@@ -55,12 +55,6 @@ difference.
 separate CI from a human. Do not start M1 until this is true — the whole detector design
 rests on it.
 
-### T2 · Read and summarize
-Write half a page on what you expect to build, based on the design doc and spike findings.
-
-**Accept:** the summary states that the audit log is the primary trigger and `managedFields`
-is enrichment, not the other way round.
-
 ---
 
 ## M1 · The trigger
