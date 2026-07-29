@@ -306,8 +306,8 @@ fix lands as a reviewed change. Each of these is an adapter, a skill, and a judg
 | Domain | The signal | State |
 |---|---|---|
 | **Incident triage** | Warning event on a workload | **Live** |
-| **Drift detection** | Out-of-band change in the audit log | Designed |
-| **Obtainability governance** | Stockout investigator | Planned |
+| **Drift detection** | Out-of-band change in the audit log | Candidate |
+| **Obtainability governance** | Stockout investigator | Candidate |
 | **Shadow infrastructure** | Unmanaged resource found in inventory | Candidate |
 | **Policy propagation** | Policy missing on a cluster in the fleet | Candidate |
 | **Add-on lifecycle** | Add-on version or health goes out of band | Candidate |
