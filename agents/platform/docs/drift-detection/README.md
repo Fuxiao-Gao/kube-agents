@@ -8,6 +8,7 @@ Design, spike results, and tooling for the drift-detection domain.
 | [`spike-findings.md`](./spike-findings.md) | Phase 0 spike results (A: attribution, B: noise profile). Verdict: **GO** |
 | [`drift_attribute.sh`](./drift_attribute.sh) | Reusable join: `managedFields` + audit log for one namespace |
 | [`baseline-manifests.yaml`](./baseline-manifests.yaml) | Baseline manifests used to stage the spike |
+| [`cuj3-task-breakdown.md`](./cuj3-task-breakdown.md) | Ticket: CUJ 3 (noise-filtered triage), the enabling implementation |
 
 ## What the spike settled
 
