@@ -44,86 +44,133 @@ Named explicitly, because each is a plausible-looking rabbit hole:
 
 ---
 
-## M0 · Ramp
+## Before you start
 
-### T1 · Reproduce Spike A by hand
-Run `drift_attribute.sh` against a namespace. Make a `kubectl patch` and watch it appear in
-both halves of the output. Make the same change as a service account and note the
-difference.
+Run `drift_attribute.sh` against a namespace, make a `kubectl patch`, and watch it land in both
+halves of the output. Then make the same change as a service account and compare. You should be
+able to explain why `managedFields` alone cannot separate CI from a human before writing any code —
+the whole detector design rests on that.
 
-**Accept:** you can explain, without looking it up, why `managedFields` alone cannot
-separate CI from a human. Do not start M1 until this is true — the whole detector design
-rests on it.
-
----
-
-## M1 · The trigger
-
-### T3 · Stand up the audit path
-Cloud Audit Logs → Log Router sink → Pub/Sub topic → subscription. IAM: the sink writer
-service account needs `pubsub.publisher`; the consumer needs subscriber.
-
-**Accept:** `gcloud pubsub subscriptions pull` returns a real mutating-call entry.
-**Note:** pair on the IAM rather than debugging permission errors alone.
-
-### T4 · Consumer skeleton
-Pull, parse, and log `principalEmail`, `methodName`, `resourceName`, `timestamp`. No
-filtering yet.
-
-**Accept:** a `kubectl patch` appears in the consumer log within 90s. The spike measured
-30–60s ingestion delay; the margin is deliberate.
-
-### T5 · The two static filters
-Drop `principalEmail =~ "^system:"`. Then drop a configurable automation-service-account
-allowlist. The allowlist must be configuration, not a constant — it is per-cluster and it is
-the single most important tuning knob in the system.
-
-**Accept:** unit tests over recorded audit payloads covering a system principal, a CI service
-account, and a human. Capturing those fixtures is part of this task.
-
-### T6 · Measure the noise profile
-Run 24–48h against a live cluster. Produce a short report: events by tier, before and after
-filtering.
-
-**Accept:** the numbers land near the spike's (~78% system, ~20% automation, ~1% human).
-
-**If the numbers are wildly off, that is a finding, not a bug.** Report it. Do not tune the
-filters until reality matches the document.
+**Placement decision to confirm with your reviewer:** the existing adapter
+(`k8s-operator/cmd/k8s-event-watcher`) is Go, so the natural home is a sibling
+`k8s-operator/cmd/drift-detector`. Confirm before scaffolding.
 
 ---
 
-## M2 · Attribution
+## T1 · Audit-log ingestion path
 
-### T7 · Port the join to the consumer
-For each surviving event, fetch the live object and extract field-level `managedFields`
-attribution. This is a direct port of `drift_attribute.sh`, which gives you a known-good
-output to diff against.
+Stand up the transport and a consumer that parses what comes out of it.
 
-**Accept:** output matches the shell script for the same namespace.
+**Infrastructure.** A Log Router sink at project scope, a Pub/Sub topic, and a pull subscription.
+Sink filter, taken from the spike:
 
-### T8 · Handle deletes
-Deletes are audit-log-only — the object is gone, so there is nothing to read.
+```
+logName="projects/PROJECT/logs/cloudaudit.googleapis.com%2Factivity"
+resource.type="k8s_cluster"
+resource.labels.cluster_name="CLUSTER"
+protoPayload.methodName=~"create|patch|update|delete"
+```
 
-**Accept:** deleting a NetworkPolicy produces a clean attributed record and does not crash
-the consumer.
+Do the principal filtering in the consumer, not the sink — you want the unfiltered volume visible
+for T2's measurement, and sink filters are awkward to iterate on.
 
-### T9 · Emit the inject
-POST a `gitops-drift` inject to `/sessions/{session_id}/inject`.
+**IAM.** The sink's writer identity needs `roles/pubsub.publisher` on the topic; the consumer's
+service account needs `roles/pubsub.subscriber` on the subscription. Pair on this rather than
+burning days on permission errors.
 
-**Accept:** the definition of done above — one change, one inject; one CI deploy, zero
-injects.
+**Consumer.** Pull loop, ack on successful parse, structured log per message. Extract:
+
+| Field | Path |
+|---|---|
+| Principal | `protoPayload.authenticationInfo.principalEmail` |
+| Verb | `protoPayload.methodName` |
+| Resource | `protoPayload.resourceName` |
+| User agent | `protoPayload.callerSuppliedUserAgent` |
+| Time | `timestamp` |
+
+`resourceName` arrives as a path like `core/v1/namespaces/foo/services/web`. Parse it into
+`(group, version, namespace, kind, name)` — you need those components for the live-object lookup
+in T3, and getting the cluster-scoped and core-group variants right is the fiddly part.
+
+**Accept:** a `kubectl patch` appears in the consumer's structured log within 90s, with all five
+fields populated and the resource path decomposed. The spike measured 30–60s ingestion delay; the
+margin is deliberate.
 
 ---
 
-## M3 · Stretch
+## T2 · Principal classification and the noise profile
 
-### T10 · Daily digest
-A drift skill plus a minimal judgment prompt that reports the day's real human changes in
-plain language. No revert-or-codify decision — just what happened.
+**Two filters, both config-driven.** Drop `principalEmail` matching `^system:`. Then drop principals
+in an automation allowlist. That allowlist is per-cluster configuration, not a constant — it is the
+single most important tuning knob in the system, and getting it wrong makes every CI deploy look
+like drift. Something in the shape of:
 
-Only start this if M1 and M2 have landed cleanly.
+```yaml
+drift:
+  automation_principals:
+    - github-deploy-sa@PROJECT.iam.gserviceaccount.com
+    - gitops-infra-sa@PROJECT.iam.gserviceaccount.com
+  gitops_managers: ["argocd", "flux", "helm", "kube-controller-manager", ".*-controller$"]
+```
+
+Classify every message into one of three tiers — `system`, `automation`, `human` — and emit a
+counter per tier rather than silently discarding. You need those counts for the measurement below
+and for debugging a misconfigured allowlist later.
+
+**Tests.** Table-driven, over recorded audit payloads. Capture real fixtures from the subscription;
+do not hand-write them. Cover at minimum: a `system:` controller, a CI service account applying
+client-side, a human `kubectl patch`, and a delete.
+
+**Measurement.** Run 24–48h against a live cluster and produce a short report of counts by tier,
+before and after filtering.
+
+**Accept:** tier counts land near the spike's (~78% system, ~20% automation, ~1% human), and the
+allowlist can be changed without a rebuild.
+
+**If the numbers are wildly off, that is a finding, not a bug.** Report it. Do not tune the filters
+until reality matches the document.
 
 ---
+
+## T3 · `managedFields` attribution join
+
+For each message classified `human`, fetch the live object using the components parsed in T1 and
+extract field-level ownership. This is a direct port of the first half of `drift_attribute.sh`, so
+you have a known-good output to diff against.
+
+Keep entries where `operation == "Update"` and the manager does *not* match `gitops_managers`.
+`fieldsV1` arrives as a nested structure with `f:`-prefixed keys — flatten it to dotted paths
+(`spec.replicas`, `spec.template.spec.containers[0].securityContext.privileged`) so the output is
+readable by a human and by the agent downstream. That flattening is the substantive part of this
+task; the lookup is not.
+
+**Deletes have no live object.** They are audit-log-only, so the join must short-circuit rather than
+404 and crash the consumer. Carry the audit record through with an explicit "object gone" marker.
+
+**Accept:** output matches `drift_attribute.sh` for the same namespace, and deleting a NetworkPolicy
+produces a clean attributed record with no live-object lookup attempted.
+
+---
+
+## T4 · Emit the `gitops-drift` inject
+
+Mint a session (`POST /sessions`), then `POST /sessions/{session_id}/inject`.
+
+Match the envelope the event watcher already sends — see `injector.go`. Note that the payload is
+marshalled to JSON and then **wrapped as a string** in `{"message": "<escaped JSON>"}`; it is not
+posted as a nested object. Carry the principal, verb, resource, timestamp, and the attributed field
+list, with `kind: gitops-drift`.
+
+**Accept:** the ticket's definition of done — one out-of-band change produces exactly one inject
+within ~90s; one full CI deploy produces zero.
+
+---
+
+## T5 · Daily digest *(stretch — only if T1–T4 land clean)*
+
+A drift skill under `agents/platform/skills/` plus a minimal judgment prompt that reports the day's
+real human changes in plain language. No revert-or-codify decision — that is CUJ 1. This one just
+answers "what actually changed on this cluster today, and who did it."
 
 ## Escalate immediately if
 
