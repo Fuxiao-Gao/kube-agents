@@ -12,6 +12,9 @@ roughly seven real human changes a day on an active cluster — a volume small e
 per-change agent judgment. This ticket implements that filter and the attribution join
 behind it, and emits the result as an inject on the AutoOps pipeline.
 
+Everything else in the drift domain waits on this. CUJs 1, 2, and 4 all consume the filtered,
+attributed stream this CUJ produces.
+
 **Read before starting:**
 [`drift-detection.md`](../drift-detection.md) (design) and
 [`spike-findings.md`](./spike-findings.md) (measured results, verdict GO).
