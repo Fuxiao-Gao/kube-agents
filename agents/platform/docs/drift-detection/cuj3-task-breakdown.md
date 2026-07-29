@@ -22,7 +22,8 @@ attributed stream this CUJ produces.
 ## Goal
 
 Turn raw cluster mutation activity into a small, attributed stream of real human changes,
-emitted as `gitops-drift` injects on the existing pipeline.
+emitted as `gitops-drift` injects on the existing pipeline. You are writing one ingestion adapter —
+nothing downstream of the inject changes.
 
 ## Definition of done
 
@@ -41,32 +42,6 @@ Named explicitly, because each is a plausible-looking rabbit hole:
   later phase, and it is unbounded.
 - **Revert-or-codify judgment.** That is CUJ 1. This ticket reports what happened; it does
   not decide what to do about it.
-
----
-
-## What layer you are working in
-
-**You are writing one ingestion adapter.** Nothing downstream of the inject changes.
-
-The AutoOps pipeline is five contracts (see
-[`autoops-architecture.md`](../autoops-architecture.md)). This CUJ lives almost entirely in
-Contract 1:
-
-| Contract | Who owns it here |
-|---|---|
-| **1 · Ingestion** | **You.** Detect the signal, filter its noise, enrich it, emit the inject. |
-| 2 · Session & state | Already built. Sessions, thread routing, and follow-up come for free. |
-| 3 · Judgment | Already built for k8s events; T5 adds drift's own skill and prompt. |
-| 4 · Context reach | Already wired. `kubectl` / `gcloud` is enough for this CUJ. |
-| 5 · Remediation | Already built. Not reached by this CUJ — no PR is opened here. |
-
-Concretely: your deliverable is the drift equivalent of `k8s-event-watcher`. That component
-watches the Kubernetes API and emits `kind: k8s-event`; yours consumes an audit-log subscription
-and emits `kind: gitops-drift`. Same envelope, same endpoint, same everything after it.
-
-**The handoff is T4.** Once the inject POSTs successfully, the existing pipeline takes over and
-your work is done. If you find yourself editing the session server, the agent gateway, or the PR
-logic, stop — you have left the adapter.
 
 ---
 
