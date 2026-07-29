@@ -44,6 +44,32 @@ Named explicitly, because each is a plausible-looking rabbit hole:
 
 ---
 
+## What layer you are working in
+
+**You are writing one ingestion adapter.** Nothing downstream of the inject changes.
+
+The AutoOps pipeline is five contracts (see
+[`autoops-architecture.md`](../autoops-architecture.md)). This CUJ lives almost entirely in
+Contract 1:
+
+| Contract | Who owns it here |
+|---|---|
+| **1 · Ingestion** | **You.** Detect the signal, filter its noise, enrich it, emit the inject. |
+| 2 · Session & state | Already built. Sessions, thread routing, and follow-up come for free. |
+| 3 · Judgment | Already built for k8s events; T5 adds drift's own skill and prompt. |
+| 4 · Context reach | Already wired. `kubectl` / `gcloud` is enough for this CUJ. |
+| 5 · Remediation | Already built. Not reached by this CUJ — no PR is opened here. |
+
+Concretely: your deliverable is the drift equivalent of `k8s-event-watcher`. That component
+watches the Kubernetes API and emits `kind: k8s-event`; yours consumes an audit-log subscription
+and emits `kind: gitops-drift`. Same envelope, same endpoint, same everything after it.
+
+**The handoff is T4.** Once the inject POSTs successfully, the existing pipeline takes over and
+your work is done. If you find yourself editing the session server, the agent gateway, or the PR
+logic, stop — you have left the adapter.
+
+---
+
 ## Before you start
 
 Run `drift_attribute.sh` against a namespace, make a `kubectl patch`, and watch it land in both
@@ -58,6 +84,8 @@ the whole detector design rests on that.
 ---
 
 ## T1 · Audit-log ingestion path
+
+*Adapter — transport and parsing. Equivalent to the event watcher's informer setup.*
 
 Stand up the transport and a consumer that parses what comes out of it.
 
@@ -100,6 +128,8 @@ margin is deliberate.
 
 ## T2 · Principal classification and the noise profile
 
+*Adapter — noise control. Equivalent to the event watcher's namespace rules, flapping guard, and dedup window.*
+
 **Two filters, both config-driven.** Drop `principalEmail` matching `^system:`. Then drop principals
 in an automation allowlist. That allowlist is per-cluster configuration, not a constant — it is the
 single most important tuning knob in the system, and getting it wrong makes every CI deploy look
@@ -134,6 +164,8 @@ until reality matches the document.
 
 ## T3 · `managedFields` attribution join
 
+*Adapter — enrichment. No equivalent in the event watcher; drift needs a second signal to be actionable.*
+
 For each message classified `human`, fetch the live object using the components parsed in T1 and
 extract field-level ownership. This is a direct port of the first half of `drift_attribute.sh`, so
 you have a known-good output to diff against.
@@ -154,6 +186,8 @@ produces a clean attributed record with no live-object lookup attempted.
 
 ## T4 · Emit the `gitops-drift` inject
 
+*Adapter — the pipeline boundary. Everything past this line already exists.*
+
 Mint a session (`POST /sessions`), then `POST /sessions/{session_id}/inject`.
 
 Match the envelope the event watcher already sends — see `injector.go`. Note that the payload is
@@ -167,6 +201,8 @@ within ~90s; one full CI deploy produces zero.
 ---
 
 ## T5 · Daily digest *(stretch — only if T1–T4 land clean)*
+
+*Contract 3 — judgment. The one piece of this CUJ that is not adapter work.*
 
 A drift skill under `agents/platform/skills/` plus a minimal judgment prompt that reports the day's
 real human changes in plain language. No revert-or-codify decision — that is CUJ 1. This one just
