@@ -1,6 +1,7 @@
 # AutoOps — Architecture
 
-One path from an operational signal to a reviewed GitOps pull request, with a human in the middle.
+One path from operational signal to GitOps pull request, with a human in the middle.
+New domains plug into that path instead of rebuilding it.
 
 AutoOps is not a troubleshooting bot. It is an extension architecture: a fixed pipeline that turns
 *something happened* into *someone approved a reviewable change*, plus a small set of contracts that
@@ -87,11 +88,13 @@ The pipeline handles one shape of problem:
 3. **The fix lands as a reviewed change** — a pull request a human approves, not a mutation on a live cluster.
 
 If step 2 is a lookup table, use a policy engine. If step 1 never fires on its own, there is nothing to
-react to. **This is a Day 2 architecture** — it reacts to what a running fleet does. Day 0 authoring and
-provisioning (writing blueprints, standing up clusters, laying down a mesh) is a different product
-surface and deliberately out of scope.
+react to.
 
-## The five contracts
+**Day 2 is the scope.** This pipeline reacts to what a running fleet does. Day 0 authoring and
+provisioning — writing blueprints, standing up clusters, laying down a mesh — is a different product
+surface, and deliberately not this one.
+
+## The platform is five contracts
 
 A domain plugs in by satisfying five contracts. Four of them are already implemented and shared; the
 fifth (judgment) is shared machinery with per-domain content.
@@ -108,7 +111,11 @@ fifth (judgment) is shared machinery with per-domain content.
 
 ### Contract 1 · Ingestion
 
-Every source normalizes into a single inject and posts it to one entry point.
+**One adapter per source.**
+
+The adapter owns everything source-specific: authentication, payload parsing, noise thresholds,
+and deduplication. The `kind` field is the discriminator skills match on, so a second source ships
+a different constant rather than a different path.
 
 The Go event watcher marshals an `InjectPayload`, wraps it as `{"message": "<escaped JSON>"}`, and
 `POST`s it to `/sessions/{id}/inject` (`k8s-operator/cmd/k8s-event-watcher/injector.go`). The watcher
@@ -119,15 +126,15 @@ incident rather than forty.
 **A new domain supplies:** an adapter that detects its signal, filters its own noise, and emits the
 inject envelope with its own `kind`.
 
-> **Honest state:** the envelope is still k8s-event-shaped — `reason`, `namespace`, `kind_of_object`,
-> `name`, `message`. Generalizing it is part of the work of landing the second source, not a box already
-> ticked.
+> **Honest state:** the envelope is still k8s-shaped — `reason`, `namespace`, `kind_of_object`, `name`,
+> `message`. Generalizing it is part of the work of landing the second source, not a box already ticked.
 
 ---
 
 ### Contract 2 · Session & state
 
-One session per incident, held in two SQLite tables (`agents/platform/scripts/session_kv_server.py`):
+**One session per incident, held in two tables**
+(`agents/platform/scripts/session_kv_server.py`):
 
 ```sql
 CREATE TABLE session_metadata (        CREATE TABLE incidents (
@@ -139,29 +146,39 @@ CREATE TABLE session_metadata (        CREATE TABLE incidents (
                                        );
 ```
 
-`session_metadata` maps a session to its chat destination, so the agent's replies land in the right
-thread. `incidents` stores the triage report keyed by `(chat_id, thread_id)`, written `INSERT OR IGNORE`
-so the **first** report for a thread is the one that sticks.
+**`session_metadata`** maps a session to its chat thread, so a reply in that thread routes back to the
+same session instead of starting a new one.
+
+**`incidents`** keeps the first triage report per thread — the one carrying the fix options. Written
+`INSERT OR IGNORE`, so later chatter cannot overwrite the decision record.
 
 This is what makes follow-up work: an engineer replies *"apply Option B"* hours later, and the agent still
 knows what Option B was. Both tables expire on a TTL sweep (`SESSION_KV_CLEANUP_TTL_DAYS`, default 14).
 
 **A new domain supplies:** nothing. It inherits sessions, thread routing, and follow-up for free.
 
-**What it unlocks:** the `incidents` table is already an incident corpus in embryo — every triage the
-fleet has produced, in one place. Add resource keys, a captured outcome, and retention past the TTL and
-it answers *"has this failed before, and what did we do?"* None of that is built yet; they are small
-changes to a table we already write.
+#### What it unlocks — every incident leaves a written report behind
+
+The `incidents` table is already an incident corpus in embryo — every triage the fleet has produced,
+in one place:
+
+- **A postmortem draft**, written from the triage and the approved fix, not from memory a week later.
+- **Recurrence matching** — match a new incident against past ones and surface the fix that actually worked.
+- **Fleet failure patterns** — what breaks, where, and how often. A reliability review built from real incidents.
+- **An eval set** — past reports plus what humans approved is a labelled set for scoring the agent.
+
+None of this is built yet. Resource keys, a captured outcome, and retention past the TTL are what turn
+that table into a corpus, and they are small changes to a table we already write.
 
 ---
 
 ### Contract 3 · Judgment
 
-**Every domain writes a judgment prompt.** This is the contract most easily mistaken for "just call the
-LLM," and it is where the domain's opinion actually lives.
+**Every domain writes its judgment prompt.**
 
-`_build_agent_query()` (`session_kv_server.py:245`) turns an inject into the prompt that drives the turn.
-Abridged, as it runs today:
+The watcher sends JSON. `_build_agent_query()` (`session_kv_server.py:245`) turns it into one string,
+and that string decides how the whole interaction behaves. Every new domain writes one of these, next
+to its skill. Abridged, as it runs today:
 
 ```
 Analyze the following Kubernetes event warning on GKE cluster '{cluster}'
@@ -189,7 +206,7 @@ When done, post your final diagnostic report ... formatted exactly like this:
 3. Do not execute any write mutations (kubectl scale, patch, or apply) directly on the live cluster.
 ```
 
-Three things are pinned here, and each is a design decision rather than a formatting preference:
+**What that one string pins down** — three design decisions, not formatting preferences:
 
 - **The report shape** — a fixed layout the reader learns once. Consistency across domains is what makes
   the output skimmable at 3am.
@@ -216,8 +233,10 @@ the prompt is *what to decide and how to say it*.
 
 ### Contract 4 · Context reach
 
-Judgment is capped by what the tools can see. The agent correlates across exactly the domains its tool
-surface can read, and no further.
+**Judgment is capped by what the tools can see.**
+
+The agent can only connect domains its tools can read. Every tool added widens the set of answerable
+questions, with no pipeline change.
 
 | Surface | Reaches | Status |
 |---|---|---|
@@ -237,20 +256,22 @@ architectures lose credibility.
 
 ### Contract 5 · Remediation
 
+**One safe write path for every domain.**
+
 Every domain ends in the same place: a pull request. Not a mutation, not an auto-heal, not a direct
 `kubectl apply`. The agent proposes, an engineer approves in-thread, and the change lands as a branch,
 a diff, and a PR link posted back to the same thread.
 
 This is why the write boundary is stated in the prompt rather than only enforced in tooling — the model
-is told the rule in the same breath it is told the task. A new domain inherits reviewability, auditability,
-and rollback for free, because the PR *is* the audit log.
+is told the rule in the same breath it is told the task. Because remediation is a pull request rather
+than a live write, a new domain inherits reviewability and rollback for free.
 
 **A new domain supplies:** nothing, unless it needs a different target (Terraform, a runbook execution)
 — in which case that is a new remediation adapter behind the same approval loop.
 
 ---
 
-## What runs today
+## What ships today — signal to pull request, with a human in the middle
 
 The GKE-events path is live end to end:
 
@@ -267,7 +288,7 @@ The GKE-events path is live end to end:
 
 ## Plugging in a new domain
 
-The complete checklist, in order:
+Each new domain adds a source, an adapter, a skill, and a judgment prompt. In order:
 
 1. **A signal** — something that fires on its own.
 2. **An adapter** — detects the signal, filters its own noise, emits the inject envelope with a new `kind`.
@@ -277,21 +298,32 @@ The complete checklist, in order:
 Sessions, thread routing, follow-up memory, chat delivery, the approval gate, and PR generation are not
 on the list. That is the point.
 
-## Domains on this path
+## What else fits this path
+
+Anything with the same shape rides the same pipeline: a signal arrives, someone has to judge it, the
+fix lands as a reviewed change. Each of these is an adapter, a skill, and a judgment prompt away.
 
 | Domain | The signal | State |
 |---|---|---|
 | **Incident triage** | Warning event on a workload | **Live** |
-| **Drift detection** | Out-of-band change in the audit log | Designed, spike-proven |
-| **Obtainability governance** | Stockout / capacity signal | Planned |
+| **Drift detection** | Out-of-band change in the audit log | Designed |
+| **Obtainability governance** | Stockout investigator | Planned |
 | **Shadow infrastructure** | Unmanaged resource found in inventory | Candidate |
 | **Policy propagation** | Policy missing on a cluster in the fleet | Candidate |
 | **Add-on lifecycle** | Add-on version or health goes out of band | Candidate |
 
-Drift detection has a full design doc and a completed attribution spike: `managedFields` gives
-field-level ownership, the audit log gives the principal, and the two-signal join separates a human
-out-of-band change from CI and from controller churn (~99% noise reduction with two static filters).
-See `drift-detection.md`.
+### Domains grow. The pipeline doesn't.
+
+**Drift detection — two contracts touched.** Emits `kind: gitops-drift`. Takes no dependency on any
+GitOps tool, so it works on every cluster and covers resources no tool manages. Argo and Flux become
+optional enrichment, never a prerequisite. It has a full design doc and a completed attribution spike:
+`managedFields` gives field-level ownership, the audit log gives the principal, and the two-signal join
+separates a human out-of-band change from CI and from controller churn (~99% noise reduction with two
+static filters). See `drift-detection.md`.
+
+**Obtainability governance — the same two contracts.** A completely different domain, engineered
+independently, arrived at the same shape. It also closes the quota and capacity gap that previously
+bounded cross-domain troubleshooting.
 
 ## The CUJs that make this worth building
 
