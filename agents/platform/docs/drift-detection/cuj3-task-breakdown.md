@@ -1,8 +1,5 @@
 # CUJ 3 — Noise-filtered drift triage
 
-**Type:** Implementation · **Domain:** Drift detection · **Phase:** 1
-**Depends on:** none — this is the enabling CUJ; CUJs 1, 2, and 4 are blocked on it.
-
 ## Context
 
 Out-of-band changes to a cluster are buried in reconciliation churn. On a real cluster,
