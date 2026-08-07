@@ -373,3 +373,20 @@ python3 /opt/data/scripts/cluster_agent_profile.py create \
 The command is idempotent, so it is safe to re-run. This gives the new cluster an agent
 immediately. (The `cluster-agent-reconcile` cron would also pick it up on its next run — it
 manages every cluster in the project except the management cluster — so no labeling is required.)
+
+## Cluster Agent Profile Teardown
+
+A managed cluster and its Cluster Agent profile are **deleted together**. When a cluster is
+decommissioned/deleted, also remove its dedicated **Cluster Agent** profile (created at onboarding).
+Use the [cluster-agent-lifecycle](../cluster-agent-lifecycle/SKILL.md) skill:
+
+```bash
+python3 /opt/data/scripts/cluster_agent_profile.py delete \
+  --project "<project>" --cluster "<cluster>" --location "<location>"
+```
+
+Do not delete a Cluster Agent profile while its cluster still exists.
+
+Deleting the profile here is the immediate, preferred path. As a backstop, the hourly
+`cluster-agent-reconcile` job auto-prunes any profile whose cluster is definitively gone, so a
+profile missed during teardown is cleaned up on the next reconcile cycle.

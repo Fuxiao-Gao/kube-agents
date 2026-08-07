@@ -46,27 +46,6 @@ python3 /opt/data/scripts/cluster_agent_profile.py create \\
 The command is idempotent, so it is safe to re-run. This gives the new cluster an agent
 immediately. (The `cluster-agent-reconcile` cron would also pick it up on its next run — it
 manages every cluster in the project except the management cluster — so no labeling is required.)
-""",
-    "gke-cluster-creator": f"""{FOOTER_MARKER}
-
-## Required final step: provision the Cluster Agent profile
-
-Creating a cluster is **not complete** until it has a Cluster Agent. A managed cluster and its
-Cluster Agent profile are **created together** — never leave a newly created cluster without a
-profile. Immediately after `create_cluster` succeeds and the cluster is reachable, create its
-dedicated **Cluster Agent** profile (this is what makes the cluster delegable for runtime
-debugging). Use the [cluster-agent-lifecycle](../cluster-agent-lifecycle/SKILL.md) skill:
-
-```bash
-python3 /opt/data/scripts/cluster_agent_profile.py create \\
-  --project "<project>" --cluster "<cluster>" --location "<location>"
-```
-
-The command is idempotent, so it is safe to re-run. This gives the new cluster an agent
-immediately. (The `cluster-agent-reconcile` cron would also pick it up on its next run — it
-manages every cluster in the project except the management cluster — so no labeling is required.)
-""",
-    "gke-cluster-lifecycle": f"""{FOOTER_MARKER}
 
 ## Cluster Agent Profile Teardown
 
@@ -154,6 +133,17 @@ def main():
             print(f"\nDiscovered {len(discovered_skills)} skills matching prefix '{SKILL_PREFIX}':")
             for name in discovered_skills:
                 print(f"  - {name}")
+
+            # Prune obsolete local skill directories that were renamed/removed upstream
+            target_agents = set(DEFAULT_TARGET_AGENTS + [a for agents in SKILL_AGENT_OVERRIDES.values() for a in agents])
+            for agent in target_agents:
+                agent_skills_dir = os.path.join(repo_root, "agents", agent, "skills")
+                if os.path.isdir(agent_skills_dir):
+                    for local_name in sorted(os.listdir(agent_skills_dir)):
+                        if local_name.startswith(SKILL_PREFIX) and local_name not in discovered_skills:
+                            stale_path = os.path.join(agent_skills_dir, local_name)
+                            print(f"Removing obsolete upstream skill: agents/{agent}/skills/{local_name}...")
+                            shutil.rmtree(stale_path)
                 
             print("\nSyncing skills...")
             for skill_name in discovered_skills:
