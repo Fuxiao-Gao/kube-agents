@@ -206,6 +206,7 @@ get_platform_agent_roles() {
     "roles/logging.viewer"
     "roles/iam.serviceAccountUser"
     "roles/iam.securityReviewer"
+    "roles/aiplatform.user"
     "roles/mcp.toolUser"
   )
   local gke_admin_roles=(
@@ -217,6 +218,7 @@ get_platform_agent_roles() {
     "roles/logging.viewer"
     "roles/iam.serviceAccountUser"
     "roles/iam.securityReviewer"
+    "roles/aiplatform.user"
     "roles/mcp.toolUser"
   )
 

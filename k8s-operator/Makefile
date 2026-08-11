@@ -105,18 +105,20 @@ undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.
 
 .PHONY: deploy-litellm
 deploy-litellm: kustomize ## Deploy LiteLLM integration.
-	@if [ "$$MODEL_PROVIDER" = "chatgpt" ]; then \
-		$(KUSTOMIZE) build config/integrations/litellm/overlays/chatgpt | envsubst '$$NAMESPACE $$MODEL_PROVIDER $$MODEL_DEFAULT_NAME' | kubectl apply -n $${NAMESPACE:-kubeagents-system} -f -; \
+	@export VERTEX_LOCATION="$${VERTEX_LOCATION:-us-central1}"; \
+	if [ "$$MODEL_PROVIDER" = "chatgpt" ]; then \
+		$(KUSTOMIZE) build config/integrations/litellm/overlays/chatgpt | envsubst '$$NAMESPACE $$MODEL_PROVIDER $$MODEL_DEFAULT_NAME $$PROJECT_ID $$REGION $$VERTEX_LOCATION' | kubectl apply -n $${NAMESPACE:-kubeagents-system} -f -; \
 	else \
-		$(KUSTOMIZE) build config/integrations/litellm/base | envsubst '$$NAMESPACE $$MODEL_PROVIDER $$MODEL_DEFAULT_NAME' | kubectl apply -n $${NAMESPACE:-kubeagents-system} -f -; \
+		$(KUSTOMIZE) build config/integrations/litellm/base | envsubst '$$NAMESPACE $$MODEL_PROVIDER $$MODEL_DEFAULT_NAME $$PROJECT_ID $$REGION $$VERTEX_LOCATION' | kubectl apply -n $${NAMESPACE:-kubeagents-system} -f -; \
 	fi
 
 .PHONY: undeploy-litellm
 undeploy-litellm: kustomize ## Undeploy LiteLLM integration.
-	@if [ "$$MODEL_PROVIDER" = "chatgpt" ]; then \
-		$(KUSTOMIZE) build config/integrations/litellm/overlays/chatgpt | envsubst '$$NAMESPACE $$MODEL_PROVIDER $$MODEL_DEFAULT_NAME' | kubectl delete --ignore-not-found=$(ignore-not-found) -n $${NAMESPACE:-kubeagents-system} -f -; \
+	@export VERTEX_LOCATION="$${VERTEX_LOCATION:-us-central1}"; \
+	if [ "$$MODEL_PROVIDER" = "chatgpt" ]; then \
+		$(KUSTOMIZE) build config/integrations/litellm/overlays/chatgpt | envsubst '$$NAMESPACE $$MODEL_PROVIDER $$MODEL_DEFAULT_NAME $$PROJECT_ID $$REGION $$VERTEX_LOCATION' | kubectl delete --ignore-not-found=$(ignore-not-found) -n $${NAMESPACE:-kubeagents-system} -f -; \
 	else \
-		$(KUSTOMIZE) build config/integrations/litellm/base | envsubst '$$NAMESPACE $$MODEL_PROVIDER $$MODEL_DEFAULT_NAME' | kubectl delete --ignore-not-found=$(ignore-not-found) -n $${NAMESPACE:-kubeagents-system} -f -; \
+		$(KUSTOMIZE) build config/integrations/litellm/base | envsubst '$$NAMESPACE $$MODEL_PROVIDER $$MODEL_DEFAULT_NAME $$PROJECT_ID $$REGION $$VERTEX_LOCATION' | kubectl delete --ignore-not-found=$(ignore-not-found) -n $${NAMESPACE:-kubeagents-system} -f -; \
 	fi
 
 .PHONY: deploy-inference-replay

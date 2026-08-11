@@ -11,7 +11,8 @@ The Platform Agent talks to an LLM through a **Completions API** proxy so provid
 
 | You want                                            | Use                                                    | Why                                                                                                                                      |
 | --------------------------------------------------- | ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| Fastest path with a hosted frontier model           | **LiteLLM → Gemini** (default)                         | One API key, no GPU node pool, no cluster egress beyond the LiteLLM pod.                                                                 |
+| Production GCP workloads with zero API keys         | **LiteLLM → Vertex AI** (Workload Identity)            | Uses GKE Workload Identity, project-level quotas, no manual key rotation or token limits.                                               |
+| Fastest path with a hosted frontier model           | **LiteLLM → Gemini**                                   | One API key, no GPU node pool, no cluster egress beyond the LiteLLM pod.                                                                 |
 | Provider redundancy or A/B                          | **LiteLLM → Gemini + Anthropic + OpenAI**              | LiteLLM handles the router config; agent config is unchanged.                                                                            |
 | Free local prototyping with a consumer subscription | **LiteLLM → ChatGPT subscription** (OAuth device flow) | See [`examples/litellm-chatgpt-subscription/`](https://github.com/gke-labs/kube-agents/tree/main/examples/litellm-chatgpt-subscription). |
 | Data-locality or air-gapped inference               | **vLLM → Gemma / Llama / Qwen**                        | Runs on a GKE GPU node pool. Higher setup cost, no egress to a hosted provider.                                                          |
@@ -19,7 +20,7 @@ The Platform Agent talks to an LLM through a **Completions API** proxy so provid
 
 ## LiteLLM (hosted models)
 
-[LiteLLM](https://litellm.ai) is an OpenAI-Completions-compatible proxy in front of every major model provider. `provision_09_deploy_litellm.sh` deploys it with the API key you provide.
+[LiteLLM](https://litellm.ai) is an OpenAI-Completions-compatible proxy in front of every major model provider. `provision_09_deploy_litellm.sh` deploys it with Workload Identity or the API key you provide.
 
 ### What ships
 
@@ -43,12 +44,13 @@ Two things have to name that alias, not one. The profile config covers Chat, whi
 
 The two substituted values come from provisioning (`MODEL_PROVIDER` and `MODEL_DEFAULT_NAME`, cached in `vars.sh`). Supported providers and their shipping defaults:
 
-| `MODEL_PROVIDER`   | Default `MODEL_DEFAULT_NAME` | Notes                                  |
-| ------------------ | ---------------------------- | -------------------------------------- |
-| `gemini` (default) | `gemini-3.5-flash`           | Uses `GEMINI_API_KEY`.                 |
-| `anthropic`        | `claude-sonnet-4-5-20250929` | Uses `ANTHROPIC_API_KEY`.              |
-| `openai`           | `gpt-5.4`                    | Uses `OPENAI_API_KEY`.                 |
-| `chatgpt`          | `gpt-5.4`                    | Personal ChatGPT subscription (OAuth). |
+| `MODEL_PROVIDER`      | Default `MODEL_DEFAULT_NAME` | Notes                                                     |
+| --------------------- | ---------------------------- | --------------------------------------------------------- |
+| `vertex_ai`           | `gemini-2.5-flash`           | Uses GKE Workload Identity (`roles/aiplatform.user`).     |
+| `gemini`              | `gemini-3.1-flash-lite`      | Uses `GEMINI_API_KEY` (Google AI Studio).                 |
+| `anthropic`           | `claude-sonnet-4-5-20250929` | Uses `ANTHROPIC_API_KEY`.                                 |
+| `openai`              | `gpt-5.4`                    | Uses `OPENAI_API_KEY`.                                    |
+| `chatgpt`             | `gpt-5.4`                    | Personal ChatGPT subscription (OAuth).                    |
 
 Any model string the chosen provider accepts is valid — there is no allow-list in the harness. For example, [`examples/litellm-gemini/`](https://github.com/gke-labs/kube-agents/tree/main/examples/litellm-gemini) pins `gemini-3.1-flash-lite`.
 

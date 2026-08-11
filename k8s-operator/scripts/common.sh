@@ -205,12 +205,13 @@ default_model_for_provider() {
   case "${1:-}" in
     chatgpt | openai) echo "gpt-5.4" ;;
     anthropic) echo "claude-sonnet-4-5-20250929" ;;
+    vertex_ai) echo "gemini-2.5-flash" ;;
     *) echo "gemini-3.5-flash" ;;
   esac
 }
 
 is_valid_model_provider() {
-  [[ "${1:-}" =~ ^(gemini|anthropic|chatgpt|openai)$ ]]
+  [[ "${1:-}" =~ ^(vertex_ai|gemini|anthropic|chatgpt|openai)$ ]]
 }
 
 # The GCP IAM role bundles provision_04_gcp_iam.sh knows how to grant. Kubernetes
@@ -278,11 +279,11 @@ init_var_kms_location() {
 }
 
 init_var_model_provider() {
-  init_var "MODEL_PROVIDER" "$DEFAULT_MODEL_PROVIDER" "Enter Model Provider (gemini, anthropic, chatgpt, openai)"
+  init_var "MODEL_PROVIDER" "$DEFAULT_MODEL_PROVIDER" "Enter Model Provider (vertex_ai, gemini, anthropic, chatgpt, openai)"
 
   MODEL_PROVIDER=$(echo "$MODEL_PROVIDER" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
   if ! is_valid_model_provider "$MODEL_PROVIDER"; then
-    print_error "Invalid Model Provider '$MODEL_PROVIDER'. Must be one of: gemini, anthropic, chatgpt, openai."
+    print_error "Invalid Model Provider '$MODEL_PROVIDER'. Must be one of: vertex_ai, gemini, anthropic, chatgpt, openai."
     exit 1
   fi
 

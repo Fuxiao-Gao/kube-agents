@@ -2,11 +2,17 @@ model_list:
   - model_name: model-default
     litellm_params:
       model: ${MODEL_PROVIDER}/${MODEL_DEFAULT_NAME}
+      vertex_project: ${PROJECT_ID}
+      vertex_location: ${VERTEX_LOCATION}
   - model_name: hermes-agent
     litellm_params:
       model: ${MODEL_PROVIDER}/${MODEL_DEFAULT_NAME}
+      vertex_project: ${PROJECT_ID}
+      vertex_location: ${VERTEX_LOCATION}
   - model_name: ${MODEL_DEFAULT_NAME}
     litellm_params:
       model: ${MODEL_PROVIDER}/${MODEL_DEFAULT_NAME}
+      vertex_project: ${PROJECT_ID}
+      vertex_location: ${VERTEX_LOCATION}
 litellm_settings:
   callbacks: ["otel", "prometheus"]

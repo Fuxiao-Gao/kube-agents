@@ -59,7 +59,7 @@ _(Alternatively via GitHub raw URL: `curl -fsSL https://raw.githubusercontent.co
 - **Provisioning Sources**: Puts the provisioning scripts on disk (this checkout, or a clone at the requested revision) and verifies they match the image ref _before_ the interview starts.
 - **GKE Cluster Setup**: Provisions the supported GKE Standard topology or connects to an existing cluster.
 - **Chat Integrations**: Configures Google Chat and/or Slack when selected.
-- **AI Model Credentials**: Prompts for Gemini, OpenAI, or Anthropic credentials.
+- **AI Model Credentials**: Configures Vertex AI (via Workload Identity without API keys), Gemini (AI Studio API key), OpenAI, or Anthropic.
 - **Automated Pipeline Execution**: Writes `k8s-operator/scripts/vars.sh` and launches `make gcp-provision`.
 
 The installer performs no GCP operation of its own — it configures and then delegates to the
@@ -350,9 +350,16 @@ kubectl rollout status deployment -n kubeagents-system
 To optionally deploy the LiteLLM Gateway or GitHub Token Minter:
 
 ```bash
-# Deploy LiteLLM Gateway
+# Option A: Deploy LiteLLM Gateway with Vertex AI (Recommended - Uses GKE Workload Identity, No API Keys)
+# Prerequisites: Ensure aiplatform.googleapis.com is enabled and kubeagents-platform-gsa has roles/aiplatform.user
+export MODEL_PROVIDER=vertex_ai
+export MODEL_DEFAULT_NAME=gemini-2.5-flash
+export VERTEX_LOCATION="us-central1"
+make deploy-litellm
+
+# Option B: Deploy LiteLLM Gateway with Gemini API Key (Google AI Studio)
 export MODEL_PROVIDER=gemini
-export MODEL_DEFAULT_NAME=gemini-3.5-flash
+export MODEL_DEFAULT_NAME=gemini-3.1-flash-lite
 make deploy-litellm
 
 # Deploy GitHub Integration (requires pre-configured github-app-credentials secret and env vars)
