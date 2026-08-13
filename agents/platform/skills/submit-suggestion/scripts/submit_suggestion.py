@@ -26,10 +26,13 @@ import sys
 from pathlib import Path
 
 # Append global scripts path to allow importing the shared helpers
-sys.path.append("/opt/defaults/scripts")
-sys.path.append("/opt/data/scripts")
-# The same directory in a source checkout, where nothing is staged into /opt.
-sys.path.append(str(Path(__file__).resolve().parents[3] / "scripts"))
+for _scripts_dir in [
+    os.path.join("/opt", "defaults", "scripts"),
+    os.path.join("/opt", "data", "scripts"),
+    str(Path(__file__).resolve().parents[3] / "scripts"),
+]:
+    if os.path.exists(_scripts_dir) and _scripts_dir not in sys.path:
+        sys.path.append(_scripts_dir)
 
 import gitops_workspace
 from github_token_refresh import refresh_git_credentials, log
