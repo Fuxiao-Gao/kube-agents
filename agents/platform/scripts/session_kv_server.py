@@ -522,6 +522,8 @@ def _build_agent_query(session_id: str, payload: Dict[str, Any]) -> str:
     workloads_project_query = f"?project={gcp_project}" if gcp_project else ""
     logs_project_query = f";project={gcp_project}" if gcp_project else ""
 
+    target_repo_url = _resolve_target_git_repo()
+
     return (
         f"You are the Platform Agent. You have received a Kubernetes event warning on GKE cluster '{cluster_name}' "
         f"for the active incident session '{session_id}'.\n\n"
@@ -532,7 +534,7 @@ def _build_agent_query(session_id: str, payload: Dict[str, Any]) -> str:
         f"CRITICAL INSTRUCTION:\n"
         f"You MUST call your `send_notification` tool with `session_id='{session_id}'` and your formatted diagnostic report as `message`. "
         f"Do NOT rely on kanban or background cards to post to chat — you alone hold the `send_notification` tool and must invoke it to post the report directly into the Slack incident thread.\n\n"
-        f"Propose as many GitOps remediation options as the root cause genuinely warrants (against target repository https://github.com/gke-agentic/fuxiao-gkedemo-infra).\n"
+        f"Propose as many GitOps remediation options as the root cause genuinely warrants (against target repository {target_repo_url}).\n"
         f"Label them 'Option A', 'Option B', ... in order. When you propose more than one, mark exactly one of them '✅ **Recommended: Option <letter>**' — the safest, most durable fix for the root cause "
         f"(favor correctness and least blast radius over quick mitigations). When there is only one option, omit the Recommended line and drop the 'apply Option <letter>' override from the call-to-action, since a bare 'apply' is unambiguous.\n\n"
         f"The template below shows two Option lines as an example of the shape — repeat or drop that line to match the number of options you actually propose, and name those same letters in the call-to-action. "
@@ -551,10 +553,22 @@ def _build_agent_query(session_id: str, payload: Dict[str, Any]) -> str:
         f"---"
         f"\n\n**GitOps PR Instructions (For subsequent turns if the user replies):**\n"
         f"If the user replies to the thread with 'apply' or 'apply Option <letter>':\n"
-        f"1. A bare 'apply' (or 'apply recommended') means apply the option you marked '✅ **Recommended: Option <letter>**', or the only option you proposed if there was just one. You are explicitly authorized to create a new branch, modify the resource manifests in the local checkout, commit, push, and open a GitHub Pull Request matching the selected option against https://github.com/gke-agentic/fuxiao-gkedemo-infra.\n"
+        f"1. A bare 'apply' (or 'apply recommended') means apply the option you marked '✅ **Recommended: Option <letter>**', or the only option you proposed if there was just one. You are explicitly authorized to create a new branch, modify the resource manifests in the local checkout, commit, push, and open a GitHub Pull Request matching the selected option against {target_repo_url}.\n"
         f"2. Call `send_notification(session_id='{session_id}', message=...)` with the clickable PR link.\n"
         f"3. Do not execute any write mutations (kubectl scale, patch, or apply) directly on the live cluster."
     )
+
+
+def _resolve_target_git_repo() -> str:
+    """Resolve target GitOps repository URL from SETTINGS.md or environment."""
+    try:
+        from gitops_workspace import resolve_repo
+        repo = resolve_repo()
+        if repo:
+            return f"https://github.com/{repo}"
+    except Exception:
+        pass
+    return "the target GitOps repository"
 
 
 def _start_agent_turn(api_url: str, session_id: str, query: str, headers: Dict[str, str]) -> None:
