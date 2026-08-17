@@ -585,6 +585,46 @@ def _pre_refresh_gitops_credentials() -> None:
         logger.debug(f"Pre-refresh GitOps credentials skipped: {exc}")
 
 
+def _subscribe_kanban_task_to_chat(task_id: str, chat_platform: str, chat_id: str, thread_id: str) -> None:
+    """Register/update a kanban_notify_subs row so task progress and completion post to the chat thread."""
+    kanban_db_paths = ["/opt/data/kanban.db", "/opt/data/kanban/kanban.db"]
+    for db_path in kanban_db_paths:
+        if os.path.exists(db_path):
+            try:
+                with closing(sqlite3.connect(db_path, timeout=5.0)) as conn:
+                    table_check = conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='kanban_notify_subs'"
+                    ).fetchone()
+                    if table_check:
+                        import time
+                        now = int(time.time())
+                        metadata_json = json.dumps({"chat_type": "group", "thread_id": thread_id})
+                        conn.execute(
+                            """
+                            INSERT OR REPLACE INTO kanban_notify_subs
+                                (task_id, platform, chat_id, chat_type, thread_id, user_id,
+                                 notifier_profile, delivery_metadata, created_at, last_event_id)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                task_id,
+                                chat_platform,
+                                chat_id,
+                                "group",
+                                thread_id or "",
+                                None,
+                                "default",
+                                metadata_json,
+                                now,
+                                0,
+                            ),
+                        )
+                        conn.commit()
+                        logger.info(f"Subscribed kanban task {task_id} to {chat_platform}:{chat_id}:{thread_id}")
+            except Exception as exc:
+                logger.warning(f"Failed to subscribe kanban task {task_id} in {db_path}: {exc}")
+
+
 def _start_agent_turn(api_url: str, session_id: str, query: str, headers: Dict[str, str]) -> None:
     """Post the agent query request to execute the diagnostic reasoning loop."""
     try:
@@ -616,6 +656,11 @@ def _start_agent_turn(api_url: str, session_id: str, query: str, headers: Dict[s
                                 target = f"slack:{chat_id}:{thread_id}"
                                 logger.info(f"Delivering triage response to {target}")
                                 subprocess.run(["hermes", "send", "--to", target, reply_text], check=False, env=_run_env())
+
+                                # Auto-subscribe any delegated kanban tasks to this chat thread
+                                task_matches = re.findall(r"\b(t_[a-f0-9]{8}|task-[a-f0-9]{8})\b", reply_text)
+                                for tid in task_matches:
+                                    _subscribe_kanban_task_to_chat(tid, "slack", chat_id, thread_id)
                 except Exception as e:
                     logger.error(f"Thread notification delivery error: {e}")
             else:
