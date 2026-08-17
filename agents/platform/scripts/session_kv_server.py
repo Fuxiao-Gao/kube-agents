@@ -555,7 +555,8 @@ def _build_agent_query(session_id: str, payload: Dict[str, Any]) -> str:
         f"If the user replies to the thread with 'apply' or 'apply Option <letter>':\n"
         f"1. A bare 'apply' (or 'apply recommended') means apply the option you marked '✅ **Recommended: Option <letter>**', or the only option you proposed if there was just one. You are explicitly authorized to create a new branch, modify the resource manifests in the local checkout, commit, push, and open a GitHub Pull Request matching the selected option against {target_repo_url}.\n"
         f"2. Call `send_notification(session_id='{session_id}', message=...)` with the clickable PR link.\n"
-        f"3. Do not execute any write mutations (kubectl scale, patch, or apply) directly on the live cluster."
+        f"3. Do not execute any write mutations (kubectl scale, patch, or apply) directly on the live cluster.\n"
+        f"4. If a transient network or credential error occurs, retry the command rather than marking the task blocked."
     )
 
 
@@ -569,6 +570,19 @@ def _resolve_target_git_repo() -> str:
     except Exception:
         pass
     return "the target GitOps repository"
+
+
+def _pre_refresh_gitops_credentials() -> None:
+    """Pre-cache GitHub credentials in the credential sidecar for the GitOps repository."""
+    try:
+        from gitops_workspace import resolve_repo
+        from github_token_refresh import refresh_git_credentials
+        repo = resolve_repo()
+        if repo:
+            refresh_git_credentials(repo)
+            logger.info(f"Pre-cached GitOps credentials for {repo}")
+    except Exception as exc:
+        logger.debug(f"Pre-refresh GitOps credentials skipped: {exc}")
 
 
 def _start_agent_turn(api_url: str, session_id: str, query: str, headers: Dict[str, str]) -> None:
@@ -621,20 +635,23 @@ def trigger_agent_troubleshooter(session_id: str, alert_msg: str, payload: Dict[
     if thread_id:
         _register_session_routing(session_id, active_platform, thread_id)
 
-    # 3. Configure HTTP authentication headers for Hermes REST gateway
+    # 3. Pre-cache Git credentials in the credential sidecar for the GitOps repository
+    _pre_refresh_gitops_credentials()
+
+    # 4. Configure HTTP authentication headers for Hermes REST gateway
     api_url = os.environ.get("PLATFORM_API_URL", "http://127.0.0.1:8642")
     headers = {
         "Content-Type": "application/json",
         "Authorization": "Bearer cluster-internal-trusted",
     }
 
-    # 4. Instantiate the session in Platform Gateway
+    # 5. Instantiate the session in Platform Gateway
     session_created = _create_gateway_session(api_url, session_id, headers)
     if not session_created:
         logger.error(f"Aborting troubleshooting trigger: session creation failed for {session_id}")
         return
 
-    # 5. Formulate instructions query and execute the agent turn
+    # 6. Formulate instructions query and execute the agent turn
     agent_query = _build_agent_query(session_id, payload)
     _start_agent_turn(api_url, session_id, agent_query, headers)
 
