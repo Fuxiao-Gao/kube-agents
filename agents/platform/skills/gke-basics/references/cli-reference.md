@@ -2,6 +2,24 @@
 
 ## Tool Preference
 
+Tool usage follows two distinct, domain-specific preference hierarchies:
+
+### 1. Knowledge & Documentation Lookups (GKE Facts, Schemas, Best Practices)
+
+Default preference order:
+
+```
+1. Developer Knowledge MCP  (preferred — authoritative, curated first-party documentation)
+2. Web Search               (fallback — third-party tooling, open-source CVEs, or DK cache miss)
+```
+
+| Interface | When to Use | Examples |
+| --- | --- | --- |
+| **Developer Knowledge MCP** (`mcp-developer_knowledge`) | Default for all GKE/GCP facts, API schemas, version lifecycles, and configuration semantics. | GKE Autopilot constraints, Ingress/Gateway API spec fields, release version deprecations, quota requirements. |
+| **Web Search** (`web_search`) | Third-party software documentation, non-Google helm charts, community error discussions, or when DK returns no match. | Investigating an open-source operator error, third-party CNI details, or external blog posts. |
+
+### 2. Live Cluster Operations & State Management
+
 Default preference order:
 
 ```
@@ -10,7 +28,7 @@ Default preference order:
 3. kubectl        (fallback — purely in-cluster ops not covered by MCP)
 ```
 
-### When to use each
+### When to use each (Cluster Operations)
 
 | Interface         | When to Use                | Examples                    |
 | ----------------- | -------------------------- | --------------------------- |

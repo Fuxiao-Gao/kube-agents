@@ -87,7 +87,7 @@ kubectl get events -n <workload_namespace> --sort-by='.metadata.creationTimestam
 gcloud logging read "resource.type=\"k8s_cluster\" AND logName=\"projects/<project_id>/logs/events\" AND jsonPayload.involvedObject.namespace=\"<workload_namespace>\"" --start-time="[Start_Time]" --end-time="[End_Time]" --project="<project_id>"
 ```
 
-_Note: Retrieve the sorted events list and manually inspect the event timestamps (CreationTimestamp/LastSeen) to identify failures occurring within the `[Start_Time]` and `[End_Time]` window._
+_Note: Retrieve the sorted events list and manually inspect the event timestamps (CreationTimestamp/LastSeen) to identify failures occurring within the `[Start_Time]` and `[End_Time]` window. When researching unfamiliar GKE event reasons, quota errors, or controller statuses, query `mcp-developer_knowledge` first before falling back to generic web search._
 
 #### Signature Identifiers:
 

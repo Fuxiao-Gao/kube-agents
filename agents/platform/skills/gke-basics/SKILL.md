@@ -61,10 +61,10 @@ Managed Kubernetes platform on Google Cloud. Defaults to Autopilot mode unless S
 
 -   [Core Concepts](references/core-concepts.md): Architecture, cluster modes (Autopilot vs Standard), networking, scaling, and security model.
 
--   [CLI Usage & Tool Reference](references/cli-reference.md): Tool preference hierarchy (MCP vs gcloud vs kubectl), `gcloud container` commands, and user preference overrides.
+-   [CLI Usage & Tool Reference](references/cli-reference.md): Tool preference hierarchies (Knowledge lookups vs Cluster Operations), `gcloud container` commands, and user preference overrides.
 
 -   [Client Libraries](references/client-library-usage.md): Official Kubernetes and Google Cloud Container client libraries in Python, Go, Node.js, and Java.
 
--   [MCP Usage](references/mcp-usage.md): Connecting to and using the 23 structured GKE MCP tools for cluster management, K8s resources, and diagnostics.
+-   [MCP Usage](references/mcp-usage.md): Connecting to and using the GKE MCP and Developer Knowledge MCP tools for cluster management, K8s resources, and authoritative documentation.
 
 -   [Infrastructure as Code](references/iac-usage.md): Terraform examples for `google_container_cluster` (Autopilot), Kubernetes provider resources, and YAML samples.

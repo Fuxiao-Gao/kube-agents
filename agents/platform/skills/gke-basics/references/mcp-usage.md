@@ -77,8 +77,33 @@ Tool               | Mode        | Purpose
 `get_operation`    | READ        | Track create/upgrade progress
 `cancel_operation` | DESTRUCTIVE | Abort stuck operations
 
+## Developer Knowledge MCP Server
+
+The Developer Knowledge MCP server (`developer_knowledge`, proxied to `https://developerknowledge.googleapis.com/mcp`) provides authoritative, first-party documentation, API resource schemas, version lifecycle details, and recommended architecture patterns for Google Cloud and GKE.
+
+### Purpose & Capabilities
+- **GKE Facts & Architecture:** Authoritative feature behavior, Autopilot vs Standard constraints, configuration semantics, and security best practices.
+- **API Schemas & Fields:** Accurate resource definitions and field specifications across GKE and Kubernetes API versions.
+- **Version Lifecycle & Deprecations:** Release notes, deprecation schedules, and breaking change timelines.
+- **Quotas & Limits:** Built-in resource limits and quota requirements.
+
 ## Tool Preference
 
-Default: **MCP tools > gcloud CLI > kubectl**. See
-[cli-reference.md](./cli-reference.md) for the full coverage comparison, CLI
-fallback commands, and user preference override options.
+Tool usage follows two distinct, domain-specific hierarchies:
+
+### 1. Knowledge & Documentation Lookups (GKE Facts, Schemas, Best Practices)
+
+```
+1. Developer Knowledge MCP (`mcp-developer_knowledge`)  (preferred — authoritative, curated first-party docs)
+2. Web Search (`web_search`)                           (fallback — third-party tools, external CVEs, or when DK returns no match)
+```
+
+### 2. Live Cluster Operations & State Management
+
+```
+1. GKE MCP Tools (`mcp-gke`)  (preferred — structured, auditable, no shell required)
+2. gcloud CLI                 (fallback — when MCP doesn't expose the operation)
+3. kubectl                    (fallback — purely in-cluster ops not covered by MCP)
+```
+
+See [cli-reference.md](./cli-reference.md) for the full coverage comparison, CLI fallback commands, and user preference override options.
