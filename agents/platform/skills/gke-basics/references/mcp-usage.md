@@ -25,57 +25,58 @@ Use `locations/-` to match all regions when listing.
 
 ### Cluster Management
 
-| Tool | Mode | Purpose |
-| --- | --- | --- |
-| `list_clusters` | READ | Discover clusters in a project/region |
-| `get_cluster` | READ | Inspect cluster config. Use `readMask` to select fields |
-| `create_cluster` | MUTATE | Create a cluster from JSON config |
-| `update_cluster` | DESTRUCTIVE | Change Day-1 cluster settings |
+| Tool             | Mode        | Purpose                                                 |
+| ---------------- | ----------- | ------------------------------------------------------- |
+| `list_clusters`  | READ        | Discover clusters in a project/region                   |
+| `get_cluster`    | READ        | Inspect cluster config. Use `readMask` to select fields |
+| `create_cluster` | MUTATE      | Create a cluster from JSON config                       |
+| `update_cluster` | DESTRUCTIVE | Change Day-1 cluster settings                           |
 
 ### Node Pool Management
 
-| Tool | Mode | Purpose |
-| --- | --- | --- |
-| `list_node_pools` | READ | List pools in a cluster |
-| `get_node_pool` | READ | Get pool details |
-| `create_node_pool` | MUTATE | Add a pool (Standard clusters) |
-| `update_node_pool` | DESTRUCTIVE | Modify a pool |
+| Tool               | Mode        | Purpose                        |
+| ------------------ | ----------- | ------------------------------ |
+| `list_node_pools`  | READ        | List pools in a cluster        |
+| `get_node_pool`    | READ        | Get pool details               |
+| `create_node_pool` | MUTATE      | Add a pool (Standard clusters) |
+| `update_node_pool` | DESTRUCTIVE | Modify a pool                  |
 
 ### Kubernetes Resources
 
-| Tool | Mode | Purpose |
-| --- | --- | --- |
-| `get_k8s_resource` | READ | List/get any K8s resource (supports label/field selectors) |
-| `describe_k8s_resource` | READ | Detailed info with events and conditions |
-| `apply_k8s_manifest` | DESTRUCTIVE | Apply YAML manifests (supports `dryRun`) |
-| `patch_k8s_resource` | DESTRUCTIVE | JSON patch resource fields |
-| `delete_k8s_resource` | DESTRUCTIVE | Remove resources (supports `cascade`, `dryRun`) |
-| `list_k8s_api_resources` | READ | Discover available resource types |
+| Tool                     | Mode        | Purpose                                                    |
+| ------------------------ | ----------- | ---------------------------------------------------------- |
+| `get_k8s_resource`       | READ        | List/get any K8s resource (supports label/field selectors) |
+| `describe_k8s_resource`  | READ        | Detailed info with events and conditions                   |
+| `apply_k8s_manifest`     | DESTRUCTIVE | Apply YAML manifests (supports `dryRun`)                   |
+| `patch_k8s_resource`     | DESTRUCTIVE | JSON patch resource fields                                 |
+| `delete_k8s_resource`    | DESTRUCTIVE | Remove resources (supports `cascade`, `dryRun`)            |
+| `list_k8s_api_resources` | READ        | Discover available resource types                          |
 
 ### Diagnostics & Observability
 
-| Tool | Mode | Purpose |
-| --- | --- | --- |
-| `list_k8s_events` | READ | Scheduling failures, OOM kills, evictions |
-| `get_k8s_logs` | READ | Container logs (supports `tail`, `since`, `previous`) |
-| `get_k8s_cluster_info` | READ | Control plane and service endpoints |
-| `get_k8s_version` | READ | Kubernetes server version |
-| `get_k8s_rollout_status` | READ | Deployment/StatefulSet rollout progress |
-| `check_k8s_auth` | READ | Verify RBAC permissions for a user/SA |
+| Tool                     | Mode | Purpose                                               |
+| ------------------------ | ---- | ----------------------------------------------------- |
+| `list_k8s_events`        | READ | Scheduling failures, OOM kills, evictions             |
+| `get_k8s_logs`           | READ | Container logs (supports `tail`, `since`, `previous`) |
+| `get_k8s_cluster_info`   | READ | Control plane and service endpoints                   |
+| `get_k8s_version`        | READ | Kubernetes server version                             |
+| `get_k8s_rollout_status` | READ | Deployment/StatefulSet rollout progress               |
+| `check_k8s_auth`         | READ | Verify RBAC permissions for a user/SA                 |
 
 ### Operations
 
-| Tool | Mode | Purpose |
-| --- | --- | --- |
-| `list_operations` | READ | Pending/running cluster operations |
-| `get_operation` | READ | Track create/upgrade progress |
-| `cancel_operation` | DESTRUCTIVE | Abort stuck operations |
+| Tool               | Mode        | Purpose                            |
+| ------------------ | ----------- | ---------------------------------- |
+| `list_operations`  | READ        | Pending/running cluster operations |
+| `get_operation`    | READ        | Track create/upgrade progress      |
+| `cancel_operation` | DESTRUCTIVE | Abort stuck operations             |
 
 ## Developer Knowledge MCP Server
 
 The Developer Knowledge MCP server (`developer_knowledge`, proxied to `https://developerknowledge.googleapis.com/mcp`) provides authoritative, first-party documentation, API resource schemas, version lifecycle details, and recommended architecture patterns for Google Cloud and GKE.
 
 ### Purpose & Capabilities
+
 - **GKE Facts & Architecture:** Authoritative feature behavior, Autopilot vs Standard constraints, configuration semantics, and security best practices.
 - **API Schemas & Fields:** Accurate resource definitions and field specifications across GKE and Kubernetes API versions.
 - **Version Lifecycle & Deprecations:** Release notes, deprecation schedules, and breaking change timelines.
