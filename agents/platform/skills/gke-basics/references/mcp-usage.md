@@ -82,6 +82,14 @@ The Developer Knowledge MCP server (`developer_knowledge`, proxied to `https://d
 - **Version Lifecycle & Deprecations:** Release notes, deprecation schedules, and breaking change timelines.
 - **Quotas & Limits:** Built-in resource limits and quota requirements.
 
+### Available Tools
+
+| Tool               | Mode | Arguments        | Purpose                                                                                             |
+| ------------------ | ---- | ---------------- | --------------------------------------------------------------------------------------------------- |
+| `answer_query`     | READ | `query` (string) | High-level technical Q&A, conceptual lookups, and best practices. Preferred entry point.            |
+| `search_documents` | READ | `query` (string) | Documentation search chunks and document names. Takes only `query` (do NOT pass `max_results`).     |
+| `get_documents`    | READ | `names` (array)  | Retrieve full document content by document resource names (e.g. `["documents/docs.cloud.../..."]`). |
+
 ## Tool Preference
 
 Tool usage follows two distinct, domain-specific hierarchies:
