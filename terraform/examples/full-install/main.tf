@@ -12,6 +12,7 @@ locals {
     # enabled whether or not a BackupPlan follows, and the addon cannot be
     # enabled without the API.
     "gkebackup.googleapis.com",
+    "developerknowledge.googleapis.com",
   ]
   chat_apis = var.enable_google_chat ? [
     "pubsub.googleapis.com",
@@ -51,6 +52,7 @@ locals {
     "roles/iam.serviceAccountUser",
     "roles/iam.securityReviewer",
     "roles/mcp.toolUser",
+    "roles/serviceusage.serviceUsageConsumer",
   ]
   gke_admin_roles = [
     "roles/container.clusterAdmin",
@@ -63,6 +65,7 @@ locals {
     "roles/iam.serviceAccountUser",
     "roles/iam.securityReviewer",
     "roles/mcp.toolUser",
+    "roles/serviceusage.serviceUsageConsumer",
   ]
 
   # An explicit project_roles list always wins, so an existing configuration

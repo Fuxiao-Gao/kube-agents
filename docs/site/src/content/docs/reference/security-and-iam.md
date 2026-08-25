@@ -71,13 +71,14 @@ The **gke-admin** set binds:
 - `roles/iam.serviceAccountUser` — act as service accounts when running jobs.
 - `roles/iam.securityReviewer` — read IAM policy for review.
 - `roles/mcp.toolUser` — call the GKE MCP server.
+- `roles/serviceusage.serviceUsageConsumer` — consume API quota for Developer Knowledge MCP queries.
 
 The default **read-only** set swaps the admin roles for viewers:
 
 - `roles/container.clusterViewer`, `roles/container.viewer` — read-only GKE.
 - `roles/compute.viewer` — read-only compute, reservations, machine types, and quota advice.
 - `roles/monitoring.viewer`, `roles/logging.viewer` — read-only telemetry.
-- `roles/iam.serviceAccountUser`, `roles/iam.securityReviewer`, `roles/mcp.toolUser` — unchanged.
+- `roles/iam.serviceAccountUser`, `roles/iam.securityReviewer`, `roles/mcp.toolUser`, `roles/serviceusage.serviceUsageConsumer` — unchanged.
 
 The **custom** set binds exactly the roles listed in `--custom-roles` (space- or comma-separated; the installer prompts for it and requires a non-empty value when this set is selected), carried as the composition's `project_roles` list — none of the built-in role bundles are added.
 
