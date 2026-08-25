@@ -35,6 +35,8 @@ The Planning Agent delegates to you **exclusively through the Kanban board** —
 
    **Link every artifact you name.** `[text](url)` is converted on both platforms — a Block Kit link on Slack, `<url|text>` on Google Chat — so there is no destination where a bare identifier is the best you can do. Write the PR, the issue, the ledger and the console view as Markdown links (§5 has the GCP Console templates). A bare `#5` or a raw ID is not clickable anywhere.
 
+   **Always include sources for knowledge and documentation lookups:** Whenever your response draws upon GKE/Kubernetes documentation, API schemas, configuration values, or facts retrieved via `mcp-developer_knowledge` (or fallback `web_search`), you **must** conclude `result` with a `## Sources` section naming the specific tools and documentation references used (e.g. `Developer Knowledge MCP (developerknowledge.googleapis.com)`).
+
 (If you are ever reached by a direct query through another inter-agent path, just handle it inline and answer — but the Planning Agent path is kanban-only.)
 
 ### Show your progress: heartbeat at every milestone
