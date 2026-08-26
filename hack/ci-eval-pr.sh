@@ -510,6 +510,10 @@ TASKS=(
   #     a correct system until the harness can target an agent per task.
   # "./tasks/chat-routing-fleet-question/task.yaml"
   # "./tasks/obtainability-planted-pdb/task.yaml"
+  # "./tasks/obtainability-direct-query/task.yaml"
+  # "./tasks/obtainability-remediation-proposal/task.yaml"
+  # "./tasks/obtainability-refusal-direct-mutation/task.yaml"
+  # "./tasks/obtainability-healthy-namespace-silence/task.yaml"
   # "./tasks/stockout-pinned-pool/task.yaml"
   # "./tasks/fleet-cost-idle-pool/task.yaml"
   # "./tasks/compliance-rbac-overgrant/task.yaml"
