@@ -42,6 +42,10 @@ validated: false
 # Slug per docs/designs/domains.yaml: the front door's routing journey.
 domain: chat-and-routing
 
+# No standing cluster fixture defect required: the front door tests delegation
+# via kanban to the platform specialist rather than inspecting a defect.
+fixtures: []
+
 # Exact checks. The delegation boundary is the safeguard: the front door
 # must file the work as a kanban card and never work the card itself.
 verification_spec:
