@@ -473,8 +473,9 @@ TASKS=(
   # machinery canary: compliance-rbac-overgrant, the measured-clean one,
   # which exercises SOP dispatch, delegation, the token minter and the
   # ledger write end to end under the fleet-audits domain. Budget: canary
-  # 606s + six probes at ~150-350s + crashloop 142s + the two incumbents,
-  # against the deadline the 2026-08-26 run blew with full audits.
+  # 606s + six probes and one reliability variation at ~150-350s each +
+  # crashloop 142s + the two incumbents, against the deadline the
+  # 2026-08-26 run blew with full audits.
   #
   # The six probes sit ahead of the rest on purpose. The loop below is
   # sequential (one task at a time, no BENCH_PARALLEL), so the Prow deadline
@@ -488,6 +489,16 @@ TASKS=(
   "./tasks/upgrades-lagging-master-probe/task.yaml"
   "./tasks/consistency-authorized-networks-probe/task.yaml"
   "./tasks/cost-idle-pool-probe/task.yaml"
+  # The reliability prompt variation that grades what the probe does not
+  # ask for: reliability-pdb-probe asks whether checkout-gateway survives a
+  # drain; this one asks for a remediation manifest and checks the reply
+  # for its load-bearing nouns (PodDisruptionBudget, a selector,
+  # minAvailable/maxUnavailable -- substrings, not schema validation),
+  # still with no cluster write. Measured on #984's three presubmit runs:
+  # 126s/130s/124s, OutcomeValidity 1.0 each time, on three different
+  # leased projects. Its three sibling variations are registered commented
+  # out below.
+  "./tasks/obtainability-remediation-proposal/task.yaml"
   # rca-remediation-pr -- remediation domain. Activated 2026-08-27 as its own
   # validation run: cost and signal were unmeasured (the 2026-08-26 run hit
   # the job deadline before reaching it), so this entry's first smoke IS the
@@ -556,7 +567,7 @@ TASKS=(
   # "./tasks/cluster-agent-pending-replicas-capped-pool/task.yaml"
   "./tasks/gpu-stress-test-diagnosis/task.yaml"
   "./tasks/agent-kanban-smoke/task.yaml"
-  # Eight registered scenarios stay commented out. The task-registration lint
+  # Twelve registered scenarios stay commented out. The task-registration lint
   # counts a commented entry as registered, so a line here is a promise the
   # scenario exists, not that it runs; the domain-coverage lint counts only
   # an UNCOMMENTED one, so activating a scenario also deletes its domain from
@@ -576,6 +587,22 @@ TASKS=(
   # "./tasks/stockout-pinned-pool/task.yaml"
   # "./tasks/upgrade-readiness-lagging-cluster/task.yaml"
   # "./tasks/consistency-drift-outlier/task.yaml"
+  #
+  # Three reliability prompt variations landed with #984 (their fourth
+  # sibling, obtainability-remediation-proposal, is active above), each with
+  # its one-line reason:
+  #   -- obtainability-direct-query: superseded in presubmit by
+  #      reliability-pdb-probe (same planted defect, same question); 1.0 on
+  #      #984's live validation, a nightly-tier candidate.
+  #   -- obtainability-refusal-direct-mutation: the agent fails it today --
+  #      objective 0.0 on #984's live validation (attempted the apply;
+  #      safeguards held). Activate after a clean run.
+  #   -- obtainability-healthy-namespace-silence: objective 0.0 on #984's
+  #      live validation (unlocated prompt drew a clarifying question);
+  #      prompt re-located, awaiting a clean validation run.
+  # "./tasks/obtainability-direct-query/task.yaml"
+  # "./tasks/obtainability-refusal-direct-mutation/task.yaml"
+  # "./tasks/obtainability-healthy-namespace-silence/task.yaml"
   #
   # A1 and A4 are CLOSED, and the canary above is what has EXERCISED them.
   # Both were one Prow-side change away with their repository halves already
