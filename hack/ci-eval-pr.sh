@@ -817,6 +817,17 @@ BENCH_DIR="${SCRIPT_DIR}/../bench"
 # agent-kanban-smoke is deployer: noop, so it adds a delegation round trip
 # (~100-300s), not a cluster.
 TASKS=(
+  # DRAFT-PHASE MEASUREMENT PLACEMENT (#1023). The two second-domain cases
+  # this pull request adds sit uncommented at the head of the array for the
+  # draft phase only: the loop is sequential and the deadline truncates the
+  # TAIL, so unmeasured work goes first — a timeout loses a measured
+  # repeat, not their first signal. The merge commit moves both to the
+  # parked region at the bottom, commented out, with enablement deferred to
+  # the post-#1057 follow-up (bench/tasks/DRAFTS.md, "Second cases per
+  # domain (#1023)"). board-read first: it is the cheapest shape in the
+  # matrix (a single front-door turn, no delegation round trip).
+  "./tasks/chat-routing-board-read/task.yaml"
+  "./tasks/pdb-remediation-pr/task.yaml"
   # SEVEN DOMAINS THROUGH PROBES, THE AUDIT MACHINERY THROUGH ONE CANARY.
   # The 2026-08-26 smoke run (build 2092638061140643840, kube-agents-evals-3)
   # measured what six full audits cost: obtainability-planted-pdb PASSED in
