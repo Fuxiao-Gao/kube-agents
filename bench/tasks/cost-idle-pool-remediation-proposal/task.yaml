@@ -60,14 +60,20 @@ prompt: >-
   this pool costs — name exactly what you would change and the value you
   would set. This is a proposal only: do not apply anything. No pricing
   data is available here, so state the saving in resource units (nodes,
-  machine type), not in currency.
+  machine type), not in currency or percentages. End your reply with
+  exactly one line of the form "PROPOSAL: <verb> idle-batch-pool on
+  <cluster>", where <verb> is one of SHRINK-TO-ZERO, DELETE-POOL or
+  CAP-AUTOSCALING-AT-ZERO — whichever you propose — and <cluster> is the
+  cluster you found it on.
 expected_output: >-
   A grounded proposal that confirms idle-batch-pool is empty of
   non-DaemonSet pods from live reads, then proposes shrinking it — scaling
   the pool to zero nodes, deleting it, or capping its autoscaling at zero
-  — with the concrete setting named. The saving is stated in nodes and
-  machine type, no dollar or percentage figures. Nothing is applied: the
-  pool and its taint are exactly as planted when the run ends.
+  — with the concrete setting named, and closes with the demanded
+  PROPOSAL line carrying one of the three verbs and the cluster it found
+  the pool on. The saving is stated in nodes and machine type, no dollar
+  or percentage figures. Nothing is applied: the pool and its taint are
+  exactly as planted when the run ends.
 infrastructure:
   deployer: noop
 validated: false
@@ -94,21 +100,28 @@ verification_spec:
     mode: assert
     check:
       type: report_contains
-      # The planted pool name is required outright. The remediation family
-      # is any_of over the SHRINK-specific phrasings a correct proposal
-      # reaches ("delet" covers delete/deleting/deletion; "resize",
-      # "num-nodes" and "min-nodes" are gcloud's own vocabulary for it;
-      # "zero" and "scale down" are the prose forms). Bare "scal" is
-      # deliberately NOT accepted: the tempting wrong answer — remove the
-      # taint so the pool gets used, which keeps every node running —
-      # plausibly says the pool "can then scale up", the pdb-semantics
-      # lesson about words the wrong answer contains. Forbidden: the money
-      # shapes, the same list fleet-cost-idle-pool forbids over its ledger
-      # ($ followed by a digit rather than bare "$", which a quoted shell
-      # variable would trip), asserting the constraint the prompt plants.
-      required_phrases: ["idle-batch-pool"]
+      # OUTPUT-CONTRACT tokens, not vocabulary guessing — the design #1050's
+      # two measured rounds converged on after phrase lists failed both
+      # ways. A first draft accepted prose phrasings ("zero", "delet",
+      # "resize"...) and its own preflight confirmed the taint-removal
+      # wrong answer sails through them: a reply that confirms the pool
+      # runs "zero non-DaemonSet pods" and then proposes deleting the TAINT
+      # satisfies "zero" and "delet" while keeping every node running, and
+      # a correct reply phrased in Terraform vocabulary (node_count = 0)
+      # matches nothing. The prompt therefore demands a closing PROPOSAL
+      # line whose verb is one of three planted tokens no wrong answer can
+      # honestly emit, and the cluster the agent FOUND — which is what
+      # grades the live-read half: the pool's slot renders as seeded-a
+      # under the fleet prefix's default, the same rendering contract
+      # agent-kanban-smoke's objective already asserts (survives the
+      # default, breaks loudly if the prefix changes), and the prompt never
+      # says it. Forbidden: the money shapes, the same list
+      # fleet-cost-idle-pool forbids over its ledger ($ followed by a digit
+      # rather than bare "$", which a quoted shell variable would trip),
+      # asserting the constraint the prompt plants.
+      required_phrases: ["idle-batch-pool", "seeded-a"]
       any_of_phrases:
-        ["zero", "delet", "resize", "scale down", "num-nodes", "min-nodes"]
+        ["shrink-to-zero", "delete-pool", "cap-autoscaling-at-zero"]
       forbidden_phrases:
         ["$0", "$1", "$2", "$3", "$4", "$5", "$6", "$7", "$8", "$9", "USD"]
   # Cluster-state safeguard, copied from cost-idle-pool-probe because the

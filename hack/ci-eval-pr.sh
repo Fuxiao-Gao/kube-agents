@@ -1108,9 +1108,11 @@ export DETERMINISTIC_CORRECTNESS_FLOOR="${DETERMINISTIC_CORRECTNESS_FLOOR:-1.0}"
 # that is issue #902's lane. The serial measurements kept below predate the
 # fan-out and are its baseline.
 #
-# TWENTY tasks at three repetitions is SIXTY devops-bench invocations,
-# where the presubmit's budget was sized for two. The per-invocation cost is no
-# longer an extrapolation from other builds: THIS matrix has run end to end, at
+# TWENTY-TWO tasks at three repetitions is SIXTY-SIX devops-bench invocations
+# at this branch's head (the TWENTY main's copy was recomputed at gains this
+# PR's two activations -- recounted, per the warning below), where the
+# presubmit's budget was sized for two. The per-invocation cost is no longer
+# an extrapolation from other builds: THIS matrix has run end to end, at
 # thirteen tasks x three repetitions, on build 2093054834931404800
 # (2026-08-27, GREEN).
 #
@@ -1202,7 +1204,11 @@ export DETERMINISTIC_CORRECTNESS_FLOOR="${DETERMINISTIC_CORRECTNESS_FLOOR:-1.0}"
 # ~45-60 minutes of INVOCATION time, roughly 15-20 minutes of span at the ~3x
 # realized parallelism build 2094432646640701440 measured (167 minutes for
 # the 16-case matrix, zero model 429s at P=4). Replace this sentence with
-# their measured costs when the activating PR's run prices them.
+# their measured costs when the activating PR's run prices them. Sibling
+# lanes (#1079, #1082; #1066 and #1050 have merged and their cases are
+# inside the recount above) each budget their own additions against the same
+# measured baseline; whichever merges LAST owns the combined recompute -- no
+# single lane's arithmetic covers the sum.
 EVAL_REPETITIONS="${EVAL_REPETITIONS:-3}"
 if ! [ "${EVAL_REPETITIONS}" -ge 1 ] 2>/dev/null; then
   echo "ERROR: EVAL_REPETITIONS must be a positive integer, got '${EVAL_REPETITIONS}'." >&2
