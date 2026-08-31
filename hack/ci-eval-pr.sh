@@ -825,7 +825,10 @@ TASKS=(
   # parked region at the bottom, commented out, with enablement deferred to
   # the post-#1057 follow-up (bench/tasks/DRAFTS.md, "Second cases per
   # domain (#1023)"). board-read first: it is the cheapest shape in the
-  # matrix (a single front-door turn, no delegation round trip).
+  # matrix (a single front-door turn, no delegation round trip). The
+  # budget block above EVAL_REPETITIONS is deliberately NOT recomputed for
+  # this draft-phase placement: the merge state leaves the active count
+  # unchanged, so the enablement PR owns that arithmetic.
   "./tasks/chat-routing-board-read/task.yaml"
   "./tasks/pdb-remediation-pr/task.yaml"
   # SEVEN DOMAINS THROUGH PROBES, THE AUDIT MACHINERY THROUGH ONE CANARY.

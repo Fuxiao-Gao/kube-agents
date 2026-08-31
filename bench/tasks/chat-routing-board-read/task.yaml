@@ -1,11 +1,13 @@
-# REGISTERED, COMMENTED OUT in hack/ci-eval-pr.sh TASKS — the second
-# chat-and-routing case (#1023: every domain at least two active cases),
-# merged disabled so the active matrix does not grow ahead of #1057's
-# fan-out. The authoring pull request runs this entry at the head of TASKS
-# during its draft phase only, which is the clean measured run; record the
-# build id and duration here and in bench/tasks/DRAFTS.md ("Second cases
-# per domain") when it lands, then the enablement follow-up issue carries
-# the uncommenting.
+# MERGES REGISTERED, COMMENTED OUT in hack/ci-eval-pr.sh TASKS — the
+# second chat-and-routing case (#1023: every domain at least two active
+# cases), parked at merge so activation waits for #1057's fan-out and its
+# pool-quota reading instead of spending serial-loop headroom ahead of it.
+# The lifecycle, so this header is true at every commit: the authoring
+# pull request runs this entry uncommented at the head of TASKS for its
+# draft phase only, which is the clean measured run; the deactivation
+# commit parks it — recording build id and duration here and in
+# bench/tasks/DRAFTS.md ("Second cases per domain") — before the PR
+# leaves draft; the enablement follow-up issue carries the uncommenting.
 #
 # WHAT THIS GRADES THAT agent-kanban-smoke DOES NOT: the front door's
 # routing decision in the direction no active case prices. The smoke
@@ -23,6 +25,15 @@
 # kanban_list / kanban_create are front-door calls — so this sits entirely
 # inside tool_called's router-only limit (verifiers.py) instead of working
 # around it.
+#
+# One standing text disagrees with that premise, and the draft-phase run
+# adjudicates it: DRAFTS.md's activation blocker A2 says "every entry in
+# TASKS talks to the platform agent", while agent-kanban-smoke's header
+# and agents/chat/config.yaml say the harness endpoint serves the
+# front-door (default) profile. This case is built on the second reading.
+# A green draft-phase run — kanban_list observed in the responding agent's
+# own trajectory — settles it, and reconciling A2's wording to what the
+# run shows belongs to the deactivation commit, not to this file.
 #
 # The board's CONTENT is deliberately not asserted. Cards on the board at
 # run time belong to whichever tasks ran before this one against the same

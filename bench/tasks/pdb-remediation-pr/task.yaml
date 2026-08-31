@@ -1,11 +1,13 @@
-# REGISTERED, COMMENTED OUT in hack/ci-eval-pr.sh TASKS — the second
-# remediation-domain case (#1023: every domain at least two active cases),
-# merged disabled so the active matrix does not grow ahead of #1057's
-# fan-out. The authoring pull request runs this entry at the head of TASKS
-# during its draft phase only, which is the clean measured run; record the
-# build id and duration here and in bench/tasks/DRAFTS.md ("Second cases
-# per domain") when it lands, then the enablement follow-up issue carries
-# the uncommenting.
+# MERGES REGISTERED, COMMENTED OUT in hack/ci-eval-pr.sh TASKS — the
+# second remediation-domain case (#1023: every domain at least two active
+# cases), parked at merge so activation waits for #1057's fan-out and its
+# pool-quota reading instead of spending serial-loop headroom ahead of it.
+# The lifecycle, so this header is true at every commit: the authoring
+# pull request runs this entry uncommented at the head of TASKS for its
+# draft phase only, which is the clean measured run; the deactivation
+# commit parks it — recording build id and duration here and in
+# bench/tasks/DRAFTS.md ("Second cases per domain") — before the PR
+# leaves draft; the enablement follow-up issue carries the uncommenting.
 #
 # WHAT THIS GRADES THAT rca-remediation-pr DOES NOT. Both cases end in a
 # pull request through the submit-suggestion skill, and both read the PR
@@ -83,11 +85,15 @@ verification_spec:
     mode: assert
     check:
       type: report_contains
-      # Both halves of a GitHub PR URL, not "/pull/" alone (any PR link
-      # would satisfy that) — the same shape and the same TODO as
-      # rca-remediation-pr: tighten to the eval GitOps repository's own
-      # slug once one is fixed.
-      required_phrases: ["github.com/", "/pull/"]
+      # Tighter than rca-remediation-pr's ["github.com/", "/pull/"], which
+      # any PR link quoted in the reply would satisfy. The eval GitOps
+      # repositories are decided now — gke-agentic/<project>-infra, per
+      # DRAFTS.md's A1 and docs/site's ci-pool-projects.md — so the org
+      # half is a fair exact match across every pool project, and it
+      # breaks loudly and correctly if the org ever moves (the same
+      # contract class as the seeded-name assertions). rca's looser copy
+      # gates an active case and is deliberately not edited here.
+      required_phrases: ["github.com/gke-agentic/", "/pull/"]
   - name: the-fix-names-the-workload-and-the-budget
     role: objective
     # assert, not the converge default: the transcript is immutable once the
