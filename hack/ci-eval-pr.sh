@@ -826,7 +826,7 @@ TASKS=(
   # domains at 600-1300s each do not fit one presubmit, so each audit domain
   # is covered by a PROBE -- a targeted question about that domain's planted
   # defect, graded on the reply, the shape cluster-agent-crashloop-debug
-  # proved at 142s -- and exactly ONE full audit stays active as the
+  # proved at 142s -- and exactly ONE full audit stayed active as the
   # machinery canary: compliance-rbac-overgrant, the measured-clean one,
   # which exercises SOP dispatch, delegation, the token minter and the
   # ledger write end to end under the fleet-audits domain. Budget: canary
@@ -904,7 +904,7 @@ TASKS=(
   # REACTIVATED (#1023): the capacity and consistency full audits, second
   # cases for domains their probes cover with a question. Both were parked
   # by the 2026-08-26 recast for a serial-budget reason the merged fan-out
-  # (#1057, 167min GREEN, zero pool 429s at P=4) removed, and both failed
+  # (#1057, 167min GREEN, zero model 429s at P=4) removed, and both failed
   # that day's only run on agent-endpoint HTTP 502s -- transport, not
   # scenario bugs; the endpoint has run green since (build
   # 2093054834931404800 onward). Still `validated: false`: the activating
@@ -989,8 +989,10 @@ TASKS=(
   #      probe above. The recast's serial-budget reason ended with #1057's
   #      fan-out: stockout and drift-outlier are reactivated above (#1023),
   #      upgrade-readiness follows in its own PR, and planted-pdb stays
-  #      parked -- reliability already holds five active cases, so it is a
-  #      nightly candidate rather than a coverage need.
+  #      parked: reliability's coverage does not depend on it (its probe
+  #      and remediation-proposal variation are active; #1050's further
+  #      activations are in flight), so it is a nightly candidate rather
+  #      than a coverage need.
   #   -- rca-remediation-pr was parked here too until 2026-08-27; it is now
   #      active above, this pull request's smoke run being the clean measured
   #      run it was waiting for.
@@ -1189,8 +1191,10 @@ export DETERMINISTIC_CORRECTNESS_FLOOR="${DETERMINISTIC_CORRECTNESS_FLOOR:-1.0}"
 # estimate of ~700-1000s per repetition, six units add ~70-100 minutes of
 # INVOCATION time, roughly 25-35 minutes of span at the ~3x realized
 # parallelism build 2094432646640701440 measured (167 minutes for the 16-case
-# matrix, zero model 429s at P=4). Replace this sentence with their measured
-# costs when the reactivating PR's run prices them.
+# matrix, zero model 429s at P=4). At the 600-1300s bracket's tail the six
+# units are ~130 minutes of invocation, which is why the pricing run is
+# load-bearing rather than a formality. Replace this sentence with their
+# measured costs when the reactivating PR's run prices them.
 EVAL_REPETITIONS="${EVAL_REPETITIONS:-3}"
 if ! [ "${EVAL_REPETITIONS}" -ge 1 ] 2>/dev/null; then
   echo "ERROR: EVAL_REPETITIONS must be a positive integer, got '${EVAL_REPETITIONS}'." >&2
