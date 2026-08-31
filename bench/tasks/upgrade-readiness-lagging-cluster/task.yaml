@@ -50,8 +50,8 @@
 # remediation pull requests and closes findings that stopped reproducing.
 # Presubmit-eligible because that write path is pinned per eval project to a
 # throwaway GitOps repository, token-scoped -- see DRAFTS.md, activation
-# blocker A1, now closed. Eligible tier: presubmit, and active there
-# since 2026-08-25.
+# blocker A1, now closed. Eligible tier: presubmit — active 2026-08-25 to
+# the 2026-08-26 recast, reactivated by #1023.
 #
 # The SOP has no vulnerability feed and forbids naming CVEs; a CVE id in the
 # report is an invention. That rule becomes an exact forbidden-phrase check.

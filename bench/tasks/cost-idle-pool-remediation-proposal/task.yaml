@@ -3,8 +3,8 @@
 # cost-idle-pool-probe (#1023: every domain at least two active cases). The
 # gate is that PR's own measured /test all run (Prow skips draft PRs): a
 # red takes this entry back out before the PR leaves draft, and a green
-# records build id and duration here and in bench/tasks/DRAFTS.md ("Second
-# cases per domain").
+# records build id and duration here and on bench/tasks/DRAFTS.md's cost
+# row.
 #
 # WHY A NEW CASE AND NOT THE PARKED AUDIT. The domain's spec-ready second
 # case, fleet-cost-idle-pool, is date-gated by the cost SOP's own
@@ -19,9 +19,9 @@
 # WHAT THIS GRADES THAT cost-idle-pool-probe DOES NOT: the probe grades
 # DISCOVERY (name the pool running no workloads, unprompted); this grades
 # the REMEDIATION PROPOSAL — handed the finding, compose the change that
-# eliminates the spend, concretely and without touching anything. The same
-# probe-then-proposal second shape the security domain uses
-# (security-overgrant-remediation-proposal, #1066). An agent that removes
+# eliminates the spend, concretely and without touching anything — the
+# probe-then-proposal second shape #1066 is adding for security
+# (security-overgrant-remediation-proposal). An agent that removes
 # the taint "so the pool can be used" has answered a different question:
 # the nodes keep running and the spend survives — which is why the
 # accepted phrasings are the shrink-the-pool family and deliberately NOT

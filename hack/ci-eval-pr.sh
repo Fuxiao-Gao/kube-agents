@@ -826,7 +826,7 @@ TASKS=(
   # domains at 600-1300s each do not fit one presubmit, so each audit domain
   # is covered by a PROBE -- a targeted question about that domain's planted
   # defect, graded on the reply, the shape cluster-agent-crashloop-debug
-  # proved at 142s -- and exactly ONE full audit stays active as the
+  # proved at 142s -- and exactly ONE full audit stayed active as the
   # machinery canary: compliance-rbac-overgrant, the measured-clean one,
   # which exercises SOP dispatch, delegation, the token minter and the
   # ledger write end to end under the fleet-audits domain. Budget: canary
@@ -848,7 +848,7 @@ TASKS=(
   "./tasks/cost-idle-pool-probe/task.yaml"
   # The cost domain's second case (#1023): the probe above grades DISCOVERY
   # of the idle pool, this grades the REMEDIATION PROPOSAL on the same
-  # fixture — the probe-then-proposal shape security uses (#1066). New
+  # fixture — the probe-then-proposal shape #1066 is adding for security. New
   # authoring rather than reactivating fleet-cost-idle-pool, whose A3 date
   # gate re-arms pool-wide on every project onboarding (see the task's
   # header). Probe-priced (~150-350s expected), default cost hint until the
@@ -908,7 +908,7 @@ TASKS=(
   # REACTIVATED (#1023): the upgrades full audit, second case for the
   # domain its probe covers with a question. Parked by the 2026-08-26
   # recast for a serial-budget reason the merged fan-out (#1057, 167min
-  # GREEN, zero pool 429s at P=4) removed. Its one run failed on
+  # GREEN, zero model 429s at P=4) removed. Its one run failed on
   # agent-endpoint 502s while its delegated worker completed the sweep and
   # filed ledger issue #3 — transport, not the scenario. Still
   # `validated: false`: the reactivating PR's own /test all run is the
@@ -998,8 +998,10 @@ TASKS=(
   #      fan-out: upgrade-readiness-lagging-cluster is reactivated above
   #      (#1023), stockout-pinned-pool and consistency-drift-outlier
   #      reactivate in a sibling PR of the same lane, and planted-pdb stays
-  #      parked -- reliability already holds five active cases, so it is a
-  #      nightly candidate rather than a coverage need.
+  #      parked: reliability's coverage does not depend on it (its probe
+  #      and remediation-proposal variation are active; #1050's further
+  #      activations are in flight), so it is a nightly candidate rather
+  #      than a coverage need.
   #   -- rca-remediation-pr was parked here too until 2026-08-27; it is now
   #      active above, this pull request's smoke run being the clean measured
   #      run it was waiting for.
