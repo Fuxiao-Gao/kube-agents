@@ -817,18 +817,18 @@ BENCH_DIR="${SCRIPT_DIR}/../bench"
 # agent-kanban-smoke is deployer: noop, so it adds a delegation round trip
 # (~100-300s), not a cluster.
 TASKS=(
-  # DRAFT-PHASE MEASUREMENT PLACEMENT (#1023). The two second-domain cases
-  # this pull request adds sit uncommented at the head of the array for the
-  # draft phase only: the loop is sequential and the deadline truncates the
-  # TAIL, so unmeasured work goes first — a timeout loses a measured
-  # repeat, not their first signal. The merge commit moves both to the
-  # parked region at the bottom, commented out, with enablement deferred to
-  # the post-#1057 follow-up (bench/tasks/DRAFTS.md, "Second cases per
-  # domain (#1023)"). board-read first: it is the cheapest shape in the
-  # matrix (a single front-door turn, no delegation round trip). The
-  # budget block above EVAL_REPETITIONS is deliberately NOT recomputed for
-  # this draft-phase placement: the merge state leaves the active count
-  # unchanged, so the enablement PR owns that arithmetic.
+  # Two second-domain cases (#1023): remediation's PR-landing shape and
+  # chat-and-routing's board-read routing exception. ACTIVE on the
+  # strength of this pull request's own measured run (Prow skips draft
+  # PRs, so that run is `/test all`-triggered); a red on either takes its
+  # entry back out before the PR leaves draft — the #1049 rule. Array
+  # position no longer sets execution order: the fan-out launches
+  # longest-first from unit_cost_hint below, where both take the default
+  # until the measured run prices them. board-read is expected to be the
+  # cheapest shape in the matrix (a single front-door turn, no delegation
+  # round trip); pdb-remediation-pr's sibling rca-remediation-pr measured
+  # at the 700 hint. Budget arithmetic for the pair is at the end of the
+  # block above EVAL_REPETITIONS.
   "./tasks/chat-routing-board-read/task.yaml"
   "./tasks/pdb-remediation-pr/task.yaml"
   # SEVEN DOMAINS THROUGH PROBES, THE AUDIT MACHINERY THROUGH ONE CANARY.
@@ -1184,6 +1184,12 @@ export DETERMINISTIC_CORRECTNESS_FLOOR="${DETERMINISTIC_CORRECTNESS_FLOOR:-1.0}"
 # pull request. It is not a legitimate default: at 1 the collapse rung
 # degenerates to "the single run failed", which is exactly the trigger-happy
 # rule this change exists to replace.
+# #1023's two second-domain activations (chat-routing-board-read,
+# pdb-remediation-pr) are budgeted at the default hint pending their measured
+# run: ~6 units of invocation time against the 167 minutes the 16-case x 3-rep
+# matrix measured under the fan-out (build 2094432646640701440, zero model
+# 429s at P=4). Replace this sentence with their measured costs when the
+# activating PR's run prices them.
 EVAL_REPETITIONS="${EVAL_REPETITIONS:-3}"
 if ! [ "${EVAL_REPETITIONS}" -ge 1 ] 2>/dev/null; then
   echo "ERROR: EVAL_REPETITIONS must be a positive integer, got '${EVAL_REPETITIONS}'." >&2

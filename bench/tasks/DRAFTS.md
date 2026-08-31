@@ -147,26 +147,32 @@ The six probes that carry the audit domains in presubmit after the 2026-08-26 re
 
 ## Second cases per domain (#1023)
 
-Issue #1023 asks for a second active case in each single-case domain. This lane's cases land
-**merged registered-but-commented-out**: activating a case spends presubmit headroom the budget
-block above `EVAL_REPETITIONS` prices (the 2026-08-27 build ran the matrix GREEN at 156.8 of 240
-minutes, and the active list has grown since that measurement), and #1057's parallel fan-out — with
-the pool-quota measurement its own presubmit produces (429 count at P=4) — is in flight to recover
-it, so these activate in staged follow-up pull requests once it lands rather than ahead of it. Each
-authoring pull request's own draft-phase presubmit, with the new entries temporarily uncommented at
-the head of `TASKS`, is the clean measured run; the deactivation commit parks them before the pull
-request leaves draft, and the enablement pull request recomputes the budget block and is the
-confirming run. The landing policy is this lane's, not the programme's: #1066 lands security's
-second case (`security-overgrant-remediation-proposal`) active, and #1050 lands its reliability
-activations active — merge order reconciles, per #1057's own conflict note. Four of the
-single-case domains (capacity, upgrades, consistency, cost) already hold a spec-ready second case
-in the parked region above — whether re-activation substitutes for new authoring there is an open
-question on #1023.
+Issue #1023 asks for a second active case in each single-case domain. Cases in this lane land
+**ACTIVE with their authoring pull request**, on the strength of that PR's own measured run:
+#1057's fan-out merged 2026-08-31 and its pool measurement was clean (16 cases × 3 reps GREEN in
+167 minutes, 48/48 units, zero model-quota 429s at P=4, build `2094432646640701440`), so the
+merge-disabled staging this section first described is no longer needed. The lifecycle per PR:
+Prow skips draft pull requests, so the author triggers `/test all` on the draft; a green run
+records build id and durations in the task headers and here, a red takes the entry back out
+before the PR leaves draft (the #1049 rule); each activation recomputes the budget block above
+`EVAL_REPETITIONS`. Staging stays at ~2 cases per PR: the fan-out's measured net speedup is
+1.2-1.5x (contention inflates concurrent conversations ~2.4x) and transport events rose 2 to 54,
+absorbed by repetitions - a misbehaving new case must stay bisectable.
 
-| Case                       | Domain           | What it grades that the domain's active case does not                                                                                                 | Status                                                               |
-| -------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| `pdb-remediation-pr/`      | remediation      | A fix that ADDS a missing object (the planted no-PDB defect) through submit-suggestion, where `rca-remediation-pr` edits an existing manifest's field | merges disabled; draft-phase run pending — record build id, duration |
-| `chat-routing-board-read/` | chat-and-routing | The §1.5 routing exception: a board question is answered by reading the board, never by filing a card — the direction `agent-kanban-smoke` cannot see | merges disabled; draft-phase run pending — record build id, duration |
+The slate, decided on #1023: this PR carries remediation + chat-and-routing; R1 reactivates
+`stockout-pinned-pool` (capacity) + `consistency-drift-outlier` (consistency); R2 reactivates
+`upgrade-readiness-lagging-cluster` (upgrades) + a new instantaneous-shaped cost case; R3 authors
+fleet-audits + incident-triage; security's second case is #1066, in flight. The three
+reactivations are spec-ready but unverified (`validated: false`, no clean run - their 2026-08-26
+failures were agent-endpoint 502s, transport), so each reactivating PR produces both halves of
+the entry bar. **`fleet-cost-idle-pool` stays parked for presubmit**: its A3 date gate re-arms
+pool-wide on every project onboarding or fixture replant, which is structural flakiness, not a
+wait - it remains a nightly-tier candidate.
+
+| Case                       | Domain           | What it grades that the domain's active case does not                                                                                                 | Status                                                                |
+| -------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `pdb-remediation-pr/`      | remediation      | A fix that ADDS a missing object (the planted no-PDB defect) through submit-suggestion, where `rca-remediation-pr` edits an existing manifest's field | ACTIVE with this PR; measured run pending - record build id, duration |
+| `chat-routing-board-read/` | chat-and-routing | The §1.5 routing exception: a board question is answered by reading the board, never by filing a card - the direction `agent-kanban-smoke` cannot see | ACTIVE with this PR; measured run pending - record build id, duration |
 
 ## Cluster debugging beyond the first draft
 

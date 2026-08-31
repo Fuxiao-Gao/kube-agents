@@ -1,13 +1,14 @@
-# MERGES REGISTERED, COMMENTED OUT in hack/ci-eval-pr.sh TASKS — the
-# second remediation-domain case (#1023: every domain at least two active
-# cases), parked at merge so activation waits for #1057's fan-out and its
-# pool-quota reading instead of spending serial-loop headroom ahead of it.
-# The lifecycle, so this header is true at every commit: the authoring
-# pull request runs this entry uncommented at the head of TASKS for its
-# draft phase only, which is the clean measured run; the deactivation
-# commit parks it — recording build id and duration here and in
-# bench/tasks/DRAFTS.md ("Second cases per domain") — before the PR
-# leaves draft; the enablement follow-up issue carries the uncommenting.
+# ACTIVE — lands as an uncommented hack/ci-eval-pr.sh TASKS entry with
+# its authoring pull request, the second remediation-domain case (#1023:
+# every domain at least two active cases). It was first written to merge
+# parked while #1057's fan-out was unlanded; #1057 merged 2026-08-31 with
+# its pool measurement clean (167min GREEN, 48/48 units, zero model 429s
+# at P=4, build 2094432646640701440), so activation rides the authoring
+# PR instead of a follow-up. The gate is that PR's own measured run
+# (Prow skips draft PRs — the run is `/test all`-triggered): a red takes
+# this entry back out before the PR leaves draft, and a green records
+# build id and duration here and in bench/tasks/DRAFTS.md ("Second cases
+# per domain").
 #
 # WHAT THIS GRADES THAT rca-remediation-pr DOES NOT. Both cases end in a
 # pull request through the submit-suggestion skill, and both read the PR
@@ -33,8 +34,8 @@
 # submit-suggestion has no dedupe and nothing ever closes its PRs (the
 # accounting is in rca-remediation-pr's header; this case doubles that
 # accumulation, accepted on the same terms: the *-infra repos are throwaway
-# fixtures nobody reads). Eligible tier: presubmit, once the fan-out
-# absorbs the added wall clock.
+# fixtures nobody reads). Eligible tier: presubmit, under the merged
+# fan-out.
 #
 # Expected cost bracket: unmeasured. Bounded below by
 # obtainability-remediation-proposal (124-130s measured — same fixture,

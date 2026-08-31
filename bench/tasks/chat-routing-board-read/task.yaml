@@ -1,13 +1,14 @@
-# MERGES REGISTERED, COMMENTED OUT in hack/ci-eval-pr.sh TASKS — the
-# second chat-and-routing case (#1023: every domain at least two active
-# cases), parked at merge so activation waits for #1057's fan-out and its
-# pool-quota reading instead of spending serial-loop headroom ahead of it.
-# The lifecycle, so this header is true at every commit: the authoring
-# pull request runs this entry uncommented at the head of TASKS for its
-# draft phase only, which is the clean measured run; the deactivation
-# commit parks it — recording build id and duration here and in
-# bench/tasks/DRAFTS.md ("Second cases per domain") — before the PR
-# leaves draft; the enablement follow-up issue carries the uncommenting.
+# ACTIVE — lands as an uncommented hack/ci-eval-pr.sh TASKS entry with
+# its authoring pull request, the second chat-and-routing case (#1023:
+# every domain at least two active cases). It was first written to merge
+# parked while #1057's fan-out was unlanded; #1057 merged 2026-08-31 with
+# its pool measurement clean (167min GREEN, 48/48 units, zero model 429s
+# at P=4, build 2094432646640701440), so activation rides the authoring
+# PR instead of a follow-up. The gate is that PR's own measured run
+# (Prow skips draft PRs — the run is `/test all`-triggered): a red takes
+# this entry back out before the PR leaves draft, and a green records
+# build id and duration here and in bench/tasks/DRAFTS.md ("Second cases
+# per domain").
 #
 # WHAT THIS GRADES THAT agent-kanban-smoke DOES NOT: the front door's
 # routing decision in the direction no active case prices. The smoke
