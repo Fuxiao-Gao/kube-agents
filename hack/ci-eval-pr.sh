@@ -846,6 +846,15 @@ TASKS=(
   "./tasks/upgrades-lagging-master-probe/task.yaml"
   "./tasks/consistency-authorized-networks-probe/task.yaml"
   "./tasks/cost-idle-pool-probe/task.yaml"
+  # The cost domain's second case (#1023): the probe above grades DISCOVERY
+  # of the idle pool, this grades the REMEDIATION PROPOSAL on the same
+  # fixture — the probe-then-proposal shape security uses (#1066). New
+  # authoring rather than reactivating fleet-cost-idle-pool, whose A3 date
+  # gate re-arms pool-wide on every project onboarding (see the task's
+  # header). Probe-priced (~150-350s expected), default cost hint until the
+  # authoring PR's /test all run measures it; a red takes it back out
+  # before that PR leaves draft.
+  "./tasks/cost-idle-pool-remediation-proposal/task.yaml"
   # The security prompt variation, in the same relation to
   # security-overgrant-probe that obtainability-remediation-proposal below
   # holds to reliability-pdb-probe: the probe asks whether debug-binding is
@@ -896,6 +905,17 @@ TASKS=(
   # The one active task that WRITES: it files a remediation PR against the
   # leased project's throwaway GitOps repo via submit-suggestion.
   "./tasks/rca-remediation-pr/task.yaml"
+  # REACTIVATED (#1023): the upgrades full audit, second case for the
+  # domain its probe covers with a question. Parked by the 2026-08-26
+  # recast for a serial-budget reason the merged fan-out (#1057, 167min
+  # GREEN, zero pool 429s at P=4) removed. Its one run failed on
+  # agent-endpoint 502s while its delegated worker completed the sweep and
+  # filed ledger issue #3 — transport, not the scenario. Still
+  # `validated: false`: the reactivating PR's own /test all run is the
+  # clean measured run, a red takes the entry back out before that PR
+  # leaves draft, and its cost hint below is an audit-shape estimate until
+  # that run prices it.
+  "./tasks/upgrade-readiness-lagging-cluster/task.yaml"
   # The audit-machinery canary: measured 606s clean on 2026-08-26, every
   # exact check green -- the only task that has proven the A1/A4 path
   # (minted token, cloned *-infra workspace, published ledger issue) in a
@@ -974,13 +994,17 @@ TASKS=(
   #      upgrade-readiness-lagging-cluster, consistency-drift-outlier:
   #      full-audit shape recast to the nightly tier (600-1300s each, measured
   #      or transport-failed on 2026-08-26); each domain is now covered by a
-  #      probe above. They remain spec-ready and activation is uncommenting.
+  #      probe above. The recast's serial-budget reason ended with #1057's
+  #      fan-out: upgrade-readiness-lagging-cluster is reactivated above
+  #      (#1023), stockout-pinned-pool and consistency-drift-outlier
+  #      reactivate in a sibling PR of the same lane, and planted-pdb stays
+  #      parked -- reliability already holds five active cases, so it is a
+  #      nightly candidate rather than a coverage need.
   #   -- rca-remediation-pr was parked here too until 2026-08-27; it is now
   #      active above, this pull request's smoke run being the clean measured
   #      run it was waiting for.
   # "./tasks/obtainability-planted-pdb/task.yaml"
   # "./tasks/stockout-pinned-pool/task.yaml"
-  # "./tasks/upgrade-readiness-lagging-cluster/task.yaml"
   # "./tasks/consistency-drift-outlier/task.yaml"
   #
   # Two reliability prompt variations landed with #984 and stay commented
@@ -1170,6 +1194,13 @@ export DETERMINISTIC_CORRECTNESS_FLOOR="${DETERMINISTIC_CORRECTNESS_FLOOR:-1.0}"
 # pull request. It is not a legitimate default: at 1 the collapse rung
 # degenerates to "the single run failed", which is exactly the trigger-happy
 # rule this change exists to replace.
+# #1023's upgrades reactivation (upgrade-readiness-lagging-cluster) and cost
+# proposal (cost-idle-pool-remediation-proposal): at the audit-shape estimate
+# of ~700-1000s and the proposal shape's measured 124-130s, six units add
+# ~45-60 minutes of INVOCATION time, roughly 15-20 minutes of span at the ~3x
+# realized parallelism build 2094432646640701440 measured (167 minutes for
+# the 16-case matrix, zero model 429s at P=4). Replace this sentence with
+# their measured costs when the activating PR's run prices them.
 EVAL_REPETITIONS="${EVAL_REPETITIONS:-3}"
 if ! [ "${EVAL_REPETITIONS}" -ge 1 ] 2>/dev/null; then
   echo "ERROR: EVAL_REPETITIONS must be a positive integer, got '${EVAL_REPETITIONS}'." >&2
@@ -1323,6 +1354,10 @@ fi
 unit_cost_hint() {
   case "$1" in
     gpu-stress-test-diagnosis | autoops-warning-event-triage) echo 900 ;;
+    # Audit-shape ESTIMATE, not a measurement: siblings priced the full
+    # audit at 606-962s per repetition. Replace with the measured cost from
+    # the reactivating PR's run.
+    upgrade-readiness-lagging-cluster) echo 900 ;;
     compliance-rbac-overgrant | rca-remediation-pr) echo 700 ;;
     consistency-authorized-networks-probe) echo 300 ;;
     *) echo 200 ;;
