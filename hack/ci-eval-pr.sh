@@ -615,6 +615,28 @@ TASKS=(
   # bench/tf/prebuilt/autoops-incident/main.tf for why it cannot, and why it
   # is the host cluster and not the per-run one that gets the incident.
   "./tasks/autoops-warning-event-triage/task.yaml"
+  # Two second-domain cases (#1023), both ACTIVE on the strength of their
+  # authoring pull request's own measured /test all run (Prow skips draft
+  # PRs); a red takes the offending entry back out before that PR leaves
+  # draft — the #1049 rule.
+  #
+  # ai-security-planted-model-audit: fleet-audits' second case beside the
+  # compliance canary — a second audit stream end to end
+  # (ai-security-audit, whose checks nothing else touches) over a defect
+  # its own stack plants on the host cluster, plus the SOP's
+  # report-the-name-never-the-value redaction rule made exact. Full-audit
+  # shape; hinted at the audit estimate below until measured.
+  #
+  # autoops-crashloop-config-triage: incident-triage's second case — the
+  # same watcher/dispatch/delivery pipeline as the entry above, on a
+  # different failure class whose evidence lives in the container log and
+  # pod spec rather than in lastState.terminated, keyed on a planted
+  # config path a pattern-matched OOM diagnosis cannot produce. Sibling
+  # stack directory (shared state is why it is not a variable on the
+  # incumbent's stack); pays the same open-incident and card waits, so it
+  # takes the incumbent's 900 hint as its estimate.
+  "./tasks/ai-security-planted-model-audit/task.yaml"
+  "./tasks/autoops-crashloop-config-triage/task.yaml"
   # Eleven registered scenarios stay commented out. The task-registration lint
   # counts a commented entry as registered, so a line here is a promise the
   # scenario exists, not that it runs; the domain-coverage lint counts only
@@ -798,6 +820,18 @@ export DETERMINISTIC_CORRECTNESS_FLOOR="${DETERMINISTIC_CORRECTNESS_FLOOR:-1.0}"
 # pull request. It is not a legitimate default: at 1 the collapse rung
 # degenerates to "the single run failed", which is exactly the trigger-happy
 # rule this change exists to replace.
+# #1023's fleet-audits and incident-triage second cases
+# (ai-security-planted-model-audit, autoops-crashloop-config-triage) are the
+# two shapes that pay waits as well as conversation: at their 900 estimates,
+# six units add ~90 minutes of INVOCATION time, roughly 30 minutes of span at
+# the ~3x realized parallelism build 2094432646640701440 measured (167
+# minutes for the 16-case matrix, zero model 429s at P=4) — noting the
+# crashloop case's stack also blocks in apply until the watcher fires, which
+# is infra time the invocation figure does not carry. Replace this sentence
+# with measured costs when the authoring PR's run prices them. Sibling lanes
+# (#1079, #1082, #1083, #1066, #1050) each budget their own additions against
+# the same measured baseline; whichever merges LAST owns the combined
+# recompute -- no single lane's arithmetic covers the sum.
 EVAL_REPETITIONS="${EVAL_REPETITIONS:-3}"
 if ! [ "${EVAL_REPETITIONS}" -ge 1 ] 2>/dev/null; then
   echo "ERROR: EVAL_REPETITIONS must be a positive integer, got '${EVAL_REPETITIONS}'." >&2
@@ -903,6 +937,10 @@ fi
 unit_cost_hint() {
   case "$1" in
     gpu-stress-test-diagnosis | autoops-warning-event-triage) echo 900 ;;
+    # ESTIMATES, not measurements — the audit at its shape's sibling prices
+    # (606-962s/rep), the crashloop triage at its sibling's hint (same
+    # waits). Replace with measured costs from the authoring PR's run.
+    ai-security-planted-model-audit | autoops-crashloop-config-triage) echo 900 ;;
     compliance-rbac-overgrant | rca-remediation-pr) echo 700 ;;
     consistency-authorized-networks-probe) echo 300 ;;
     *) echo 200 ;;
