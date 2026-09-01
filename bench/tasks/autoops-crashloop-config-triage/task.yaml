@@ -42,7 +42,7 @@ name: AutoOps triage names the missing config file, not a guessed OOM
 
 # No seeded-fleet dependency: the stack below plants everything this case
 # reads. The empty list is the declaration, not an omission — see
-# docs/designs/bench-fleet-catalog.md.
+# docs/designs/bench-case-format.md, the `fixtures: []` rule.
 fixtures: []
 
 infrastructure:
