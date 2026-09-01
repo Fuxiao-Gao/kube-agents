@@ -966,15 +966,17 @@ export DETERMINISTIC_CORRECTNESS_FLOOR="${DETERMINISTIC_CORRECTNESS_FLOOR:-1.0}"
 # separate pull request can replace, and this number was invalidated FIVE times
 # by a matrix that grew after it was computed (#956, then #982, then #998, then
 # #1049's three) before and after real runs replaced the arithmetic. At the
-# measured ~317min serial, ~43min of serial headroom remains: a further
-# average-cost case's ~11min of INVOCATION time still fits, a canary-cost
-# case's ~34min does not -- divided by however much of EVAL_TASK_PARALLELISM
-# the fan-out below actually realises against the pool's model quota, which the
-# first parallel Prow run will measure. Until it has, budget serially: a case
-# that fits at parallelism 1 cannot be the thing that blows the deadline. The
-# NEXT activation of any size is a raise-first change unless the in-flight
-# runtime-reduction work lands first. Activating a case and raising the budget
-# are one change in two repositories, not a change and a follow-up.
+# measured ~317min serial, ~43min of serial headroom remains. Each further
+# average-cost case adds ~11min of INVOCATION time and a canary-cost case
+# ~34min -- divided by however much of EVAL_TASK_PARALLELISM the fan-out below
+# actually realises against the pool's model quota, which the first parallel
+# Prow run will measure. Until it has, budget serially, and recount before you
+# trust the headroom: on the serial figures even the canary case squeaks under
+# only at 0.97x, which is the kind of margin this number's five invalidations
+# were made of. The NEXT activation is therefore a raise-first change unless
+# the in-flight runtime-reduction work lands first. Activating a case and
+# raising the budget are one change in two repositories, not a change and a
+# follow-up.
 #
 # The variance that was flagged as the thing to watch has resolved in the good
 # direction: consistency-authorized-networks-probe took 1039s on the one earlier
