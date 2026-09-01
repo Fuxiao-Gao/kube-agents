@@ -604,7 +604,9 @@ TASKS=(
   # "./tasks/cluster-agent-pending-replicas-capped-pool/task.yaml"
   "./tasks/gpu-stress-test-diagnosis/task.yaml"
   "./tasks/agent-kanban-smoke/task.yaml"
-  # Last, because it is the only entry that pays twice. Its stack plants an
+  # Was last because it was the only entry that pays twice -- its #1023
+  # crashloop sibling below now pays the same two waits, and array order
+  # stopped mattering when unit_cost_hint took over launch order. Its stack plants an
   # OOM-killed workload on the host cluster and blocks until the event
   # watcher's leading-edge debounce clears and the incident opens (~1 minute,
   # bounded at 12), and then the agent turn itself waits on the AutoOps card,
@@ -760,7 +762,9 @@ export DETERMINISTIC_CORRECTNESS_FLOOR="${DETERMINISTIC_CORRECTNESS_FLOOR:-1.0}"
 # that is issue #902's lane. The serial measurements kept below predate the
 # fan-out and are its baseline.
 #
-# FOURTEEN tasks at three repetitions is FORTY-TWO devops-bench invocations,
+# EIGHTEEN tasks at three repetitions is FIFTY-FOUR devops-bench invocations
+# at this branch's head (the FOURTEEN this block was computed at has been
+# invalidated by activations since -- its own warning below, proven again),
 # where the presubmit's budget was sized for two. This number is no longer an
 # extrapolation from other builds: THIS matrix has now run end to end, at
 # thirteen tasks x three repetitions, on build 2093054834931404800
@@ -821,17 +825,20 @@ export DETERMINISTIC_CORRECTNESS_FLOOR="${DETERMINISTIC_CORRECTNESS_FLOOR:-1.0}"
 # degenerates to "the single run failed", which is exactly the trigger-happy
 # rule this change exists to replace.
 # #1023's fleet-audits and incident-triage second cases
-# (ai-security-planted-model-audit, autoops-crashloop-config-triage) are the
-# two shapes that pay waits as well as conversation: at their 900 estimates,
-# six units add ~90 minutes of INVOCATION time, roughly 30 minutes of span at
-# the ~3x realized parallelism build 2094432646640701440 measured (167
-# minutes for the 16-case matrix, zero model 429s at P=4) — noting the
-# crashloop case's stack also blocks in apply until the watcher fires, which
-# is infra time the invocation figure does not carry. Replace this sentence
-# with measured costs when the authoring PR's run prices them. Sibling lanes
-# (#1079, #1082, #1083, #1066, #1050) each budget their own additions against
-# the same measured baseline; whichever merges LAST owns the combined
-# recompute -- no single lane's arithmetic covers the sum.
+# (ai-security-planted-model-audit, autoops-crashloop-config-triage) do NOT
+# amortize across lanes the way noop cases do, and the binding constraint is
+# not parallelism: both are stack-bearing, and the infra mutex below holds
+# lock-infra for a unit's WHOLE invocation, so every tofu unit serializes
+# with every other. These six units join gpu-stress's and the incumbent
+# autoops task's six in one serial chain — at the 900 estimates that chain
+# alone is ~180 minutes, plus the crashloop apply's bounded watcher waits
+# (420s+300s worst case per rep) riding inside it, against the measured
+# 167-minute 16-case baseline (build 2094432646640701440, zero model 429s
+# at P=4). The authoring PR's measured run is what says whether that chain
+# fits; if it crowds the deadline, thinning the chain (not raising P) is
+# the lever. Sibling lanes (#1079, #1082, #1083, #1066, #1050) each budget
+# their own additions against the same baseline; whichever merges LAST owns
+# the combined recompute -- no single lane's arithmetic covers the sum.
 EVAL_REPETITIONS="${EVAL_REPETITIONS:-3}"
 if ! [ "${EVAL_REPETITIONS}" -ge 1 ] 2>/dev/null; then
   echo "ERROR: EVAL_REPETITIONS must be a positive integer, got '${EVAL_REPETITIONS}'." >&2

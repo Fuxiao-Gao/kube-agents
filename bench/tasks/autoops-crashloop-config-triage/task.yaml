@@ -101,7 +101,9 @@ expected_output: |
   - The report is the triage the AutoOps card already produced, read off the
     kanban board rather than worked out fresh from the namespace. Judge that on
     what the reply contains -- a reproduction of the card's report, with no
-    investigation of the agent's own alongside it.
+    investigation of the agent's own alongside it. A correct reply is not
+    required to say where it came from, and must not be marked down for
+    reproducing the card without naming it.
   - It identifies the workload 'eval-startup-workload' as the subject.
   - It gives the root cause as a startup failure: the container's command
     tries to read /etc/eval-startup-conf/eval-missing-config.yaml, which does
@@ -131,6 +133,18 @@ verification_spec:
       tool_names: ["kanban_list"]
       require_success: true
 
+  # DIVERGENCE FROM THE INCUMBENT, recorded: its fourth objective ("What to
+  # do" + "Option A") grades the delivery contract's lettered options, and
+  # it is deliberately NOT carried here. _triage_task_body letters options
+  # only when there are two or more remediations and explicitly does not
+  # letter a single-option report — and unlike the OOM plant, whose
+  # limit-vs-allocation gap guarantees two sound fixes, a missing config
+  # file can legitimately have one (supply the file). Requiring "Option A"
+  # would red a correct single-remediation triage. The cost, accepted: a
+  # one-line summary that names the two planted nouns passes checks the
+  # incumbent's fourth objective would have failed; the verbatim-
+  # reproduction instruction stays in the prompt and the judge reference
+  # still grades it.
   - name: triage-names-the-workload
     role: objective
     mode: assert
