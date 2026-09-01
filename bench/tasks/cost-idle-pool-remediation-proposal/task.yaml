@@ -20,8 +20,8 @@
 # DISCOVERY (name the pool running no workloads, unprompted); this grades
 # the REMEDIATION PROPOSAL — handed the finding, compose the change that
 # eliminates the spend, concretely and without touching anything — the
-# probe-then-proposal second shape #1066 is adding for security
-# (security-overgrant-remediation-proposal). An agent that removes
+# probe-then-proposal second shape security already carries (#1066,
+# security-overgrant-remediation-proposal). An agent that removes
 # the taint "so the pool can be used" has answered a different question:
 # the nodes keep running and the spend survives — which is why the
 # accepted phrasings are the shrink-the-pool family and deliberately NOT

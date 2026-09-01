@@ -848,7 +848,7 @@ TASKS=(
   "./tasks/cost-idle-pool-probe/task.yaml"
   # The cost domain's second case (#1023): the probe above grades DISCOVERY
   # of the idle pool, this grades the REMEDIATION PROPOSAL on the same
-  # fixture — the probe-then-proposal shape #1066 is adding for security. New
+  # fixture — the probe-then-proposal shape security uses (#1066, merged). New
   # authoring rather than reactivating fleet-cost-idle-pool, whose A3 date
   # gate re-arms pool-wide on every project onboarding (see the task's
   # header). Probe-priced (~150-350s expected), default cost hint until the
