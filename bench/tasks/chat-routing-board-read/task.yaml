@@ -4,11 +4,9 @@
 # parked while #1057's fan-out was unlanded; #1057 merged 2026-08-31 with
 # its pool measurement clean (167min GREEN, 48/48 units, zero model 429s
 # at P=4, build 2094432646640701440), so activation rides the authoring
-# PR instead of a follow-up. The gate is that PR's own measured run
-# (Prow skips draft PRs — the run is `/test all`-triggered): a red takes
-# this entry back out before the PR leaves draft, and a green records
-# build id and duration here and in bench/tasks/DRAFTS.md ("Second cases
-# per domain").
+# PR instead of a follow-up. MEASURED: 3/3 GREEN on that run — build
+# 2094517532634386432 (2026-08-31), 61s/59s/66s per repetition, the
+# cheapest case in the matrix as designed.
 #
 # WHAT THIS GRADES THAT agent-kanban-smoke DOES NOT: the front door's
 # routing decision in the direction no active case prices. The smoke
@@ -27,14 +25,16 @@
 # inside tool_called's router-only limit (verifiers.py) instead of working
 # around it.
 #
-# One standing text disagrees with that premise, and the draft-phase run
-# adjudicates it: DRAFTS.md's activation blocker A2 says "every entry in
+# One standing text disagreed with that premise, and the measured run
+# adjudicated it: DRAFTS.md's activation blocker A2 said "every entry in
 # TASKS talks to the platform agent", while agent-kanban-smoke's header
 # and agents/chat/config.yaml say the harness endpoint serves the
-# front-door (default) profile. This case is built on the second reading.
-# A green draft-phase run — kanban_list observed in the responding agent's
-# own trajectory — settles it, and reconciling A2's wording to what the
-# run shows belongs to the deactivation commit, not to this file.
+# front-door (default) profile. Build 2094517532634386432 settled it the
+# second way — three repetitions green with kanban_list in the responding
+# agent's own trajectory, a call no non-front-door reading explains.
+# DRAFTS.md's A2 entry now carries the dated reconciliation; what A2
+# still holds is per-task targeting of a profile OTHER than the one the
+# single endpoint serves.
 #
 # The board's CONTENT is deliberately not asserted. Cards on the board at
 # run time belong to whichever tasks ran before this one against the same

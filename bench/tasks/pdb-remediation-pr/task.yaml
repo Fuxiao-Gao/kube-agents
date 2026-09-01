@@ -4,11 +4,9 @@
 # parked while #1057's fan-out was unlanded; #1057 merged 2026-08-31 with
 # its pool measurement clean (167min GREEN, 48/48 units, zero model 429s
 # at P=4, build 2094432646640701440), so activation rides the authoring
-# PR instead of a follow-up. The gate is that PR's own measured run
-# (Prow skips draft PRs — the run is `/test all`-triggered): a red takes
-# this entry back out before the PR leaves draft, and a green records
-# build id and duration here and in bench/tasks/DRAFTS.md ("Second cases
-# per domain").
+# PR instead of a follow-up. MEASURED: 3/3 GREEN on that run — build
+# 2094517532634386432 (2026-08-31), 280s/489s/267s per repetition; the
+# 400 unit_cost_hint is that measurement rounded.
 #
 # WHAT THIS GRADES THAT rca-remediation-pr DOES NOT. Both cases end in a
 # pull request through the submit-suggestion skill, and both read the PR
