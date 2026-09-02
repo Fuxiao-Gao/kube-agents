@@ -1649,6 +1649,34 @@ class CommandExecutorTest(unittest.TestCase):
         managed = executor.kubeconfig_dir / f"{self.CONTEXT}.yaml"
         self.assertIn(self.CONTEXT, managed.read_text(encoding="utf-8"))
 
+    @unittest.skipIf(os.geteuid() == 0, "root ignores the mode bits this test relies on")
+    def test_get_credentials_survives_an_unwritable_pin_destination(self):
+        # `hermes profile create` makes a profile home 0700 and sandbox-owned,
+        # so across the #955 UID split the sidecar's pin copy-out can hit
+        # EACCES. The fetch itself succeeded and the managed copy is filed, so
+        # the command must still report success: failing the whole request
+        # here is the amplification that degraded every fleet audit in #1171.
+        executor = self.fake_gcloud(self.executor())
+        home = executor.workspace_dir / "profiles" / "cluster-a"
+        home.mkdir(parents=True)
+        home.chmod(0o500)
+        # tearDown removes the whole temp tree first, so guard the restore.
+        self.addCleanup(lambda: home.exists() and home.chmod(0o700))
+        destination = home / "kubeconfig.yaml"
+
+        with self.assertLogs(level="WARNING") as logs:
+            result = executor.execute(
+                ["gcloud", "container", "clusters", "get-credentials", "cluster-a",
+                 "--location=us-central1", "--project=demo-project"],
+                kubeconfig=str(destination),
+            )
+
+        self.assertEqual(0, result.exit_code)
+        self.assertFalse(destination.exists())
+        managed = executor.kubeconfig_dir / f"{self.CONTEXT}.yaml"
+        self.assertIn(self.CONTEXT, managed.read_text(encoding="utf-8"))
+        self.assertTrue(any("kubeconfig pin copy" in line for line in logs.output))
+
     def test_get_credentials_never_writes_through_the_callers_path(self):
         # gcloud must not be handed the agent-writable path directly; if it were,
         # the agent could swap the file between the write and the read that files

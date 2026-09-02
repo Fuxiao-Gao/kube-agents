@@ -26,6 +26,15 @@ from pathlib import Path
 # profile home, POSIX-separated; each one needs a merge rule below.
 MERGE_PATHS: tuple[str, ...] = ("cron/jobs.json",)
 
+# `hermes profile create` makes the profile home 0700, which the sandbox
+# (uid 10000) can use but the credential sidecar (uid 10001, sharing only the
+# fsGroup — the #955 UID split) cannot: the sidecar gets EACCES writing the
+# kubeconfig pin into a cluster profile home and even stat-ing
+# profiles/platform for cwd containment (issue #1171). Group rwx admits the
+# sidecar; setgid keeps files created inside on the shared group rather than
+# the creator's primary gid; others stay excluded, as hermes intended.
+PROFILE_HOME_MODE = 0o2770
+
 
 def make_log(prefix: str):
     """Build a stderr logger tagged with a component prefix (shared across the profile scripts)."""
@@ -132,6 +141,15 @@ def ensure_profile(name: str, description: str, hermes_home: Path) -> Path:
             raise SystemExit(f"ERROR: could not execute 'hermes' to create profile {name}: {e}")
     if not home.is_dir():
         raise SystemExit(f"ERROR: expected profile home not found after create: {home}")
+    # Every call, not just the scaffolding one, so a home created 0700 by an
+    # earlier image is repaired the next time anything ensures the profile.
+    # Guarded: a home owned by the peer uid may refuse the chmod, and losing
+    # the widening is better than losing the profile (same stance as the
+    # scratch-dir repair in docker-entrypoint.sh).
+    try:
+        home.chmod(PROFILE_HOME_MODE)
+    except OSError as e:
+        log(f"{name}: could not widen profile home for the credential sidecar ({e})")
     return home
 
 

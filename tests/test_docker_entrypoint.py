@@ -148,6 +148,41 @@ class SharedStateGateTest(unittest.TestCase):
                 "through the group bits",
             )
 
+    def test_the_setup_widens_profile_homes_left_0700_on_the_volume(self):
+        """Step 2.5's repair loop: `hermes profile create` makes a profile home
+        0700, which the credential sidecar (uid 10001) cannot enter through the
+        shared fsGroup — the #955 uid split. The scaffold is gated on
+        profile.yaml and never reruns, so a home a pre-fix image created stays
+        0700 on the PVC forever unless startup repairs it; #1171 is what that
+        looks like (EACCES on the kubeconfig pin and on profiles/platform)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = pathlib.Path(tmp) / "data"
+            for name in ("platform", "cluster-demo-seeded-a-us-central1-a"):
+                profile = home / "profiles" / name
+                profile.mkdir(parents=True)
+                (profile / "profile.yaml").write_text("name: x\n")
+                profile.chmod(0o700)
+            proc = subprocess.run(
+                ["sh", str(_ENTRYPOINT), "echo", "hermes", "gateway", "run"],
+                capture_output=True,
+                text=True,
+                env={
+                    "PATH": "/usr/bin:/bin",
+                    "PLATFORM_AGENT_HOME": str(home),
+                    "AGENT_SHARED_STATE_WAIT_SECS": "0",
+                },
+                timeout=60,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            for name in ("platform", "cluster-demo-seeded-a-us-central1-a"):
+                mode = (home / "profiles" / name).stat().st_mode
+                self.assertEqual(
+                    mode & 0o070,
+                    0o070,
+                    f"profiles/{name} is {oct(mode & 0o777)}: the sidecar "
+                    "reaches it only through the group bits",
+                )
+
     def test_dashboard_sidecar_skips_the_setup(self):
         proc, ran_setup = self._run(["hermes", "dashboard"])
         self.assertEqual(proc.returncode, 0, proc.stderr)

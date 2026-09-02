@@ -2545,8 +2545,32 @@ class CommandExecutor:
                     # redundant fetch. Taking the lock here would serialise every
                     # scaffold behind every cold read for no benefit.
                     os.replace(scratch, self._managed_kubeconfig(target))
-                requested.parent.mkdir(parents=True, exist_ok=True)
-                requested.write_text(generated, encoding="utf-8")
+                try:
+                    requested.parent.mkdir(parents=True, exist_ok=True)
+                    requested.write_text(generated, encoding="utf-8")
+                except OSError as error:
+                    # The pin copy is an artefact for the agent to look at, never
+                    # what a later command runs against — the docstring's contract.
+                    # Failing the whole request over it turned a successful
+                    # credential fetch into "credential proxy command execution
+                    # failed" whenever the profile home was not writable across
+                    # the #955 UID split (0700, sandbox-owned), and that single
+                    # amplification degraded every fleet audit in issue #1171.
+                    # What still works: this fetch, and the managed copy filed
+                    # above. What does not: a later command that names the
+                    # cluster through this pin — _resolve_kubeconfig reads the
+                    # pin to learn the target, and the Cluster Agent preflight
+                    # surfaces the absence as its missing-pin check. The
+                    # profile-home widening in profile_scaffold and the
+                    # entrypoint repair are what keep this branch rare rather
+                    # than load-bearing.
+                    logging.warning(
+                        "could not write the kubeconfig pin copy to %s (%s); the "
+                        "fetch succeeded and the managed copy is filed, but "
+                        "commands resolving through this pin will not find it",
+                        requested,
+                        error,
+                    )
             return result
         finally:
             scratch.unlink(missing_ok=True)

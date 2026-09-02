@@ -668,9 +668,13 @@ vector, which `kubectl` prefers over the environment; covering only the
 environment would leave the flag as an equivalent path. `get-credentials` is
 handled as the one command permitted to author a kubeconfig: it writes into the
 sidecar's own directory, the result is filed under the context it selects, and a
-copy is then written to the workspace path the caller asked for. The visible pin
-that profile scaffolding records and the Cluster Agent preflight inspects
-therefore still exists, without being what a later command opens.
+copy is then written to the workspace path the caller asked for — the visible
+pin that profile scaffolding records and the Cluster Agent preflight inspects,
+without being what a later command opens. The copy-out is best-effort: a
+workspace home the sidecar cannot write refuses only the artefact, so the fetch
+still succeeds against the sidecar's own copy and the sidecar logs a warning
+naming the path. A pin that is consequently absent surfaces later, in the
+preflight's missing-pin check, rather than as a failed credential fetch.
 
 Consequences:
 
@@ -746,8 +750,11 @@ only command output, never a mounted Git credential file.
   mounted in both and each writes files the other has to change — the sandbox
   creates the leased GitOps directory the sidecar clones into, the sidecar writes
   the kubeconfig pin into a profile home the sandbox created — so both
-  entrypoints run with `umask 0002`. Files that predate the UID split are made
-  group-writable by the kubelet's `fsGroup` pass at every mount.
+  entrypoints run with `umask 0002`. `hermes profile create` makes a profile
+  home 0700 regardless of that umask, so profile scaffolding widens each home
+  to 2770 (group-writable, setgid, others still excluded) and the entrypoint
+  repairs homes already sitting 0700 on the volume. Files that predate the UID
+  split are made group-writable by the kubelet's `fsGroup` pass at every mount.
 - Every container the operator builds — the credential-cleanup init container,
   sandbox, dashboard, sidecar, log shipper — has a read-only root filesystem;
   writable state uses bounded `emptyDir` volumes. The sandbox and dashboard

@@ -885,6 +885,21 @@ if { [ -f "$TARGET_DIR/profiles/platform/profile.yaml" ] || [ -f "$TARGET_DIR/pr
     ln -sfn "$TARGET_DIR/scripts" "$TARGET_DIR/profiles/platform/scripts" 2>/dev/null || true
 fi
 
+# Widen existing profile homes for the credential sidecar (the #955 UID split;
+# issue #1171). `hermes profile create` makes a home 0700, which the sandbox
+# (uid 10000) can use but the sidecar (uid 10001) — reaching the PVC only
+# through the shared fsGroup — cannot: it gets EACCES writing a cluster
+# profile's kubeconfig pin and even stat-ing profiles/platform for cwd
+# containment. profile_scaffold.ensure_profile widens the homes it touches;
+# this repairs the ones already sitting on a PVC that no scaffold revisits,
+# because the 2.5 scaffold is gated on profile.yaml and never reruns. Guarded
+# like the scratch repair in 4.5: a home owned by the peer uid may refuse the
+# chmod, and that is fine. Setgid so files created inside stay on the shared
+# group; others stay excluded, as hermes intended with the 0700.
+for PROFILE_HOME in "$TARGET_DIR"/profiles/*/; do
+    [ -d "$PROFILE_HOME" ] && chmod 2770 "$PROFILE_HOME" 2>/dev/null || true
+done
+
 # 2.6 Force-sync the image-managed persona and config files of the specialist
 # profiles so they ALWAYS track the image, not the persistent PVC — the same
 # guarantee step 2a gives the default profile. The scaffold in 2.5 only runs when

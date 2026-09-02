@@ -334,8 +334,13 @@ class EnsureProfileTest(unittest.TestCase):
         if self.fail_create:
             raise subprocess.CalledProcessError(1, cmd, output="", stderr="profile already exists")
         self.home.mkdir(parents=True, exist_ok=True)
+        # The real hermes makes the home 0700 — the mode the widening exists for.
+        self.home.chmod(0o700)
         (self.home / "profile.yaml").write_text("name: platform\n")
         return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    def home_mode(self):
+        return self.home.stat().st_mode & 0o7777
 
     def ensure(self):
         with redirect_stderr(io.StringIO()) as err:
@@ -346,6 +351,33 @@ class EnsureProfileTest(unittest.TestCase):
     def test_creates_a_profile_that_does_not_exist(self):
         self.assertEqual(self.ensure(), self.home)
         self.assertEqual(len(self.calls), 1)
+
+    def test_a_fresh_home_is_widened_for_the_credential_sidecar(self):
+        # hermes makes it 0700; the sidecar (peer uid, shared fsGroup — the
+        # #955 split) then cannot write the kubeconfig pin into it (#1171).
+        self.ensure()
+        self.assertEqual(self.home_mode(), ps.PROFILE_HOME_MODE)
+
+    def test_an_already_registered_home_is_widened_too(self):
+        # The repair path: a home a pre-fix image scaffolded 0700 sits on the
+        # PVC, and the create is (correctly) skipped for it.
+        self.home.mkdir(parents=True)
+        self.home.chmod(0o700)
+        (self.home / "profile.yaml").write_text("name: platform\n")
+        self.ensure()
+        self.assertEqual(self.home_mode(), ps.PROFILE_HOME_MODE)
+
+    def test_a_refused_chmod_is_logged_not_fatal(self):
+        # A home owned by the peer uid may refuse the widening; the profile
+        # still has to come up.
+        self.home.mkdir(parents=True)
+        (self.home / "profile.yaml").write_text("name: platform\n")
+        with unittest.mock.patch.object(
+            ps.Path, "chmod", side_effect=PermissionError("not yours")
+        ):
+            home = self.ensure()
+        self.assertEqual(home, self.home)
+        self.assertIn("could not widen", self.stderr)
 
     def test_skips_a_profile_already_registered(self):
         self.home.mkdir(parents=True)
