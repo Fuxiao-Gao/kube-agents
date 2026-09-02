@@ -1063,11 +1063,13 @@ TASKS=(
   #       the INSTANTANEOUS question (no age gate), so the cost domain is
   #       covered while this SOP-faithful audit waits for its calendar.
   #   A2  chat-routing-fleet-question. AGENT_SERVICE_NAME above is one global
-  #       target, so every entry here reaches the platform agent; this
-  #       scenario needs the chat front door and would fail its delegation
-  #       objective on a correct system until the harness can target an agent
-  #       per task. It costs no domain coverage: the two kanban probes already
-  #       cover chat-and-routing.
+  #       target, and the 2026-08-31 measurement (chat-routing-board-read's
+  #       activating run, build 2094517532634386432) settled that the endpoint
+  #       serves the front-door profile -- the one this scenario needs. So
+  #       what holds it is validation (validated: false, never run), not
+  #       routing; A2 proper -- targeting a profile OTHER than the endpoint's
+  #       -- holds no entry by itself. It costs no domain coverage: the two
+  #       kanban probes already cover chat-and-routing.
   # "./tasks/chat-routing-fleet-question/task.yaml"
   # "./tasks/fleet-cost-idle-pool/task.yaml"
   #
