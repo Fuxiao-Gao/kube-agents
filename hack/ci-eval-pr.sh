@@ -791,7 +791,10 @@ export JUDGE_PROVIDER="google"
 # them -- treat editing this line as that expensive.
 #
 # The judge and agent VALUES are still equal today, which partly measures the
-# judge grading itself. The split to a distinct judge model is blocked on one
+# judge grading itself. They no longer share a serving path: the agent's
+# traffic goes through LiteLLM to Vertex AI (hack/ci-deploy.sh, #1097), so
+# the judge is now this key's only eval-loop consumer. The split to a
+# distinct judge model is blocked on one
 # fact this repository cannot prove: that kube-agents-gemini-api-key serves a
 # second model. The tree says it should -- the chart's default for the same
 # GEMINI_API_KEY family is gemini-3.5-flash (charts/kube-agents/templates/

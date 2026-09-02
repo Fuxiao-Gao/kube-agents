@@ -1997,6 +1997,10 @@ class IamGrantsTest(unittest.TestCase):
         member = f"serviceAccount:{project_id}.svc.id.goog[kubeagents-system/kubeagents-platform-agent]"
         return json.dumps({"bindings": [{"role": "roles/iam.workloadIdentityUser", "members": [member]}]})
 
+    def _litellm_wi_policy(self, project_id):
+        member = f"serviceAccount:{project_id}.svc.id.goog[kubeagents-system/kubeagents-litellm]"
+        return json.dumps({"bindings": [{"role": "roles/iam.workloadIdentityUser", "members": [member]}]})
+
     def _reader_policy(self, members):
         return json.dumps({"bindings": [{"role": "roles/artifactregistry.reader", "members": members}]})
 
@@ -2037,6 +2041,7 @@ class IamGrantsTest(unittest.TestCase):
         with mock.patch.object(checker, "run_cmd") as run:
             run.side_effect = [
                 _ok(self._wi_policy("kube-agents-evals-3")),
+                _ok(self._litellm_wi_policy("kube-agents-evals-3")),
                 _ok(self._project_policy()),
                 _ok(self._both_build_identities()),
             ]
@@ -2049,6 +2054,7 @@ class IamGrantsTest(unittest.TestCase):
         with mock.patch.object(checker, "run_cmd") as run:
             run.side_effect = [
                 _ok(self._wi_policy("kube-agents-evals-2")),
+                _ok(self._litellm_wi_policy("kube-agents-evals-2")),
                 _ok(self._project_policy("kube-agents-evals-2")),
                 _ok(self._reader_policy([f"serviceAccount:{project_number}-compute@developer.gserviceaccount.com"])),
             ]
@@ -2067,6 +2073,7 @@ class IamGrantsTest(unittest.TestCase):
         with mock.patch.object(checker, "run_cmd") as run:
             run.side_effect = [
                 _ok(json.dumps({"bindings": []})),
+                _ok(self._litellm_wi_policy("kube-agents-evals-3")),
                 _ok(self._project_policy()),
                 _ok(self._both_build_identities()),
             ]
@@ -2074,11 +2081,62 @@ class IamGrantsTest(unittest.TestCase):
         self.assertFalse(result.passed)
         self.assertTrue(any("Workload Identity" in d for d in result.details), result.details)
 
+    def test_missing_litellm_wi_binding_fails(self):
+        # The gap every pool project provisioned before model_provider =
+        # "vertex_ai" landed in provision_ci_pool_project.sh's tfvars carries:
+        # the deploy annotates the kubeagents-litellm KSA, no binding backs
+        # it, and every leased presubmit reds at the model-call gate (#1097).
+        with mock.patch.object(checker, "run_cmd") as run:
+            run.side_effect = [
+                _ok(self._wi_policy("kube-agents-evals-3")),
+                _ok(json.dumps({"bindings": []})),
+                _ok(self._project_policy()),
+                _ok(self._both_build_identities()),
+            ]
+            result = checker.check_iam_and_service_accounts("kube-agents-evals-3", "123456")
+        self.assertFalse(result.passed)
+        self.assertTrue(
+            any("kubeagents-litellm-gsa" in d and "Workload Identity" in d for d in result.details),
+            result.details,
+        )
+
+    def test_missing_litellm_gsa_fails(self):
+        with mock.patch.object(checker, "run_cmd") as run:
+            run.side_effect = [
+                _ok(self._wi_policy("kube-agents-evals-3")),
+                _fail("ERROR: (gcloud.iam.service-accounts.get-iam-policy) NOT_FOUND: Unknown "
+                      "service account."),
+                _ok(self._project_policy()),
+                _ok(self._both_build_identities()),
+            ]
+            result = checker.check_iam_and_service_accounts("kube-agents-evals-3", "123456")
+        self.assertFalse(result.passed)
+        self.assertTrue(
+            any("Missing GSA" in d and "kubeagents-litellm-gsa" in d for d in result.details),
+            result.details,
+        )
+
+    def test_denied_litellm_policy_is_unverified_not_a_missing_gsa(self):
+        # Same anti-enumeration shape as the platform GSA read below: a denied
+        # read is "not checked", never "missing".
+        with mock.patch.object(checker, "run_cmd") as run:
+            run.side_effect = [
+                _ok(self._wi_policy("kube-agents-evals-6")),
+                _fail("ERROR: (gcloud.iam.service-accounts.get-iam-policy) PERMISSION_DENIED: Permission "
+                      "iam.serviceAccounts.getIamPolicy is required to perform this operation"),
+                _ok(self._project_policy("kube-agents-evals-6")),
+                _ok(self._both_build_identities()),
+            ]
+            result = checker.check_iam_and_service_accounts("kube-agents-evals-6", "123456")
+        self.assertTrue(result.passed, result.details)
+        self.assertFalse(any("Missing GSA" in d for d in result.details), result.details)
+
     def test_denied_gsa_policy_is_unverified_not_a_missing_gsa(self):
         with mock.patch.object(checker, "run_cmd") as run:
             run.side_effect = [
                 _fail("ERROR: (gcloud.iam.service-accounts.get-iam-policy) PERMISSION_DENIED: Permission "
                       "iam.serviceAccounts.getIamPolicy is required to perform this operation"),
+                _ok(self._litellm_wi_policy("kube-agents-evals-6")),
                 _ok(self._project_policy("kube-agents-evals-6")),
                 _ok(
                     self._reader_policy(
@@ -2102,6 +2160,7 @@ class IamGrantsTest(unittest.TestCase):
         with mock.patch.object(checker, "run_cmd") as run:
             run.side_effect = [
                 _ok(self._wi_policy("kube-agents-evals-6")),
+                _ok(self._litellm_wi_policy("kube-agents-evals-6")),
                 _fail("ERROR: (gcloud.projects.get-iam-policy) PERMISSION_DENIED: Permission "
                       "'resourcemanager.projects.getIamPolicy' denied on resource"),
                 _ok(self._both_build_identities()),
@@ -2124,6 +2183,7 @@ class IamGrantsTest(unittest.TestCase):
         with mock.patch.object(checker, "run_cmd") as run:
             run.side_effect = [
                 _ok(self._wi_policy("kube-agents-evals-6")),
+                _ok(self._litellm_wi_policy("kube-agents-evals-6")),
                 _ok(self._project_policy("kube-agents-evals-6")),
                 _fail("ERROR: PERMISSION_DENIED: Permission 'artifactregistry.repositories.getIamPolicy' "
                       "denied on resource"),
@@ -2147,6 +2207,7 @@ class IamGrantsTest(unittest.TestCase):
                 # PERMISSION_DENIED, so a missing GSA is still reportable.
                 _fail("ERROR: (gcloud.iam.service-accounts.get-iam-policy) NOT_FOUND: Unknown "
                       "service account."),
+                _ok(self._litellm_wi_policy("kube-agents-evals-3")),
                 _ok(self._project_policy("kube-agents-evals-3")),
                 _ok(self._reader_policy(["serviceAccount:123456@cloudbuild.gserviceaccount.com"])),
             ]
@@ -2161,6 +2222,7 @@ class IamGrantsTest(unittest.TestCase):
         with mock.patch.object(checker, "run_cmd") as run:
             run.side_effect = [
                 _ok(self._wi_policy("kube-agents-evals-6")),
+                _ok(self._litellm_wi_policy("kube-agents-evals-6")),
                 _ok(self._project_policy("kube-agents-evals-6", prow_roles=without_container_admin)),
                 _ok(self._both_build_identities()),
             ]
@@ -2174,6 +2236,7 @@ class IamGrantsTest(unittest.TestCase):
         with mock.patch.object(checker, "run_cmd") as run:
             run.side_effect = [
                 _ok(self._wi_policy("kube-agents-evals-6")),
+                _ok(self._litellm_wi_policy("kube-agents-evals-6")),
                 _ok(
                     self._project_policy(
                         "kube-agents-evals-6",
@@ -2193,6 +2256,7 @@ class IamGrantsTest(unittest.TestCase):
         with mock.patch.object(checker, "run_cmd") as run:
             run.side_effect = [
                 _ok(self._wi_policy("kube-agents-evals-3")),
+                _ok(self._litellm_wi_policy("kube-agents-evals-3")),
                 _ok(self._project_policy(prow_roles=checker.PROW_RUNNER_ROLES | {"roles/artifactregistry.writer"})),
                 _ok(self._both_build_identities()),
             ]
@@ -2203,6 +2267,7 @@ class IamGrantsTest(unittest.TestCase):
         with mock.patch.object(checker, "run_cmd") as run:
             run.side_effect = [
                 _ok(self._wi_policy("kube-agents-evals-3")),
+                _ok(self._litellm_wi_policy("kube-agents-evals-3")),
                 _ok(self._project_policy(
                     platform_roles=checker.PLATFORM_GSA_ROLES - {"roles/container.viewer"})),
                 _ok(self._both_build_identities()),
@@ -2218,6 +2283,7 @@ class IamGrantsTest(unittest.TestCase):
         with mock.patch.object(checker, "run_cmd") as run:
             run.side_effect = [
                 _ok(self._wi_policy("kube-agents-evals-3")),
+                _ok(self._litellm_wi_policy("kube-agents-evals-3")),
                 _ok(self._project_policy(
                     platform_roles=checker.PLATFORM_GSA_ROLES | {"roles/container.admin"})),
                 _ok(self._both_build_identities()),
@@ -2232,6 +2298,7 @@ class IamGrantsTest(unittest.TestCase):
         with mock.patch.object(checker, "run_cmd") as run:
             run.side_effect = [
                 _ok(self._wi_policy("kube-agents-evals-3")),
+                _ok(self._litellm_wi_policy("kube-agents-evals-3")),
                 _ok(self._project_policy(
                     extra_bindings=[{"role": "roles/storage.objectViewer", "members": ["allUsers"]}])),
                 _ok(self._both_build_identities()),
@@ -2246,6 +2313,7 @@ class IamGrantsTest(unittest.TestCase):
         with mock.patch.object(checker, "run_cmd") as run:
             run.side_effect = [
                 _ok(self._wi_policy("kube-agents-evals-3")),
+                _ok(self._litellm_wi_policy("kube-agents-evals-3")),
                 _ok(self._project_policy(extra_bindings=[{
                     "role": "roles/storage.objectViewer",
                     "members": ["allAuthenticatedUsers"],

@@ -73,6 +73,20 @@ KUBE_AGENTS_STATE_PREFIX="full-install/platform-agent-host" \
     --role="roles/iam.workloadIdentityUser" \
     --member="serviceAccount:${PROJECT_ID}.svc.id.goog[kubeagents-system/kubeagents-platform-agent]"
   ```
+- **The LiteLLM gateway's Vertex AI identity**: Google Service Account `kubeagents-litellm-gsa@${PROJECT_ID}.iam.gserviceaccount.com` holding `roles/aiplatform.user` on the project, bound to KSA `kubeagents-litellm` in `kubeagents-system`. The eval installs route model traffic through Vertex AI (`hack/ci-deploy.sh` sets `litellm.modelProvider=vertex_ai`; the `GEMINI_API_KEY` path's fixed paid-tier-3 quota redded every smoke run on 2026-09-02 — [#1097](https://github.com/gke-labs/kube-agents/issues/1097), diagnosis on [#1184](https://github.com/gke-labs/kube-agents/issues/1184)), and a project missing this pair reds every presubmit that leases it at the deploy's model-call gate. It is deliberately not the platform agent's GSA — see [Security and IAM](../reference/security-and-iam.md)'s "The Vertex AI gateway is a separate identity". `scripts/provision_ci_pool_project.sh` creates it through the full-install composition (`model_provider = "vertex_ai"` in its tfvars instantiates the `litellm_vertex_iam` module), and the verifier checks the binding. For a project provisioned before that line existed, re-running the composition apply adds the pair; the hand repair is:
+
+  ```bash
+  gcloud iam service-accounts create kubeagents-litellm-gsa --project="${PROJECT_ID}" \
+    --display-name="Kube-Agents LiteLLM Vertex AI Service Account"
+  gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+    --member="serviceAccount:kubeagents-litellm-gsa@${PROJECT_ID}.iam.gserviceaccount.com" \
+    --role="roles/aiplatform.user" --quiet >/dev/null
+  gcloud iam service-accounts add-iam-policy-binding \
+    kubeagents-litellm-gsa@${PROJECT_ID}.iam.gserviceaccount.com \
+    --role="roles/iam.workloadIdentityUser" \
+    --member="serviceAccount:${PROJECT_ID}.svc.id.goog[kubeagents-system/kubeagents-litellm]"
+  ```
+
 - **Upload rights on the project's own registry**, so a presubmit can push its PR build images. `roles/artifactregistry.writer` is the grant to make explicitly, and `scripts/provision_ci_pool_project.sh` makes it. The pool projects that predate the script reach the same permission indirectly — Cloud Build through `roles/cloudbuild.builds.builder`, the Compute default SA through the `roles/editor` GCP grants it by default — which is why `AR_WRITER_ROLES` in `scripts/verify_ci_pool_project.py` accepts a set rather than the one role. `roles/owner` is deliberately not in it. Either build identity holding one of those roles satisfies the check.
 - **Reader on the cache images**, in the `kube-agents` repository of `kube-agents-prow` — the repository at location `us`, not the project, and not `us-central1`, because that is where `hack/ci-deploy.sh`'s default `CACHE_IMAGE` and the `:buildcache` manifests beside it live. Both identities need `roles/artifactregistry.reader` there, and the verifier fails the project if either is missing:
   - `${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com`

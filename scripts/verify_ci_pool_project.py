@@ -749,6 +749,44 @@ def check_iam_and_service_accounts(project_id: str, project_number: str) -> Chec
             passed = False
             details.append(f"Failed parsing policy for {gsa_email}: {exc}")
 
+    # The LiteLLM gateway's own identity, created by the full-install
+    # composition's litellm_vertex_iam module once model_provider is
+    # "vertex_ai" (provision_ci_pool_project.sh writes it into the tfvars).
+    # hack/ci-deploy.sh's per-lease helm upgrade annotates the
+    # kubeagents-litellm KSA with this GSA, so a project missing the pair
+    # reds every presubmit it leases at the deploy's model-call gate (#1097).
+    litellm_gsa_email = f"kubeagents-litellm-gsa@{project_id}.iam.gserviceaccount.com"
+    rc, out, err = run_cmd([
+        "gcloud", "iam", "service-accounts", "get-iam-policy",
+        litellm_gsa_email,
+        f"--project={project_id}",
+        "--format=json",
+    ])
+    if rc != 0:
+        if not _record_unreadable(
+            err,
+            f"Missing GSA or failed reading policy for {litellm_gsa_email}",
+            f"Could not read the IAM policy on {litellm_gsa_email}, so its Workload Identity binding was not "
+            "checked (and neither was the GSA's existence)",
+            details,
+            warnings,
+        ):
+            passed = False
+    else:
+        try:
+            policy = _load_json(out)
+            expected_member = f"serviceAccount:{project_id}.svc.id.goog[kubeagents-system/kubeagents-litellm]"
+            wi_bound = any(
+                b.get("role") == "roles/iam.workloadIdentityUser" and expected_member in b.get("members", [])
+                for b in policy.get("bindings", [])
+            )
+            if not wi_bound:
+                passed = False
+                details.append(f"Workload Identity user binding missing on {litellm_gsa_email} for {expected_member}")
+        except Exception as exc:
+            passed = False
+            details.append(f"Failed parsing policy for {litellm_gsa_email}: {exc}")
+
     # Read off the project's own policy, which is not the effective one. Two
     # things it hides from a literal-member scan: a role inherited from an
     # ancestor (checked 2026-08-26, the pool projects sit directly under the

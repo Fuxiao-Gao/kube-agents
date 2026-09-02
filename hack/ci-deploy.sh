@@ -41,6 +41,8 @@ readonly HELM_RELEASE_SECRET_SELECTOR="owner=helm,name=${HELM_RELEASE_NAME}"
 readonly HELM_DEPLOYED_STATUS_RE='"status"[[:space:]]*:[[:space:]]*"deployed"'
 
 # ─── 1. Validation & Pre-checks ───────────────────────────────────────────────
+# Still required with the agent path on vertex_ai below: the judge reads it
+# (JUDGE_API_KEY in ci-eval-pr.sh) and the chart's credentials secret carries it.
 if [ -z "${GEMINI_API_KEY:-}" ]; then
   echo "ERROR: GEMINI_API_KEY environment variable is required"
   exit 1
@@ -142,14 +144,34 @@ else
   DEPLOY_SOURCE="PR #${PULL_NUMBER:-local} build (${TAG})"
 fi
 
-export MODEL_PROVIDER="gemini"
-export MODEL_DEFAULT_NAME="gemini-3.1-pro-preview"
+# vertex_ai, not gemini. On 2026-09-02 every smoke run redded on 429s from the
+# Gemini Developer API key's fixed paid-tier-3 quota -- 8,000,000 input
+# tokens/minute for gemini-3.1-pro, named in the error body -- with five
+# concurrent builds drawing ~94k-token turns from one shared minute window
+# (#1097; the full diagnosis with build artifacts is on #1184). Vertex AI
+# serves the same Gemini models under dynamic shared quota, with no fixed
+# per-minute wall, and authenticates the LiteLLM pod through Workload Identity
+# (the kubeagents-litellm KSA annotation below) instead of the API key.
+# Overridable so a rollout problem is a job-env flip rather than a revert.
+# Anyone flipping MODEL_DEFAULT_NAME: ci-eval-pr.sh stamps records with its
+# own AGENT_MODEL_OVERRIDE, so flip both or the eval version key names a
+# model the install is not serving.
+export MODEL_PROVIDER="${MODEL_PROVIDER:-vertex_ai}"
+export MODEL_DEFAULT_NAME="${MODEL_DEFAULT_NAME:-gemini-3.1-pro-preview}"
 # Default to enforcing CMEK database encryption on CI evaluation clusters.
 # Set ALLOW_UNENCRYPTED_SECRETS=true to bypass CMEK checks on unencrypted test clusters.
 export ALLOW_UNENCRYPTED_SECRETS="${ALLOW_UNENCRYPTED_SECRETS:-false}"
 
 export KSA_NAME="kubeagents-platform-agent"
 export GSA_NAME="kubeagents-platform-gsa"
+# The gateway's own identity, deliberately not GSA_NAME: LiteLLM is a
+# network-exposed proxy forwarding attacker-influenceable prompt content, so
+# it holds roles/aiplatform.user and nothing else (the site's
+# security-and-iam.md, "The Vertex AI gateway is a separate identity"). The
+# pair must exist in the leased PROJECT_ID before a vertex_ai deploy;
+# provision_ci_pool_project.sh creates it, verify_ci_pool_project.py checks
+# it, and the site's deploy/ci-pool-projects.md carries the hand repair.
+export LITELLM_GSA_NAME="kubeagents-litellm-gsa"
 export MEMORY_ENABLED="false"
 export USER_PROFILE_ENABLED="false"
 export GOOGLE_CHAT_ENABLED="false"
@@ -482,6 +504,7 @@ helm upgrade --install "${HELM_RELEASE_NAME}" ./charts/kube-agents \
   --set-string "platformAgent.credentials.data.GEMINI_API_KEY=${GEMINI_API_KEY}" \
   --set-string "litellm.modelProvider=${MODEL_PROVIDER}" \
   --set-string "litellm.modelDefaultName=${MODEL_DEFAULT_NAME}" \
+  --set-string "litellm.vertex.serviceAccountAnnotations.iam\.gke\.io/gcp-service-account=${LITELLM_GSA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com" \
   --set "platformAgent.deployment.availability.runtimeClassName=" \
   --set-string "platformAgent.deployment.env[0].name=ALERT_DAILY_LIMIT_WARNING" \
   --set-string "platformAgent.deployment.env[0].value=${EVAL_ALERT_DAILY_LIMIT_WARNING}" \
