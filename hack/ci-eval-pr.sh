@@ -1000,7 +1000,7 @@ TASKS=(
   #      reactivate in a sibling PR of the same lane, and planted-pdb stays
   #      parked: reliability's coverage does not depend on it (its probe
   #      and remediation-proposal variation are active; #1050's further
-  #      activations are in flight), so it is a nightly candidate rather
+  #      activations have merged), so it is a nightly candidate rather
   #      than a coverage need.
   #   -- rca-remediation-pr was parked here too until 2026-08-27; it is now
   #      active above, this pull request's smoke run being the clean measured
