@@ -389,6 +389,24 @@ class RenderGoldenTest(unittest.TestCase):
         self.assertEqual(copied["generated_at"], "2026-09-01T12:00:00Z")
 
 
+class ReasonSignatureTest(unittest.TestCase):
+    def test_the_never_ran_reason_groups_and_classes_as_infra(self):
+        # The wording classify_rep() writes for #1184's empty-success record
+        # (bench/kube_agents_bench/scoring.py); a #1184 wave must group under
+        # one named infra bar, not scatter into first-60-chars groups.
+        reason = (
+            "the record shows no agent ever ran: the trajectory is empty and "
+            "tokens.total is 0, so no model call was billed. There is no "
+            "answer in it to grade, whatever produced it -- infrastructure, "
+            "not the pull request (#1184)"
+        )
+        self.assertEqual(
+            render.reason_signature(reason),
+            "never ran: empty trajectory, zero tokens (infra)",
+        )
+        self.assertEqual(render.reason_class(reason), "infra")
+
+
 class RenderToleranceTest(unittest.TestCase):
     def test_empty_data_renders_designed_empty_state(self):
         data = {"schema_version": 1, "generated_at": "2026-08-28T14:02:11Z",
