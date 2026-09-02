@@ -1098,7 +1098,7 @@ export DETERMINISTIC_CORRECTNESS_FLOOR="${DETERMINISTIC_CORRECTNESS_FLOOR:-1.0}"
 # that is issue #902's lane. The serial measurements kept below predate the
 # fan-out and are its baseline.
 #
-# TWENTY tasks at three repetitions is SIXTY devops-bench invocations,
+# TWENTY-TWO tasks at three repetitions is SIXTY-SIX devops-bench invocations,
 # where the presubmit's budget was sized for two. The per-invocation cost is no
 # longer an extrapolation from other builds: THIS matrix has run end to end, at
 # thirteen tasks x three repetitions, on build 2093054834931404800
@@ -1110,9 +1110,9 @@ export DETERMINISTIC_CORRECTNESS_FLOOR="${DETERMINISTIC_CORRECTNESS_FLOOR:-1.0}"
 #       teardown)                                                16.4min
 #
 # So an invocation averages 3.6min, not the 4.7min extrapolated from #956's and
-# #982's builds -- those over-read it. Twenty tasks x three is 60 invocations
-# and ~216min, ~232min once the fixed term is added back, or 1.55x against the
-# 360m deadline.
+# #982's builds -- those over-read it. Twenty-two tasks x three is 66
+# invocations and ~238min, ~254min once the fixed term is added back, or 1.42x
+# against the 360m deadline.
 #
 # One term in that is still a substitution rather than a measurement:
 # rca-remediation-pr, activated by #998 so that its own smoke run would BE the
