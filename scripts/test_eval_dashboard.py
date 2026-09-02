@@ -406,6 +406,20 @@ class ReasonSignatureTest(unittest.TestCase):
         )
         self.assertEqual(render.reason_class(reason), "infra")
 
+    def test_the_js_mirror_carries_the_never_ran_signature(self):
+        # The page re-renders the Pareto client-side from the template's own
+        # JS mirror of these maps, so a signature added to render.py alone is
+        # invisible on the live surface — the server-rendered bar is replaced
+        # on load. Caught by a headless-Chrome capture during #1184's review.
+        tmpl = (
+            pathlib.Path(__file__).resolve().parent
+            / "eval_dashboard" / "template" / "index.html.tmpl"
+        ).read_text()
+        self.assertIn(f'sigNeverRan: "{render.SIG_NEVER_RAN}"', tmpl)
+        self.assertIn('return "never ran: empty trajectory, zero tokens (infra)"', tmpl)
+        # ...and the class map: the keyword must sit in the JS infra list too.
+        self.assertIn(f'"{render.SIG_NEVER_RAN}"]', tmpl)
+
 
 class RenderToleranceTest(unittest.TestCase):
     def test_empty_data_renders_designed_empty_state(self):
