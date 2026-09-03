@@ -2009,15 +2009,19 @@ class IamGrantsTest(unittest.TestCase):
         project_id="kube-agents-evals-3",
         prow_roles=None,
         platform_roles=None,
+        litellm_roles=None,
         conditional_roles=(),
         extra_bindings=(),
     ):
-        """The project's own policy: both identities holding exactly what they should."""
+        """The project's own policy: all three identities holding exactly what they should."""
         prow = checker.PROW_RUNNER_ROLES if prow_roles is None else prow_roles
         platform = checker.PLATFORM_GSA_ROLES if platform_roles is None else platform_roles
+        litellm = checker.LITELLM_GSA_ROLES if litellm_roles is None else litellm_roles
         platform_member = checker.PLATFORM_GSA_MEMBER_TEMPLATE.format(project_id=project_id)
+        litellm_member = checker.LITELLM_GSA_MEMBER_TEMPLATE.format(project_id=project_id)
         bindings = [{"role": r, "members": [checker.PROW_RUNNER_MEMBER]} for r in sorted(prow)]
         bindings += [{"role": r, "members": [platform_member]} for r in sorted(platform)]
+        bindings += [{"role": r, "members": [litellm_member]} for r in sorted(litellm)]
         bindings += [
             {
                 "role": r,
@@ -2113,6 +2117,42 @@ class IamGrantsTest(unittest.TestCase):
         self.assertFalse(result.passed)
         self.assertTrue(
             any("Missing GSA" in d and "kubeagents-litellm-gsa" in d for d in result.details),
+            result.details,
+        )
+
+    def test_litellm_gsa_missing_role_fails(self):
+        # The 2026-09-03 pool rollout's finding (#1208): the WI binding check
+        # alone passed a project that would still fail at the model call for
+        # want of aiplatform.user.
+        with mock.patch.object(checker, "run_cmd") as run:
+            run.side_effect = [
+                _ok(self._wi_policy("kube-agents-evals-3")),
+                _ok(self._litellm_wi_policy("kube-agents-evals-3")),
+                _ok(self._project_policy(litellm_roles=set())),
+                _ok(self._both_build_identities()),
+            ]
+            result = checker.check_iam_and_service_accounts("kube-agents-evals-3", "123456")
+        self.assertFalse(result.passed)
+        self.assertTrue(
+            any("roles/aiplatform.user" in d and "LiteLLM" in d for d in result.details),
+            result.details,
+        )
+
+    def test_litellm_gsa_extra_role_fails(self):
+        # Closed in both directions like the platform GSA: the gateway proxies
+        # attacker-influenceable content and must hold aiplatform.user only.
+        with mock.patch.object(checker, "run_cmd") as run:
+            run.side_effect = [
+                _ok(self._wi_policy("kube-agents-evals-3")),
+                _ok(self._litellm_wi_policy("kube-agents-evals-3")),
+                _ok(self._project_policy(
+                    litellm_roles=checker.LITELLM_GSA_ROLES | {"roles/container.viewer"})),
+                _ok(self._both_build_identities()),
+            ]
+            result = checker.check_iam_and_service_accounts("kube-agents-evals-3", "123456")
+        self.assertFalse(result.passed)
+        self.assertTrue(
+            any("roles/container.viewer" in d and "LiteLLM" in d for d in result.details),
             result.details,
         )
 
