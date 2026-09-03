@@ -270,7 +270,16 @@ module "litellm_vertex_iam" {
   # Granted below instead, so a cross-project vertex_project_id works.
   project_roles = []
 
-  depends_on = [google_project_service.required]
+  # module.gke_cluster for the reason module.kube_agents_iam's depends_on
+  # states in full: the module's workload_identity binding names the pool as
+  # an interpolated string, so Terraform sees no edge to the cluster whose
+  # creation brings the pool into existence, and on a project that has never
+  # held a Workload-Identity-enabled cluster the binding fails with "Identity
+  # Pool does not exist". This instantiation went without the edge for as long
+  # as the pool path never set model_provider = "vertex_ai" -- the first
+  # onboarding run that does (provision_ci_pool_project.sh, Step 2.1 building
+  # the project's first cluster) is exactly the case that races.
+  depends_on = [google_project_service.required, module.gke_cluster]
 }
 
 resource "google_project_iam_member" "litellm_vertex_user" {
