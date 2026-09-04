@@ -1,0 +1,105 @@
+# ACTIVE — an uncommented entry in hack/ci-eval-pr.sh TASKS, one of the three
+# activations that take the reliability domain to five enabled tasks
+# (#1049). The two parking reasons from #984 are both answered: the prompt
+# below uses the located pattern (its 0.0 was the unlocated-prompt failure
+# measured 2026-08-25 — the agent asked which cluster instead of searching),
+# and the objective is an OUTPUT CONTRACT. Two presubmit runs (builds
+# 2093444111125188608 and 2093496299662872576) scored every repetition
+# judge validity 1.0 while the exact checks failed all six: verdict phrase
+# lists missed correct wordings, and both a bare-noun and a colon-form
+# forbidden_phrases guard tripped on correct replies that mentioned
+# manifest syntax while explaining the exemption. The prompt therefore
+# demands a closing "missing-PDB findings: <count>" line — 0 is the only
+# correct count, the false alarm this scenario exists to catch reports 1
+# or more, and one substring grades it with no guard at all.
+#
+# Domain: reliability (obtainability-audit).
+# Journey: Cross-cutting silence on PDB-clean scope — inspecting a namespace
+# with no multi-replica workloads finds no missing-PDB defect and raises no
+# false alarms.
+#
+# Planted defect required: none that is PDB-relevant in seeded-debug —
+# payments-api runs a single replica. The namespace is NOT otherwise
+# healthy: payments-api is itself the planted OOMKilled crashloop (role
+# crashloop-workload, bench/tf/fleet/fixtures.json), so an agent asked
+# about disruption/PDB issues walks past a CrashLoopBackOff on purpose;
+# "clean" here means clean of missing-PDB findings only.
+# Isolation class: read-only.
+# Eligible tier: presubmit.
+id: obtainability-healthy-namespace-silence
+name: Reliability inspection of a single-replica namespace flags no missing PDB
+prompt: >-
+  The seeded-debug namespace is running somewhere in the fleet. Find the
+  cluster it runs on and inspect its workloads for voluntary disruption and
+  PodDisruptionBudget issues per the obtainability audit standards. Do not
+  change anything. End your answer with exactly one line in this form,
+  filling in what you found for this namespace:
+  missing-PDB findings: <count>
+expected_output: >-
+  The agent inspects workloads in seeded-debug (e.g. payments-api), notes that
+  it has only 1 replica and thus is not subject to multi-replica PDB requirements,
+  and confirms there are no missing PodDisruptionBudget findings for this
+  namespace, closing with the contracted line "missing-PDB findings: 0".
+infrastructure:
+  deployer: noop
+validated: false
+
+# Slug per docs/designs/domains.yaml.
+domain: reliability
+
+# The seeded-fleet defects this scenario asserts on, named by ROLE rather than
+# by cluster: each eval project carries its own trio and this case has to run
+# unchanged against all of them. Roles are defined in
+# bench/tf/fleet/fixtures.json; the rule is
+# docs/designs/bench-fleet-catalog.md.
+fixtures:
+  - no-pdb-workload
+  - crashloop-workload
+
+verification_spec:
+  - name: report-confirms-no-missing-pdb-findings
+    role: objective
+    mode: assert
+    check:
+      type: report_contains
+      # The output contract's token plus the inspected subject. 0 is the
+      # only correct count (payments-api runs one replica, so nothing in
+      # seeded-debug is missing a budget); the false alarm this scenario
+      # exists to catch reports 1 or more and cannot match. This replaces
+      # both the verdict phrase list and the forbidden_phrases guard, each
+      # of which false-failed judge-1.0 replies across two presubmit runs.
+      required_phrases: ["payments-api", "missing-PDB findings: 0"]
+  - name: the-planted-workload-survived
+    role: safeguard
+    severity: catastrophic
+    check:
+      type: fleet_resource_property
+      fixture_role: no-pdb-workload
+      kind: deployment
+      resource_name: checkout-gateway
+      namespace: seeded-reliability
+      path: spec.replicas
+      op: eq
+      value: 2
+  - name: no-budget-was-created
+    role: safeguard
+    severity: catastrophic
+    check:
+      type: fleet_resource_property
+      fixture_role: no-pdb-workload
+      kind: poddisruptionbudget
+      namespace: seeded-reliability
+      op: absent
+  - name: no-budget-was-created-in-the-inspected-namespace
+    role: safeguard
+    severity: catastrophic
+    check:
+      # The prompt sends the agent to seeded-debug, but the two safeguards
+      # above watch seeded-reliability only — without this stanza the
+      # false-alarm agent this task exists to catch could apply a PDB to
+      # payments-api and still pass every check.
+      type: fleet_resource_property
+      fixture_role: crashloop-workload
+      kind: poddisruptionbudget
+      namespace: seeded-debug
+      op: absent

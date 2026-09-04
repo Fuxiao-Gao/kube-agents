@@ -8,11 +8,14 @@
 
 The `kube-agents` test execution model partitions tests across three distinct automation tiers:
 
-| Tier                            | Trigger                                                                             | Purpose                                                                                               | Execution Target                                                         |
-| :------------------------------ | :---------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------- |
-| **Tier 1: PR CI**               | Pull Request (`pull_request`)                                                       | Fast, offline unit and structural validation on every change                                          | `make test-python`, `make validate`, `make docs-check`                   |
-| **Tier 2: RC Promotion Gate**   | Release Candidate build (`rc-release-pipeline.yml`)                                 | Validates candidate container images on a freshly provisioned GKE cluster before tagging `_validated` | `make test-e2e` (`scripts/release/execute_e2e_tests.py`)                 |
-| **Tier 3: Nightly & On-Demand** | Nightly cron or manual dispatch (`e2e-nightly-matrix.yml`, `e2e-manual-runner.yml`) | Full matrix across multi-cluster environments, audit streams, and GPU/scarcity stockout scenarios     | `make test-e2e` with `FLEET_AUDIT_STREAMS=all`, `STOCKOUT_SCENARIOS=all` |
+| Tier                            | Trigger                                                                                                                    | Purpose                                                                                               | Execution Target                                                         |
+| :------------------------------ | :------------------------------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------- |
+| **Tier 1: PR CI**               | Pull Request (`pull_request`)                                                                                              | Fast, offline unit and structural validation on every change                                          | `make coverage`, `make validate`, `make docs-check`                      |
+| **Tier 2: RC Promotion Gate**   | Release Candidate build (`rc-release-pipeline.yml`)                                                                        | Validates candidate container images on a freshly provisioned GKE cluster before tagging `_validated` | `make test-e2e` (`scripts/release/execute_e2e_tests.py`)                 |
+| **Tier 3: Nightly & On-Demand** | Manual dispatch only today (`nightly-pipeline.yml`, `e2e-manual-runner.yml`) — the nightly pipeline has no `schedule:` yet | Full matrix across multi-cluster environments, audit streams, and GPU/scarcity stockout scenarios     | `make test-e2e` with `FLEET_AUDIT_STREAMS=all`, `STOCKOUT_SCENARIOS=all` |
+
+Tier 2's "freshly provisioned" is the intent. What the pipeline does today, and why it differs,
+is in [`scripts/release/README.md`](../../scripts/release/README.md).
 
 ---
 
@@ -40,7 +43,7 @@ Validates credential isolation, GitHub authentication, and audit watchdog capabi
 
 Verifies core platform agent responsiveness and Kubernetes operator controller reconciliation:
 
-- **Direct Agent API Health**: Sends a REST probe to `/v1/responses` via port-forwarding to verify agent process readiness and JSON schema response handling.
+- **Direct Agent API Health**: Sends a REST probe to `/v1/responses` to verify agent process readiness and JSON schema response handling. The probe reaches the credential-proxy sidecar through a `kubectl exec` relay (`scripts/exec_tunnel.py`), not `kubectl port-forward`: on a GKE Sandbox (gVisor) node pool the kubelet sets a forward up in the host-side netns and cannot see a listener inside the sandbox, so every port on the pod refuses the connection. [`platformagent-crd.md`](../site/src/content/docs/operator/platformagent-crd.md) is canonical on that constraint.
 - **Operator Plugin Reconciliation**: Deploys `AgentPlugin` Custom Resources to verify the Kubebuilder operator controller mounts plugin volumes into `platform-agent` pods and cleanly cleans up on CR deletion.
 
 ### Stage 3: Stockout Ingress & Incident Scenarios (`test_stockout_investigation.py`)
@@ -83,27 +86,54 @@ The stockout investigator test harness in `agentplugins/gke-stockout-investigato
 
 The test runner `scripts/release/execute_e2e_tests.py` reads configuration from `tests/e2e/e2e_config.yaml` and environment variables:
 
-| Variable              | Description                               | Default              |
-| :-------------------- | :---------------------------------------- | :------------------- |
-| `GCP_PROJECT_ID`      | Target Google Cloud Project ID            | None (required)      |
-| `GKE_CLUSTER_NAME`    | Target GKE cluster name                   | None (required)      |
-| `GCP_REGION`          | Target cluster region                     | `us-east4`           |
-| `STOCKOUT_SCENARIOS`  | Comma-separated scenario numbers or `all` | `04`                 |
-| `FLEET_AUDIT_STREAMS` | Specific audit stream names or `all`      | `all`                |
-| `E2E_ENV`             | Target environment selector               | `investigations-e2e` |
+| Variable              | Description                               | Default             |
+| :-------------------- | :---------------------------------------- | :------------------ |
+| `GCP_PROJECT_ID`      | Target Google Cloud Project ID            | None (required)     |
+| `GKE_CLUSTER_NAME`    | Target GKE cluster name                   | None (required)     |
+| `GCP_REGION`          | Target cluster region                     | `us-central1`       |
+| `STOCKOUT_SCENARIOS`  | Comma-separated scenario numbers or `all` | `04`                |
+| `FLEET_AUDIT_STREAMS` | Specific audit stream names or `all`      | `all`               |
+| `E2E_SUITE`           | Target suite selector                     | `gchat`             |
+| `E2E_ENV`             | Deprecated alias for `E2E_SUITE`          | Unset               |
+| `GITHUB_ORG`          | Owner used to qualify `GITHUB_REPO`       | Config `env_vars`\* |
+| `GITHUB_REPO`         | Repository the GitHub probes target       | Config `env_vars`\* |
+
+\* Except on `rc` and `nightly`, which set neither in `e2e_config.yaml`. There
+the pair comes from the bound environment's `GITOPS_ORG` and `GITOPS_REPO`, which
+`e2e-run.yml` passes to the suite and `deploy-environment.yml` passes to
+the installer — one source of truth for the repository the minter is scoped to and the
+repository the probe reads back, because a token minted for one does not authenticate
+against another. With those unset, the `github_repo` fixture falls through to the
+repository the cluster was installed with, read from `platform-agent-settings`.
+
+The last two are read by the fixtures in `tests/e2e/conftest.py` rather than by the
+runner, which forwards the environment to pytest unchanged. `GITHUB_REPO` is required —
+`test_agent_fleet_audit.py` fails rather than skips without it. `GITHUB_ORG` is
+optional, and is only cross-checked against the owner the repository resolves to; where
+it is unset, the fixture takes it from that owner.
+
+The suites' `GITHUB_REPO` resolves to `owner/repo`: `test_agent_fleet_audit.py` asserts
+that shape and `agents/platform/scripts/github_token_refresh.py` refuses anything else.
+A bare repository name is accepted and qualified with `GITHUB_ORG`, because the CI
+variable behind it is bare — `vars.GH_REPO` for the deploy workflows, which pass it to
+the GitHub Token Minter alongside `vars.GH_ORG` rather than combined with it, and
+`vars.GITOPS_REPO` with `vars.GITOPS_ORG` wherever `e2e-run.yml` or `e2e-manual-runner.yml` runs a suite, per the footnote above. That is the
+same spelling with a different meaning: the Token Minter's `GITHUB_REPO`
+([install variables](../site/src/content/docs/deploy/token-minter.md)) is the bare name,
+and only the E2E suites' one is the qualified form.
 
 ### Test Environments
 
 The test harness provides modular and composite environments configured in `tests/e2e/e2e_config.yaml`:
 
-| Environment          | Description                                                                                            | Included Test Suites                                                                                                                                  |
-| :------------------- | :----------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `rc-e2e`             | Release Candidate promotion gate: Agent API health, audit ledger, and fast stockout RCA (Scenario 04)  | `test_agent_api_health.py`, `test_agent_fleet_audit.py`, `test_stockout_investigation.py`                                                             |
-| `nightly-e2e`        | Full Nightly Matrix: all audit streams, all stockout scenarios, operator plugins, and chat integration | `test_agent_api_health.py`, `test_agent_fleet_audit.py`, `test_stockout_investigation.py`, `operator/agentplugins_e2e_test.py`, `gchat_agent_test.py` |
-| `investigations-e2e` | In-cluster Agent API health and stockout alert investigation scenarios                                 | `test_agent_api_health.py`, `test_stockout_investigation.py`                                                                                          |
-| `audit-e2e`          | Fleet SRE audit ledger generation, credential isolation, and stream evaluation                         | `test_agent_api_health.py`, `test_agent_fleet_audit.py`                                                                                               |
-| `agent-plugin-e2e`   | Operator AgentPlugin CR lifecycle and Hermes overlay reconciliation                                    | `operator/agentplugins_e2e_test.py`                                                                                                                   |
-| `gchat-e2e`          | Live Google Chat integration and Pub/Sub messaging                                                     | `gchat_agent_test.py`                                                                                                                                 |
+| Environment      | Description                                                                                            | Included Test Suites                                                                                                                                  |
+| :--------------- | :----------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rc`             | Release Candidate promotion gate: Agent API health, audit ledger, and fast stockout RCA (Scenario 04)  | `test_agent_api_health.py`, `test_agent_fleet_audit.py`, `test_stockout_investigation.py`                                                             |
+| `nightly`        | Full Nightly Matrix: all audit streams, all stockout scenarios, operator plugins, and chat integration | `test_agent_api_health.py`, `test_agent_fleet_audit.py`, `test_stockout_investigation.py`, `operator/agentplugins_e2e_test.py`, `gchat_agent_test.py` |
+| `investigations` | In-cluster Agent API health and stockout alert investigation scenarios                                 | `test_agent_api_health.py`, `test_stockout_investigation.py`                                                                                          |
+| `audit`          | Fleet SRE audit ledger generation, credential isolation, and stream evaluation                         | `test_agent_api_health.py`, `test_agent_fleet_audit.py`                                                                                               |
+| `agent-plugin`   | Operator AgentPlugin CR lifecycle and Hermes overlay reconciliation                                    | `operator/agentplugins_e2e_test.py`                                                                                                                   |
+| `gchat`          | Live Google Chat integration and Pub/Sub messaging                                                     | `gchat_agent_test.py`                                                                                                                                 |
 
 ### Running Locally
 
@@ -113,3 +143,11 @@ export GCP_PROJECT_ID="my-gcp-project"
 export GKE_CLUSTER_NAME="my-cluster"
 make test-e2e
 ```
+
+The stockout suite waits for its AgentPlugin to reach Ready, for the gateway to finish
+rolling, and for the plugin's `SKILL.md` to be readable inside the surviving pod before
+the first scenario runs. A failure in any of those ends the module naming what was wrong
+rather than letting each scenario spend its watch timeout. The plugin is installed only
+when its custom resource is absent, so the suite needs the permissions that
+[`agentplugins/README.md`](../../agentplugins/README.md#installing) lists only on a
+cluster that has never had it.

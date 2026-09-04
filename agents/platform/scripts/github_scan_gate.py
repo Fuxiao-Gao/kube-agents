@@ -55,6 +55,7 @@ Consolidating did take something away: an operator could previously stop one
 poller by disabling its roster entry. ``GITHUB_WATCHER_SWEEPS`` gives that back.
 """
 
+from collections import defaultdict
 import json
 import os
 import re
@@ -84,6 +85,8 @@ SWEEPS_ENV = "GITHUB_WATCHER_SWEEPS"
 ASSIGNEE = "platform"
 
 RESOLVER_REL = "skills/github-issue-resolver/scripts/resolver.py"
+PLATFORM_PROFILE_DIR = "profiles/platform"
+PLATFORM_TEMPLATE_DIR = "/opt/platform-template"
 
 # The one filesystem both this container and the credential sidecar can see.
 # `resolver.py` and `audit_report.py` pin the same path for the same reason.
@@ -194,7 +197,17 @@ def selected_sweeps() -> tuple[tuple[str, ...], list[str]]:
 
 
 def _resolver_path() -> Path:
-    return hermes_home() / RESOLVER_REL
+    home = hermes_home()
+    candidates = (
+        home / PLATFORM_PROFILE_DIR / RESOLVER_REL,
+        home / RESOLVER_REL,
+        Path(PLATFORM_TEMPLATE_DIR) / RESOLVER_REL,
+        Path(__file__).resolve().parent.parent / RESOLVER_REL,
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return home / RESOLVER_REL
 
 
 def run_resolver_poll() -> dict:
@@ -256,7 +269,20 @@ def _issue_card(payload: dict, now: datetime | None = None) -> Card:
     """
     number = payload["issue_number"]
     repo = payload.get("repository", "")
-    title = payload.get("title", "") or f"issue #{number}"
+    # `title_plain`, not `title`: the resolver's `title` is the same text wrapped
+    # in `<untrusted_title>` boundary tags for the model's benefit, and putting
+    # that on a card leaves every board entry and card notification reading
+    # "Triage and resolve acme/toolkit#42: <untrusted_title>Pods crashlooping
+    # </untrusted_title>". The 35 characters of markup also come out of the
+    # 200-character budget below, so a long enough title loses its closing tag to
+    # the truncation and the card carries an *unclosed* boundary marker into the
+    # worker — the demarcation failure the tags were added to prevent. Falls back
+    # through `title` for a payload written before `title_plain` existed.
+    # `.get(k, default)` rather than `or`: `or` tests falsiness, so a title made
+    # entirely of zero-width or control characters — which GitHub accepts —
+    # sanitizes to "" and falls through to the tagged `title`, putting the
+    # markup back on the card this line exists to keep it off.
+    title = payload.get("title_plain", payload.get("title", "")) or f"issue #{number}"
     bucket = (now or datetime.now(timezone.utc)).strftime(CARD_BUCKET_FORMAT)
     return Card(
         title=f"Triage and resolve {repo}#{number}: {title}"[:200],
@@ -279,9 +305,10 @@ def _issue_card(payload: dict, now: datetime | None = None) -> Card:
         # therefore latches the key permanently — and the skill has an ordinary
         # path that does exactly that: Step 1 says to alert the room and
         # terminate on an `ERROR` status. The issue keeps no `status:` label, so
-        # `handle_poll` keeps returning it; because it returns only the
-        # lowest-numbered unaddressed issue, every higher-numbered one goes
-        # unseen too, and `file_card` cannot tell a create from a dedupe hit, so
+        # `handle_poll` keeps returning it; because it returns exactly one
+        # issue per tick — the highest-priority unaddressed one — every other
+        # issue goes unseen too, and `file_card` cannot tell a create from a
+        # dedupe hit, so
         # every subsequent tick looks like a clean run. The old `*/30` prompt
         # job had no cross-tick state to wedge; the key is what introduced it.
         #
@@ -346,6 +373,7 @@ class _Pending:
     pr: "forge.PullRequest"
     comment: "forge.Comment"
     trigger: "pr_triggers.Trigger"
+    repo: str = ""
 
 
 REFUSAL_BODY = (
@@ -397,18 +425,34 @@ def _post_body(provider, repo: str, pr, body: str) -> None:
     in its own filesystem; `/tmp` is a per-container emptyDir, so a
     `--body-file /tmp/…` path names a file the other container cannot open. The
     refusal then fails with "no such file" — observed live before this moved.
-    `audit_report._write_temp` documents the same trap. Falls back to the system
-    temp directory when the volume is absent, so tests still run off-cluster.
+    `audit_report._write_temp` documents the same trap, and a second one: since
+    #955 the sandbox (uid 10000) and the sidecar (uid 10001) are different
+    users, so the 0600 file `NamedTemporaryFile` creates must be `fchmod`ed
+    group-readable or the sidecar cannot open it even on the shared volume.
+
+    NO fallback to the system temp directory when the volume is absent: the
+    sidecar can never see this container's private tmp, so in-cluster that
+    fallback turned a fixable mount problem into a guaranteed failure that read
+    as a graceful degrade (#1030). Raise instead — the per-sweep try in `main`
+    turns it into a warning the room sees. Tests patch SCRATCH_DIR.
     """
-    directory: str | None = SCRATCH_DIR
     try:
         Path(SCRATCH_DIR).mkdir(parents=True, exist_ok=True)
-    except OSError:
-        directory = None
-    handle = tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", suffix=".md", delete=False, dir=directory
-    )
+        handle = tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", suffix=".md", delete=False, dir=SCRATCH_DIR
+        )
+    except OSError as exc:
+        raise RuntimeError(
+            "publish path broken: cannot stage a body file in the shared "
+            f"scratch directory {SCRATCH_DIR} (uid {os.getuid()}): {exc}. "
+            "The credential sidecar resolves body-file paths in its own "
+            "filesystem, so a container-private temp file can never work — "
+            "fix the shared mount/permissions (see gke-labs/kube-agents#1030)."
+        ) from exc
     try:
+        # Group-readable across the #955 uid split; owner-only is unreadable
+        # to the sidecar that actually runs `gh`.
+        os.fchmod(handle.fileno(), 0o664)
         handle.write(body)
         handle.close()
         provider.post_comment(repo, pr, handle.name)
@@ -503,10 +547,11 @@ def sweep_pr_comments(dry_run: bool = False) -> SweepResult:
     warnings: list[str] = []
 
     try:
-        repo = forge.target_repo()
-    except forge.ForgeError as error:
-        return SweepResult(warnings=[_forge_warning(error)])
-    if not repo:
+        from gitops_workspace import get_managed_github_repos
+        repos = get_managed_github_repos()
+    except Exception as error:
+        return SweepResult(warnings=[_forge_warning(error if isinstance(error, forge.ForgeError) else forge.ForgeError("DISCOVERY_FAILED", str(error)))])
+    if not repos:
         # No GitOps repository configured. A supported install with nothing to
         # watch, not a fault — same reading as the issues sweep's NOT_CONFIGURED.
         return SweepResult()
@@ -526,11 +571,11 @@ def sweep_pr_comments(dry_run: bool = False) -> SweepResult:
                     "so the agent cannot recognise its own pull requests."
                 ]
             )
-        prs = [
-            pr
-            for pr in provider.list_open_prs(repo)
-            if forge.is_agent_pull_request(pr, repo, viewer) and not pr.is_ignored
-        ]
+        prs: list[tuple[str, forge.PullRequest]] = []
+        for r in repos:
+            for pr in provider.list_open_prs(r):
+                if forge.is_agent_pull_request(pr, r, viewer) and not pr.is_ignored:
+                    prs.append((r, pr))
     except forge.ForgeError as error:
         return SweepResult(warnings=[_forge_warning(error)])
 
@@ -539,24 +584,24 @@ def sweep_pr_comments(dry_run: bool = False) -> SweepResult:
     allowed_bots = pr_triggers.bot_allowlist()
     pending: list[_Pending] = []
     refusals: list[_Pending] = []
-    unreadable: list[int] = []
+    unreadable: list[tuple[str, int]] = []
     indeterminate = 0
     # Refusals already on each pull request, so the bound is a total rather than
     # a per-tick allowance that resets every ten minutes.
-    refused_so_far: dict[int, int] = {}
+    refused_so_far: dict[tuple[str, int], int] = {}
 
-    for pr in prs:
+    for repo, pr in prs:
         try:
             comments = provider.list_comments(repo, pr)
         except forge.ForgeError:
             # One pull request that will not load must not blind the sweep for
             # the others. Collected into a single warning below rather than one
             # line each, so a repo-wide outage is one message.
-            unreadable.append(pr.number)
+            unreadable.append((repo, pr.number))
             continue
 
         handled = pr_triggers.handled_node_ids(comments, viewer)
-        refused_so_far[pr.number] = len(pr_triggers.refused_node_ids(comments, viewer))
+        refused_so_far[(repo, pr.number)] = len(pr_triggers.refused_node_ids(comments, viewer))
 
         for comment in comments:
             if comment.node_id in handled:
@@ -579,7 +624,7 @@ def sweep_pr_comments(dry_run: bool = False) -> SweepResult:
                 indeterminate += 1
                 continue
             (pending if comment.can_write else refusals).append(
-                _Pending(pr=pr, comment=comment, trigger=trigger)
+                _Pending(pr=pr, comment=comment, trigger=trigger, repo=repo)
             )
 
     if indeterminate:
@@ -592,7 +637,7 @@ def sweep_pr_comments(dry_run: bool = False) -> SweepResult:
     if unreadable:
         warnings.append(
             "⚠️ **GitHub PR watcher could not read** "
-            + ", ".join(f"{repo}#{n}" for n in sorted(unreadable))
+            + ", ".join(f"{repo}#{n}" for repo, n in sorted(unreadable))
             + " — those conversations were skipped this tick."
         )
     # Oldest first, so a burst of new comments cannot starve a request that has
@@ -612,7 +657,7 @@ def sweep_pr_comments(dry_run: bool = False) -> SweepResult:
         if posted_refusals >= cap:
             dropped_refusals += 1
             continue
-        if refused_so_far.get(item.pr.number, 0) >= refusal_budget:
+        if refused_so_far.get((item.repo, item.pr.number), 0) >= refusal_budget:
             # Past the budget the request is ignored rather than answered. No
             # marker is written, so nothing is claimed to have been handled.
             dropped_refusals += 1
@@ -621,20 +666,20 @@ def sweep_pr_comments(dry_run: bool = False) -> SweepResult:
         if dry_run:
             sys.stderr.write(
                 f"github_scan_gate: would refuse {item.trigger.node_id} "
-                f"on #{item.pr.number} (@{item.comment.author})\n"
+                f"on {item.repo}#{item.pr.number} (@{item.comment.author})\n"
             )
             posted_refusals += 1
-            refused_so_far[item.pr.number] = refused_so_far.get(item.pr.number, 0) + 1
+            refused_so_far[(item.repo, item.pr.number)] = refused_so_far.get((item.repo, item.pr.number), 0) + 1
             continue
         try:
-            _post_body(provider, repo, item.pr, body)
+            _post_body(provider, item.repo, item.pr, body)
         except forge.ForgeError as error:
             sys.stderr.write(
-                f"github_scan_gate: could not post refusal on #{item.pr.number}: {error}\n"
+                f"github_scan_gate: could not post refusal on {item.repo}#{item.pr.number}: {error}\n"
             )
             continue
         posted_refusals += 1
-        refused_so_far[item.pr.number] = refused_so_far.get(item.pr.number, 0) + 1
+        refused_so_far[(item.repo, item.pr.number)] = refused_so_far.get((item.repo, item.pr.number), 0) + 1
 
     accepted = pending[:cap]
     deferred = len(pending) - len(accepted)
@@ -652,7 +697,7 @@ def sweep_pr_comments(dry_run: bool = False) -> SweepResult:
             f"(per-tick cap {cap}, per-PR budget {refusal_budget})\n"
         )
 
-    by_pr: dict[int, list[_Pending]] = {}
+    by_pr: dict[tuple[str, int], list[_Pending]] = defaultdict(list)
     for item in accepted:
         # Acknowledge before filing, so the reviewer sees something inside this
         # tick rather than after a model has been scheduled. Best-effort by
@@ -660,18 +705,18 @@ def sweep_pr_comments(dry_run: bool = False) -> SweepResult:
         if dry_run:
             sys.stderr.write(
                 f"github_scan_gate: would acknowledge {item.comment.node_id} "
-                f"on #{item.pr.number}\n"
+                f"on {item.repo}#{item.pr.number}\n"
             )
         elif provider.supports_acknowledge:
             try:
-                provider.acknowledge(repo, item.comment)
+                provider.acknowledge(item.repo, item.comment)
             except forge.ForgeError:
                 pass
-        by_pr.setdefault(item.pr.number, []).append(item)
+        by_pr[(item.repo, item.pr.number)].append(item)
 
     cards = [
         _pr_card(items[0].pr, items, repo)
-        for _number, items in sorted(by_pr.items())
+        for (repo, _number), items in sorted(by_pr.items(), key=lambda x: x[0])
     ]
     return SweepResult(cards=cards, warnings=warnings)
 

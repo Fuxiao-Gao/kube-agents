@@ -7,14 +7,31 @@ Reusable Terraform module for provisioning the Platform Agent's Google Service A
 This is the module the full-install composition (and therefore `install.sh`) uses for the
 agent's identity. The canonical identifiers (GSA `kubeagents-platform-gsa`, KSA
 `kubeagents-platform-agent`, namespace `kubeagents-system`) also appear in
-`k8s-operator/scripts/common.sh` for the dev tooling, and the module's defaults mirror
+`scripts/installer/common.sh` for the dev tooling, and the module's defaults mirror
 them.
 
 By default the module grants the read-only role set (the composition's
 `permission_set = "read-only"`, also the installer's default). Pass `project_roles = []` to grant
 nothing and manage roles yourself — but note the agent fails every GCP call until an
-equivalent role set exists. The `gke-admin` set can be reproduced by passing those
-roles explicitly (see `local.gke_admin_roles` in the full-install composition).
+equivalent role set exists.
+
+There is no admin preset to mirror: the `gke-admin` bundle was removed (see
+[Security & IAM](../../../docs/site/src/content/docs/reference/security-and-iam.md)),
+and this module has never had one. Passing admin roles through `project_roles` is
+possible and is the module's equivalent of `permission_set = "custom"` — it puts
+the grant in your Terraform, where it is reviewed.
+
+## The scoped service account pool
+
+`scoped_clusters` provisions one service account per named GKE cluster, plus
+`roles/iam.serviceAccountTokenCreator` for the agent bound on each member as a
+resource (never at project level). The members hold no IAM grant of their own
+as of 2026-08-12 — the IAM-Condition scoping they were designed around grants
+nothing for Kubernetes object operations — so the default is `[]` and should
+stay there until per-cluster RBAC lands. The site's
+[security-and-iam reference](../../../docs/site/src/content/docs/reference/security-and-iam.md)
+owns the topic, including how the mapping reaches the credential broker and
+what the pool does and does not bound.
 
 ## Usage
 

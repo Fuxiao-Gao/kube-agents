@@ -15,10 +15,10 @@ already been answered — is harness policy that does not change between forges.
 
 Splitting the two here is what makes a second forge a new class rather than a
 second copy of the sweep. It is *not* a claim that a second forge is cheap:
-`docs/designs/pr-comment-conversation.md` §3 lists the four places under this
-module — token brokering, the credential sidecar's executable allowlist, git
-credential shape, and the CRD — that would each need work first. The seam is
-here so that when that work happens it lands in one place.
+`docs/designs/multi-forge-support.md` §5 covers the layers under this module —
+token brokering, the credential sidecar's executable allowlist, git credential
+shape, the egress policy — and §6 the CRD, each of which would need work first.
+The seam is here so that when that work happens it lands in one place.
 
 Why `_call` exists
 ------------------
@@ -65,22 +65,35 @@ The looser parser in `gitops_workspace.repo_from_settings` is deliberately not
 reused. It strips a `github.com/` prefix and otherwise takes the last two path
 segments, so `https://evil.com/github.com/attacker/repo` resolves to
 `attacker/repo`. That is out of scope here and noted rather than fixed.
+
+A third parser, `github_token_refresh.github_repo_from_remote`, reads the git
+remote rather than a configured value and rejects a non-GitHub host outright.
+Its host set carries `ssh.github.com` — GitHub's SSH-over-443 endpoint, which
+appears in a clone URL but not in a `SETTINGS.md` repository line — so a remote
+of that form resolves there and not here.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import re
 import subprocess
 import urllib.parse
 from dataclasses import dataclass
 from typing import Callable, Iterable, Optional, Protocol, Sequence
 
-SETTINGS_PATH = "/opt/data/SETTINGS.md"
+from github_token_refresh import (
+    GH_MISSING_RC,
+    GH_TIMEOUT_RC,
+    is_refresh_failed,
+    looks_like_auth_failure,
+    refresh_credentials_once,
+)
 
-#: Shell convention for "command not found". Kept distinguishable from a `gh`
-#: command that ran and failed, because the two need different operators.
-GH_MISSING_RC = 127
+LOGGER = logging.getLogger(__name__)
+
+SETTINGS_PATH = "/opt/data/SETTINGS.md"
 
 #: How long any single `gh` call may take. A hung proxy must not hold the cron
 #: tick's per-job lock open indefinitely.
@@ -133,6 +146,11 @@ HTTP_STATUS_RE = re.compile(r"\(HTTP (\d{3})\)")
 #: broken credential reports "Failed to log in to … account <login>", and that
 #: line names an account whose token no longer works.
 VIEWER_RE = re.compile(r"Logged in to \S+ account (\S+)")
+
+#: Definitive HTTP status codes in `gh` stderr that indicate permanent errors
+#: (401 Bad Credentials, 403 Forbidden, 404 Not Found), which should not be
+#: retried even for read-only queries.
+DEFINITIVE_HTTP_STATUS_RE = re.compile(r"HTTP (?:401|403|404)\b", re.IGNORECASE)
 
 
 class ForgeError(Exception):
@@ -346,40 +364,21 @@ def _parse_repo(configured: str) -> str:
     return repo
 
 
-def target_repo(settings_path: Optional[str] = None) -> Optional[str]:
-    """The configured repository as `owner/name`, or None when there is none.
+def _should_retry_transient(result: subprocess.CompletedProcess) -> bool:
+    """Return True if a non-zero `gh` result is worth a single transient retry.
 
-    None means "nothing configured", which is a supported install. A configured
-    value that cannot be read raises instead, because those two must never
-    reach an operator as the same silence.
+    Definitive HTTP failures (401, 403, 404), missing binary (GH_MISSING_RC),
+    and sidecar timeouts (GH_TIMEOUT_RC) are skipped.
     """
-    path = settings_path or SETTINGS_PATH
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            lines = handle.readlines()
-    except OSError:
-        return None
-
-    configured = None
-    for line in lines:
-        if "Git Repo:" in line:
-            configured = line.split("Git Repo:", 1)[1].replace("*", "").strip()
-            break
-
-    if not configured or configured.lower() == SETTINGS_REPO_UNSET:
-        return None
-    return _parse_repo(configured)
+    if result.returncode in (GH_MISSING_RC, GH_TIMEOUT_RC):
+        return False
+    if DEFINITIVE_HTTP_STATUS_RE.search(result.stderr or ""):
+        return False
+    return True
 
 
-def run_gh(argv: Sequence[str]) -> subprocess.CompletedProcess:
-    """One `gh` invocation, never raising for a non-zero exit.
-
-    Callers here always need the reason code more than the exception: a token
-    without scope for this repository and a repository that 404s both exit
-    non-zero with usable stderr, and turning that into a traceback loses it.
-    A missing binary is reported as `GH_MISSING_RC` so it stays distinguishable
-    from a command that ran and failed.
-    """
+def run_gh_once(argv: Sequence[str]) -> subprocess.CompletedProcess:
+    """Run one gh command without retry, mapping a missing binary onto a return code."""
     try:
         return subprocess.run(
             ["gh", *argv],
@@ -395,10 +394,30 @@ def run_gh(argv: Sequence[str]) -> subprocess.CompletedProcess:
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(
             ["gh", *argv],
-            1,
+            GH_TIMEOUT_RC,
             stdout="",
             stderr=f"'gh' timed out after {GH_TIMEOUT_S}s.",
         )
+
+
+def run_gh(
+    argv: Sequence[str], repo: Optional[str] = None
+) -> subprocess.CompletedProcess:
+    """One `gh` invocation, never raising for a non-zero exit.
+
+    A failed call gets one retry behind a freshly minted token on auth failures.
+    Callers here always need the reason code more than the exception: a token
+    without scope for this repository and a repository that 404s both exit
+    non-zero with usable stderr, and turning that into a traceback loses it.
+    A missing binary is reported as `GH_MISSING_RC` so it stays distinguishable
+    from a command that ran and failed.
+    """
+    result = run_gh_once(argv)
+    if looks_like_auth_failure(argv, result) and refresh_credentials_once(
+        argv, repo=repo
+    ):
+        result = run_gh_once(argv)
+    return result
 
 
 def gh_preflight(run: Callable[[Sequence[str]], subprocess.CompletedProcess] = run_gh):
@@ -411,6 +430,8 @@ def gh_preflight(run: Callable[[Sequence[str]], subprocess.CompletedProcess] = r
     result = run(["auth", "status"])
     if result.returncode == 0:
         return
+    if is_refresh_failed():
+        raise ForgeError("GITHUB_TOKEN_REFRESH_FAILED")
     raise ForgeError(
         "GH_CLI_NOT_FOUND"
         if result.returncode == GH_MISSING_RC
@@ -425,6 +446,12 @@ class GitHubProvider:
     name = "github"
 
     def __init__(self, run: Optional[Callable] = None):
+        """Initialize the GitHub provider.
+
+        Args:
+            run: Runner callable matching `run(argv, repo=None)`. Defaults to
+                `run_gh`, which passes `repo` to credential refresh on auth failure.
+        """
         self._run = run or run_gh
         # One entry per distinct commenter per provider instance, which the
         # gate builds fresh each tick. A busy thread is usually three or four
@@ -436,15 +463,36 @@ class GitHubProvider:
         self._viewer: Optional[str] = None
 
     # -- the seam ---------------------------------------------------------
-    def _call(self, argv: Sequence[str], *, expect_json: bool = True):
+    def _call(
+        self,
+        argv: Sequence[str],
+        *,
+        repo: Optional[str] = None,
+        expect_json: bool = True,
+        retry_transient: bool = False,
+    ):
         """Every forge round trip goes through here. See the module docstring.
 
         Returns parsed JSON, or None for a call made only for its effect. A
         non-zero exit raises `REPO_UNREACHABLE`, which is the honest reading of
         a `gh` failure that survived the preflight: the credential works
         somewhere, just not here.
+
+        When `repo` is provided, it is passed to the runner for credential refresh
+        context on authentication failure.
+
+        When `retry_transient=True` (for read-only queries), a non-zero exit gets
+        a single bounded retry before raising `REPO_UNREACHABLE`. Mutating calls
+        (e.g., post_comment, acknowledge) must leave `retry_transient=False` to
+        avoid double-posting on a sidecar timeout.
         """
-        result = self._run(list(argv))
+        result = self._run(list(argv), repo=repo)
+        if (
+            result.returncode != 0
+            and retry_transient
+            and _should_retry_transient(result)
+        ):
+            result = self._run(list(argv), repo=repo)
         if result.returncode != 0:
             raise ForgeError("REPO_UNREACHABLE", (result.stderr or "").strip()[:200])
         if not expect_json:
@@ -510,7 +558,9 @@ class GitHubProvider:
                 "api",
                 f"repos/{repo}/pulls?state=open&per_page={PR_PAGE_SIZE}",
                 "--paginate",
-            ]
+            ],
+            repo=repo,
+            retry_transient=True,
         )
         return [
             PullRequest(
@@ -614,7 +664,8 @@ class GitHubProvider:
         quoted = urllib.parse.quote(login, safe="")
         try:
             data = self._call(
-                ["api", f"repos/{repo}/collaborators/{quoted}/permission"]
+                ["api", f"repos/{repo}/collaborators/{quoted}/permission"],
+                repo=repo,
             )
         except ForgeError as error:
             status = HTTP_STATUS_RE.search(error.value or "")
@@ -629,7 +680,12 @@ class GitHubProvider:
         return allowed
 
     def _collect(self, path: str, *, kind: str, repo: str) -> Iterable[Comment]:
-        rows = self._call(["api", path, "--paginate"]) or []
+        rows = (
+            self._call(
+                ["api", path, "--paginate"], repo=repo, retry_transient=True
+            )
+            or []
+        )
         for row in rows:
             body = str(row.get("body") or "")
             # A review with no summary body is an approval or a state change,
@@ -662,6 +718,7 @@ class GitHubProvider:
         """
         self._call(
             ["pr", "comment", str(pr.number), "-R", repo, "--body-file", body_file],
+            repo=repo,
             expect_json=False,
         )
 
@@ -681,9 +738,20 @@ class GitHubProvider:
             return False
         try:
             self._call(
-                ["api", "-X", "POST", path, "-f", "content=eyes"], expect_json=False
+                ["api", "-X", "POST", path, "-f", "content=eyes"],
+                repo=repo,
+                expect_json=False,
             )
-        except ForgeError:
+        except ForgeError as error:
+            # Expected through the credential proxy, which refuses mutating
+            # `gh api` calls as github.api-mutation -- the same rule that stops
+            # the agent merging its own pull request. The reaction is a
+            # courtesy and the request is answered without it, so this is a
+            # accepted loss rather than a failure, but it is logged because a
+            # silent one leaves nobody able to explain a missing eyes emoji.
+            # Note the proxy also logs its refusal at WARNING, so a brokered
+            # sweep emits a SECURITY_POLICY_BLOCKED line per acknowledgement.
+            LOGGER.info("acknowledgement reaction not left on %s: %s", path, error)
             return False
         return True
 
@@ -705,7 +773,9 @@ class GitHubProvider:
                 "api",
                 f"repos/{repo}/pulls/{pr.number}/commits?per_page={PR_PAGE_SIZE}",
                 "--paginate",
-            ]
+            ],
+            repo=repo,
+            retry_transient=True,
         )
         commits = []
         for row in rows or []:
@@ -722,20 +792,14 @@ class GitHubProvider:
 PROVIDERS: dict[str, type] = {"github.com": GitHubProvider}
 
 
-def provider_for(settings_path: Optional[str] = None, **kwargs) -> ForgeProvider:
-    """Pick a provider from the host in SETTINGS.md's `Git Repo:` line.
+def provider_for(repo: Optional[str] = None, **kwargs) -> ForgeProvider:
+    """Pick a provider from the host in repo or default to GitHub.
 
     A bare `owner/repo` — which the operator accepts and writes through
     verbatim — names no host, so it means GitHub: that shorthand is `gh -R`'s
     own form and no other forge shares it.
     """
-    path = settings_path or SETTINGS_PATH
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            text = handle.read()
-    except OSError:
-        text = ""
-    lowered = text.lower()
+    lowered = (repo or "").lower()
     for host, cls in PROVIDERS.items():
         if host in lowered:
             return cls(**kwargs)

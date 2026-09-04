@@ -49,7 +49,7 @@ For any request that concerns runtime behavior of workloads on a **single, speci
 
 3. **Read the result** — you are auto-subscribed, so the completion (or a `needs_input` block) is pushed into your chat. You can also inspect it: `kanban_show(<id>)`. The RCA is in the card's `result` — the field the gateway posts verbatim, and the only one the requester receives — with any proposed patch in `metadata`; neither is ever in the worker's chat reply, which is a bare acknowledgement by design.
 
-**Multi-cluster (fan-out / fan-in):** create one card per cluster **with no `parents`**, plus a card **assigned to yourself** with `parents=[<those card ids>]` (the fan-in). `parents` means "runs after", so a per-cluster card that lists your own running card as a parent can never be claimed — see `SOUL.md` §0. Complete your current card; once all the per-cluster cards finish, the dispatcher spawns you on the fan-in card, whose context includes every prerequisite's `metadata`. See the **`workload-rebalancing`** skill for the validation-then-declare pattern.
+**Multi-cluster (fan-out):** create one card per cluster **with no `parents`**, in one burst, so they run in parallel. `parents` means "runs after", so a per-cluster card that lists your own running card as a parent can never be claimed — see `SOUL.md` §0. Then **keep your own card open**: poll each per-cluster card with `kanban_show(<id>)` (`sleep 60` between rounds), and once all of them are settled, synthesize their `result`/`metadata` into your own `kanban_complete(result=...)`. Completing your card is the delivery, so never complete it on a dispatch receipt — the image refuses a `kanban_complete` while your fanned-out cards are unfinished (#1010). See the **`workload-rebalancing`** skill for the validation-then-declare pattern.
 
 ## Acting on the result
 
@@ -86,9 +86,29 @@ both directions:
   carry a profile even though that cluster exists. This closes the loop when a cluster is deleted
   out-of-band, so its profile is never left orphaned pointing at a dead kubeconfig.
 
+A create that fails is recorded rather than only logged: the cluster goes into a `create_failed`
+bucket. Both places that bucket surfaces are narrower than it looks. The chat summary names the
+failures only on a run that also created or pruned something — a run whose sole outcome is a failed
+create posts nothing, because a permanent cause repeats every minute while the bootstrap gate is
+ticking. A failed create is only one of the things `--require-create-pass` reports. Under that flag the run
+exits `3` when the CREATE direction never ran (the project would not resolve, or listing the
+clusters failed), when `reconcile()` raised, or when it ran and every create failed with no fully
+scaffolded profile already on the roster — and `4` when another reconcile holds the lock. One
+failure alongside a success exits 0 and costs the sweep one `gaps` row. Without the flag every one
+of those exits 0, because a cron producer must. That flag's caller is the bootstrap scan gate,
+which gates a one-shot fleet sweep on the exit code, so a non-zero exit means "the roster is not
+worth fanning out against yet", not specifically "a create failed".
+
+A profile whose `cluster_identity` is stamped but whose `kubeconfig.yaml` or `USER.md` is missing is
+treated as absent and recreated. Profile creation stamps the identity before it writes either file,
+so a run killed mid-create leaves a home that satisfies the create direction's existence check and
+the prune direction's "identity present, cluster exists" check — unrepaired, it stays half-built
+forever.
+
 It never deletes on ambiguity: any inconclusive check (auth/network/timeout, or a missing
 `cluster_identity`) leaves the profile untouched. `created=0 pruned=0 kept=0` is a normal,
-successful result. When it creates or prunes anything it posts a Google Chat summary.
+successful result. When it creates or prunes anything it posts a summary to every chat platform it
+can resolve as enabled, falling back to Google Chat when it can resolve none.
 
 Profile lifecycle belongs to this script and to the explicit onboarding/teardown paths above. Do
 not repair the roster from other work by calling `cluster_agent_profile.py` directly — a profile

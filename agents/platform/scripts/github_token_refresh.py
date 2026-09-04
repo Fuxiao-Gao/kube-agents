@@ -11,11 +11,22 @@ import email.message
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
+from typing import Sequence
+from urllib.parse import urlsplit
+
+# Add scripts directory so gitops_workspace is importable
+sys.path.append("/opt/defaults/scripts")
+sys.path.append("/opt/data/scripts")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from credential_proxy_client import authorization_headers
 
 
 def log(msg: str):
@@ -28,21 +39,209 @@ TOKEN_BROKER_URL = os.getenv(
     "http://github-token-minter.kubeagents-system.svc.cluster.local:8080/token",
 )
 
+#: Shell convention for "command not found", reused so a missing binary stays
+#: distinguishable from a gh command that ran and failed.
+GH_MISSING_RC = 127
 
-def get_current_git_repo() -> str | None:
+#: The credential sidecar's own timeout (`_execute` in credential_proxy.py),
+#: surfaced through credential_proxy_client. Excluded from the retry because a
+#: command that ran for the full timeout may well have landed its write; see
+#: looks_like_auth_failure.
+GH_TIMEOUT_RC = 124
+
+# What `gh` prints when the credential is the problem, as opposed to the
+# repository, the network, or the rate limit. Matched case-insensitively
+# against stderr: the REST paths emit `HTTP 401: Bad credentials`, the GraphQL
+# ones `requires authentication`, and `auth status` (which is handled
+# separately, being the explicit question) `not logged in` / `token is invalid`.
+_GH_AUTH_FAILURE = re.compile(
+    r"HTTP 401"
+    r"|bad credentials"
+    r"|requires authentication"
+    r"|authentication failed"
+    r"|not logged in"
+    r"|token is invalid"
+    r"|invalid token",
+    re.IGNORECASE,
+)
+
+
+def looks_like_auth_failure(args: Sequence[str] | list, result: subprocess.CompletedProcess) -> bool:
+    """Does this failure look like one a fresh token would fix?
+
+    The retry exists for an expired installation token, and minting on anything
+    else spends a credential on a fault no credential can repair. `gh auth
+    status` passes whenever *any* host is authenticated, so a repository the
+    token cannot reach fails only at `issue list` with a 404 -- and gating the
+    retry on ``returncode != 0`` alone turned that permanent misconfiguration
+    into a mint on every ten-minute tick, indefinitely.
+    """
+    if result.returncode == 0:
+        return False
+    if result.returncode in (GH_MISSING_RC, GH_TIMEOUT_RC):
+        return False
+    if list(args)[:2] == ["auth", "status"]:
+        return True
+    return bool(_GH_AUTH_FAILURE.search(result.stderr or ""))
+
+
+_refresh_attempted = False
+_refresh_failed = False
+
+
+def is_refresh_failed() -> bool:
+    """True if a credential refresh was attempted during this process and failed."""
+    return _refresh_failed
+
+
+def reset_refresh_state() -> None:
+    """Reset the at-most-once refresh guard and failure state (primarily for tests)."""
+    global _refresh_attempted, _refresh_failed
+    _refresh_attempted = False
+    _refresh_failed = False
+
+
+def refresh_credentials_once(
+    args: Sequence[str] | None = None,
+    *,
+    repo: str | None = None,
+) -> bool:
+    """Mint a fresh token, at most once per process.
+
+    Returns True only when a new token actually landed -- i.e. when retrying
+    the gh command that just failed is worth doing.
+
+    The at-most-once guard is what bounds the cost. Each entry point runs as
+    its own invocation, so one invocation makes one mint however many gh calls
+    it makes, and a credential broken for a reason no token fixes cannot turn a
+    single poll into a mint per call.
+
+    Note: In multi-org deployments, if an un-scoped preflight check (e.g. `auth
+    status`) triggers token refresh, it mints for the first managed repository.
+    Subsequent 401s for a repository in a different organization within the same
+    process will not trigger a second mint due to the process-wide at-most-once
+    guard. Full multi-org refresh across different organizations requires lifting
+    the guard to once-per-organization.
+    """
+    global _refresh_attempted, _refresh_failed
+    if _refresh_attempted:
+        return False
+    _refresh_attempted = True
+
+    if not repo and args:
+        argv_list = list(args)
+        for flag in ("-R", "--repo"):
+            if flag in argv_list:
+                try:
+                    repo = argv_list[argv_list.index(flag) + 1]
+                    break
+                except (ValueError, IndexError):
+                    pass
+
+    if not repo:
+        try:
+            from gitops_workspace import get_managed_github_repos
+            managed = get_managed_github_repos()
+            repo = managed[0] if managed else None
+        except Exception:
+            repo = None
+
+    if not repo:
+        return False
+
+    try:
+        refresh_git_credentials(repo)
+    except Exception as exc:
+        log(f"GitHub credential refresh failed: {type(exc).__name__}: {exc}")
+        _refresh_failed = True
+        return False
+    return True
+
+
+# Hosts this refresher will mint a token for. `ssh.github.com` is GitHub's
+# SSH-over-443 endpoint and `www.github.com` is the redirecting alias `git
+# clone` accepts, both naming the same repositories as `github.com`. An
+# enterprise host is deliberately absent: Minty issues tokens for github.com
+# installations only.
+GITHUB_HOSTS = frozenset({"github.com", "www.github.com", "ssh.github.com"})
+
+# scp-like remote syntax — `[user@]host:path` — which is not a URL and so has
+# to be split before the host can be compared.
+_SCP_REMOTE = re.compile(r"^(?:[^/@]+@)?(?P<host>[^/:]+):(?P<path>.+)$")
+
+# One `owner/name` slug, the shape `credential_proxy.is_valid_repository`
+# accepts on the sidecar path. Checked here because the other path — direct to
+# Minty, for the standalone deployments the module docstring names — has no
+# validator downstream, so a deep link's extra segments would be posted as a
+# repository name.
+_REPOSITORY_SEGMENT = re.compile(r"[A-Za-z0-9_.-]+")
+
+
+def github_repo_from_remote(url: str) -> str | None:
+    """Return `owner/repo` when `url` is a GitHub remote, else None.
+
+    The host is compared against `GITHUB_HOSTS` after parsing rather than
+    searched for in the raw string: `https://evil.example/github.com/o/r.git`
+    and `https://github.com.evil.example/o/r.git` both contain `github.com`,
+    and a substring check would hand a token request for someone else's
+    repository to Minty.
+    """
+    if "://" in url:
+        parts = urlsplit(url)
+        host, path = parts.hostname, parts.path
+    else:
+        match = _SCP_REMOTE.match(url)
+        if not match:
+            return None
+        host, path = match.group("host"), match.group("path")
+
+    if not host:
+        return None
+    if host.lower() not in GITHUB_HOSTS:
+        # The host, never the URL: a remote can carry `user:token@` in front of
+        # it. Without this an operator whose clone uses an SSH host alias sees
+        # only the caller's "Could not identify target repository 'None'".
+        log(f"Ignoring git remote: host '{host}' is not a GitHub host.")
+        return None
+
+    path = path.strip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    owner, slash, name = path.partition("/")
+    if (
+        not slash
+        or not _valid_repository_segment(owner)
+        or not _valid_repository_segment(name)
+    ):
+        log(f"Ignoring git remote: path '{path}' is not an owner/repo slug.")
+        return None
+    return f"{owner}/{name}"
+
+
+def _valid_repository_segment(segment: str) -> bool:
+    """One half of an `owner/name` slug, with the traversal shapes rejected.
+
+    The character class permits `.` and `-`, so it matches `..` and a leading
+    dash as happily as a real name; neither is a repository.
+    """
+    return (
+        _REPOSITORY_SEGMENT.fullmatch(segment) is not None
+        and segment not in (".", "..")
+        and not segment.startswith("-")
+    )
+
+
+def get_current_git_repo(cwd: str | None = None) -> str | None:
+    """Extract repository name (owner/repo) from local git config."""
     try:
         res = subprocess.run(
             ["git", "config", "--get", "remote.origin.url"],
+            cwd=str(cwd) if cwd else None,
             capture_output=True,
             text=True,
             check=True,
         )
-        url = res.stdout.strip()
-        if "github.com" in url:
-            path = url.split("github.com")[-1].lstrip(":").lstrip("/")
-            if path.endswith(".git"):
-                path = path[:-4]
-            return path
+        return github_repo_from_remote(res.stdout.strip())
     except Exception:
         pass
     return None
@@ -55,9 +254,10 @@ def refresh_git_credentials(
     initial_delay: float = 0.5,
     backoff_factor: float = 2.0,
 ) -> str:
+    """Query local Minty, retrieve token, and cache inside git credentials."""
     repository = target_repo.strip().strip("/") if target_repo else get_current_git_repo()
 
-    if not repository or "/" not in repository:
+    if not repository or repository.count("/") != 1:
         raise RuntimeError(
             f"Could not identify target repository '{repository}'. Must be in 'owner/repo' format."
         )
@@ -72,7 +272,9 @@ def refresh_git_credentials(
         request = urllib.request.Request(
             url,
             data=json.dumps({"repository": repository}).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            # Empty in the sidecar deployment; carries the caller's projected
+            # ServiceAccount token when the broker runs in its own Pod.
+            headers={"Content-Type": "application/json", **authorization_headers()},
             method="POST",
         )
         try:
@@ -130,16 +332,34 @@ def refresh_git_credentials(
 
     # 2. Query Minty Token Broker with bounded retries
     org_name, repo_name = repository.split("/", 1)
+
+    # In a multi-repo deployment, scope the installation token to all managed
+    # repositories within this organization to avoid pod-wide token slot churn.
+    repositories_to_scope = [repo_name]
+    try:
+        from gitops_workspace import get_managed_github_repos
+
+        for m in get_managed_github_repos():
+            if "/" in m:
+                m_org, m_repo = m.split("/", 1)
+                if (
+                    m_org.lower() == org_name.lower()
+                    and m_repo not in repositories_to_scope
+                ):
+                    repositories_to_scope.append(m_repo)
+    except Exception as e:
+        log(f"WARNING: Could not expand managed repositories for token scoping: {e}")
+
     headers = {"Content-Type": "application/json", "X-OIDC-Token": oidc_token}
     body = {
         "org_name": org_name,
-        "repositories": [repo_name],
+        "repositories": repositories_to_scope,
         "scope": "platform-agent-scope",
     }
     req_data = json.dumps(body).encode("utf-8")
 
     log(
-        f"Requesting scoped installation token from Minty for repository: {org_name}/{repo_name}..."
+        f"Requesting scoped installation token from Minty for organization {org_name} (repositories: {repositories_to_scope})..."
     )
 
     token = None

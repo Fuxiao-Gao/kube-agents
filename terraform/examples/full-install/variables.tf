@@ -90,14 +90,21 @@ variable "namespace" {
   default     = "kubeagents-system"
 }
 
+# With one bundle left, this no longer selects between bundles: `read-only` takes
+# local.read_only_roles and `custom` requires project_roles, which wins on its own.
+# It stays because it is still load-bearing in two places — installer_common.sh
+# writes it into every generated terraform.tfvars, so removing the variable would
+# fail every installer-driven apply on an unsupported argument, and outputs.tf
+# preconditions on it to catch `custom` with no roles named. It is also the gate
+# that refuses a configuration still asking for the removed admin bundle.
 variable "permission_set" {
-  description = "Which GCP IAM role bundle the agent's service account gets: read-only, gke-admin, or custom (custom requires project_roles). Ignored when project_roles is set explicitly."
+  description = "Which GCP IAM role bundle the agent's service account gets: read-only, or custom (custom requires project_roles). Ignored when project_roles is set explicitly."
   type        = string
   default     = "read-only"
 
   validation {
-    condition     = contains(["read-only", "gke-admin", "custom"], var.permission_set)
-    error_message = "permission_set must be one of read-only, gke-admin, or custom."
+    condition     = contains(["read-only", "custom"], var.permission_set)
+    error_message = "permission_set must be one of read-only or custom. The gke-admin bundle was removed: roles/container.admin authorizes the agent through IAM regardless of its Kubernetes RBAC, and the container.clusters.impersonate it carries applies to every cluster in the project. Name the roles you need in project_roles instead."
   }
 }
 
@@ -105,6 +112,40 @@ variable "project_roles" {
   description = "Project-level IAM roles granted to the agent's service account. Leave null to take the bundle permission_set names; set explicitly (including []) to manage the roles yourself, which overrides permission_set."
   type        = list(string)
   default     = null
+}
+
+variable "scoped_clusters" {
+  description = <<-EOT
+    GKE clusters to provision a scoped reader service account for -- one account
+    per cluster. Empty, the default, provisions no pool and leaves the agent's
+    single identity in place.
+
+    A non-empty list does two things. It provisions the accounts, and it arms
+    the credential broker: the mapping reaches the PlatformAgent CR, and a
+    request naming a cluster that is not in this list is then refused rather
+    than served by a wider credential.
+
+    The default is empty because a pool member holds no IAM grant. The IAM
+    Condition that scoped it grants nothing for Kubernetes object operations
+    (measured 2026-08-12), and un-conditioned the same binding is project-wide
+    container.viewer, so both are gone -- see the kube-agents-iam module's
+    scoped_pool.tf. An armed pool therefore selects a powerless identity for
+    every request and turns every cluster read into a Forbidden. Set this to
+    exercise the selection, refusal and minting path; the authority arrives with
+    per-cluster RBAC.
+
+    Name each cluster by value rather than from module.gke_cluster's outputs,
+    including this composition's own: the accounts would otherwise depend on the
+    cluster existing and Terraform would refuse to plan the IAM until after it
+    was created.
+  EOT
+  type = list(object({
+    project_id   = string
+    location     = string
+    cluster_name = string
+  }))
+  nullable = false
+  default  = []
 }
 
 variable "image_tag" {
@@ -398,6 +439,36 @@ variable "enable_webhooks" {
   description = "Enable the operator's PlatformAgent admission webhooks (defaulting, validation, delete protection). Requires cert-manager in the cluster — either enable_cert_manager or a pre-existing install."
   type        = bool
   default     = true
+}
+
+variable "enable_pubsub_platform" {
+  description = "Enable the Pub/Sub platform adapter AgentPlugin (opens event listeners for Cloud Pub/Sub subscriptions)."
+  type        = bool
+  default     = false
+}
+
+variable "enable_stockout_investigator" {
+  description = "Enable the GKE Stockout Investigator AgentPlugin (diagnoses autoscaler capacity failures and proposes GitOps PRs). Automatically enables pubsub_platform for alert ingress."
+  type        = bool
+  default     = false
+}
+
+variable "stockout_pubsub_topic" {
+  description = "Pub/Sub topic for GKE stockout alerts. Only used when enable_stockout_investigator is true."
+  type        = string
+  default     = "gke-stockout-alerts-topic"
+}
+
+variable "stockout_pubsub_subscription" {
+  description = "Pub/Sub subscription for GKE stockout alerts. Only used when enable_stockout_investigator is true."
+  type        = string
+  default     = "gke-stockout-alerts-sub"
+}
+
+variable "stockout_pubsub_sink" {
+  description = "Log sink name for GKE stockout alerts. Only used when enable_stockout_investigator is true."
+  type        = string
+  default     = "gke-stockout-alerts-sink"
 }
 
 variable "extra_helm_values" {

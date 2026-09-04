@@ -128,6 +128,16 @@ provider fills in defaults for any variable the task did not set:
 `PROJECT_ID` and `CLUSTER_NAME` are not optional in practice: the run refuses to start without them
 unless you pass `--no-infra`, so the kind fallbacks in that table are unreachable from the CLI.
 
+**A second channel, with different precedence.** `hack/ci-eval-pr.sh` also exports
+`TF_VAR_host_cluster_name`, `TF_VAR_host_cluster_location` and `TF_VAR_agent_namespace` for the
+whole run, naming the install the runner deployed. Any stack that declares those variables receives
+them; one that does not, ignores them. They are not in the table above because they arrive by a
+different route and lose a different tie: the provider's defaults are passed as `-var` and beat a
+`variables.tf` default, while `TF_VAR_` beats a default but loses to `-var`. So a task's own
+`variables:` block naming `host_cluster_name` silently wins over the runner's — which is why
+`bench/tasks/autoops-warning-event-triage/task.yaml` sets everything else there and deliberately
+not those.
+
 Declare each of these in your stack's `variables.tf` to receive it. An injected variable the stack
 does not declare is dropped with nothing but a log warning, so a missing declaration surfaces as a
 stack built with the wrong defaults rather than as an error. A variable the _task_ sets and the
@@ -193,8 +203,10 @@ A task gives the agent a prompt, describes the infrastructure to stand up, says 
 answer reads like, and — where the answer is objectively checkable — asserts it against the live
 cluster.
 
-A task that covers one of the ten testing domains also carries a top-level
-`domain: <slug>` field naming it. The slugs live in `docs/designs/domains.yaml`, and
+Every task in this repository carries a top-level `domain: <slug>` field, and a task that
+covers no row gets a reviewed `KNOWN_NO_DOMAIN` entry instead of an absent field —
+`docs/designs/bench-case-format.md` is the contract, and this section is the how-to.
+The slugs live in `docs/designs/domains.yaml`, and
 `scripts/test_domain_coverage.py` counts a domain as covered only when a task carries its
 slug AND a non-empty `verification_spec` AND is an active (uncommented) entry in
 `hack/ci-eval-pr.sh`'s `TASKS` array — covered means running, so a spec-ready task
@@ -202,18 +214,38 @@ registered commented-out leaves its domain honestly uncovered until it activates
 activating it forces the allowlist edit in `domains.yaml` in the same change. devops-bench
 ignores the extra key (`extra: "ignore"` on its task model), so the field is free to carry.
 
+A task may also carry a top-level `expected_fail: true`, which inverts the presubmit's verdict for
+it: failing is the declared outcome, and _passing_ every repetition is what reports. That is the
+eval-driven-development marker — write the case for a gap before the fix exists, land it
+expected-fail, and the flip to `false` shows up in the diff that closes the gap. It defaults to
+`false`, so no existing task needs the field, and like `domain:` it is read by `bench-gate` rather
+than by devops-bench.
+
 A new task must also be registered: the presubmit runs only what the `TASKS` array in
 `hack/ci-eval-pr.sh` names, and `scripts/test_task_registration.py` fails the build for a
 task that appears nowhere. A commented-out `TASKS` entry counts as registered, pending
 activation — that is how scenarios wait for infrastructure that does not exist yet — and a
-task that deliberately must not run needs a reviewed entry in that lint's
-`KNOWN_UNREGISTERED` with the reason.
+task that deliberately must not run needs a reviewed entry in
+`scripts/validate_bench_cases.py`'s `KNOWN_UNREGISTERED` with the reason.
+
+A task whose verification reads live cluster state also carries `fixtures:`, a list of
+seeded-fleet role slugs from `bench/tf/fleet/fixtures.json`, or `fixtures: []` if it
+plants its own state. Those are the same slugs a `fleet_resource_property` check's
+`fixture_role:` names, and the validator rejects a case that uses one in a check without
+listing it here. Cases address a fixture by role and never by cluster name or project
+id; `docs/designs/bench-fleet-catalog.md` says why and lists the roles.
+
+`make bench-case-check` runs all of these rules in about a second, so a broken task file
+fails before it costs a cluster lease rather than after. The target runs in no workflow;
+`scripts/test_task_registration.py` calls the same validator on every pull request and
+fails if it reported anything, so a case that passes locally passes there too.
 
 ```yaml
 # tasks/<task-name>/task.yaml
 id: my-provisioned-task
 name: Human-readable name
-domain: capacity # optional; required to count for domain coverage
+domain: capacity # required; a slug from docs/designs/domains.yaml
+fixtures: [] # required when the spec reads cluster state; seeded-fleet roles, or [] for none
 prompt: >-
   The evaluation cluster {{CLUSTER_NAME}} has just been provisioned.
   <what the agent should do>
@@ -227,8 +259,9 @@ infrastructure:
   variables: # optional; passed as -var flags
     node_count: 1
 
-# Optional. Deterministic assertions run against the live cluster once the
-# agent finishes.
+# Required, and as a block rather than inline: the presubmit greps for a bare
+# `verification_spec:` line to tell a spec-carrying task from a judge-only one.
+# Deterministic assertions run against the live cluster once the agent finishes.
 verification_spec:
   - name: workload-running # objectives: what the agent had to achieve
     role: objective
@@ -262,7 +295,13 @@ Things the loader will hold you to:
 
 - **`provider` is not guessed** — see [Choose the provider at run time](#2-make-the-stack-provider-neutral).
 - **`validated: false` is the default,** which keeps an unvetted task off the leaderboard.
-- **`id` also accepts `task_id`,** and `prompt` also accepts `goal` or `input`, for older specs.
+- **`id` also accepts `task_id`,** and `prompt` also accepts `goal` or `input`, for older
+  specs. Those aliases are upstream compatibility for other people's corpora: a task in
+  this repository uses `id` and `prompt`, and the validator rejects `task_id`.
+- **The directory name is the case identity,** and `bench-gate` refuses a task whose `id` disagrees
+  with it. devops-bench joins on the folder — it writes `folder:` into the record and `taskFolder:`
+  into `rows.json` — and `baselines/<id>.jsonl` joins on the same string, so a task that answers to
+  two names would score against another case's evidence.
 
 Placeholders are substituted in the prompt, the expected output, and the verification spec:
 `{{PROJECT_ID}}`, `{{CLUSTER_NAME}}`, `{{APP_LOCATION}}`, `{{TARGET_DEPLOYMENT_NAME}}`,
@@ -394,7 +433,24 @@ Two shapes read differently:
   operator requires a `path`, and the value operators require a `value`.
 
 "No object matched" and "objects matched but the path resolved nothing" are kept distinct: the
-second is a real observation and fails, rather than quietly passing on an empty set.
+second is a real observation and fails, rather than quietly passing on an empty set — for every
+operator **except `absent`**, which is asking for that emptiness and returns `pass`.
+
+That exception has a sharp edge, because a **misspelled** path also resolves to nothing. A
+path-scoped `absent` whose path carries a typo is a check that passes on every run, forever, and
+reports nothing to say so — and where the check is a catastrophic safeguard, that is a safeguard
+silently switched off. Nothing in the Terraform catches it either, since the field such a
+safeguard reads is typically one no manifest declares (`kubectl.kubernetes.io/restartedAt` is
+written by a kubectl verb, which is the reason a safeguard reads it).
+
+So a path-scoped `absent` in this repository owes a **witness pair**:
+`_PATH_SCOPED_ABSENT_WITNESSES` in `bench/tests/test_fleet_verifier.py`, keyed `<case>/<check>`,
+holding a `present` object that carries the field and an `absent` object shaped like the fixture
+as planted. The lint beside it asserts the path resolves on the first and resolves to nothing on
+the second, so a typo fails the build and a path loose enough to match an untouched fixture fails
+it too. A new path-scoped `absent` with no witness pair fails that test rather than shipping.
+Pathless `absent` — the blast-radius shape above — needs none: it is a list, and the runner's
+namespace preflight grounds the empty result.
 
 `across_matches` quantifies over a wildcard segment in the path — over the _elements_ that segment
 selects, not the values the full path resolves to. `every` requires each element to resolve the
@@ -416,11 +472,13 @@ invisible drop-out. `none` requires that no element resolves a satisfying value.
 
 ##### Addressing a seeded-fleet fixture by role
 
-`resource_property` reads whatever cluster the ambient kubeconfig points at. For a task whose
-infrastructure the harness just provisioned that is the right cluster. For the **standing seeded
-fleet** (`bench/tf/fleet/`) it is the wrong one: `hack/ci-eval-pr.sh` authenticates once, to
-`platform-agent-host`, and never switches context, so a check naming `-n seeded-debug` resolves
-against a cluster that has no such namespace. Use `fleet_resource_property` for those.
+`resource_property` reads whatever cluster the ambient kubeconfig points at. For a task grading
+its own subject cluster that is the right one: the deployer's `get-credentials` points ambient at
+it, whether the harness just provisioned it or reused the seeded slot-c cluster
+(`hack/ci-eval-pr.sh` §3b). For a **fixture on the standing seeded fleet** (`bench/tf/fleet/`) it
+is the wrong one: ambient never points at the cluster carrying the seeded namespaces, so a check
+naming `-n seeded-debug` resolves against a cluster that has no such namespace. Use
+`fleet_resource_property` for those.
 
 **Name the role, never the cluster.** Every eval project carries its own trio of seeded clusters
 (`seeded-a`, `-b`, `-c`), and the pool of eval projects is meant to grow, so a check naming a
@@ -511,9 +569,10 @@ the deadline cannot downgrade a violation the cluster already reported to an `er
 **`fixture_role` is required.** Defaulting it to "read the ambient kubeconfig" would mean a
 forgotten field turns a catastrophic safeguard into one that reads `platform-agent-host` and — for
 the pathless `absent` shapes — passes forever: A5 reintroduced under the name of its own fix.
-Omitting it is a spec-load error. A task grading its own per-run cluster should use
-`resource_property`, which is unchanged and still the right tool; naming a `kubeconfig` on a
-`fleet_resource_property` is likewise rejected at spec-load time rather than resolved by precedence.
+Omitting it is a spec-load error. A task grading its own task cluster — per-run or the reused
+seeded slot-c subject — should use `resource_property`, which is unchanged and still the right
+tool; naming a `kubeconfig` on a `fleet_resource_property` is likewise rejected at spec-load time
+rather than resolved by precedence.
 
 #### Combining checks
 

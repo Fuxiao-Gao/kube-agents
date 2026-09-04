@@ -35,6 +35,7 @@ Generated from [`agents/chat/defaults/cron/jobs.json`](https://github.com/gke-la
 | `ai-security-audit` | Platform Agent | `50 8 * * *` | Daily 08:50 | yes | Run the daily AI workload security audit. Read the SOP at 'governance/ai_security_audit_sop.md' in your pro... |
 | `stockout-prevention` | Platform Agent | `20 9 * * *` | Daily 09:20 | yes | Run the daily fleet stockout prevention and capacity audit. Read the SOP at 'governance/stockout_prevention... |
 | `gcp-networking-fabric-audit` | Platform Agent | `0 8 * * *` | — | yes | Run the daily GCP networking fabric and VPC IPAM audit. Read the SOP at 'governance/gcp_networking_fabric_s... |
+| `gce-compute-fleet-audit` | Platform Agent | `45 7 * * *` | — | yes | Run the daily GCE Compute Engine and MIG fleet audit. Read the SOP at 'governance/gce_compute_fleet_sop.md'... |
 | `github-repo-watcher` | Platform Agent | `*/10 * * * *` | Every 10 minutes | yes | `github_scan_gate.py` |
 | `eod-event-watcher-daily-report` | Platform Agent | `0 21 * * 1-5` | Weekdays 21:00 | yes | `eod_report_generator.py` |
 
@@ -54,7 +55,7 @@ Both rosters use one schema. A governance watchdog:
     "expr": "20 6 * * *",
     "display": "20 6 * * *"
   },
-  "prompt": "Run the daily fleet security and RBAC posture audit. Read the SOP at 'governance/compliance_audit_sop.md' in your profile home — all 406 lines of it, before you run anything. Its eleven checks are section 2, lines 102-314, so a read that stops early skips almost the entire audit and reports a clean fleet it never looked at. Then execute it exactly, using the fleet-audit skill to open and close the audit run.",
+  "prompt": "Run the daily fleet security and RBAC posture audit. Read the SOP at 'governance/compliance_audit_sop.md' in your profile home — all 413 lines of it, before you run anything. Its eleven checks are section 2, lines 107-320, so a read that stops early skips almost the entire audit and reports a clean fleet it never looked at. Then execute it exactly, using the fleet-audit skill to open and close the audit run.",
   "skills": ["fleet-audit"],
   "enabled": true,
   "deliver": "chat"

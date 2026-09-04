@@ -20,16 +20,20 @@
 # literal filter `creationTimestamp<-P30D` and flags only at AGE >= 30d;
 # check 3.7 (`idle-nodepool`) will not flag "pools created < 7 days ago".
 # (Check 3.5 is `idle-address` at AGE >= 14d and is unrelated to either.)
-# The fleet in both eval projects was created 2026-08-21, so the idle-pool
-# half of this scenario cannot pass before 2026-08-28 and the orphan-disk
-# half not before 2026-09-20. Turning it on earlier produces a red presubmit
-# that is the SOP behaving correctly.
-# Any replant of the fixtures restarts both clocks. One unsettled detail: the
-# 3.7 command (`gcloud container node-pools list`) returns no creation field,
-# so pool age is whatever the agent infers -- if it reads node age, the
-# rolling node recreation from a GKE_METADATA or machine-type change resets
-# the 7-day gate even though the pool object is untouched. See DRAFTS.md,
-# activation blocker A3.
+# The gate binds to the NEWEST fleet in the Boskos pool, not the oldest:
+# a lease is random, so a run that draws the youngest project is the one
+# that decides. The activation date is therefore a subtraction, not a fixed
+# date -- newest plant date plus the window above -- and both terms move:
+# onboarding a project or replanting fixtures moves the first, an SOP edit
+# moves the second. Compute it before switching this on; DRAFTS.md
+# activation blocker A3 has the command and a dated worked example.
+# Turning it on early produces a red presubmit that is the SOP behaving
+# correctly.
+# One unsettled detail: the 3.7 command (`gcloud container node-pools list`)
+# returns no creation field, so pool age is whatever the agent infers -- if it
+# reads node age, the rolling node recreation from a GKE_METADATA or
+# machine-type change resets the 7-day gate even though the pool object is
+# untouched. See DRAFTS.md, activation blocker A3.
 # Isolation class: cluster-read-only, GitOps-repo write. NOT read-only, and
 # the earlier claim that it was is the correction this line carries: step 0 of
 # every fleet-audit stream (`audit_report.py start`) mints a repo-scoped
@@ -59,6 +63,15 @@ validated: false
 
 # Slug per docs/designs/domains.yaml.
 domain: cost
+
+# The seeded-fleet defects this scenario asserts on, named by ROLE rather than
+# by cluster: each eval project carries its own trio and this case has to run
+# unchanged against all of them. Roles are defined in
+# bench/tf/fleet/fixtures.json; the rule is
+# docs/designs/bench-fleet-catalog.md.
+fixtures:
+  - idle-nodepool
+  - orphan-disks
 
 # Graded against the LEDGER, not the chat reply: the fleet-wide-cost-analysis
 # SOP mandates a one-line closing response that deliberately restates nothing,

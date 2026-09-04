@@ -11,13 +11,20 @@ Every image an install pulls or a rebuild needs, and how their tags are managed.
 
 [`images.json`](https://github.com/gke-labs/kube-agents/blob/main/images.json) at the repository root is the source of truth for this list. It is what `make mirror-images` copies from, what the chart and the dev tooling resolve their third-party pins from, and what the table below is generated from — so there is one pin per image, not one per install path.
 
-That cuts both ways: **a version bump edits `images.json` and nothing else.** The manifest,
-Dockerfile, or chart value that used to carry a pin now names a variable, so editing the old
-location changes nothing. `make images-check` cross-checks the entries that still have a second
-copy — LiteLLM and fluent-bit against the chart values, the build-time bases against their
-Dockerfile `ARG` defaults — but for `github-token-minter-server`, both Hindsight images, and the
-four cert-manager entries this file is the only copy, and nothing else in the tree is left to
-disagree with it. Bump the pin here, then run `make images-check` and `make docs-generate`.
+A bump starts here but rarely ends here. Several images keep a second copy that this file is the
+source for — a chart value, a Dockerfile `ARG` default, a compiled constant in the operator — and
+`make images-check` is what holds them in step. It covers every image the chart renders, on both a
+default and a mirrored install; the build-time bases against their Dockerfile `ARG` defaults; the
+fluent-bit fallback baked into the operator binary; the example manifests; and the kustomize
+integrations, which it requires to name a variable this file owns rather than a literal.
+
+Two copies it does not reach, where a stale pin passes every check. An image behind a non-default
+chart toggle is never rendered, so Hindsight (`memory.provider`) and the GitHub token minter
+(`githubMinter.enabled`) keep unguarded pins in `charts/kube-agents/values.yaml`. And cert-manager's
+version is set again in `terraform/examples/full-install/variables.tf`, which no check reads.
+
+Bump the pin here, run `make images-check` and `make docs-generate`, then grep the tree for the old
+version before opening the pull request.
 
 <!-- BEGIN GENERATED: container-images -->
 <!-- Regenerate with: make docs-generate -- do not edit by hand. -->
@@ -33,6 +40,8 @@ Tagged with the release version; `:latest` on every push to `main`.
 | `credential-proxy` | `ghcr.io/gke-labs/kube-agents/credential-proxy` | release tag | `CREDENTIAL_PROXY_IMAGE` | The credential-proxy sidecar in the agent pod. |
 | `k8s-operator` | `ghcr.io/gke-labs/kube-agents/k8s-operator` | release tag | `OPERATOR_IMAGE` | The controller-manager Deployment. |
 | `replay-proxy` | `ghcr.io/gke-labs/kube-agents/replay-proxy` | release tag | `REPLAY_IMAGE` | The optional inference-replay integration. |
+| `pubsub-platform` | `ghcr.io/gke-labs/kube-agents/pubsub-platform` | release tag | — | The pubsub-platform AgentPlugin. |
+| `gke-stockout-investigator` | `ghcr.io/gke-labs/kube-agents/gke-stockout-investigator` | release tag | — | The gke-stockout-investigator AgentPlugin. |
 
 ### Pulled by an install, built elsewhere
 
@@ -40,12 +49,12 @@ Pinned here so `make mirror-images` and the install ask for the same version.
 
 | Image | Upstream reference | Pin | Override | Pulled by |
 | ----- | ------------------ | --- | -------- | --------- |
-| `litellm` | `ghcr.io/berriai/litellm` | `v1.96.2` | `LITELLM_IMAGE` | The LiteLLM gateway, from either the chart or the kustomize integration. |
-| `fluent-bit` | `docker.io/fluent/fluent-bit` | `5.1.0` | `FLUENT_BIT_IMAGE` | The logging sidecar the operator injects into every agent pod. |
-| `k8s` | `docker.io/alpine/k8s` | `1.34.9` | — | The chart's pre-delete cleanup hook Job. |
+| `litellm` | `ghcr.io/berriai/litellm` | `v1.98.0` | `LITELLM_IMAGE` | The LiteLLM gateway, from either the chart or the kustomize integration. |
+| `fluent-bit` | `docker.io/fluent/fluent-bit` | `5.1.1` | `FLUENT_BIT_IMAGE` | The logging sidecar the operator injects into every agent pod. |
+| `k8s` | `docker.io/alpine/k8s` | `1.36.2` | — | The chart's pre-delete cleanup hook Job. |
 | `github-token-minter-server` | `us-docker.pkg.dev/abcxyz-artifacts/docker-images/github-token-minter-server` | `v2.7.1-amd64` | `GITHUB_MINTER_IMAGE` | The optional GitHub integration. |
-| `hindsight-api` | `ghcr.io/vectorize-io/hindsight-api` | `0.9.1@sha256:24a079bead8aa58e45d728bf535ea727bfe559d8784024b6b9f89d56646954ab` | `HINDSIGHT_API_IMAGE` | The chart, when the memory provider uses Hindsight (make deploy-hindsight for the kustomize dev path). |
-| `hindsight-postgresql` | `docker.io/ankane/pgvector` | `latest@sha256:956744bd14e9cbdf639c61c2a2a7c7c2c48a9c8cdd42f7de4ac034f4e96b90f8` | `HINDSIGHT_POSTGRES_IMAGE` | The chart, alongside the Hindsight API. |
+| `hindsight-api` | `ghcr.io/vectorize-io/hindsight-api` | `0.9.2@sha256:7b14a1f4062252992d0176758753615e0a2071d9a269995be007be223ab01812` | `HINDSIGHT_API_IMAGE` | The chart, when the memory provider uses Hindsight (make deploy-hindsight for the kustomize dev path). |
+| `hindsight-postgresql` | `docker.io/pgvector/pgvector` | `0.8.6-pg15@sha256:a947c45cdc5906a1bc951f20a8709e321256343ee0f251e4ae00b5e7def4e6da` | `HINDSIGHT_POSTGRES_IMAGE` | The chart, alongside the Hindsight API. |
 | `cert-manager-controller` | `quay.io/jetstack/cert-manager-controller` | `v1.21.1` | — | cert-manager, installed by the full-install composition unless enable_cert_manager is false. |
 | `cert-manager-cainjector` | `quay.io/jetstack/cert-manager-cainjector` | `v1.21.1` | — | cert-manager, installed by the full-install composition unless enable_cert_manager is false. |
 | `cert-manager-webhook` | `quay.io/jetstack/cert-manager-webhook` | `v1.21.1` | — | cert-manager, installed by the full-install composition unless enable_cert_manager is false. |
@@ -59,10 +68,11 @@ Needed only to rebuild the images above from source, not to run an install. Each
 | Image | Upstream reference | Pin | Override | Pulled by |
 | ----- | ------------------ | --- | -------- | --------- |
 | `hermes-agent` | `docker.io/nousresearch/hermes-agent` | `HERMES_AGENT_TAG` in [`tags.env`](https://github.com/gke-labs/kube-agents/blob/main/tags.env) | `HERMES_AGENT_IMAGE` | deploy/docker/Dockerfile (agent-base stage). |
-| `envoy` | `docker.io/envoyproxy/envoy` | `v1.39.0` | `ENVOY_IMAGE` | deploy/docker/Dockerfile (envoy-bin stage). |
-| `golang` | `docker.io/library/golang` | `1.26-alpine` | `GOLANG_IMAGE` | deploy/docker/Dockerfile and k8s-operator/Dockerfile builder stages. |
-| `python` | `docker.io/library/python` | `3.11-slim` | `PYTHON_IMAGE` | examples/inference-replay/replay-proxy/Dockerfile. |
+| `envoy` | `docker.io/envoyproxy/envoy` | `v1.39.1` | `ENVOY_IMAGE` | deploy/docker/Dockerfile (envoy-bin stage). |
+| `golang` | `docker.io/library/golang` | `1.27-alpine` | `GOLANG_IMAGE` | deploy/docker/Dockerfile and k8s-operator/Dockerfile builder stages. |
+| `python` | `docker.io/library/python` | `3.14-slim` | `PYTHON_IMAGE` | examples/inference-replay/replay-proxy/Dockerfile. |
 | `distroless-static` | `gcr.io/distroless/static` | `nonroot` | `DISTROLESS_IMAGE` | k8s-operator/Dockerfile runtime stage. |
+| `busybox` | `docker.io/library/busybox` | `musl@sha256:32b5cdad7cce41dfd53d0ae06baebcf8357a147ee7694dc706911c373bc30c37` | — | agentplugins/*/Dockerfile base images. |
 
 <!-- prettier-ignore-end -->
 <!-- END GENERATED: container-images -->
@@ -137,13 +147,19 @@ Confining it takes more than a scratch `$PLATFORM_AGENT_HOME`, because two of th
 
 CI then runs the same script a second time, as a container under `docker run --read-only --tmpfs /tmp`. The build stage above cannot cover that: a build layer is writable by definition, so it proves the entrypoint works and not that it works without writing to the root filesystem. The operator sets `readOnlyRootFilesystem` on every container it builds, which turns any such write into `EROFS`, and the entrypoint's first step runs a script this repository does not own — so the second run is what keeps an upstream change to `stage2-hook.sh` from reaching a cluster as a pod that will not start.
 
+One thing the entrypoint does can stop the container rather than warn. Before the setup copies anything to the data volume — in the container that owns the shared state, since a `skip` container has already `exec`ed the command by this point — it checks each skill tree baked into the image (`/opt/hermes/skills`, `/opt/platform-template/skills`, `/opt/cluster-template/skills`) against the SHA-256 manifest the build wrote into it, and exits non-zero if a tree no longer matches — naming the offending file on stderr, with both digests when its content is what changed. Almost every other step here degrades with a `WARN` — the exception is step 1, which runs upstream's `stage2-hook.sh` and inherits `set -e` from the script. This one is a deliberate exception, for the reason [Security &amp; IAM](/kube-agents/reference/security-and-iam/#change-control--safety) gives. A pod crash-looping with `does not match the manifest baked beside it at build time` is reporting a corrupted or altered image, not a misconfiguration: reinstate the image the manifest belongs to rather than looking for a setting to change.
+
+The manifest, not the checker, is what makes the check mandatory: a tree carrying one is verified or the container refuses to start. Both sides of that pairing are root-owned in the image — the manifest inside the tree it describes, the verifier in `/opt/defaults/scripts` — so `carries a build-time manifest but nothing here can check it` is not something the agent's own uid can arrange, and it is read the same way as a mismatch: an altered or truncated image, not a setting. A tree with no manifest inside it is skipped, which is how the same entrypoint stays a no-op in images that never reached the stage where manifests are written.
+
 ## Base image pin
 
-The Hermes base image tag is pinned in [`tags.env`](https://github.com/gke-labs/kube-agents/blob/main/tags.env) at the repo root:
+The Hermes base image tag is pinned in [`tags.env`](https://github.com/gke-labs/kube-agents/blob/main/tags.env) at the repo root, by tag and digest together:
 
 ```bash
-HERMES_AGENT_TAG=v2026.8.13@sha256:68e15ae2a6d894d0ccbd9f8aacbbe13d4d28fa5dc9b6a303970b67bb2499b1a6
+HERMES_AGENT_TAG=<tag>@sha256:<digest>
 ```
+
+That file holds the pin itself; this page does not repeat it, because a second copy of a digest is a second thing to forget.
 
 Docker builds source `tags.env` via the `HERMES_AGENT_TAG` build arg:
 
@@ -153,7 +169,9 @@ ARG HERMES_AGENT_IMAGE=nousresearch/hermes-agent
 FROM ${HERMES_AGENT_IMAGE}:${HERMES_AGENT_TAG} AS agent-base
 ```
 
-Bumping Hermes = updating `tags.env` (a single-line change) and rebuilding.
+The `ARG` has no default, so every build path has to pass it — the image-build workflows, `make docker-build-platform` and `make docker-build-credential-proxy`, and `dev_rebuild_agent.sh` all read it from `tags.env`. A build that omits it fails rather than falling back to `latest`.
+
+Bumping Hermes means editing `tags.env` and rebuilding both agent images: the pin is a build-time base, so nothing changes in a cluster until `platform-agent` and `credential-proxy` are rebuilt and rolled out.
 
 ## Private / custom registry
 
@@ -183,7 +201,7 @@ Destinations are flat, named after the inventory entry's `name`, so
 `quay.io/jetstack/cert-manager-webhook:v1.21.1` lands as
 `<prefix>/cert-manager-webhook:v1.21.1`. The `name`, not the repository's trailing segment —
 they are the same word for almost every entry, but where they differ the name wins, and
-`docker.io/ankane/pgvector` lands as `<prefix>/hindsight-postgresql`. Every consumer below
+`docker.io/pgvector/pgvector` lands as `<prefix>/hindsight-postgresql`. Every consumer below
 assumes that flat layout.
 
 ### 2. Point the install at it
@@ -211,13 +229,12 @@ The composition's
 [README](https://github.com/gke-labs/kube-agents/blob/main/terraform/examples/full-install/README.md)
 has the detail.
 
-`REGISTRY_PREFIX` and `THIRD_PARTY_REGISTRY_PREFIX` are persisted to the installer's state file
-(`vars.sh`) like every other knob, so re-runs reuse them; `terraform.tfvars` is regenerated from
-that state on every run. Changing the registry _after_ a first run means re-running `install.sh`
-with the new flag (or editing the saved values in `vars.sh` — saved state wins over a new
-export).
+`REGISTRY_PREFIX` and `THIRD_PARTY_REGISTRY_PREFIX` live in the install configuration
+(`install.env`) like every other knob, so re-runs reuse them; `terraform.tfvars` is regenerated
+from it on every run. Changing the registry _after_ a first run means editing `install.env` and
+re-running `install.sh`, or passing the flag again — a flag beats the file.
 
-`IMAGE_TAG` is per-run and is deliberately not saved to `vars.sh`: the installer passes it into
+`IMAGE_TAG` is per-run and is deliberately not recorded in `install.env`: the installer passes it into
 `terraform.tfvars` as `image_tag`, which overrides both first-party image tags in the chart. The
 third-party images are excluded, because their tags come from `images.json` and have nothing to
 do with `IMAGE_TAG`.

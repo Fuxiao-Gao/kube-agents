@@ -14,8 +14,10 @@ locals {
     "gkebackup.googleapis.com",
     "developerknowledge.googleapis.com",
   ]
-  chat_apis = var.enable_google_chat ? [
+  pubsub_apis = (var.enable_google_chat || var.enable_pubsub_platform || var.enable_stockout_investigator) ? [
     "pubsub.googleapis.com",
+  ] : []
+  chat_apis = var.enable_google_chat ? [
     "chat.googleapis.com",
     "gsuiteaddons.googleapis.com",
   ] : []
@@ -25,7 +27,7 @@ locals {
   # Not var.location: a model is only callable from a location that serves it,
   # and the cluster's is often not one — on a zonal cluster it is not even a
   # valid Vertex location. Mirrors DEFAULT_VERTEX_LOCATION in
-  # k8s-operator/scripts/installer_common.sh.
+  # scripts/installer/installer_common.sh.
   vertex_location = var.vertex_location != "" ? var.vertex_location : "global"
   litellm_ksa     = "kubeagents-litellm"
 
@@ -38,11 +40,19 @@ locals {
   github_org        = length(local.github_repo_parts) == 2 ? local.github_repo_parts[0] : ""
   github_repo_name  = length(local.github_repo_parts) == 2 ? local.github_repo_parts[1] : ""
 
-  required_apis = toset(concat(local.base_apis, local.chat_apis))
+  required_apis = toset(concat(local.base_apis, local.pubsub_apis, local.chat_apis))
 
-  # The agent's GCP IAM permission-set bundles, kept verbatim so the
-  # two install paths hand the agent the same authority. Kubernetes RBAC is
-  # read-only in both; see the security-and-iam reference.
+  # The agent's GCP IAM permission-set bundle, kept verbatim so the two install
+  # paths hand the agent the same authority. Kubernetes RBAC is read-only
+  # alongside it; see the security-and-iam reference.
+  #
+  # There is deliberately one bundle and no admin one. GKE authorizes an action
+  # if either IAM or Kubernetes RBAC allows it, so a role like
+  # roles/container.admin authorizes the agent through IAM regardless of how
+  # narrow its KSA is, and the container.clusters.impersonate it carries applies
+  # to every cluster in the project. A deployment that needs broader roles names
+  # them in project_roles, which puts the grant in the caller's Terraform where
+  # it is reviewed.
   read_only_roles = [
     "roles/container.clusterViewer",
     "roles/container.viewer",
@@ -54,27 +64,10 @@ locals {
     "roles/mcp.toolUser",
     "roles/serviceusage.serviceUsageConsumer",
   ]
-  gke_admin_roles = [
-    "roles/container.clusterAdmin",
-    "roles/container.admin",
-    "roles/compute.viewer",
-    "roles/monitoring.admin",
-    # The agent can query logs for diagnostics but must not administer the
-    # audit-log sink.
-    "roles/logging.viewer",
-    "roles/iam.serviceAccountUser",
-    "roles/iam.securityReviewer",
-    "roles/mcp.toolUser",
-    "roles/serviceusage.serviceUsageConsumer",
-  ]
 
   # An explicit project_roles list always wins, so an existing configuration
   # that set it keeps its roles regardless of permission_set.
-  agent_project_roles = (
-    var.project_roles != null
-    ? var.project_roles
-    : (var.permission_set == "gke-admin" ? local.gke_admin_roles : local.read_only_roles)
-  )
+  agent_project_roles = var.project_roles != null ? var.project_roles : local.read_only_roles
 
   # Only non-empty credential keys end up in the Secret, so an unset optional
   # provider key does not create an empty entry.
@@ -133,7 +126,8 @@ locals {
   # Empty means the upstream registries.
   third_party_registry = trimsuffix(
     var.third_party_image_registry != "" ? var.third_party_image_registry : var.image_registry,
-  "/")
+    "/"
+  )
 
   # Mirrored image overrides for helm_release.cert_manager below. Destination
   # names follow images.json (<prefix>/<name>:<tag>) — the contract
@@ -223,14 +217,35 @@ module "gke_backup_plan" {
   encryption_key      = var.backup_encryption_key
 }
 
+locals {
+  # Indexed by the same key the kube-agents-iam module uses, so the emails
+  # coming back out of the module can be rejoined with the tuple that produced
+  # them without re-deriving anything.
+  scoped_pool_entries = {
+    for cluster in var.scoped_clusters :
+    "projects/${cluster.project_id}/locations/${cluster.location}/clusters/${cluster.cluster_name}" => cluster
+  }
+}
+
 module "kube_agents_iam" {
   source = "../../modules/kube-agents-iam"
 
-  project_id    = var.project_id
-  namespace     = var.namespace
-  project_roles = local.agent_project_roles
+  project_id      = var.project_id
+  namespace       = var.namespace
+  project_roles   = local.agent_project_roles
+  scoped_clusters = var.scoped_clusters
 
-  depends_on = [google_project_service.required]
+  # module.gke_cluster, and not only the API enablements, because the module's
+  # workload_identity binding names the pool as an interpolated string
+  # ("serviceAccount:${var.project_id}.svc.id.goog[...]") rather than as a
+  # reference to the cluster. Terraform therefore sees no edge between them and
+  # starts the binding as soon as the service account exists, roughly nine
+  # minutes before an Autopilot cluster finishes. The pool does not exist until
+  # the project's first Workload-Identity-enabled cluster does, so on a project
+  # that has never had one the apply fails with "Identity Pool does not exist".
+  # It survived this long because a pool outlives the cluster that created it:
+  # every project the composition had been applied to already had one.
+  depends_on = [google_project_service.required, module.gke_cluster]
 }
 
 # ─── Vertex AI gateway identity (model_provider = "vertex_ai") ────────────────
@@ -298,6 +313,72 @@ module "github_minter" {
   kms_key_name     = var.github_minter_kms_key
 
   depends_on = [google_project_service.required]
+}
+
+# Stockout Investigator Pub/Sub Infrastructure (Topic, Subscription, Logging Sink, IAM).
+# Declaratively provisioned by the composition when enable_stockout_investigator = true.
+# Matches the resource names and filter configuration created imperatively by
+# agentplugins/gke-stockout-investigator/install.sh.
+resource "google_pubsub_topic" "stockout_alerts" {
+  #checkov:skip=CKV_GCP_83:Stockout alert topic uses default Google-managed encryption keys
+  count   = var.enable_stockout_investigator ? 1 : 0
+  project = var.project_id
+  name    = var.stockout_pubsub_topic
+
+  depends_on = [google_project_service.required]
+}
+
+resource "google_pubsub_subscription" "stockout_alerts" {
+  count   = var.enable_stockout_investigator ? 1 : 0
+  project = var.project_id
+  name    = var.stockout_pubsub_subscription
+  topic   = google_pubsub_topic.stockout_alerts[0].id
+
+  ack_deadline_seconds       = 60
+  message_retention_duration = "604800s"
+
+  expiration_policy {
+    ttl = ""
+  }
+
+  retry_policy {
+    minimum_backoff = "10s"
+    maximum_backoff = "600s"
+  }
+}
+
+resource "google_logging_project_sink" "stockout_alerts" {
+  count       = var.enable_stockout_investigator ? 1 : 0
+  project     = var.project_id
+  name        = var.stockout_pubsub_sink
+  destination = "pubsub.googleapis.com/${google_pubsub_topic.stockout_alerts[0].id}"
+  filter      = "(log_id(\"test-stockout\") OR log_id(\"container.googleapis.com/cluster-autoscaler-visibility\")) AND (resource.labels.cluster_name=\"${module.gke_cluster.cluster_name}\" OR jsonPayload.resource.labels.cluster_name=\"${module.gke_cluster.cluster_name}\") AND (jsonPayload.messageId:(\"scale.up.error.out.of.resources\" OR \"scale.up.error.quota.exceeded\" OR \"scale.up.error.ip.space.exhausted\" OR \"scale.up.no.scale.up\") OR jsonPayload.noDecisionStatus.noScaleUp:* OR jsonPayload.resultInfo.results.errorMsg.messageId:(\"scale.up.error.out.of.resources\" OR \"scale.up.error.quota.exceeded\" OR \"scale.up.error.ip.space.exhausted\" OR \"scale.up.no.scale.up\"))"
+
+  unique_writer_identity = true
+}
+
+resource "google_pubsub_topic_iam_member" "stockout_sink_writer" {
+  count   = var.enable_stockout_investigator ? 1 : 0
+  project = var.project_id
+  topic   = google_pubsub_topic.stockout_alerts[0].name
+  role    = "roles/pubsub.publisher"
+  member  = google_logging_project_sink.stockout_alerts[0].writer_identity
+}
+
+resource "google_pubsub_subscription_iam_member" "stockout_agent_subscriber" {
+  count        = var.enable_stockout_investigator ? 1 : 0
+  project      = var.project_id
+  subscription = google_pubsub_subscription.stockout_alerts[0].name
+  role         = "roles/pubsub.subscriber"
+  member       = "serviceAccount:${module.kube_agents_iam.service_account_email}"
+}
+
+resource "google_pubsub_subscription_iam_member" "stockout_agent_viewer" {
+  count        = var.enable_stockout_investigator ? 1 : 0
+  project      = var.project_id
+  subscription = google_pubsub_subscription.stockout_alerts[0].name
+  role         = "roles/pubsub.viewer"
+  member       = "serviceAccount:${module.kube_agents_iam.service_account_email}"
 }
 
 # cert-manager, the certificate source for the operator's admission webhooks.
@@ -455,6 +536,19 @@ resource "helm_release" "kube_agents" {
         serviceAccountAnnotations = {
           "iam.gke.io/gcp-service-account" = module.kube_agents_iam.service_account_email
         }
+        # The mapping the credential broker selects from. It has to reach the
+        # cluster as data rather than being recomputed there: the broker refuses
+        # a scope it has no entry for, so a second implementation of the naming
+        # rule would turn a mismatch into a refusal at request time instead of a
+        # diff at plan time.
+        scopedServiceAccounts = [
+          for key in sort(keys(module.kube_agents_iam.scoped_service_accounts)) : {
+            projectId           = local.scoped_pool_entries[key].project_id
+            location            = local.scoped_pool_entries[key].location
+            clusterName         = local.scoped_pool_entries[key].cluster_name
+            serviceAccountEmail = module.kube_agents_iam.scoped_service_accounts[key]
+          }
+        ]
       }
       credentials = {
         create = true
@@ -479,8 +573,11 @@ resource "helm_release" "kube_agents" {
             homeChannelName = var.slack_home_channel_name
           }
         } : {},
-        var.github_repo != "" ? {
-          github = { gitRepo = var.github_repo }
+        (local.github_org != "" || var.github_repo != "") ? {
+          github = merge(
+            local.github_org != "" ? { org = local.github_org } : {},
+            var.github_repo != "" ? { gitRepo = var.github_repo } : {}
+          )
         } : {}
       )
     }
@@ -498,6 +595,34 @@ resource "helm_release" "kube_agents" {
         keyring = var.github_minter_kms_keyring
         key     = var.github_minter_kms_key
       }
+    }
+    plugins = {
+      pubsubPlatform = merge(
+        {
+          enabled = var.enable_pubsub_platform || var.enable_stockout_investigator
+        },
+        var.image_tag != "" ? {
+          image = {
+            tag = var.image_tag
+          }
+        } : {}
+      )
+      stockoutInvestigator = merge(
+        {
+          enabled     = var.enable_stockout_investigator
+          clusterName = module.gke_cluster.cluster_name
+          pubsub = {
+            topic        = var.stockout_pubsub_topic
+            subscription = var.stockout_pubsub_subscription
+            sink         = var.stockout_pubsub_sink
+          }
+        },
+        var.image_tag != "" ? {
+          image = {
+            tag = var.image_tag
+          }
+        } : {}
+      )
     }
     }),
     # Second document rather than a merge() into the first: Helm deep-merges
@@ -518,6 +643,12 @@ resource "helm_release" "kube_agents" {
     google_project_service.vertex_ai,
     google_project_iam_member.litellm_vertex_user,
     helm_release.cert_manager,
+    google_pubsub_topic.stockout_alerts,
+    google_pubsub_subscription.stockout_alerts,
+    google_logging_project_sink.stockout_alerts,
+    google_pubsub_topic_iam_member.stockout_sink_writer,
+    google_pubsub_subscription_iam_member.stockout_agent_subscriber,
+    google_pubsub_subscription_iam_member.stockout_agent_viewer,
   ]
 
   lifecycle {

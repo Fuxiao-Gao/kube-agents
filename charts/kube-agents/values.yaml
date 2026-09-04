@@ -1,3 +1,25 @@
+# Cluster-wide ValidatingAdmissionPolicies that backstop agent RBAC at apply
+# time: read verbs only, no Secrets, and no cluster-scoped binding to a
+# namespace-tier agent ServiceAccount. Read the header of
+# templates/agent-rbac-admission-policy.yaml before relying on them — notably,
+# they cannot check the rules of a *referenced* Role, and the content policy is
+# evadable by a manifest that carries neither the `kube-agents/tier` label nor
+# the `*-agent` naming convention.
+#
+# You do not need to turn this off for an old cluster: the template also checks
+# `.Capabilities.KubeVersion` and renders nothing below Kubernetes 1.30, where
+# the policy API is not yet v1 and the objects would fail to apply. Turn it off
+# for a second kube-agents release in a cluster that already has these — they
+# are cluster singletons with fixed names, so Helm refuses the second install on
+# ownership rather than duplicating them.
+#
+# What the policies do and do not enforce is in the header of
+# templates/agent-rbac-admission-policy.yaml. Read it before relying on them:
+# on a default install with no GitOps overlay, the content policy matches
+# nothing the operator creates.
+admissionPolicy:
+  enabled: true
+
 global:
   # Registry prefix for the images built from this repo (operator, agent,
   # credential proxy). Empty leaves them on the public defaults below.
@@ -195,9 +217,43 @@ litellm:
     # copies: a chart pinned to a version the mirror was never populated with
     # is an ImagePullBackOff. This pin sat a release behind the kustomize base
     # for exactly that reason.
-    tag: v1.96.2
+    tag: v1.98.0
     pullPolicy: IfNotPresent
   replicaCount: 2
+  # Rollout strategy — the canonical home for this argument. The chart template
+  # and examples/litellm-gemini defer here directly; the kustomize base defers
+  # to the template, which defers on to this. Unlike
+  # podDisruptionBudget below this one is configurable, because the right answer
+  # depends on something the chart cannot see: whether a namespace ResourceQuota
+  # has room for a surge Pod.
+  #
+  # maxUnavailable: 0 is the zero-downtime shape, and it makes the surge Pod
+  # mandatory — under a full quota the old ReplicaSet may not shrink, the surge
+  # Pod is refused with FailedCreate, and the rollout stalls rather than
+  # completing (#749).
+  #
+  # The default of 1 lets the Deployment replace in place, and that trade is
+  # taken on every install rather than only quota-constrained ones: at 0 a
+  # rollout cost no serving capacity at all, and at 1 the old ReplicaSet gives up
+  # a slot as soon as it starts. At the default replicaCount of 2 one replica
+  # keeps serving throughout. At replicaCount 1 there is no second replica, so a
+  # rollout becomes a real gap for as long as the new Pod takes to pass its
+  # startupProbe — up to the 3 minutes that probe sanctions.
+  #
+  # Set maxUnavailable to 0 on an install with quota headroom that would rather a
+  # rollout stall than drop a request; keep 1 anywhere a baseline quota is applied
+  # as policy. Both at 0 is rejected in any spelling — 0, "0", 0%, 0.0 — and the
+  # template fails the render rather than letting it reach the cluster, where the
+  # API server would reject it anyway.
+  #
+  # Emptying a fencepost rather than setting it (`--set …maxUnavailable=`, or
+  # `maxUnavailable: ""`, or removing the key) resolves to the 1 below, not to
+  # nothing. Rendering it empty would hand Kubernetes its own 25% default, which
+  # rounds down to 0 at replicaCount 2 — the stall above, reached silently. Keep
+  # these two literals in step with that fallback in templates/litellm.yaml.
+  rollingUpdate:
+    maxSurge: 1
+    maxUnavailable: 1
   podDisruptionBudget:
     # Renders maxUnavailable: 1 at any replicaCount. The budget is deliberately
     # not configurable: minAvailable is the shape that deadlocks node drains,
@@ -236,7 +292,7 @@ hindsight:
     # tag, because that is what mirror-images pushes.
     image:
       repository: ghcr.io/vectorize-io/hindsight-api
-      tag: "0.9.1@sha256:24a079bead8aa58e45d728bf535ea727bfe559d8784024b6b9f89d56646954ab"
+      tag: "0.9.2@sha256:7b14a1f4062252992d0176758753615e0a2071d9a269995be007be223ab01812"
       pullPolicy: IfNotPresent
     # Recall is CPU-bound on the in-process cross-encoder reranker; see the
     # template before raising these — more CPU has been measured to buy
@@ -249,12 +305,12 @@ hindsight:
         cpu: "4"
         memory: 4Gi
   postgresql:
-    # Upstream publishes only a floating `latest`; the digest is the real pin.
-    # The images.json entry is named hindsight-postgresql, which is where a
-    # mirror holds the copy.
+    # Keep in step with images.json (`make mirror-images` copies from it), where
+    # the entry is named hindsight-postgresql and carries the constraints on
+    # this tag — the pg15 line among them. Read them there before changing it.
     image:
-      repository: docker.io/ankane/pgvector
-      tag: "latest@sha256:956744bd14e9cbdf639c61c2a2a7c7c2c48a9c8cdd42f7de4ac034f4e96b90f8"
+      repository: docker.io/pgvector/pgvector
+      tag: "0.8.6-pg15@sha256:a947c45cdc5906a1bc951f20a8709e321256343ee0f251e4ae00b5e7def4e6da"
       pullPolicy: IfNotPresent
     resources:
       requests:
@@ -332,7 +388,7 @@ githubMinter:
 fluentBit:
   image:
     repository: docker.io/fluent/fluent-bit
-    tag: "5.1.0"
+    tag: "5.1.1"
 
 platformAgent:
   enabled: true
@@ -360,6 +416,18 @@ platformAgent:
       enabled: null # CRD default: false
       provider: "" # CRD default: multiuser_memory
       userProfileEnabled: null # CRD default: false
+    # Execution limits per agent persona. Empty omits the field so CRD/Hermes
+    # defaults apply. When plugins.stockoutInvestigator.enabled=true, the chart
+    # automatically applies tuning (maxInProgress: 3, platform.maxTurns: 200,
+    # cluster.maxTurns: 150) unless overridden here.
+    tuning: {}
+      # maxInProgress: 3
+      # platform:
+      #   apiMaxRetries: 8
+      #   maxTurns: 200
+      # cluster:
+      #   apiMaxRetries: 8
+      #   maxTurns: 150
   deployment:
     image:
       repository: ghcr.io/gke-labs/kube-agents/platform-agent
@@ -376,18 +444,38 @@ platformAgent:
     availability:
       # Number of agent pods. `null` omits the field; the operator defaults to 1.
       replicas: null
-      # RuntimeClass for the agent pod. Set to "gvisor" for GKE Sandbox kernel
-      # isolation — on a Standard cluster that needs the sandbox node pool the
-      # gke-cluster module's enable_gvisor_node_pool creates; Autopilot ships
-      # the RuntimeClass natively. Empty omits the field.
-      runtimeClassName: ""
+      # RuntimeClass for the agent pod. "gvisor" asks for GKE Sandbox kernel
+      # isolation, and is the default because the agent executes model-authored
+      # commands and an unsandboxed pod shares the node kernel with everything
+      # else scheduled there.
+      #
+      # Autopilot ships the RuntimeClass natively (GKE 1.27.4-gke.800 and
+      # later). A Standard cluster needs the sandbox node pool that the
+      # gke-cluster module's enable_gvisor_node_pool creates; without it the
+      # operator refuses to write the agent Deployment and reports
+      # RuntimeClassNotFound on the PlatformAgent. Set "" to omit the field and
+      # run on the standard container runtime.
+      #
+      # The Terraform composition always passes this explicitly (from
+      # agent_runtime_class, which install.sh derives from --gvisor), so this
+      # default is what a direct `helm install` gets -- and what a `helm
+      # upgrade` of a release that never set the key adopts, since Helm merges
+      # the new chart's defaults. That upgrade path fails quietly where the
+      # RuntimeClass is missing: the operator stops before reconciling the
+      # workload, so the previous unsandboxed Deployment keeps running while
+      # .status says Degraded. See the chart README's Usage section.
+      runtimeClassName: "gvisor"
     # Extra environment for the agent container, applied after the operator's own
-    # values so it overrides them. The case this exists for is telemetry: the
-    # operator's endpoint ladder always resolves to SOMETHING — an in-cluster
-    # collector if it discovers one, otherwise the GKE managed collector at
-    # opentelemetry-collector.gke-managed-otel — and a cluster that runs neither
-    # has no way to say "no telemetry". The exporter then retries a hostname that
-    # does not resolve for the life of the pod. Turn it off with:
+    # values so it overrides them. Telemetry is the case this exists for, though
+    # a cluster with no collector no longer needs it: when discovery completes
+    # and finds none, the operator itself omits the endpoint and sets
+    # OTEL_SDK_DISABLED=true, and reports `None` in
+    # status.telemetry.otlpEndpointSource.
+    #
+    # What is left for this field is the cases the operator will not decide —
+    # discovery switched off with OTEL_COLLECTOR_DISCOVERY=false, an endpoint
+    # pinned through telemetry.otlpEndpoint, or a collector that exists but that
+    # you do not want this agent exporting to:
     #
     #   env:
     #     - name: OTEL_SDK_DISABLED
@@ -406,8 +494,10 @@ platformAgent:
     enabled: true
     # Needs kubectl AND a shell: the `|| true` that keeps a wait timeout from
     # failing the hook (and with it the whole uninstall) needs `sh -c`, which
-    # rules out the distroless registry.k8s.io/kubectl. Skew of a minor or two
-    # is fine for a delete.
+    # rules out the distroless registry.k8s.io/kubectl. One pin serves the whole
+    # kubeVersion range rather than tracking the server, because the hook only
+    # deletes a CRD-backed object and waits on it — never the built-in API
+    # surface kubectl's +/-1 skew policy governs.
     #
     # Third-party, so it follows global.thirdPartyImageRegistry: an uninstall
     # on an air-gapped cluster otherwise fails to pull the very hook that keeps
@@ -415,7 +505,7 @@ platformAgent:
     # images.json like every other third-party image.
     image:
       repository: docker.io/alpine/k8s
-      tag: "1.34.9"
+      tag: "1.36.2"
     # How long to wait for the finalizer to clear.
     timeout: 120s
     # Bounds the Job itself (image pull, scheduling) above that wait.
@@ -423,7 +513,7 @@ platformAgent:
   security:
     # Kubernetes ServiceAccount the agent pod runs as. The Workload Identity
     # binding must target this KSA (see the chart README); the default matches
-    # PLATFORM_AGENT_KSA_NAME in k8s-operator/scripts/common.sh.
+    # PLATFORM_AGENT_KSA_NAME in scripts/installer/common.sh.
     # Ownership: with serviceAccountAnnotations set, the OPERATOR creates and
     # manages the KSA; with no annotations, the operator treats it as
     # user-managed and the CHART creates it instead.
@@ -431,6 +521,34 @@ platformAgent:
     # Annotations applied to that KSA, e.g. for Workload Identity:
     #   iam.gke.io/gcp-service-account: <GSA>@<project>.iam.gserviceaccount.com
     serviceAccountAnnotations: {}
+    # One Google service account per GKE cluster the agent may read, each
+    # provisioned by Terraform. The credential broker mints a short-lived token
+    # for the account a request's cluster maps to, instead of using the agent's
+    # own identity -- which, with a project-level roles/container.viewer, reads
+    # objects in every cluster in the project.
+    #
+    # Empty by default, and it should stay empty until per-cluster RBAC lands.
+    # A pool member holds no IAM grant: the IAM Condition that scoped it grants
+    # nothing for Kubernetes object operations (measured 2026-08-12) and the
+    # un-conditioned binding is project-wide roles/container.viewer, so both
+    # were removed. A non-empty list here arms the broker, which would then
+    # select a powerless identity for every request.
+    #
+    # The terraform/examples/full-install composition fills this in from its
+    # `scoped_service_accounts` output; take the values from there rather than
+    # deriving the account names, since the broker matches them exactly.
+    #
+    # A cluster that is not listed is REFUSED, not served by a wider credential.
+    # Leaving the list empty keeps the previous single-identity behaviour and
+    # renders CREDENTIAL_PROXY_SCOPED_SA_POOL=0 on the broker container, so the
+    # mode an install is in is readable from the Deployment.
+    #
+    #   scopedServiceAccounts:
+    #     - projectId: my-project
+    #       location: us-east4
+    #       clusterName: my-cluster
+    #       serviceAccountEmail: ka-my-cluster-1a2b3c4d@my-project.iam.gserviceaccount.com
+    scopedServiceAccounts: []
   credentials:
     # Secret holding the agent's credential keys: API_SERVER_KEY plus the
     # model-provider key(s) (ANTHROPIC_API_KEY / GEMINI_API_KEY /
@@ -459,10 +577,34 @@ platformAgent:
     # add them to the existing Secret (upgrade.sh backfills them additively).
     create: false
     data: {}
+  # spec.networkPolicy on the PlatformAgent CR, passed through verbatim. Empty
+  # omits the field, which is what leaves the operator to discover the cluster
+  # DNS ClusterIPs and use the default metadata-daemon address. Not to be
+  # confused with the `networkPolicy: true` booleans under litellm, hindsight
+  # and githubMinter above, which toggle those components' own policies.
+  #
+  #   networkPolicy:
+  #     enabled: true              # false stops generation and deletes the
+  #                                # operator-owned <name>-gateway-netpol and
+  #                                # <name>-fqdn-netpol
+  #     dnsClusterIPs: ["10.96.0.10"]
+  #     metadataDaemon:
+  #       endpoint: "169.254.169.252"  # "" suppresses the post-NAT rule
+  #     additionalEgress:
+  #       - to: [{ cidr: "10.200.0.0/16" }]
+  #         ports: [{ protocol: TCP, port: 5432 }]
+  #
+  # Reference: docs/site/src/content/docs/operator/platformagent-crd.md
+  networkPolicy: {}
   integration:
     github:
-      # Target GitOps repository for the GitHub integration (owner/repo or
-      # URL). Empty leaves the GitHub integration unconfigured.
+      # Target GitHub Organization where the GitHub App is installed (optional).
+      # If omitted and gitRepo is specified, the organization is inferred from the repository owner.
+      # If both are empty, GitHub integration remains unconfigured.
+      org: ""
+      # Primary GitOps repository URL or owner/repo shorthand (optional).
+      # If omitted or empty, the agent starts with no registered repos, and
+      # repositories can be registered in the gitops-state ConfigMap by a cluster administrator.
       gitRepo: ""
     googleChat:
       # Requires the Chat Pub/Sub backend (terraform/modules/chat-pubsub).
@@ -483,3 +625,53 @@ platformAgent:
       allowedUsers: []
       homeChannel: ""
       homeChannelName: ""
+    teams:
+      # Microsoft Teams ChatOps integration via Microsoft Bot Framework / Entra ID.
+      # App ID and App Password are read from credentials.secretName under
+      # TEAMS_APP_ID and TEAMS_APP_PASSWORD.
+      enabled: false
+      # Microsoft Entra ID Tenant ID for single-tenant enterprise lock-down.
+      tenantId: ""
+      # Restrict bot interactions to specific Entra ID Object IDs or UPN emails.
+      # When empty and allowAllUsers is false, interactions are rejected.
+      allowedUsers: []
+      # Set to true to allow any authenticated user in the tenant to interact with the bot.
+      allowAllUsers: false
+      # Default conversation ID / channel for asynchronous alerts and reports.
+      homeChannel: ""
+      # Bot Framework Service URL (defaults to Microsoft public cloud endpoint).
+      serviceUrl: "https://smba.trafficmanager.net/teams/"
+      # Render responses with Microsoft Adaptive Cards v1.5 (markdown fallback if false).
+      adaptiveCards: true
+
+# AgentPlugins deployed into the cluster.
+plugins:
+  # Pub/Sub platform adapter AgentPlugin: opens the event listener for Cloud Pub/Sub subscriptions.
+  pubsubPlatform:
+    enabled: false
+    name: pubsubplatform
+    agentRef: "" # defaults to platformAgent.name
+    image:
+      repository: ghcr.io/gke-labs/kube-agents/pubsub-platform
+      tag: "" # defaults to Chart.appVersion
+      pullPolicy: IfNotPresent
+
+  # GKE Stockout Investigator AgentPlugin: diagnoses autoscaler scale-up failures and opens GitOps PRs.
+  # Requires plugins.pubsubPlatform.enabled=true for alert ingress.
+  stockoutInvestigator:
+    enabled: false
+    name: gkestockoutinvestigator
+    agentRef: "" # defaults to platformAgent.name
+    targetProfile: platform
+    # Target cluster name. Required when enabled (defaults to platformAgent.harness.clusterName if empty).
+    clusterName: ""
+    image:
+      repository: ghcr.io/gke-labs/kube-agents/gke-stockout-investigator
+      tag: "" # defaults to Chart.appVersion
+      pullPolicy: IfNotPresent
+    pubsub:
+      topic: gke-stockout-alerts-topic
+      subscription: gke-stockout-alerts-sub
+      sink: gke-stockout-alerts-sink
+      thresholdCount: 1
+      thresholdWindowSeconds: 300

@@ -140,7 +140,7 @@ pip install -r tests/e2e/requirements.txt
 > **Note on Local Runs**: When running locally without `E2E_CHAT_*` environment variables, the test runner automatically falls back to your personal `gcloud` ADC credentials. You can run the test locally against any GCP project and target Google Chat Space without requiring OTA user credentials!
 
 ```bash
-source k8s-operator/scripts/vars.sh
+set -a; . install.env; set +a
 export CHAT_SPACE_ID="spaces/XXXXXXXXX"
 
 gcloud auth application-default set-quota-project "$PROJECT_ID"
@@ -263,9 +263,48 @@ On a host without a Docker daemon, add `IMAGE_BUILDER=crane`.
 
 ---
 
+## 🔒 Credential Isolation E2E (`tests/e2e/operator/credential_isolation_e2e_test.py`)
+
+Asserts, at runtime, the credential boundary between the sandbox and the credential broker. The operator's Go tests assert the _inputs_ — `shareProcessNamespace` left unset, split UIDs, broker-private volumes — and a rendered manifest cannot tell you what the kernel actually shows one container about another. This closes that gap and there is no way to close it without a cluster, so there is no CI job for it.
+
+Unlike the AgentPlugins suite it is **read-only and safe to run against a cluster you care about**: no image build, no registry, no writes. It runs `id` and reads `/proc` and `/proc/self/mounts`.
+
+### Prerequisites
+
+- Active `kubectl` context with `exec` permission on the agent namespace.
+- A running agent Pod in the **sidecar layout**, which is what the operator renders today. If the broker is ever in a Pod of its own the suite exits without running, rather than passing vacuously — the containers are then in different Pods and there is no shared process namespace to check.
+
+### Environment variables
+
+| Variable       | Required | Purpose                                    |
+| -------------- | -------- | ------------------------------------------ |
+| `KUBE_CONTEXT` | Yes      | `kubectl` context of the target cluster.   |
+| `NAMESPACE`    | Yes      | Namespace holding the `PlatformAgent` Pod. |
+
+### Execution
+
+```bash
+KUBE_CONTEXT="gke_my-project_europe-west1_ka-dev-mgmt" \
+NAMESPACE="kubeagents-system" \
+python3 tests/e2e/operator/credential_isolation_e2e_test.py
+```
+
+### What it checks
+
+1. **PID 1 is each container's own entrypoint**, not the Pod infra (`pause`) process — the first observable consequence of `shareProcessNamespace: true`.
+2. **The broker is actually running the credential proxy.** Checked _before_ the scan below, because a crash-looping broker and an invisible broker produce the same empty result.
+3. **No broker process appears in the agent container's `/proc`** — the second observable consequence, asserted separately because a CRI quirk could mask either one alone. Paired with a positive control requiring the scan to have returned _some_ process, so an empty result cannot be mistaken for isolation.
+4. **No `/proc/<pid>/environ` the agent can read carries the broker's environment.** The consequence stated directly rather than inferred, so it catches a credential-holding process this file does not know to look for by name. Also paired with a positive control: the identical command is run in the broker container, where a hit is guaranteed, and is required to find one. This is the only check whose external tool (`grep`) is exercised nowhere else, and an absence-of-output assertion cannot otherwise tell "nothing to find" from "nothing ran".
+5. **The two containers run as different users** (10000 and 10001). Reading another process's environ needs ptrace-level access, which the kernel grants on a UID match; splitting the UIDs removes that even if the shared namespace ever returns.
+6. **The agent mounts neither the broker's HOME nor its backend socket directory.** Asserted against the agent's mount table, not against whether the directory exists: an empty directory of the same name passes either way, and it is the mount that decides whether the bytes are shared. `kubectl` reads `$HOME/.kube/kuberc` with no flag at all and a kuberc can set `as`, so a writable broker HOME is caller-supplied impersonation through a file.
+
+---
+
 ## 🤖 Running in GitHub Actions (CI)
 
-The workflow file [`.github/workflows/e2e-gchat-test.yml`](../../.github/workflows/e2e-gchat-test.yml) is triggered manually via `workflow_dispatch` (or via GitHub CLI / Web UI).
+Three workflows run this suite. [`.github/workflows/e2e-gchat-test.yml`](../../.github/workflows/e2e-gchat-test.yml) and [`.github/workflows/e2e-manual-runner.yml`](../../.github/workflows/e2e-manual-runner.yml) are triggered by hand via `workflow_dispatch` (or via GitHub CLI / Web UI). The third is [`.github/workflows/e2e-run.yml`](../../.github/workflows/e2e-run.yml), which runs nothing on its own — it is the reusable job that calls `scripts/release/execute_e2e_tests.sh`, and both pipelines delegate to it. [`.github/workflows/rc-release-pipeline.yml`](../../.github/workflows/rc-release-pipeline.yml) calls it unattended and `step-4-tag-validated` depends on the result, so a break here stops the release-candidate tag within three hours. That pipeline carries no schedule of its own: [`.github/workflows/rc-scheduler.yml`](../../.github/workflows/rc-scheduler.yml) runs three-hourly and dispatches it only when there is a new candidate, so a tick with nothing to do leaves no run behind to be mistaken for a passing one. [`.github/workflows/nightly-pipeline.yml`](../../.github/workflows/nightly-pipeline.yml) calls it too, gating the staging promotion — that one is `workflow_dispatch`-only for now, so it runs when somebody starts it.
+
+Each caller splits its suites into a gate and tolerated coverage. `blocking_suite` fails the run; `optional_suites`, a comma-separated list run by `scripts/release/run_optional_e2e_suites.sh`, reports and does not. The split is evidence rather than preference: a suite gates a promotion once it has passed on a real cluster, and runs as optional coverage until then. The RC pipeline gates on `gchat` and tolerates `rc`; the nightly pipeline gates on `rc` — the subset the RC pipeline exercises every three hours — and tolerates `agent-plugin`, `gchat` and `stockout-full`, which between them cover every file the `nightly` suite adds. Per-suite filters such as `STOCKOUT_SCENARIOS` are declared in the suite's `env_vars` in `e2e_config.yaml`, not passed from the workflow, because one workflow input cannot carry a different value for each suite in a list.
 
 ### Triggering Workflow via GitHub CLI (`gh`):
 

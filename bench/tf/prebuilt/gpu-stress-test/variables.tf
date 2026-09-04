@@ -20,6 +20,17 @@ variable "infra_provider" {
   description = "The target cloud provider (gcp, kind)"
 }
 
+# Set via TF_VAR_reuse_existing_cluster by hack/ci-eval-pr.sh when the leased
+# project carries the standing seeded fleet (bench/tf/fleet): the stack then
+# creates no cluster, plants its Cloud Logging fixture against the existing
+# cluster named by `cluster_name`/`location`, and destroy leaves that cluster
+# standing. false keeps the per-run cluster for a project without a fleet.
+variable "reuse_existing_cluster" {
+  type        = bool
+  description = "Create no cluster; treat cluster_name/location as an existing cluster the log fixture refers to."
+  default     = false
+}
+
 variable "cluster_name" {
   type        = string
   description = "Name of the cluster to provision"
@@ -37,10 +48,16 @@ variable "node_count" {
   default     = 1
 }
 
+# General-purpose on purpose. The node runs the GKE system pods and nothing
+# else -- the incident this stack stands up is seeded into Cloud Logging, not
+# scheduled onto the cluster -- so an accelerator machine family bought
+# nothing but cost and a stockout surface. Keep this off the g2-*/a2-*
+# families: the gke submodule infers a GPU from the machine family alone
+# (`local.is_g2`), so putting one back here re-attaches an L4 silently.
 variable "machine_type" {
   type        = string
   description = "VM instance type"
-  default     = "g2-standard-4"
+  default     = "e2-standard-4"
 }
 
 variable "project_id" {

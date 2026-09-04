@@ -28,6 +28,7 @@ import io
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
@@ -219,8 +220,8 @@ class CardBucketTest(unittest.TestCase):
     cards. A worker that ends its turn before the skill's Step 2 — which Step 1
     prescribes on an ``ERROR`` status — leaves the issue with no ``status:``
     label, so the poll keeps returning it and the key keeps suppressing it. The
-    poll returns only the lowest-numbered unaddressed issue, so that also hides
-    every higher-numbered one.
+    poll returns exactly one issue per tick — the highest-priority unaddressed
+    one — so that also hides every other issue.
     """
 
     PAYLOAD = {
@@ -264,6 +265,54 @@ class CardBucketTest(unittest.TestCase):
         card = gate._issue_card(self.PAYLOAD)
         expected = datetime.now(timezone.utc).strftime(gate.CARD_BUCKET_FORMAT)
         self.assertTrue(card.idempotency_key.endswith(expected))
+
+
+class IssueCardTitleTest(unittest.TestCase):
+    """The card title is human-facing, so it takes the resolver's plain title.
+
+    ``resolver.handle_poll`` emits the issue title twice: ``title``, wrapped in
+    ``<untrusted_title>`` boundary tags for the model, and ``title_plain`` for
+    everywhere else. The payloads elsewhere in this file are hand-written with a
+    bare ``title``, so they cannot tell the two apart — which is why this class
+    builds its fixture in the shape ``handle_poll`` actually prints.
+    """
+
+    #: Shaped as ``handle_poll`` actually prints it, not as a test finds
+    #: convenient — the mismatch between those two is the bug being pinned.
+    def _payload(self, plain):
+        return {
+            "status": "FOUND",
+            "repository": "gke-labs/kube-agents",
+            "issue_number": 42,
+            "title": f"<untrusted_title>{plain}</untrusted_title>",
+            "title_plain": plain,
+            "body": "<untrusted_body>b</untrusted_body>",
+        }
+
+    def test_the_card_title_carries_no_boundary_markup(self):
+        card = gate._issue_card(self._payload("Pods crashlooping"))
+        self.assertEqual(
+            card.title, "Triage and resolve gke-labs/kube-agents#42: Pods crashlooping"
+        )
+        self.assertNotIn("untrusted_title", card.title)
+
+    def test_a_long_title_cannot_leave_an_unclosed_boundary_tag(self):
+        """The 200-character cut is where reading ``title`` got dangerous.
+
+        The prefix plus an opening ``<untrusted_title>`` is about 62 characters,
+        so a title past roughly 120 had its closing tag sliced off and the card
+        reached the worker with an opening boundary marker and no close.
+        """
+        card = gate._issue_card(self._payload("Ingress 502s on payments " * 8))
+        self.assertLessEqual(len(card.title), 200)
+        self.assertNotIn("<untrusted", card.title)
+
+    def test_a_payload_without_title_plain_still_files_a_card(self):
+        """A card queued before the resolver grew ``title_plain``."""
+        card = gate._issue_card(
+            {"status": "FOUND", "repository": "o/r", "issue_number": 7, "title": "t"}
+        )
+        self.assertEqual(card.title, "Triage and resolve o/r#7: t")
 
 
 class PrCardKeyTest(unittest.TestCase):
@@ -521,12 +570,61 @@ class PostBodyTest(unittest.TestCase):
                 gate._post_body(recorder, "acme/toolkit", make_pr(), "x")
             self.assertFalse(Path(recorder.path).exists())
 
-    def test_an_absent_volume_falls_back_rather_than_crashing(self):
-        """Off-cluster there is no /opt/data, and the unit tests still run."""
+    def test_the_body_file_is_group_readable_across_the_uid_split(self):
+        """Since #955 the sidecar running `gh` is a different uid; the 0600
+        file `NamedTemporaryFile` creates is unreadable to it even on the
+        shared volume, so the group bits are load-bearing."""
+        import os as _os
+        import tempfile as _tempfile
+
+        modes = []
         recorder = self._Recorder()
-        with mock.patch.object(gate, "SCRATCH_DIR", "/proc/nonexistent/scratch"):
-            gate._post_body(recorder, "acme/toolkit", make_pr(), "x")
-        self.assertEqual(recorder.body, "x")
+        original = recorder.post_comment
+
+        def post_and_stat(repo, pr, body_file):
+            modes.append(_os.stat(body_file).st_mode)
+            original(repo, pr, body_file)
+
+        recorder.post_comment = post_and_stat
+        with _tempfile.TemporaryDirectory() as shared:
+            with mock.patch.object(gate, "SCRATCH_DIR", shared):
+                gate._post_body(recorder, "acme/toolkit", make_pr(), "the refusal")
+        self.assertEqual(
+            modes[0] & 0o060,
+            0o060,
+            f"body file is {oct(modes[0] & 0o777)}: the sidecar can only read "
+            "it through the group bits",
+        )
+
+    def test_an_unusable_volume_fails_loudly_with_no_private_tmp_file(self):
+        """The old silent fallback to the system temp dir guaranteed failure
+        in-cluster — the sidecar can never see this container's private tmp —
+        while looking like a graceful degrade (#1030). It must raise instead,
+        and leave nothing behind in the private temp dir."""
+        import tempfile as _tempfile
+
+        recorder = self._Recorder()
+        with _tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp) / "readonly"
+            parent.mkdir()
+            parent.chmod(0o500)
+            private = Path(tmp) / "private-tmp"
+            private.mkdir()
+            try:
+                with mock.patch.object(
+                    gate, "SCRATCH_DIR", str(parent / "scratch")
+                ), mock.patch.object(_tempfile, "tempdir", str(private)):
+                    with self.assertRaises(RuntimeError) as ctx:
+                        gate._post_body(recorder, "acme/toolkit", make_pr(), "x")
+            finally:
+                parent.chmod(0o700)
+            message = str(ctx.exception)
+            self.assertIn("publish path broken", message)
+            self.assertIn("#1030", message)
+            self.assertIsNone(
+                recorder.path, "nothing must be posted from a private file"
+            )
+            self.assertEqual(list(private.iterdir()), [])
 
 
 # ---------------------------------------------------------------------------
@@ -619,9 +717,22 @@ def make_comment(
 
 
 class PrCommentsSweepTest(unittest.TestCase):
+    def setUp(self):
+        # A refusal posts through `_post_body`, which stages the body on the
+        # shared volume and — since the silent private-tmp fallback died with
+        # #1030 — raises where /opt/data does not exist. Off-cluster that is
+        # here, so point it at a directory that does.
+        import tempfile as _tempfile
+
+        scratch = _tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        patcher = mock.patch.object(gate, "SCRATCH_DIR", scratch.name)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _sweep(self, provider, repo=REPO, env=None, repo_error=None, dry_run=False):
-        target = mock.Mock(side_effect=repo_error) if repo_error else mock.Mock(return_value=repo)
-        with mock.patch.object(forge, "target_repo", target), \
+        managed_mock = mock.Mock(side_effect=repo_error) if repo_error else mock.Mock(return_value=[repo] if repo else [])
+        with mock.patch("gitops_workspace.get_managed_github_repos", managed_mock), \
              mock.patch.object(forge, "provider_for", return_value=provider), \
              mock.patch.dict("os.environ", env or {}, clear=False):
             import os
@@ -725,6 +836,36 @@ class PrCommentsSweepTest(unittest.TestCase):
             },
         )
         self.assertEqual(len(self._sweep(provider).cards), 2)
+
+    def test_sweep_across_multiple_repositories(self):
+        """sweep_pr_comments iterates across all managed repos and files cards per repo."""
+        pr1 = make_pr(1, head_ref="platform-agent/fix-1", head_repo="acme/repo1")
+        pr2 = make_pr(2, head_ref="platform-agent/fix-2", head_repo="acme/repo2")
+
+        class MultiRepoFakeProvider(FakeProvider):
+            def list_open_prs(self, repo):
+                if repo == "acme/repo1":
+                    return [pr1]
+                elif repo == "acme/repo2":
+                    return [pr2]
+                return []
+
+            def list_comments(self, repo, pr):
+                if repo == "acme/repo1" and pr.number == 1:
+                    return [make_comment("IC_1", "/agent fix repo1")]
+                elif repo == "acme/repo2" and pr.number == 2:
+                    return [make_comment("IC_2", "/agent fix repo2")]
+                return []
+
+        provider = MultiRepoFakeProvider()
+        managed_mock = mock.Mock(return_value=["acme/repo1", "acme/repo2"])
+        with mock.patch("gitops_workspace.get_managed_github_repos", managed_mock), \
+             mock.patch.object(forge, "provider_for", return_value=provider):
+            res = gate.sweep_pr_comments()
+            self.assertEqual(len(res.cards), 2)
+            keys = [card.idempotency_key for card in res.cards]
+            self.assertTrue(any("acme-repo1-1" in k for k in keys))
+            self.assertTrue(any("acme-repo2-2" in k for k in keys))
 
     def test_the_card_body_says_it_is_a_pointer_not_a_transcript(self):
         provider = FakeProvider(
@@ -1137,6 +1278,49 @@ class PrCommentsSweepTest(unittest.TestCase):
         provider = FakeProvider()
         self._sweep(provider)
         self.assertTrue(provider.preflighted)
+
+
+class ResolverPathTest(unittest.TestCase):
+    def test_finds_resolver_in_platform_profile(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            target = home / gate.PLATFORM_PROFILE_DIR / gate.RESOLVER_REL
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("#!/usr/bin/env python3\n")
+            with mock.patch("github_scan_gate.hermes_home", return_value=home):
+                self.assertEqual(gate._resolver_path(), target)
+
+    def test_finds_resolver_in_home_root(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            target = home / gate.RESOLVER_REL
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("#!/usr/bin/env python3\n")
+            with mock.patch("github_scan_gate.hermes_home", return_value=home):
+                self.assertEqual(gate._resolver_path(), target)
+
+    def test_finds_resolver_in_platform_template(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "data"
+            home.mkdir(parents=True, exist_ok=True)
+            template_root = Path(tmpdir) / "template"
+            target = template_root / gate.RESOLVER_REL
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("#!/usr/bin/env python3\n")
+            with mock.patch("github_scan_gate.hermes_home", return_value=home), \
+                 mock.patch.object(gate, "PLATFORM_TEMPLATE_DIR", str(template_root)):
+                self.assertEqual(gate._resolver_path(), target)
+
+    def test_fallback_returns_home_resolver_rel(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "profiles" / "platform"
+            home.mkdir(parents=True, exist_ok=True)
+            expected = home / gate.RESOLVER_REL
+            nonexistent = str(Path(tmpdir) / "nonexistent" / "github_scan_gate.py")
+            with mock.patch("github_scan_gate.hermes_home", return_value=home), \
+                 mock.patch.object(gate, "PLATFORM_TEMPLATE_DIR", str(Path(tmpdir) / "nonexistent")), \
+                 mock.patch.object(gate, "__file__", nonexistent):
+                self.assertEqual(gate._resolver_path(), expected)
 
 
 if __name__ == "__main__":

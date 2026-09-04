@@ -50,6 +50,12 @@ install without the interview.
   idempotent without reading the cluster — and because rotating the salt
   re-anonymises every user, severing their past sessions from their future
   ones.
+- Optionally (`enable_pubsub_platform = true`) the Cloud Pub/Sub platform adapter
+  `AgentPlugin/pubsubplatform` for message and alert ingress.
+- Optionally (`enable_stockout_investigator = true`) the GKE Stockout Investigator
+  backend and `AgentPlugin/gkestockoutinvestigator`: Pub/Sub topic (`stockout_pubsub_topic`),
+  subscription (`stockout_pubsub_subscription`), Cloud Logging project sink
+  (`stockout_pubsub_sink`), and publisher IAM binding.
 - Optionally (`model_provider = "vertex_ai"`) the Vertex AI / Model Garden path:
   a second [`kube-agents-iam`](../../modules/kube-agents-iam) instantiation for
   the gateway's service account, `roles/aiplatform.user` on
@@ -102,16 +108,157 @@ KUBE_AGENTS_STATE_BUCKET=auto ./lifecycle.sh apply
 ```
 
 `auto` derives the bucket name `<project_id>-kube-agents-tfstate`; any other
-value is used verbatim. The bucket is created on first use — versioned, with
-uniform bucket-level access, in the cluster's region — and a gitignored
+value is used verbatim. `apply` and `destroy` create the bucket on first use —
+versioned, with uniform bucket-level access, in the cluster's region. `plan`
+does not: it stops instead, because a plan that creates the backend has both
+changed the project and answered the wrong question, since an empty bucket
+plans the whole composition as new and reads as total drift. A gitignored
 `backend_override.tf` points Terraform at
 `gs://<bucket>/<prefix>`, where the prefix defaults to
 `kube-agents/<cluster_name>` (override with `KUBE_AGENTS_STATE_PREFIX`) so two
 installs in one project keep separate state. Versioning is the recovery story:
-a corrupted or mistakenly-overwritten state file can be restored from a prior
-generation with `gcloud storage restore`. If the state is gone entirely,
+a corrupted or mistakenly-overwritten state file can be rolled back to a prior
+generation by copying it over the live object (`gcloud storage ls -a` lists the
+generations; `gcloud storage restore` is for soft-deleted objects, which is a
+different feature — with versioning on, a previous generation is a noncurrent
+version rather than a soft-deleted object):
+
+```bash
+gcloud storage ls -a gs://<bucket>/<prefix>/default.tfstate
+gcloud storage cp gs://<bucket>/<prefix>/default.tfstate#<generation> \
+  gs://<bucket>/<prefix>/default.tfstate
+```
+
+If the state is gone entirely,
 re-run `lifecycle.sh apply` against the same tfvars — KMS adoption is
 automatic, and `terraform import` covers the rest.
+
+### Asking what an apply would change
+
+```bash
+KUBE_AGENTS_STATE_BUCKET=auto ./lifecycle.sh plan -detailed-exitcode
+```
+
+Read-only, and every part of that is deliberate: no state lock, so it can
+neither block nor be blocked by the apply it is reporting on; no bucket
+creation; and none of the adoption imports `apply` runs, since those write
+state. An install that needs adoption therefore shows those resources as "to
+create", which is what a plan alone can honestly say about them.
+
+`-detailed-exitcode` makes the answer machine-readable — 0 for in sync, 2 for
+there are changes, 1 for a plan that failed — which is what the scheduled drift
+report reads. `./upgrade.sh --plan`, run from the install's own checkout, is the
+front door: it renders the tfvars an upgrade would apply and then calls this.
+
+### Recovering from an interrupted apply
+
+An apply killed part-way — Ctrl-C, a dropped connection, a laptop lid — leaves
+state locked, and the next command fails with `Error acquiring the state lock`.
+`terraform force-unlock` is the release, and it works here; what trips people up
+is which identifier it wants. On the `gcs` backend the lock ID is the **GCS
+generation number** of the lock object, not a UUID, and it is the `ID:` in the
+error Terraform just printed:
+
+```text
+Lock Info:
+  ID:        1787242876096737
+  Path:      gs://<bucket>/<prefix>/default.tflock
+```
+
+```bash
+terraform force-unlock 1787242876096737
+```
+
+Run it from a directory whose backend is already configured, or it will not
+reach the lock at all. `force-unlock` acts on whatever backend the working
+directory has, this composition ships no backend block, and `backend_override.tf`
+is gitignored and written only by `lifecycle.sh` — so in a checkout that has
+never been through `lifecycle.sh`, Terraform is on local state and refuses with a
+local-state error that never mentions GCS. That matters here more than it looks:
+`install.sh`, `uninstall.sh` and `upgrade.sh` all drive the apply from a
+disposable clone, so the directory that took the lock is routinely gone by the
+time anyone goes looking for it. The fix is the same one the `BackupPlan` import
+below needs — `KUBE_AGENTS_STATE_BUCKET=<same value> KUBE_AGENTS_STATE_PREFIX=<same value> ./lifecycle.sh adopt-kms`
+first, or work in a directory `lifecycle.sh` has already initialised.
+
+Pass a UUID from anywhere else — the `"ID"` field inside the lock object's own
+JSON, for instance — and it refuses with `Lock ID should be numerical value`,
+which reads like the backend not supporting `force-unlock` at all. It does.
+
+Establish that nothing is still applying before you run it. The ID in the error
+is the generation of the lock as it exists at that moment, so `force-unlock`
+matches it and releases it whether the holder is a dead process or a colleague's
+apply still running — the interactive confirmation is the only thing in the way,
+and `-force` removes that too. What the generation check does catch is a
+**stale** ID: one carried over from an earlier error, after which the lock was
+released and re-taken. Pass that and the command refuses rather than breaking a
+lock you were not looking at. That is the reason to prefer it to
+`gcloud storage rm gs://<bucket>/<prefix>/default.tflock`, which deletes the
+object whatever its generation and is the fallback for a lock whose ID you no
+longer have. `<bucket>` and `<prefix>` are the ones from
+[Remote state](#remote-state) — `<project_id>-kube-agents-tfstate` and
+`kube-agents/<cluster_name>` unless `KUBE_AGENTS_STATE_PREFIX` overrode it.
+
+A connectivity drop mid-apply produces two failures worth recognising, because
+neither means what it looks like:
+
+- **`http2: client connection lost` on the state upload.** Terraform retries this
+  itself and the retry usually succeeds, so the run can report a state-write
+  failure it then recovered from. Check the bucket before concluding state was
+  lost — and remember versioning is on, so a bad write can be rolled back to the
+  previous generation as above.
+- **A `BackupPlan` create that fails while polling its operation.** The
+  long-running operation keeps going server-side, so the plan is often `READY`
+  even though Terraform recorded a failure and holds nothing in state. Check with
+  `gcloud beta container backup-restore backup-plans describe`, then import it and
+  re-apply rather than deleting the plan to let Terraform recreate it.
+
+  Import into the same state the apply used, which on a remote-state install
+  means the backend has to be configured first. `backend_override.tf` is
+  gitignored and written only by `lifecycle.sh`, so in a checkout that has
+  `terraform.tfvars` but no override — one `install.sh` wrote into and something
+  later cleaned, say — a bare `terraform import` silently writes a **local**
+  `terraform.tfstate`, reports success, and leaves the next apply still trying to
+  create the plan. Run
+  `KUBE_AGENTS_STATE_BUCKET=<same value> ./lifecycle.sh adopt-kms` first — it is
+  the cheapest subcommand that initialises the backend — or work in a directory
+  `lifecycle.sh` has already initialised. Carry `KUBE_AGENTS_STATE_PREFIX` across
+  as well if the install set one. `ensure_backend` derives the prefix
+  independently of the bucket and inits with `-reconfigure`, so an omitted
+  override points the backend at the default `kube-agents/<cluster_name>` object,
+  and the import lands in an empty state that reports success while the real one
+  still has no plan.
+
+  `terraform.tfvars` is gitignored too, so a literally fresh clone has neither
+  file and fails earlier and more loudly: `ensure_backend` evaluates
+  `var.project_id` before it can write the override, and `lifecycle.sh` exits
+  with "could not evaluate var.project_id". Restore the tfvars the install used
+  before either recipe.
+
+  The import itself needs the placeholder Helm provider `adopt-kms` writes for
+  its own imports, and `lifecycle.sh` exposes no generic import subcommand to
+  borrow — so write it yourself. `terraform import` configures every provider
+  before it does anything, and the `helm` provider here is built from
+  `module.gke_cluster.cluster_endpoint`; the override was needed in practice even
+  with the cluster already in state. The filename suffix is what makes Terraform
+  treat it as an override, so keep it:
+
+  ```bash
+  cat > providers_lifecycle_override.tf <<'EOF'
+  provider "helm" {
+    kubernetes = {
+      host  = "https://127.0.0.1"
+      token = "placeholder"
+    }
+  }
+  EOF
+  terraform import 'module.gke_backup_plan[0].google_gke_backup_backup_plan.this' \
+    "projects/<project>/locations/<region>/backupPlans/<cluster_name>-backup-plan"
+  rm -f providers_lifecycle_override.tf
+  ```
+
+  Remove the override before the next apply — it is never meant to survive an
+  import, which is why `lifecycle.sh` deletes it on an `EXIT` trap.
 
 ### The `image_tag` rule
 
@@ -187,11 +334,18 @@ vocabulary the installer's `--permission-set` flag uses):
 | `permission_set`      | Roles granted                                           |
 | --------------------- | ------------------------------------------------------- |
 | `read-only` (default) | `local.read_only_roles` in [`main.tf`](main.tf)         |
-| `gke-admin`           | `local.gke_admin_roles` in [`main.tf`](main.tf)         |
 | `custom`              | whatever `project_roles` lists — setting it is required |
 
-Both lists live in [`main.tf`](main.tf); read them there rather than from
-this page.
+There is no admin bundle. `roles/container.admin` authorizes the agent
+through IAM regardless of its Kubernetes RBAC, and the
+`container.clusters.impersonate` it carries applies to every cluster in the
+project, so it is not something a one-word setting should hand out; see
+[Security & IAM](../../../docs/site/src/content/docs/reference/security-and-iam.md).
+Widening access means naming the roles in `project_roles`, where the grant
+is explicit and reviewed.
+
+The list lives in [`main.tf`](main.tf); read it there rather than from this
+page.
 
 `project_roles` still wins when set, whatever `permission_set` says, so an
 existing configuration keeps the roles it had. `project_roles = []` grants
@@ -264,20 +418,35 @@ upgrading does not publish an endpoint on a cluster that has none — see the
 [module README](../../modules/gke-cluster/README.md) for why that endpoint is
 not covered by master-authorized-networks.
 
-### Google Chat and GitHub integrations
+### Google Chat, Slack, and GitHub integrations
 
 With `enable_google_chat = true` the composition provisions the GCP backend
 (topic, subscription, IAM) **and** enables the CR's `googleChat` integration
 with the created topic/subscription — restrict access with
 `google_chat_allowed_users` (empty = everyone).
 
-Set `github_repo` to wire the agent's GitOps target repository
-(`spec.integration.github.gitRepo`).
+With `enable_github_minter = true`, set `github_repo` to your primary GitOps repository (in `owner/repo` or GitHub URL format). Additional GitOps repositories within the same organization can also be registered in the ConfigMap by cluster administrators.
 
 `enable_slack = true` writes `slack_bot_token` / `slack_app_token` into the
 credentials Secret and turns on the CR's `slack` section, the same pair
 install.sh collects. Slack needs no GCP resources, so this is
 purely configuration — the Slack app itself is a manual step (below).
+
+### Pub/Sub Platform and Stockout Investigator Plugins
+
+- `enable_pubsub_platform = true` deploys the `pubsub-platform` adapter
+  `AgentPlugin/pubsubplatform` via Helm, giving the Platform Agent Cloud Pub/Sub
+  ingress capabilities.
+- `enable_stockout_investigator = true` provisions the GCP Pub/Sub topic
+  (`stockout_pubsub_topic`), pull subscription (`stockout_pubsub_subscription`),
+  and Log Router sink (`stockout_pubsub_sink`), and deploys the
+  `AgentPlugin/gkestockoutinvestigator` resource targeting the `platform` profile
+  with tuned execution limits. Requires `enable_pubsub_platform = true`.
+
+If a plugin was previously installed using the standalone `agentplugins/*/install.sh` scripts,
+uninstall its standalone release before setting these variables (`helm uninstall pubsubplatform -n <namespace>`,
+`helm uninstall gkestockoutinvestigator -n <namespace>`). Helm checks object ownership metadata
+(`meta.helm.sh/release-name`) and refuses to adopt existing resources owned by another release.
 
 **Manual steps that no IaC can perform** — canonical walkthrough:
 [INSTALL.md § Enable Google Chat & Slack Integrations](../../../INSTALL.md#step-4-enable-google-chat--slack-integrations-manual-required-steps):
@@ -317,10 +486,10 @@ Use `lifecycle.sh destroy` for teardown; anything that mutates the
 Terraform-managed resources out of band (for instance removing the
 `kube-agents-host` label by hand) causes plan drift the next apply reverts.
 
-Four things in this stack are not symmetric — applying them is not the inverse
-of destroying them — and each one breaks a plain `terraform destroy`, or the
-`terraform apply` that follows it. [`lifecycle.sh`](lifecycle.sh) handles all
-four, so the cycle is repeatable:
+Several things in this stack are not symmetric — applying them is not the
+inverse of destroying them — and each one breaks a plain `terraform destroy`, or
+the `terraform apply` that follows it. [`lifecycle.sh`](lifecycle.sh) handles
+them, so the cycle is repeatable:
 
 ```bash
 make tf-destroy     # or: ./terraform/examples/full-install/lifecycle.sh destroy
@@ -329,12 +498,13 @@ make tf-apply       # or: ./terraform/examples/full-install/lifecycle.sh apply
 
 What each one does that raw Terraform cannot:
 
-| Asymmetry                                                            | Handled by                                                                    |
-| -------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| KMS key rings and keys can never be deleted, so the next apply 409s  | `tf-apply` imports the survivors before applying (`lifecycle.sh adopt-kms`)   |
-| The `PlatformAgent` finalizer strands the CR and hangs the namespace | `tf-destroy` deletes the CR and waits, force-clearing the finalizer if wedged |
-| A `BackupPlan` cannot be deleted while it owns backups               | `tf-destroy` purges the plan's backups first                                  |
-| `deletion_protection = true` cannot be overridden by a destroy alone | `tf-destroy` applies it as `false`, then destroys                             |
+| Asymmetry                                                                | Handled by                                                                                                                                   |
+| ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| KMS key rings and keys can never be deleted, so the next apply 409s      | `tf-apply` imports the survivors before applying (`lifecycle.sh adopt-kms`)                                                                  |
+| The `PlatformAgent` finalizer strands the CR and hangs the namespace     | `tf-destroy` deletes the CR and waits, force-clearing the finalizer if wedged                                                                |
+| A `BackupPlan` cannot be deleted while it owns backups                   | `tf-destroy` purges the plan's backups first                                                                                                 |
+| `deletion_protection = true` cannot be overridden by a destroy alone     | `tf-destroy` applies it as `false`, then destroys                                                                                            |
+| A Pub/Sub topic or subscription that already exists makes the create 409 | `tf-apply` imports it first (`adopt_pubsub`), so a topic created in the Cloud console while wiring up Google Chat does not block the install |
 
 The chart also carries a `pre-delete` hook that removes the CR and waits for
 its finalizer, so a plain `helm uninstall` is safe on its own; `tf-destroy`

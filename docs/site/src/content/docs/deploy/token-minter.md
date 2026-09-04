@@ -5,7 +5,7 @@ sidebar:
   order: 3
 ---
 
-Minty is the GitHub Token Minter — an in-cluster service that mints short-lived (1-hour) GitHub App installation tokens on demand for the Platform Agent's `submit-suggestion`, `fleet-audit`, and `github-issue-resolver` skills. The GitHub App's private key never leaves GCP KMS.
+Minty is the GitHub Token Minter — an in-cluster service that mints short-lived (1-hour) repository-scoped GitHub App installation tokens on demand for the Platform Agent's `submit-suggestion`, `fleet-audit`, and `github-issue-resolver` skills. The GitHub App's private key never leaves GCP KMS.
 
 GCP half (minter GSA, Workload Identity binding, import-only KMS signing key): [`terraform/modules/github-minter`](https://github.com/gke-labs/kube-agents/tree/main/terraform/modules/github-minter).
 Kubernetes half (Deployment, Service, NetworkPolicy, KSA, rule ConfigMap, `github-app-credentials` Secret): the chart's `githubMinter.*` values; the dev copy is `make -C k8s-operator deploy-github`.
@@ -16,7 +16,7 @@ Full README: [`k8s-operator/config/integrations/github/README.md`](https://githu
 1. **Request.** The agent calls Minty via HTTP, specifying the target org and repo. The request is authenticated with the agent's Google Service Account OIDC token (via Workload Identity).
 2. **Verification.** Minty checks the request against local rules ([`configmap.yaml.template`](https://github.com/gke-labs/kube-agents/tree/main/k8s-operator/config/integrations/github)). It extracts the `email` claim from the OIDC token and verifies against `assertion.email`.
 3. **KMS signing.** Minty asks GCP KMS to sign a JWT with the GitHub App's private key. The raw key material never touches Minty.
-4. **Token exchange.** Minty exchanges the signed JWT with GitHub for a 1-hour installation access token.
+4. **Token exchange.** Minty exchanges the signed JWT with GitHub for a 1-hour repository-scoped installation access token.
 5. **Delivery.** Minty returns the token to the agent, which uses it for `git push`, PR-open, and issue operations — the Platform Agent publishes audit findings as GitHub issues and reads `/remediate` comments on them, and `github-issue-resolver` triages the rest.
 
 ## The GitOps repo must be owned by an organization
@@ -24,6 +24,10 @@ Full README: [`k8s-operator/config/integrations/github/README.md`](https://githu
 Minty resolves the installation with `GET /orgs/{org}/installation` ([`pkg/server/source/github.go`](https://github.com/abcxyz/github-token-minter/blob/main/pkg/server/source/github.go), `app.InstallationForOrg`). GitHub serves personal accounts from `/users/{user}/installation` instead, and Minty has no fallback to it, so a repo owned by a personal account cannot be used — every mint fails with `errors retrieving GitHub installation: … 404` no matter how the App is configured.
 
 Create the repo under an organization, or transfer an existing one into it. A free organization is enough. Note that GitHub shares one namespace across users and organizations, so you cannot create an organization whose name matches your own username.
+
+## Single-organization scoping boundary
+
+Minty's rule ConfigMap is mounted in-container at `/etc/minty/<GITHUB_ORG>`. A single PlatformAgent instance and its associated Minty deployment manage multiple repositories within the primary GitHub Organization where the GitHub App is installed. Additional repositories registered in the `gitops-state` ConfigMap must belong to this primary organization.
 
 ## Setup checklist
 
@@ -39,18 +43,24 @@ A personal-account App is created as "Only on this account", which cannot instal
 
 ### Install variables
 
-`./install.sh` collects these in its GitOps interview and saves them to `k8s-operator/scripts/vars.sh`:
+`./install.sh` collects these in its GitOps interview and saves them to `install.env`:
 
 - `GITHUB_APP_ID` — numeric App ID.
-- `GITHUB_ORG` — the organization hosting the repo. A username will not work; see above.
-- `GITHUB_REPO` — repo name.
+- `GITOPS_ORG` — the organization hosting the repo. A username will not work; see above.
+- `GITOPS_REPO` — repo name.
+
+  These were `GITHUB_ORG` / `GITHUB_REPO`, which still work for one release with a
+  deprecation warning. They were renamed because `GH_ORG` / `GH_REPO` name the _release_
+  repository on the rc and nightly environments, and `tests/e2e/.env` uses `GITHUB_ORG` /
+  `GITHUB_REPO` for the repository a test acts on — three repositories sharing two names.
+
 - `GITHUB_PEM_PATH` — absolute path to the `.pem` file. If provided, the installer auto-imports it to KMS via the Minty CLI. If omitted, deployment proceeds but Minty fails readiness until the key is imported manually.
 
 ## Why KMS instead of a Kubernetes Secret
 
 - **No raw key material on disk.** KMS holds the key; Minty never sees it.
 - **Auditable.** Every sign operation logs to Cloud Audit Logs.
-- **Rotatable without redeploy.** Import a new key version to KMS; Minty picks it up.
+- **Rotatable without touching the cluster's key material.** Import a new key version to KMS; nothing on the node ever held the old one. Rotation is not free of a redeploy, though — the Deployment names one `cryptoKeyVersions/<n>`, not the key, so a new version also needs `githubMinter.kms.keyVersion` bumped and the chart re-applied.
 
 The Minty CLI handles the KMS import — it deals with PKCS#1 to PKCS#8 conversion, provisions the KMS Import Job, and does RSA-OAEP wrapping automatically. The installer shallow-clones the Minty repo at `v2.7.1` and runs `go run ./cmd/minty tools import-pk` from the tree (requires `git` and `go` on the install host; the `go run <module>@v2.7.1` form does not resolve because upstream's go.mod lacks the `/v2` suffix its v2 tags require). The import is deliberately not a Terraform resource, so the PEM never enters Terraform state.
 
@@ -98,7 +108,7 @@ curl -i -X POST http://github-token-minter.kubeagents-system.svc.cluster.local:8
   -d '{"org_name":"<org>","repositories":["<repo>"],"scope":"platform-agent-scope"}'
 ```
 
-A 200 response whose body is the short-lived GitHub installation token means the pipeline works end-to-end.
+A 200 response whose body is the short-lived, repository-scoped GitHub installation token means the pipeline works end-to-end.
 
 ## Where to go next
 

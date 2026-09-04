@@ -18,9 +18,12 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
+	"regexp"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -62,7 +65,7 @@ const (
 	// Identity tokens. It is only ever the pre-DNAT destination.
 	metadataLinkLocalIP = "169.254.169.254"
 	// metadataDaemonIP is where GKE's node-local metadata daemon actually listens, on
-	// TCP 988. On the iptables datapath (Dataplane V1) the node rewrites
+	// TCP 988. On the iptables datapath (Dataplane V1) the node DNATs
 	// 169.254.169.254:80 to 169.254.169.252:988 in nat PREROUTING — before NetworkPolicy
 	// is evaluated — so a policy that permits only the link-local address drops every
 	// token fetch. Dataplane V2 (eBPF) evaluates policy pre-NAT at the socket layer,
@@ -77,6 +80,14 @@ const (
 	AnnotationAPIServerCIDR           = "kubeagents.x-k8s.io/apiserver-cidr"
 	AnnotationCustomEgressCIDRs       = "kubeagents.x-k8s.io/custom-egress-cidrs"
 	AnnotationEnableFQDNNetworkPolicy = "kubeagents.x-k8s.io/enable-fqdn-network-policy"
+	AnnotationManagedMinterKeys       = "kubeagents.x-k8s.io/managed-minter-keys"
+
+	// GKE Autopilot API groups used to detect Autopilot clusters where Warden restricts Image volumes.
+	gkeAutopilotAPIGroup = "auto.gke.io"
+	gkeWardenAPIGroup    = "warden.gke.io"
+
+	pluginFailureReasonImagePull = "ImagePullFailed"
+	pluginFailureReasonStaging   = "StagingFailed"
 
 	// The condition reporting that cluster event ingestion has been switched off
 	// on the spec. It is written only in that state — see updateStatusReady.
@@ -149,6 +160,9 @@ type PlatformAgentReconciler struct {
 // +kubebuilder:rbac:groups=kubeagents.x-k8s.io,resources=agentplugins/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=daemonsets;replicasets,verbs=get;list;watch
+// apps/daemonsets is also read by resolveNetpolProfile to discover the gke-metadata-server
+// DaemonSet port (issue #747 B4) — a second consumer of a grant that already existed for
+// buildMinimalPlatformRole's escalation-prevention requirement.
 // +kubebuilder:rbac:groups="",resources=serviceaccounts;persistentvolumeclaims;configmaps;services;pods,verbs=get;list;watch;create;update;patch;delete
 // `nodes` is still required: buildMinimalPlatformRole grants it to the agent audit
 // ClusterRole, and RBAC escalation-prevention needs the operator to hold it to apply that.
@@ -163,6 +177,9 @@ type PlatformAgentReconciler struct {
 // +kubebuilder:rbac:groups=networking.gke.io,resources=fqdnnetworkpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles;clusterrolebindings;roles;rolebindings,verbs=get;list;watch;create;update;patch;delete
+// The split credential broker verifies its callers with a TokenReview. The operator has to
+// hold that permission in order to grant it; it confers no read access and cannot mint a token.
+// +kubebuilder:rbac:groups=authentication.k8s.io,resources=tokenreviews,verbs=create
 // +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch
 
 func (r *PlatformAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -206,6 +223,16 @@ func (r *PlatformAgentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, nil
 	}
 
+	// 2b. Validate the mode gate once at the top; everything downstream asks
+	// renderMode, which fails closed. An error here is version skew — a newer
+	// CRD's mode value this binary does not know (see mode.go). Today's stack
+	// still renders below, so the cluster keeps running what it ran; status
+	// reports Degraded/ModeNotRecognized at the end instead of Ready.
+	_, modeErr := resolveMode(instance)
+	if modeErr != nil {
+		log.Info("Unrecognized spec.mode; rendering today's stack and reporting Degraded", "error", modeErr.Error())
+	}
+
 	// 3. Reconcile Service Account (with Workload Identity annotation)
 	if err := r.reconcileServiceAccount(ctx, instance); err != nil {
 		return ctrl.Result{}, err
@@ -244,6 +271,11 @@ func (r *PlatformAgentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
+	// Reconcile Gitops State ConfigMap (create-only to avoid overwriting agent updates)
+	if err := r.reconcileGitopsStateConfigMap(ctx, instance); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// 9. Reconcile Credential Proxy Policy ConfigMap
 	proxyPolicyHash, err := r.reconcileCredentialProxyPolicyConfigMap(ctx, instance)
 	if err != nil {
@@ -264,9 +296,111 @@ func (r *PlatformAgentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, fmt.Errorf("failed to validate RuntimeClass: %w", err)
 	}
 
+	// 10b. Refuse a broker split that would strand the event watcher.
+	//
+	// Before the workload, deliberately: an operator who asked for the broker to
+	// leave the agent Pod must not get a running agent whose cluster events have
+	// silently stopped. The one refusable configuration is named in
+	// validateCredentialBrokerSplit.
+	if reason, msg := validateCredentialBrokerSplit(instance); reason != "" {
+		log.Info(msg)
+		if statusErr := r.updateStatusDegraded(ctx, instance, reason, msg); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// 10c. Refuse an egress policy whose layout the broker reconcile below
+	// would otherwise dismantle.
+	//
+	// Before reconcileCredentialBroker, deliberately, and the order is the
+	// finding this step answers: on the reconcile that flips
+	// splitCredentialBrokerPod off while egressPolicy is still Allowlist —
+	// the single-field edit warnSplitNeedsSharedFilesystem itself suggests —
+	// validating after the broker reconcile deletes the broker Deployment and
+	// Service first and refuses second. The refusal then withholds the
+	// workload, so the agent Deployment keeps its split shape, wired to a
+	// Service that no longer exists, every proxied command failing, and the
+	// 30-second requeue repeating the same refusal without ever putting the
+	// broker back. Refusing here leaves the broker running instead: the CR
+	// parks Degraded, the agent keeps working, and the message names the two
+	// ways out.
+	//
+	// The guardrail note on the allowlist refusal below applies here too, so
+	// this path reconciles the same two policies before returning.
+	if reason, msg := validateEgressPolicyLayout(instance); reason != "" {
+		log.Info(msg)
+		if err := r.reconcileAgentNetworkGuardrails(ctx, instance, reason); err != nil {
+			return ctrl.Result{}, err
+		}
+		if statusErr := r.updateStatusDegraded(ctx, instance, reason, msg); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// 10d. Reconcile the credential broker's own Pod, if it has one.
+	//
+	// Before the agent's workload, not after. On the reconcile that first turns
+	// the split on, the agent Deployment is re-rendered pointing at the broker
+	// Service; creating that Service afterwards leaves the restarted agent
+	// failing every proxied command with a connection refused until the next
+	// pass. The other direction is safe either way, because turning the split
+	// off deletes a broker the re-rendered agent has already stopped using —
+	// step 10c has already refused the one shape where it has not.
+	if err := r.reconcileCredentialBroker(ctx, instance, proxyPolicyHash); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// 10e. Refuse an allowlist destination the policy will not render.
+	//
+	// Immediately before the workload, deliberately: an operator who asked for
+	// the agent Pod to be denied the metadata server must not get a running
+	// agent that silently is not. Below the broker reconcile, also
+	// deliberately: this refusal is about one destination, and it should not
+	// stop the broker being reconciled the way the layout refusal at 10c must.
+	if reason, msg := validateEgressAllowlist(instance); reason != "" {
+		log.Info(msg)
+		// Returning here withholds the workload, the Service, the
+		// PodDisruptionBudget, the legacy cleanup and updateStatusReady. What
+		// it must not withhold is a guardrail, and the agent Pod has two:
+		// <name>-gateway-netpol, which is reconciled below in the normal path
+		// and so is reconciled here as well, and <name>-sandbox-metadata-deny,
+		// which step 11b renders.
+		//
+		// Both have to survive a refusal for the same reason. An operator
+		// triaging an EgressAllowlistRefused who deletes them gets neither back
+		// until the spec is fixed, and with nothing selecting the agent Pod
+		// NetworkPolicy permits all egress — so the outcome is wide-open egress
+		// behind a Degraded status that names only the allowlist. The gateway
+		// policy is unconditional because it has nothing to do with either
+		// refusal; it is the Pod's baseline and it predates this field.
+		//
+		// This closes the hazard at the two egress refusals only — this one
+		// and step 10c's. The two refusals above them — step 10's
+		// RuntimeClassNotFound and step 10b's SplitBrokerStrandsEventWatcher —
+		// return without reconciling the gateway policy and still have it.
+		// Issue #964 tracks that; do not read the rule stated here as one the
+		// whole function keeps yet.
+		if err := r.reconcileAgentNetworkGuardrails(ctx, instance, reason); err != nil {
+			return ctrl.Result{}, err
+		}
+		if statusErr := r.updateStatusDegraded(ctx, instance, reason, msg); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
 	// 11. Reconcile the Agent Sandbox Pod with its Envoy credential sidecar.
 	otlpEndpoint, otlpSource := r.resolveOTLPEndpoint(ctx, instance)
-	if err := r.reconcileWorkload(ctx, instance, configMapHash, fluentBitHash, settingsHash, proxyPolicyHash, agentPlugins, otlpEndpoint); err != nil {
+	otlpDisabled := otlpSource == otlpSourceNone
+	netpolProf := r.resolveNetpolProfile(ctx, instance)
+	if err := r.reconcileWorkload(ctx, instance, configMapHash, fluentBitHash, settingsHash, proxyPolicyHash, agentPlugins, otlpEndpoint, otlpDisabled); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// 11b. Reconcile the agent Pod's default-deny egress policy, if it has one.
+	if err := r.reconcileAgentEgressPolicy(ctx, instance, r.agentEgressDNSClusterIPs(ctx, instance, netpolProf)); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -279,15 +413,27 @@ func (r *PlatformAgentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 	// Reconcile NetworkPolicy
-	if err := r.reconcileNetworkPolicy(ctx, instance, otlpEndpoint); err != nil {
+	if err := r.reconcileNetworkPolicy(ctx, instance, netpolProf, otlpEndpoint, otlpDisabled); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := r.deleteLegacyCredentialIsolationResources(ctx, instance); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// 9. Update status phase to Ready
-	phase, err := r.updateStatusReady(ctx, instance, otlpEndpoint, otlpSource)
+	// 9. Update status phase. While the mode is unrecognized the phase is
+	// Degraded with a named reason — silently rendering today at that point
+	// would leave nothing in `kubectl describe` saying the cluster runs
+	// something other than what the spec asks. Requeue: the skew resolves by
+	// an operator upgrade or a spec correction, neither of which is an event
+	// on this object's watches.
+	if modeErr != nil {
+		msg := modeErr.Error() + " (version skew); rendering today's stack until the operator is upgraded or spec.mode is corrected"
+		if statusErr := r.updateStatusDegraded(ctx, instance, "ModeNotRecognized", msg); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	phase, err := r.updateStatusReady(ctx, instance, otlpEndpoint, otlpSource, netpolProf)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -299,12 +445,14 @@ func (r *PlatformAgentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	// Falling through to the bare default is the one telemetry outcome that can improve
-	// without anything else changing — someone installs a collector and nothing about
-	// this agent is touched. Reconciles are event-driven and can be quiet for hours, so
-	// nudge the probe rather than wait for an unrelated event. Every other source is
-	// explicit or already found something, and needs no polling.
-	if otlpSource == otlpSourceDefault {
+	// Default and None are the telemetry outcomes that can improve without anything else
+	// changing — someone installs a collector and nothing about this agent is touched.
+	// Reconciles are event-driven and can be quiet for hours, so nudge the probe rather
+	// than wait for an unrelated event. Every other source is explicit or already found
+	// something, and needs no polling. None especially: it is the outcome that leaves the
+	// agent exporting nowhere, so it is the one an operator most wants picked up promptly
+	// once they install a collector.
+	if otlpSource == otlpSourceDefault || otlpSource == otlpSourceNone {
 		return ctrl.Result{RequeueAfter: otelRediscoverAfter}, nil
 	}
 	return ctrl.Result{}, nil
@@ -334,6 +482,20 @@ func pluginStatusNeedsRecheck(plugins []*agentv1alpha1.AgentPlugin, agentReady b
 
 func (r *PlatformAgentReconciler) handleDeletion(ctx context.Context, agent *agentv1alpha1.PlatformAgent) (ctrl.Result, error) {
 	if controllerutil.ContainsFinalizer(agent, platformAgentFinalizer) {
+		// Delete the credential broker's TokenReview grant, if the split ever
+		// created one. cleanupAgentRBAC's label-driven pass also reaps it under
+		// deleteAll, but only when the grant carries the instance labels — one
+		// applied before applyManaged stamped them would be orphaned
+		// cluster-scoped RBAC. Named explicitly for that reason.
+		tokenReviewName := fmt.Sprintf("kubeagents:tokenreview:%s:%s", agent.Namespace, agent.Name)
+		crbTokenReview := &rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: tokenReviewName}}
+		if err := client.IgnoreNotFound(r.Delete(ctx, crbTokenReview)); err != nil {
+			return ctrl.Result{}, err
+		}
+		crTokenReview := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: tokenReviewName}}
+		if err := client.IgnoreNotFound(r.Delete(ctx, crTokenReview)); err != nil {
+			return ctrl.Result{}, err
+		}
 		if err := r.cleanupAgentRBAC(ctx, agent, true); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -466,6 +628,300 @@ func (r *PlatformAgentReconciler) reconcileSettingsConfigMap(ctx context.Context
 	return hash, nil
 }
 
+func parseManagedRepoEntries(raw string) ([]agentv1alpha1.ManagedRepoEntry, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	if !strings.HasPrefix(raw, "[") {
+		return nil, fmt.Errorf("managed_repos JSON must be an array starting with '['")
+	}
+	var entries []agentv1alpha1.ManagedRepoEntry
+	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal managed_repos JSON: %w", err)
+	}
+	var res []agentv1alpha1.ManagedRepoEntry
+	for _, e := range entries {
+		u := strings.TrimSpace(e.URL)
+		t := strings.TrimSpace(e.Type)
+		if u != "" && t != "" {
+			res = append(res, agentv1alpha1.ManagedRepoEntry{Type: t, URL: u})
+		}
+	}
+	return res, nil
+}
+
+func parseManagedRepos(raw string) ([]string, error) {
+	entries, err := parseManagedRepoEntries(raw)
+	if err != nil {
+		return nil, err
+	}
+	var res []string
+	for _, e := range entries {
+		res = append(res, e.URL)
+	}
+	return res, nil
+}
+
+// reconcileGitopsStateConfigMap ensures the <agent-name>-gitops-state ConfigMap exists to track
+// managed repositories. If spec.integration.github.gitRepo is defined on the CR, it is seeded
+// into managed_repos and kept present on subsequent reconciles without removing any additional
+// repositories added to the ConfigMap.
+//
+// Repository lifecycle and removal:
+// The reconciler appends any repository declared in spec.integration.github.gitRepo to managed_repos
+// if it is not already present in the ConfigMap, preserving all existing entries.
+// Repository removal/unregistration is administrator-driven via the ConfigMap: to unregister a
+// repository, remove its entry directly from managed_repos in the <agent-name>-gitops-state ConfigMap.
+// If the repository to be removed was declared in spec.integration.github.gitRepo on the CR, clear or
+// update gitRepo on the CR as well so the reconciler does not re-append it on subsequent passes.
+func (r *PlatformAgentReconciler) reconcileGitopsStateConfigMap(ctx context.Context, agent *agentv1alpha1.PlatformAgent) error {
+	cm := buildGitopsStateConfigMap(agent)
+	if err := ctrl.SetControllerReference(agent, cm, r.Scheme); err != nil {
+		return err
+	}
+
+	found := &corev1.ConfigMap{}
+	err := r.Get(ctx, client.ObjectKey{Name: cm.Name, Namespace: cm.Namespace}, found)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			withCommonLabels(cm, agent)
+			if err := r.Create(ctx, cm); err != nil {
+				return err
+			}
+			return r.syncGithubTokenMinterConfigMap(ctx, agent, cm.Data["managed_repos"])
+		}
+		return err
+	}
+
+	// If the CR spec provides a repository and the existing ConfigMap does not include it,
+	// ensure the repository is recorded without overwriting other dynamically added repositories.
+	if cmRepo, ok := cm.Data["managed_repos"]; ok && cmRepo != "" {
+		if found.Data == nil {
+			found.Data = map[string]string{}
+		}
+		existing := strings.TrimSpace(found.Data["managed_repos"])
+		if existing == "" {
+			found.Data["managed_repos"] = cmRepo
+			if err := r.Update(ctx, found); err != nil {
+				return err
+			}
+			return r.syncGithubTokenMinterConfigMap(ctx, agent, cmRepo)
+		}
+		specEntries, err := parseManagedRepoEntries(cmRepo)
+		if err != nil {
+			return fmt.Errorf("failed to parse spec repository JSON: %w", err)
+		}
+		existingEntries, err := parseManagedRepoEntries(existing)
+		if err != nil {
+			return fmt.Errorf("failed to parse existing managed_repos in ConfigMap %s: %w", found.Name, err)
+		}
+		updated := false
+		for _, se := range specEntries {
+			present := false
+			for _, ee := range existingEntries {
+				if ee.URL == se.URL {
+					present = true
+					break
+				}
+			}
+			if !present {
+				existingEntries = append(existingEntries, se)
+				updated = true
+			}
+		}
+		if updated {
+			if jsonBytes, err := json.Marshal(existingEntries); err == nil {
+				found.Data["managed_repos"] = string(jsonBytes)
+			}
+			if err := r.Update(ctx, found); err != nil {
+				return err
+			}
+			return r.syncGithubTokenMinterConfigMap(ctx, agent, found.Data["managed_repos"])
+		}
+	}
+
+	return r.syncGithubTokenMinterConfigMap(ctx, agent, found.Data["managed_repos"])
+}
+
+func parseManagedKeysAnnotation(ann string) map[string]struct{} {
+	keys := make(map[string]struct{})
+	if strings.TrimSpace(ann) == "" {
+		return keys
+	}
+	for _, k := range strings.Split(ann, ",") {
+		k = strings.TrimSpace(k)
+		if k != "" {
+			keys[k] = struct{}{}
+		}
+	}
+	return keys
+}
+
+func serializeManagedKeysAnnotation(keys map[string]struct{}) string {
+	var list []string
+	for k := range keys {
+		list = append(list, k)
+	}
+	sort.Strings(list)
+	return strings.Join(list, ",")
+}
+
+var minterRepoRegex = regexp.MustCompile(`(?m)^(\s*repositories:\s*\n)(?:\s*-\s*.*?\n)+`)
+
+func renderRepoPolicy(baseTemplate string, repos []string) string {
+	return minterRepoRegex.ReplaceAllStringFunc(baseTemplate, func(match string) string {
+		lines := strings.Split(match, "\n")
+		prefix := lines[0]
+		indent := ""
+		for _, ch := range prefix {
+			if ch == ' ' || ch == '\t' {
+				indent += string(ch)
+			} else {
+				break
+			}
+		}
+		itemIndent := indent + "  "
+		var sb strings.Builder
+		sb.WriteString(prefix)
+		for _, r := range repos {
+			sb.WriteString("\n")
+			sb.WriteString(itemIndent)
+			sb.WriteString("- '")
+			sb.WriteString(r)
+			sb.WriteString("'")
+		}
+		sb.WriteString("\n")
+		return sb.String()
+	})
+}
+
+// syncGithubTokenMinterConfigMap ensures that for every repository in managed_repos that belongs
+// to the primary GitHub organization (spec.integration.github.org), a corresponding <repo>.yaml
+// entry exists in github-token-minter-config ConfigMap.
+// Repositories belonging to a different organization are skipped because the minter instance is
+// bound to the primary organization directory (/etc/minty/<primary-org>/).
+// Operator-managed <repo>.yaml entries for repositories that are no longer managed are pruned.
+func (r *PlatformAgentReconciler) syncGithubTokenMinterConfigMap(ctx context.Context, agent *agentv1alpha1.PlatformAgent, managedReposStr string) error {
+	logger := logf.FromContext(ctx)
+	minterCM := &corev1.ConfigMap{}
+	err := r.Get(ctx, client.ObjectKey{Name: "github-token-minter-config", Namespace: agent.Namespace}, minterCM)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+
+	if minterCM.Data == nil {
+		return nil
+	}
+
+	baseTemplate, ok := minterCM.Data["default.yaml"]
+	if !ok || strings.TrimSpace(baseTemplate) == "" {
+		return nil
+	}
+
+	managedReposStr = strings.TrimSpace(managedReposStr)
+
+	// Read operator-managed keys from annotation
+	existingAnn := ""
+	if minterCM.Annotations != nil {
+		existingAnn = minterCM.Annotations[AnnotationManagedMinterKeys]
+	}
+	operatorManagedKeys := parseManagedKeysAnnotation(existingAnn)
+
+	// An empty managed_repos with no previously operator-managed keys is a no-op to avoid wiping unmanaged keys.
+	if managedReposStr == "" && len(operatorManagedKeys) == 0 {
+		return nil
+	}
+
+	primaryOrg := ""
+	if agent.Spec.Integration != nil && agent.Spec.Integration.GitHub != nil {
+		github := agent.Spec.Integration.GitHub
+		primaryOrg = strings.TrimSpace(github.Org)
+		if primaryOrg == "" && github.GitRepo != "" {
+			if cleaned, err := agentv1alpha1.CleanRepoSlug(github.GitRepo); err == nil {
+				parts := strings.SplitN(cleaned, "/", 2)
+				if len(parts) == 2 {
+					primaryOrg = parts[0]
+				}
+			}
+		}
+	}
+
+	repos, err := parseManagedRepos(managedReposStr)
+	if err != nil {
+		return fmt.Errorf("failed to parse managed_repos for minter policy sync: %w", err)
+	}
+	var allBareRepos []string
+	activeKeys := make(map[string]string, len(repos))
+	for _, fullRepo := range repos {
+		fullRepo = strings.TrimSpace(fullRepo)
+		if fullRepo == "" {
+			continue
+		}
+		slug, err := agentv1alpha1.CleanRepoSlugWithOrg(fullRepo, primaryOrg)
+		if err != nil {
+			logger.V(1).Info("skipping invalid repo in managed_repos for minter policy sync", "repo", fullRepo, "error", err)
+			continue
+		}
+		parts := strings.SplitN(slug, "/", 2)
+		if len(parts) == 2 {
+			repoOrg := parts[0]
+			bareRepo := parts[1]
+			if primaryOrg != "" && !strings.EqualFold(repoOrg, primaryOrg) {
+				logger.Info("skipping cross-org repository in minter policy sync; minter is scoped to primary org",
+					"repo", fullRepo, "repoOrg", repoOrg, "primaryOrg", primaryOrg)
+				continue
+			}
+			if _, exists := activeKeys[bareRepo+".yaml"]; !exists {
+				activeKeys[bareRepo+".yaml"] = bareRepo
+				allBareRepos = append(allBareRepos, bareRepo)
+			}
+		}
+	}
+	sort.Strings(allBareRepos)
+
+	updated := false
+
+	// Ensure all active managed repositories have policy entries containing all same-org managed repositories
+	expectedContent := renderRepoPolicy(baseTemplate, allBareRepos)
+	for key := range activeKeys {
+		currentVal, exists := minterCM.Data[key]
+		_, managed := operatorManagedKeys[key]
+		if !exists {
+			minterCM.Data[key] = expectedContent
+			operatorManagedKeys[key] = struct{}{}
+			updated = true
+		} else if managed && currentVal != expectedContent {
+			minterCM.Data[key] = expectedContent
+			updated = true
+		}
+	}
+
+	// Prune policy entries ONLY for repositories that were previously managed by the operator but are no longer active
+	for key := range operatorManagedKeys {
+		if key == "default.yaml" {
+			continue
+		}
+		if _, active := activeKeys[key]; !active {
+			delete(minterCM.Data, key)
+			delete(operatorManagedKeys, key)
+			updated = true
+		}
+	}
+
+	if updated {
+		if minterCM.Annotations == nil {
+			minterCM.Annotations = make(map[string]string)
+		}
+		minterCM.Annotations[AnnotationManagedMinterKeys] = serializeManagedKeysAnnotation(operatorManagedKeys)
+		return r.Update(ctx, minterCM)
+	}
+	return nil
+}
+
 func (r *PlatformAgentReconciler) reconcileCredentialProxyPolicyConfigMap(ctx context.Context, agent *agentv1alpha1.PlatformAgent) (string, error) {
 	cm := buildCredentialProxyPolicyConfigMap(agent)
 	if err := ctrl.SetControllerReference(agent, cm, r.Scheme); err != nil {
@@ -477,11 +933,11 @@ func (r *PlatformAgentReconciler) reconcileCredentialProxyPolicyConfigMap(ctx co
 	return getConfigMapHash(cm)
 }
 
-func (r *PlatformAgentReconciler) reconcileWorkload(ctx context.Context, agent *agentv1alpha1.PlatformAgent, configHash, fluentBitHash, settingsHash, policyHash string, agentPlugins []*agentv1alpha1.AgentPlugin, otlpEndpoint string) error {
+func (r *PlatformAgentReconciler) reconcileWorkload(ctx context.Context, agent *agentv1alpha1.PlatformAgent, configHash, fluentBitHash, settingsHash, policyHash string, agentPlugins []*agentv1alpha1.AgentPlugin, otlpEndpoint string, otlpDisabled bool) error {
 	imageVolumeSupported := r.imageVolumeSupported(agent)
 	r.updatePluginStatuses(ctx, agent, agentPlugins, imageVolumeSupported)
 
-	opts := renderOptions{imageVolumeSupported: imageVolumeSupported, otlpEndpoint: otlpEndpoint}
+	opts := renderOptions{imageVolumeSupported: imageVolumeSupported, otlpEndpoint: otlpEndpoint, otlpDisabled: otlpDisabled}
 
 	// Note: Switching between Deployment and StatefulSet causes a full delete+recreate of the workload.
 	// This will incur downtime and potentially stuck pods if RWO volumes take time to unbind.
@@ -511,13 +967,37 @@ func (r *PlatformAgentReconciler) reconcileWorkload(ctx context.Context, agent *
 	return r.applyManaged(ctx, agent, dep)
 }
 
+// deleteLegacyCredentialIsolationResources removes the workload objects left
+// behind by the two-pod layout that shipped in fb99cd1 and was collapsed back
+// into a sidecar in 9b2b7e8. Nothing recreates these names, so leaving them
+// running would leave a second, unreconciled copy of the agent alive.
+//
+// The <name>-credential-proxy Deployment and Service used to be on this list.
+// They are not legacy any more — they are what reconcileCredentialBroker
+// renders when the split is enabled, and it owns them in both directions.
+//
+// It also deliberately does NOT touch the <name>-sandbox-metadata-deny
+// NetworkPolicy. That object is a guardrail, not a workload: it denies the
+// sandbox egress to the link-local metadata server. Deleting it removed a
+// control this controller no longer creates, and the rule this controller keeps
+// is that it does not delete, weaken, or stop reconciling a guardrail it did
+// not create. A cluster operator who applies that policy by
+// hand, or a future release that renders it again, has to be able to rely on
+// it surviving a reconcile. A stale NetworkPolicy fails closed; a stale
+// Deployment does not, which is why the two are treated differently here.
+//
+// Leaving it on the list was also a live bug, not only a doctrinal one. The
+// operator stopped creating the policy, so nothing in the wild owns it, and a
+// hand-applied copy hit the IsControlledBy guard below and failed the whole
+// reconcile with "refusing to delete unowned legacy *v1.NetworkPolicy" on
+// every pass. This step runs after RBAC, the ConfigMaps, the workload, the
+// Service and the NetworkPolicy, so what the failure blocked was
+// updateStatusReady: the CR's status silently stopped tracking reality while
+// an admin followed the documented deletion path straight onto the error path.
 func (r *PlatformAgentReconciler) deleteLegacyCredentialIsolationResources(ctx context.Context, agent *agentv1alpha1.PlatformAgent) error {
 	resources := []client.Object{
 		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: agent.Name + "-sandbox", Namespace: agent.Namespace}},
-		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: agent.Name + "-credential-proxy", Namespace: agent.Namespace}},
-		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: agent.Name + "-credential-proxy", Namespace: agent.Namespace}},
 		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: agent.Name + "-sandbox", Namespace: agent.Namespace}},
-		&networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: agent.Name + "-sandbox-metadata-deny", Namespace: agent.Namespace}},
 	}
 	for _, resource := range resources {
 		if err := r.Get(ctx, client.ObjectKeyFromObject(resource), resource); err != nil {
@@ -533,6 +1013,347 @@ func (r *PlatformAgentReconciler) deleteLegacyCredentialIsolationResources(ctx c
 			return err
 		}
 	}
+	return nil
+}
+
+// reconcileCredentialBroker renders, or removes, the broker's own Pod.
+//
+// It owns <name>-credential-proxy in both directions: applied when
+// spec.security.splitCredentialBrokerPod is true, deleted when it is false, so
+// that turning the gate back off does not leave a second broker running against
+// the same workspace. That is cleanup of this controller's own workload, not the
+// removal of a guardrail it did not create — see
+// deleteLegacyCredentialIsolationResources.
+func (r *PlatformAgentReconciler) reconcileCredentialBroker(ctx context.Context, agent *agentv1alpha1.PlatformAgent, policyHash string) error {
+	log := logf.FromContext(ctx)
+	tokenReviewName := fmt.Sprintf("kubeagents:tokenreview:%s:%s", agent.Namespace, agent.Name)
+
+	if !credentialBrokerIsSplit(agent) {
+		owned := []client.Object{
+			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: credentialBrokerName(agent), Namespace: agent.Namespace}},
+			&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: credentialBrokerName(agent), Namespace: agent.Namespace}},
+		}
+		for _, object := range owned {
+			if err := r.deleteIfOwned(ctx, agent, object); err != nil {
+				return err
+			}
+		}
+		for _, object := range []client.Object{
+			&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: tokenReviewName}},
+			&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: tokenReviewName}},
+		} {
+			if err := r.deleteIfManaged(ctx, object); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	r.warnSplitNeedsSharedFilesystem(ctx, agent)
+
+	// The broker verifies its callers with a TokenReview, which needs one verb
+	// on one virtual resource and grants no read access to anything.
+	role := buildCredentialBrokerTokenReviewRole(agent)
+	if err := r.applyManaged(ctx, agent, role); err != nil {
+		return fmt.Errorf("failed to reconcile credential broker TokenReview ClusterRole: %w", err)
+	}
+	binding := buildClusterRoleBinding(agent, tokenReviewName, role.Name)
+	if err := r.applyManaged(ctx, agent, binding); err != nil {
+		return fmt.Errorf("failed to reconcile credential broker TokenReview ClusterRoleBinding: %w", err)
+	}
+
+	homeDir := defaultAgentHome
+	if h := agent.Spec.Harness; h != nil && h.Hermes != nil && h.Hermes.AgentHome != "" {
+		homeDir = h.Hermes.AgentHome
+	}
+	deployment := buildCredentialBrokerDeployment(agent, policyHash, homeDir)
+	if err := ctrl.SetControllerReference(agent, deployment, r.Scheme); err != nil {
+		return err
+	}
+	if err := r.applyManaged(ctx, agent, deployment); err != nil {
+		return fmt.Errorf("failed to reconcile credential broker Deployment: %w", err)
+	}
+
+	service := buildCredentialBrokerService(agent)
+	if err := ctrl.SetControllerReference(agent, service, r.Scheme); err != nil {
+		return err
+	}
+	if err := r.applyManaged(ctx, agent, service); err != nil {
+		return fmt.Errorf("failed to reconcile credential broker Service: %w", err)
+	}
+
+	log.Info("credential broker runs in its own Pod",
+		"deployment", deployment.Name, "service", service.Name)
+	return nil
+}
+
+// warnSplitNeedsSharedFilesystem says so, loudly, when the split is enabled
+// while the two Pods cannot see the same files.
+//
+// The broker runs proxied commands with a working directory the agent created
+// on this volume, so today both Pods have to mount it read-write at the same
+// path. A ReadWriteOnce claim cannot do that across nodes: the broker Pod stays
+// Pending with a Multi-Attach error and never becomes a Service endpoint, so
+// the agent sees a connection refused on every command. The containment check
+// in the broker does not catch it either — it is lexical, both Pods are
+// configured with the same workspace root, so the path always looks right and
+// what is missing is the data behind it.
+//
+// The access mode is what this reads, because it is the one signal available.
+// It is not a product requirement, and the fix is not to go and buy a
+// ReadWriteMany volume — that is one way to satisfy today's design and an
+// operator may pick it, but the managed options bill on provisioned capacity
+// with a floor far above what a workspace needs. The supported answer is to
+// leave the split off until the broker owns the workspace on a volume of its
+// own and takes content rather than a directory, a separate change that
+// removes the coupling entirely. Co-scheduling both Pods on one node is
+// not the answer: it deadlocks the next rolling update on the volume and makes
+// the two Pods a single failure domain.
+//
+// A log line rather than a Degraded status, because unlike the event-watcher
+// refusal there is nothing the operator can set to make this correct — the
+// access mode of an existing claim cannot be changed in place, and refusing to
+// reconcile would not help them.
+func (r *PlatformAgentReconciler) warnSplitNeedsSharedFilesystem(ctx context.Context, agent *agentv1alpha1.PlatformAgent) {
+	log := logf.FromContext(ctx)
+	pvc := &corev1.PersistentVolumeClaim{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: agent.Namespace, Name: agent.Name + "-data"}, pvc); err != nil {
+		return
+	}
+	if slices.Contains(pvc.Spec.AccessModes, corev1.ReadWriteMany) {
+		return
+	}
+	log.Info("WARNING: splitCredentialBrokerPod is enabled, and the agent Pod and the broker Pod cannot see the "+
+		"same files: the broker runs proxied commands in a directory the agent created on this claim, and its "+
+		"access mode does not let both Pods mount it read-write at once. The broker Pod will stay Pending with a "+
+		"Multi-Attach error and every proxied command will report the credential proxy as unavailable. Turn the "+
+		"split off. A ReadWriteMany claim also satisfies today's design and is a choice available to you, but it "+
+		"is not what this product asks for; the supported path is to wait for the broker to own the workspace and "+
+		"take content rather than a directory. Do not co-schedule the two Pods to work around this — it deadlocks "+
+		"the next rolling update on the volume.",
+		"claim", pvc.Name, "accessModes", pvc.Spec.AccessModes)
+}
+
+// deleteIfOwned removes a namespaced object this controller created, refusing
+// to touch one it does not own.
+func (r *PlatformAgentReconciler) deleteIfOwned(ctx context.Context, agent *agentv1alpha1.PlatformAgent, object client.Object) error {
+	if err := r.Get(ctx, client.ObjectKeyFromObject(object), object); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if !metav1.IsControlledBy(object, agent) {
+		return fmt.Errorf("refusing to delete unowned %T %s/%s", object, object.GetNamespace(), object.GetName())
+	}
+	return client.IgnoreNotFound(r.Delete(ctx, object))
+}
+
+// deleteIfManaged removes a cluster-scoped object this controller created.
+// Cluster-scoped objects cannot carry an owner reference to a namespaced agent,
+// so the managed-by label is the only evidence of provenance there is.
+func (r *PlatformAgentReconciler) deleteIfManaged(ctx context.Context, object client.Object) error {
+	if err := r.Get(ctx, client.ObjectKeyFromObject(object), object); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if object.GetLabels()[labelManagedBy] != fieldOwner {
+		return fmt.Errorf("refusing to delete unmanaged %T %s", object, object.GetName())
+	}
+	return client.IgnoreNotFound(r.Delete(ctx, object))
+}
+
+const (
+	// reasonEgressPolicyRequiresSplitBroker refuses the layout: the policy
+	// cannot be rendered at all, because it would govern the credential broker
+	// sharing the Pod.
+	reasonEgressPolicyRequiresSplitBroker = "EgressPolicyRequiresSplitBroker"
+
+	// reasonEgressAllowlistRefused refuses the contents: the policy is fine and
+	// still gets rendered, minus the destinations that were refused.
+	reasonEgressAllowlistRefused = "EgressAllowlistRefused"
+)
+
+// refusalStillRendersTheGuardrail reports whether the egress policy should be
+// reconciled despite the agent's spec being refused.
+//
+// The distinction is between refusing a layout and refusing a value. A refused
+// value leaves a perfectly good policy to render — the builder has already
+// dropped the offending destination — and withholding it would mean the
+// operator's mistake in one field silently removes the whole control.
+func refusalStillRendersTheGuardrail(reason string) bool {
+	return reason == reasonEgressAllowlistRefused
+}
+
+// validateEgressPolicy returns a Degraded reason and message when
+// spec.security.egressPolicy asks for something the operator cannot honestly
+// render, or "" when it can.
+//
+// There are two such cases.
+//
+// The first, and the important one: the rendered policy denies the agent Pod
+// the link-local metadata server by not listing it, and a NetworkPolicy selects
+// Pods, never containers. With the credential broker still a sidecar the two
+// share a network namespace, so the same policy governs both — and the broker
+// reaches the metadata server on purpose, because minting the cloud token is
+// its entire job. Rendering it there would take the agent's credentials away
+// and every proxied command would fail.
+//
+// The second: an operator-supplied destination the policy refuses to render.
+// The builder drops those rather than narrowing them, and a silently dropped
+// rule is its own failure — an operator who added a rule to restore GitHub
+// would get a Ready agent, an unreachable github.com, and nothing in
+// kubectl describe to connect the two. So the refusal is surfaced here rather
+// than left in a log line the operator has no reason to read.
+//
+// The alternative to refusing was to render anyway and let the operator find
+// out, or to render and quietly permit the metadata server so nothing breaks.
+// The second is worse than doing nothing: it is a control that appears on
+// kubectl get netpol and protects nothing.
+func validateEgressPolicy(agent *agentv1alpha1.PlatformAgent) (string, string) {
+	if reason, msg := validateEgressPolicyLayout(agent); reason != "" {
+		return reason, msg
+	}
+	return validateEgressAllowlist(agent)
+}
+
+// validateEgressPolicyLayout is the first case alone. Reconcile checks it
+// before reconcileCredentialBroker rather than with the allowlist check below,
+// because on the reconcile that flips splitCredentialBrokerPod off under a
+// live egressPolicy the broker teardown is the mutation this refusal exists to
+// stop — validated afterwards, the refusal arrives one step too late: the
+// broker Deployment and Service are already deleted, the refusal withholds the
+// workload, and the running agent is left wired to a Service that no longer
+// exists with nothing on the requeue path that puts it back.
+func validateEgressPolicyLayout(agent *agentv1alpha1.PlatformAgent) (string, string) {
+	if !agentEgressPolicyEnabled(agent) {
+		return "", ""
+	}
+	if !credentialBrokerIsSplit(agent) {
+		return reasonEgressPolicyRequiresSplitBroker, "spec.security.egressPolicy: Allowlist requires " +
+			"spec.security.splitCredentialBrokerPod: true. The policy denies the agent Pod the link-local " +
+			"metadata server, and a NetworkPolicy cannot tell two containers in one Pod apart — with the " +
+			"credential broker still a sidecar it would lose the metadata server too, and minting the cloud " +
+			"token there is what the broker is for. Enable the split or set egressPolicy: None and accept " +
+			"that the agent can reach the metadata server."
+	}
+	return "", ""
+}
+
+// validateEgressAllowlist is the second case alone. It stays below
+// reconcileCredentialBroker in Reconcile, deliberately: a refusal about one
+// destination should not stop the broker being reconciled.
+func validateEgressAllowlist(agent *agentv1alpha1.PlatformAgent) (string, string) {
+	if !agentEgressPolicyEnabled(agent) {
+		return "", ""
+	}
+	if refusals := egressAllowlistRefusals(agent); len(refusals) > 0 {
+		return reasonEgressAllowlistRefused, "spec.security.egressAllowlist names destinations the operator " +
+			"will not render, so the agent is not being reconciled rather than being given a policy that " +
+			"quietly omits them: " + strings.Join(refusals, "; ") +
+			". Note that an ipBlock \"except\" clause does not rescue a range containing a metadata " +
+			"address — NAT rewrites the destination before the policy is evaluated " +
+			"(kubernetes/kubernetes#68078). Split the range around it instead."
+	}
+	return "", ""
+}
+
+// reconcileAgentNetworkGuardrails keeps the agent Pod's NetworkPolicies
+// maintained on a reconcile that is about to bail out over its egress spec.
+//
+// A refusal withholds the workload. It must not also withhold a guardrail,
+// because a guardrail that stops being reconciled is a guardrail an operator
+// can delete permanently — and deleting every policy that selects the agent
+// Pod does not leave it restricted, it leaves NetworkPolicy permitting all
+// egress. That the CR reads Degraded at the time makes it worse rather than
+// better: the status names one bad CIDR while the Pod's egress is wide open.
+//
+// <name>-gateway-netpol is reconciled whatever the refusal was. It is the
+// Pod's baseline policy, it predates spec.security.egressPolicy, and neither
+// refusal is an objection to it. <name>-sandbox-metadata-deny is reconciled
+// only when refusalStillRendersTheGuardrail says so — see validateEgressPolicy
+// for why EgressPolicyRequiresSplitBroker is the case where rendering it is
+// itself the harm.
+func (r *PlatformAgentReconciler) reconcileAgentNetworkGuardrails(ctx context.Context, agent *agentv1alpha1.PlatformAgent, reason string) error {
+	otlpEndpoint, otlpSource := r.resolveOTLPEndpoint(ctx, agent)
+	netpolProf := r.resolveNetpolProfile(ctx, agent)
+	if err := r.reconcileNetworkPolicy(ctx, agent, netpolProf, otlpEndpoint, otlpSource == otlpSourceNone); err != nil {
+		return err
+	}
+	if !refusalStillRendersTheGuardrail(reason) {
+		return nil
+	}
+	return r.reconcileAgentEgressPolicy(ctx, agent, r.agentEgressDNSClusterIPs(ctx, agent, netpolProf))
+}
+
+// agentEgressDNSClusterIPs is the resolved cluster DNS VIP list for the agent
+// egress policy's DNS rule.
+//
+// In the ordinary shape it is the profile's own answer. When
+// spec.networkPolicy.enabled is false, resolveNetpolProfile returns before the
+// DNS ladder runs — correct for the gateway policy, which that flag withholds,
+// and exactly wrong for this one: that flag creates the only shape where the
+// egress policy stands alone and enforces, so it is where a hard-coded
+// fallback VIP is a total egress block on a VIP-matching dataplane and where
+// the documented dnsClusterIPs override must still work. Re-run the ladder
+// with the gate lifted; the flag gates the gateway policy, not DNS
+// resolution.
+func (r *PlatformAgentReconciler) agentEgressDNSClusterIPs(ctx context.Context, agent *agentv1alpha1.PlatformAgent, profile netpolProfile) []string {
+	if profile.Generated {
+		return profile.DNSClusterIPs
+	}
+	if !agentEgressPolicyEnabled(agent) {
+		// Nothing will render, so skip the discovery round-trip.
+		return nil
+	}
+	ungated := agent.DeepCopy()
+	ungated.Spec.NetworkPolicy.Enabled = nil
+	return r.resolveNetpolProfile(ctx, ungated).DNSClusterIPs
+}
+
+// reconcileAgentEgressPolicy renders the agent Pod's default-deny egress policy.
+//
+// It applies the policy when spec.security.egressPolicy asks for it, and
+// otherwise does nothing at all — note that "nothing at all" includes not
+// deleting. An egress policy is a guardrail, and this controller does not
+// remove one it did not create, which is the mistake that left
+// <name>-sandbox-metadata-deny deleted on every reconcile; see
+// deleteLegacyCredentialIsolationResources. A cluster operator who applies
+// their own policy under this name, or who turns the field off after the
+// operator rendered one, keeps a closed door rather than silently getting an
+// open one.
+//
+// The cost is a stale policy after an opt-out. That is fail-closed on its own,
+// but it is not harmless if splitCredentialBrokerPod is reverted in the same
+// edit: the broker returns to the agent Pod, the leftover policy selects that
+// Pod, and the broker loses the metadata server along with the sandbox. The
+// egressPolicy CRD field description carries the warning and the three-step
+// revert order, so it reaches kubectl explain.
+func (r *PlatformAgentReconciler) reconcileAgentEgressPolicy(ctx context.Context, agent *agentv1alpha1.PlatformAgent, dnsClusterIPs []string) error {
+	if !agentEgressPolicyEnabled(agent) {
+		return nil
+	}
+	log := logf.FromContext(ctx)
+
+	// validateEgressPolicy has already refused the reconcile if any of these
+	// fired, so reaching the loop below means something calls this builder on a
+	// path that skipped validation. Log it rather than assume: the drop is what
+	// keeps the rendered object safe, and a silent drop is the failure mode
+	// this guard exists for.
+	policy, dropped := buildAgentEgressNetworkPolicy(agent, dnsClusterIPs)
+	for _, reason := range dropped {
+		log.Info("WARNING: dropped an egressAllowlist destination that would widen the policy onto the "+
+			"metadata server or the open internet. It was dropped, not narrowed: an ipBlock \"except\" "+
+			"clause does not reliably block the metadata server (kubernetes/kubernetes#68078).",
+			"agent", agent.Name, "namespace", agent.Namespace, "destination", reason)
+	}
+	if err := ctrl.SetControllerReference(agent, policy, r.Scheme); err != nil {
+		return err
+	}
+	if err := r.applyManaged(ctx, agent, policy); err != nil {
+		return fmt.Errorf("failed to reconcile agent egress NetworkPolicy: %w", err)
+	}
+	log.Info("agent Pod egress is default-deny with an allowlist; the metadata server is not on it. "+
+		"This does nothing unless the cluster CNI enforces NetworkPolicy, which the operator cannot "+
+		"detect, and it is unioned with every other policy selecting this Pod — including the "+
+		"gateway policy this operator renders, which does permit the metadata server.",
+		"policy", policy.Name, "rules", len(policy.Spec.Egress))
 	return nil
 }
 
@@ -607,8 +1428,50 @@ func (r *PlatformAgentReconciler) clearForeignPDBBudgetField(ctx context.Context
 	return nil
 }
 
-func (r *PlatformAgentReconciler) reconcileNetworkPolicy(ctx context.Context, agent *agentv1alpha1.PlatformAgent, otlpEndpoint string) error {
-	profile := r.resolveNetpolProfile(ctx, agent)
+func (r *PlatformAgentReconciler) reconcileNetworkPolicy(ctx context.Context, agent *agentv1alpha1.PlatformAgent, profile netpolProfile, otlpEndpoint string, otlpDisabled bool) error {
+	if !profile.Generated {
+		var existingNetpol networkingv1.NetworkPolicy
+		if err := r.Get(ctx, types.NamespacedName{Namespace: agent.Namespace, Name: agent.Name + "-gateway-netpol"}, &existingNetpol); err == nil {
+			if metav1.IsControlledBy(&existingNetpol, agent) {
+				if err := r.Delete(ctx, &existingNetpol); err != nil && !errors.IsNotFound(err) {
+					return fmt.Errorf("failed to delete disabled NetworkPolicy %s/%s: %w", existingNetpol.Namespace, existingNetpol.Name, err)
+				}
+				logf.FromContext(ctx).Info("Deleted owner-referenced NetworkPolicy because spec.networkPolicy.enabled is false", "namespace", existingNetpol.Namespace, "name", existingNetpol.Name)
+			}
+		} else if !errors.IsNotFound(err) {
+			return fmt.Errorf("failed to get NetworkPolicy %s/%s: %w", agent.Namespace, agent.Name+"-gateway-netpol", err)
+		}
+
+		// Read before deleting, and check ownership, exactly as the NetworkPolicy
+		// above does. The name is agent-prefixed and namespaced, so a collision is
+		// unlikely -- but "enabled: false" is a request to stop managing policy, not
+		// a licence to delete a policy somebody else created under that name.
+		//
+		// The FQDN cleanup on the ENABLED path below (fqdnEnabled == false) deletes
+		// the same name unguarded, and deliberately still does: an operator old
+		// enough to have created that policy without an owner reference would leave
+		// it behind here, and FQDN filtering the user just switched off would keep
+		// applying. That risk is not worth taking on this path, where the whole
+		// point is to stop managing policy at all.
+		fqdnNetpol := &unstructured.Unstructured{}
+		fqdnNetpol.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   "networking.gke.io",
+			Version: "v1alpha1",
+			Kind:    "FQDNNetworkPolicy",
+		})
+		fqdnName := agent.Name + "-fqdn-netpol"
+		if err := r.Get(ctx, types.NamespacedName{Namespace: agent.Namespace, Name: fqdnName}, fqdnNetpol); err == nil {
+			if metav1.IsControlledBy(fqdnNetpol, agent) {
+				if err := r.Delete(ctx, fqdnNetpol); err != nil && !isCRDNotInstalledError(err) {
+					return fmt.Errorf("failed to clean up disabled FQDNNetworkPolicy %s/%s: %w", agent.Namespace, fqdnName, err)
+				}
+				logf.FromContext(ctx).Info("Deleted owner-referenced FQDNNetworkPolicy because spec.networkPolicy.enabled is false", "namespace", agent.Namespace, "name", fqdnName)
+			}
+		} else if !isCRDNotInstalledError(err) {
+			return fmt.Errorf("failed to get FQDNNetworkPolicy %s/%s: %w", agent.Namespace, fqdnName, err)
+		}
+		return nil
+	}
 
 	var apiTargets []string
 	if r.APIServerIP != "" {
@@ -649,26 +1512,18 @@ func (r *PlatformAgentReconciler) reconcileNetworkPolicy(ctx context.Context, ag
 		if raw == "" {
 			return
 		}
-		if strings.Contains(raw, "/") {
-			_, ipNet, err := net.ParseCIDR(raw)
-			if err != nil {
-				logf.FromContext(ctx).Info("Ignoring malformed CIDR in annotation", "annotation", annotationName, "cidr", raw, "error", err)
-				return
-			}
-			ones, bits := ipNet.Mask.Size()
-			if (bits == 32 && ones < minIPv4CIDRPrefix) || (bits == 128 && ones < minIPv6CIDRPrefix) {
-				logf.FromContext(ctx).Info("Rejecting overly broad CIDR in annotation (must be >= /12 for IPv4, >= /48 for IPv6)", "annotation", annotationName, "cidr", raw)
-				return
-			}
-			apiTargets = append(apiTargets, ipNet.String())
+		// normalizeCIDRTarget, not a local parse: it takes the address family from
+		// the address rather than the mask width, so an IPv4-mapped IPv6 block is
+		// measured against the IPv4 floor it will actually print as.
+		// ::ffff:a00:0/104 used to clear the /48 IPv6 floor here and land in the
+		// list as 10.0.0.0/8; it is now rejected, while ::ffff:a00:0/108 still
+		// passes because /108 is the IPv4 /12 that is exactly the floor.
+		ipNet, ok := normalizeCIDRTarget(raw, true)
+		if !ok {
+			logf.FromContext(ctx).Info("Ignoring CIDR in annotation: unparseable, or broader than the /12 (IPv4) or /48 (IPv6) floor", "annotation", annotationName, "cidr", raw)
 			return
 		}
-		trimmed := strings.Trim(raw, "[]")
-		if ip := net.ParseIP(trimmed); ip == nil {
-			logf.FromContext(ctx).Info("Ignoring invalid IP address in annotation", "annotation", annotationName, "ip", raw)
-			return
-		}
-		apiTargets = append(apiTargets, trimmed)
+		apiTargets = append(apiTargets, ipNet.String())
 	}
 
 	appendCIDRs := func(sourceName, rawList string) {
@@ -721,7 +1576,7 @@ func (r *PlatformAgentReconciler) reconcileNetworkPolicy(ctx context.Context, ag
 	}
 
 	// 2. Build and reconcile standard NetworkPolicy (omits blanket external HTTPS egress only if replacement FQDN policy is active)
-	netpol := buildNetworkPolicy(agent, apiTargets, profile, fqdnEnabled, otlpEndpoint)
+	netpol := buildNetworkPolicy(agent, apiTargets, profile, fqdnEnabled, otlpEndpoint, otlpDisabled)
 	if err := ctrl.SetControllerReference(agent, netpol, r.Scheme); err != nil {
 		return fmt.Errorf("failed to set controller reference on NetworkPolicy %s/%s: %w", netpol.Namespace, netpol.Name, err)
 	}
@@ -743,6 +1598,13 @@ func (r *PlatformAgentReconciler) cleanupAgentRBAC(ctx context.Context, agent *a
 	minimalBindingName := fmt.Sprintf("kubeagents:minimal:%s:%s", agent.Namespace, agent.Name)
 	localBindingName := fmt.Sprintf("kubeagents:local:%s:%s", agent.Namespace, agent.Name)
 	leaderBindingName := fmt.Sprintf("kubeagents:leader:%s:%s", agent.Namespace, agent.Name)
+	// The split credential broker's TokenReview grant is applied by
+	// reconcileCredentialBroker on every reconcile, through applyManaged,
+	// which stamps the same instance labels this cleanup selects on. Reaping
+	// it here would delete what the same pass just applied — the reconcile
+	// would never stabilize. Spared like the minimal binding; deleteAll
+	// (the finalizer path) still removes it.
+	tokenReviewName := fmt.Sprintf("kubeagents:tokenreview:%s:%s", agent.Namespace, agent.Name)
 
 	// 1. Fast, dynamic cleanup of ClusterRoleBindings using targeted label selectors (current and legacy instance labels)
 	var labeledClusterRoleBindings rbacv1.ClusterRoleBindingList
@@ -754,7 +1616,7 @@ func (r *PlatformAgentReconciler) cleanupAgentRBAC(ctx context.Context, agent *a
 	}
 	for i := range labeledClusterRoleBindings.Items {
 		crb := &labeledClusterRoleBindings.Items[i]
-		if !deleteAll && crb.Name == minimalBindingName {
+		if !deleteAll && (crb.Name == minimalBindingName || crb.Name == tokenReviewName) {
 			continue
 		}
 		if (strings.HasPrefix(crb.Name, "kubeagents:") || strings.HasPrefix(crb.Name, "kubeagents-")) && crb.DeletionTimestamp.IsZero() {
@@ -774,7 +1636,7 @@ func (r *PlatformAgentReconciler) cleanupAgentRBAC(ctx context.Context, agent *a
 	}
 	for i := range legacyLabeledCRBs.Items {
 		crb := &legacyLabeledCRBs.Items[i]
-		if !deleteAll && crb.Name == minimalBindingName {
+		if !deleteAll && (crb.Name == minimalBindingName || crb.Name == tokenReviewName) {
 			continue
 		}
 		if (strings.HasPrefix(crb.Name, "kubeagents:") || strings.HasPrefix(crb.Name, "kubeagents-")) && crb.DeletionTimestamp.IsZero() {
@@ -794,7 +1656,7 @@ func (r *PlatformAgentReconciler) cleanupAgentRBAC(ctx context.Context, agent *a
 	}
 	for i := range legacyClusterRoles.Items {
 		cr := &legacyClusterRoles.Items[i]
-		if !deleteAll && cr.Name == fmt.Sprintf("kubeagents:minimal:%s:%s", agent.Namespace, agent.Name) {
+		if !deleteAll && (cr.Name == fmt.Sprintf("kubeagents:minimal:%s:%s", agent.Namespace, agent.Name) || cr.Name == tokenReviewName) {
 			continue
 		}
 		if (strings.HasPrefix(cr.Name, "kubeagents:") || strings.HasPrefix(cr.Name, "kubeagents-")) && cr.DeletionTimestamp.IsZero() {
@@ -811,6 +1673,7 @@ func (r *PlatformAgentReconciler) cleanupAgentRBAC(ctx context.Context, agent *a
 	}
 	for i := range existingRoleBindings.Items {
 		rb := &existingRoleBindings.Items[i]
+		// Preserve local and leader bindings during reconciliation
 		if !deleteAll && (rb.Name == localBindingName || rb.Name == leaderBindingName) {
 			continue
 		}
@@ -915,10 +1778,10 @@ func (r *PlatformAgentReconciler) reconcileRBAC(ctx context.Context, agent *agen
 }
 
 // updateStatusReady writes the agent's status and returns the phase it settled on, so
-// the caller can decide whether the agent is still converging. otlpEndpoint and
-// otlpSource are the resolved telemetry wiring; they are reported rather than derived
-// because discovery is otherwise invisible to anyone reading the CR.
-func (r *PlatformAgentReconciler) updateStatusReady(ctx context.Context, agent *agentv1alpha1.PlatformAgent, otlpEndpoint, otlpSource string) (string, error) {
+// the caller can decide whether the agent is still converging. otlpEndpoint, otlpSource,
+// and netpolProfile are the resolved telemetry and network policy wiring; they are reported
+// rather than derived because discovery is otherwise invisible to anyone reading the CR.
+func (r *PlatformAgentReconciler) updateStatusReady(ctx context.Context, agent *agentv1alpha1.PlatformAgent, otlpEndpoint, otlpSource string, netpolProfile netpolProfile) (string, error) {
 	newDeploymentStatusName := ""
 	newDeploymentStatusReadyReplicas := int32(0)
 	var errWorkload error
@@ -989,7 +1852,11 @@ func (r *PlatformAgentReconciler) updateStatusReady(ctx context.Context, agent *
 
 	gitRepoErr := error(nil)
 	if agent.Spec.Integration != nil && agent.Spec.Integration.GitHub != nil {
-		gitRepoErr = agentv1alpha1.ValidateGitRepoURL(agent.Spec.Integration.GitHub.GitRepo)
+		if err := agentv1alpha1.ValidateGitHubOrg(agent.Spec.Integration.GitHub.Org); err != nil {
+			gitRepoErr = err
+		} else if err := agentv1alpha1.ValidateGitRepoURLWithOrg(agent.Spec.Integration.GitHub.GitRepo, agent.Spec.Integration.GitHub.Org); err != nil {
+			gitRepoErr = err
+		}
 	}
 
 	degradedStatus := metav1.ConditionFalse
@@ -997,7 +1864,7 @@ func (r *PlatformAgentReconciler) updateStatusReady(ctx context.Context, agent *
 		newPhase = "Degraded"
 		condStatus = metav1.ConditionFalse
 		condReason = "InvalidGitRepoURL"
-		condMsg = fmt.Sprintf("Invalid gitRepo URL (%s); GitOps disabled in SETTINGS.md", gitRepoErr.Error())
+		condMsg = fmt.Sprintf("Invalid gitRepo URL or org (%s); GitOps disabled in config", gitRepoErr.Error())
 		degradedStatus = metav1.ConditionTrue
 	}
 
@@ -1034,6 +1901,7 @@ func (r *PlatformAgentReconciler) updateStatusReady(ctx context.Context, agent *
 		agent.Status.Address == newAddress &&
 		agent.Status.Telemetry.OTLPEndpoint == otlpEndpoint &&
 		agent.Status.Telemetry.OTLPEndpointSource == otlpSource &&
+		networkPolicyStatusUnchanged(agent.Status.NetworkPolicy, netpolProfile) &&
 		degradedUnchanged &&
 		eventWatcherUnchanged &&
 		existingCond != nil && existingCond.Status == condStatus && existingCond.Reason == condReason && existingCond.Message == condMsg {
@@ -1049,6 +1917,12 @@ func (r *PlatformAgentReconciler) updateStatusReady(ctx context.Context, agent *
 	agent.Status.Address = newAddress
 	agent.Status.Telemetry.OTLPEndpoint = otlpEndpoint
 	agent.Status.Telemetry.OTLPEndpointSource = otlpSource
+	agent.Status.NetworkPolicy.Generated = netpolProfile.Generated
+	agent.Status.NetworkPolicy.DNSClusterIPs = append([]string(nil), netpolProfile.DNSClusterIPs...)
+	agent.Status.NetworkPolicy.DNSClusterIPsSource = netpolProfile.DNSSource
+	agent.Status.NetworkPolicy.MetadataDaemonIP = netpolProfile.MetadataDaemonIP
+	agent.Status.NetworkPolicy.MetadataDaemonPort = netpolProfile.MetadataDaemonPort
+	agent.Status.NetworkPolicy.MetadataDaemonIPSource = netpolProfile.MetadataDaemonSource
 
 	now := metav1.Now()
 	agent.Status.LastReconcileTime = &now
@@ -1088,6 +1962,33 @@ func (r *PlatformAgentReconciler) updateStatusReady(ctx context.Context, agent *
 	}
 
 	return newPhase, r.Status().Update(ctx, agent)
+}
+
+func networkPolicyStatusUnchanged(status agentv1alpha1.NetworkPolicyStatus, profile netpolProfile) bool {
+	if status.Generated != profile.Generated {
+		return false
+	}
+	if status.DNSClusterIPsSource != profile.DNSSource {
+		return false
+	}
+	if status.MetadataDaemonIP != profile.MetadataDaemonIP {
+		return false
+	}
+	if status.MetadataDaemonPort != profile.MetadataDaemonPort {
+		return false
+	}
+	if status.MetadataDaemonIPSource != profile.MetadataDaemonSource {
+		return false
+	}
+	if len(status.DNSClusterIPs) != len(profile.DNSClusterIPs) {
+		return false
+	}
+	for i := range status.DNSClusterIPs {
+		if status.DNSClusterIPs[i] != profile.DNSClusterIPs[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *PlatformAgentReconciler) getDeploymentStatusDetails(ctx context.Context, agent *agentv1alpha1.PlatformAgent) (phase string, reason string, message string) {
@@ -1356,6 +2257,26 @@ func isImageVolumeSupported(dc discovery.DiscoveryInterface, agent *agentv1alpha
 	return supported
 }
 
+// isGKEAutopilot probes the API server for GKE Autopilot specific API groups.
+func isGKEAutopilot(dc discovery.DiscoveryInterface) bool {
+	if dc == nil {
+		return false
+	}
+	defer func() {
+		_ = recover()
+	}()
+	groups, err := dc.ServerGroups()
+	if err != nil || groups == nil {
+		return false
+	}
+	for _, g := range groups.Groups {
+		if g.Name == gkeAutopilotAPIGroup || g.Name == gkeWardenAPIGroup {
+			return true
+		}
+	}
+	return false
+}
+
 // clusterImageVolumeSupport probes the API server for ImageVolume support.
 //
 // determined reports whether the answer is authoritative. When the capability cannot be
@@ -1383,6 +2304,14 @@ func clusterImageVolumeSupport(dc discovery.DiscoveryInterface) (supported bool,
 		log.Info("Could not parse server version to verify ImageVolume support; assuming unsupported. "+override,
 			"major", ver.Major, "minor", ver.Minor)
 		return false, false
+	}
+
+	// GKE Autopilot clusters enforce GKE Warden admission policies (autopilot-volume-type-limitation)
+	// that reject the Image volume type. On Autopilot, fall back to initContainer/emptyDir staging.
+	// On GKE Standard (and non-GKE clusters), ImageVolumeSource is supported natively on Kubernetes 1.35+.
+	if isGKEAutopilot(dc) {
+		log.Info("GKE Autopilot cluster detected; using initContainer plugin staging fallback. " + override)
+		return false, true
 	}
 
 	if major > 1 {
@@ -1415,14 +2344,19 @@ func (r *PlatformAgentReconciler) imageVolumeSupported(agent *agentv1alpha1.Plat
 	return supported
 }
 
-// evaluatePluginReadiness decides a plugin's Ready condition. imageFailure is the
-// kubelet's message when the agent pod cannot pull this plugin's image, empty otherwise.
+type pluginFailure struct {
+	reason  string
+	message string
+}
+
+// evaluatePluginReadiness decides a plugin's Ready condition. failure is the
+// detected failure (image pull or staging container exit), nil otherwise.
 func evaluatePluginReadiness(
 	agent *agentv1alpha1.PlatformAgent,
 	plugin *agentv1alpha1.AgentPlugin,
 	imageVolumeSupported bool,
 	duplicate bool,
-	imageFailure string,
+	failure *pluginFailure,
 ) (phase string, condition metav1.Condition) {
 	degraded := func(reason, message string) (string, metav1.Condition) {
 		return "Degraded", metav1.Condition{
@@ -1438,20 +2372,23 @@ func evaluatePluginReadiness(
 	case duplicate:
 		return degraded("DuplicatePluginName", fmt.Sprintf(
 			"Plugin name '%s' collides with built-in or already registered plugin.", plugin.Name))
-	case !imageVolumeSupported:
-		return degraded("ImageVolumeUnsupported", fmt.Sprintf(
-			"Kubernetes version does not support ImageVolumeSource (requires 1.35+). OCI volume for agent %s was not mounted.",
-			agent.Name))
-	case imageFailure != "":
-		// The image volume is part of the agent's pod spec, so an unpullable plugin
-		// image keeps the whole agent pod from starting. Reporting Ready here would
-		// point whoever is debugging the outage away from its actual cause.
-		return degraded("ImagePullFailed", fmt.Sprintf(
-			"Plugin image '%s' could not be pulled, which is blocking agent %s from starting: %s",
-			plugin.Spec.Image, agent.Name, imageFailure))
+	case failure != nil:
+		if failure.reason == pluginFailureReasonImagePull {
+			// The image volume is part of the agent's pod spec, so an unpullable plugin
+			// image keeps the whole agent pod from starting. Reporting Ready here would
+			// point whoever is debugging the outage away from its actual cause.
+			return degraded(pluginFailureReasonImagePull, fmt.Sprintf(
+				"Plugin image '%s' could not be pulled, which is blocking agent %s from starting: %s",
+				plugin.Spec.Image, agent.Name, failure.message))
+		}
+		return degraded(failure.reason, fmt.Sprintf(
+			"Plugin staging failed for agent %s: %s", agent.Name, failure.message))
 	}
 
 	message := fmt.Sprintf("Plugin successfully applied to agent %s.", agent.Name)
+	if !imageVolumeSupported {
+		message = fmt.Sprintf("Plugin successfully staged via init container for agent %s (ImageVolumeSource unsupported).", agent.Name)
+	}
 	if issues := pluginConfigIssues(plugin); len(issues) > 0 {
 		message = fmt.Sprintf("%s %s", message, strings.Join(issues, " "))
 	}
@@ -1463,7 +2400,7 @@ func evaluatePluginReadiness(
 func (r *PlatformAgentReconciler) updatePluginStatuses(ctx context.Context, agent *agentv1alpha1.PlatformAgent, plugins []*agentv1alpha1.AgentPlugin, imageVolumeSupported bool) {
 	now := metav1.Now()
 	seenNames := make(map[string]bool)
-	imageFailures := r.detectPluginImageFailures(ctx, agent, plugins)
+	pluginFailures := r.detectPluginFailures(ctx, agent, plugins)
 
 	for _, plugin := range plugins {
 		original := plugin.DeepCopy()
@@ -1477,7 +2414,11 @@ func (r *PlatformAgentReconciler) updatePluginStatuses(ctx context.Context, agen
 		duplicate := IsBuiltInPlugin(plugin.Name) || seenNames[normName]
 		seenNames[normName] = true
 
-		phase, condition := evaluatePluginReadiness(agent, plugin, imageVolumeSupported, duplicate, imageFailures[plugin.Name])
+		var failure *pluginFailure
+		if f, exists := pluginFailures[plugin.Name]; exists {
+			failure = &f
+		}
+		phase, condition := evaluatePluginReadiness(agent, plugin, imageVolumeSupported, duplicate, failure)
 		condition.LastTransitionTime = now
 		plugin.Status.Phase = phase
 		meta.SetStatusCondition(&plugin.Status.Conditions, condition)
@@ -1515,12 +2456,10 @@ func logPluginCondition(plugin *agentv1alpha1.AgentPlugin, condition metav1.Cond
 		"plugin", plugin.Name, "reason", condition.Reason)
 }
 
-// detectPluginImageFailures maps plugin name to the kubelet's message when the agent's
-// pod cannot pull that plugin's image. The failure surfaces on the platform-agent
-// container's waiting state, carrying the offending reference in its message, so a
-// plugin is only blamed when its own image is named.
-func (r *PlatformAgentReconciler) detectPluginImageFailures(ctx context.Context, agent *agentv1alpha1.PlatformAgent, plugins []*agentv1alpha1.AgentPlugin) map[string]string {
-	failures := map[string]string{}
+// detectPluginFailures maps plugin name to its detected failure when the agent pod
+// cannot pull the plugin image or when staging the plugin via init container fails.
+func (r *PlatformAgentReconciler) detectPluginFailures(ctx context.Context, agent *agentv1alpha1.PlatformAgent, plugins []*agentv1alpha1.AgentPlugin) map[string]pluginFailure {
+	failures := map[string]pluginFailure{}
 	if len(plugins) == 0 {
 		return failures
 	}
@@ -1532,6 +2471,47 @@ func (r *PlatformAgentReconciler) detectPluginImageFailures(ctx context.Context,
 	}
 
 	for _, pod := range podList.Items {
+		// 1. Check init container statuses for staging failures or image pull issues
+		for _, cs := range pod.Status.InitContainerStatuses {
+			for _, plugin := range plugins {
+				if cs.Name != buildPluginStagingContainerName(plugin.Name) {
+					continue
+				}
+				if w := cs.State.Waiting; w != nil {
+					if w.Reason == "ImagePullBackOff" || w.Reason == "ErrImagePull" {
+						failures[plugin.Name] = pluginFailure{
+							reason:  pluginFailureReasonImagePull,
+							message: w.Message,
+						}
+					} else if w.Reason == "CrashLoopBackOff" {
+						msg := w.Message
+						if cs.LastTerminationState.Terminated != nil && cs.LastTerminationState.Terminated.ExitCode != 0 {
+							msg = fmt.Sprintf("staging init container exited with code %d", cs.LastTerminationState.Terminated.ExitCode)
+							if cs.LastTerminationState.Terminated.Message != "" {
+								msg = fmt.Sprintf("%s: %s", msg, cs.LastTerminationState.Terminated.Message)
+							}
+						} else if msg == "" {
+							msg = "staging init container crashed"
+						}
+						failures[plugin.Name] = pluginFailure{
+							reason:  pluginFailureReasonStaging,
+							message: msg,
+						}
+					}
+				} else if t := cs.State.Terminated; t != nil && t.ExitCode != 0 {
+					msg := fmt.Sprintf("staging init container exited with code %d", t.ExitCode)
+					if t.Message != "" {
+						msg = fmt.Sprintf("%s: %s", msg, t.Message)
+					}
+					failures[plugin.Name] = pluginFailure{
+						reason:  pluginFailureReasonStaging,
+						message: msg,
+					}
+				}
+			}
+		}
+
+		// 2. Check main container waiting on image volumes (ImageVolumeSource)
 		for _, cs := range pod.Status.ContainerStatuses {
 			w := cs.State.Waiting
 			if w == nil || (w.Reason != "ImagePullBackOff" && w.Reason != "ErrImagePull") {
@@ -1539,12 +2519,28 @@ func (r *PlatformAgentReconciler) detectPluginImageFailures(ctx context.Context,
 			}
 			for _, plugin := range plugins {
 				if imageReferencedIn(w.Message, plugin.Spec.Image) {
-					failures[plugin.Name] = w.Message
+					failures[plugin.Name] = pluginFailure{
+						reason:  pluginFailureReasonImagePull,
+						message: w.Message,
+					}
 				}
 			}
 		}
 	}
 	return failures
+}
+
+// detectPluginImageFailures maps plugin name to the kubelet's message when the agent's
+// pod cannot pull that plugin's image.
+func (r *PlatformAgentReconciler) detectPluginImageFailures(ctx context.Context, agent *agentv1alpha1.PlatformAgent, plugins []*agentv1alpha1.AgentPlugin) map[string]string {
+	all := r.detectPluginFailures(ctx, agent, plugins)
+	images := map[string]string{}
+	for name, f := range all {
+		if f.reason == pluginFailureReasonImagePull {
+			images[name] = f.message
+		}
+	}
+	return images
 }
 
 // isImageRefChar reports whether b could be part of an image reference, and so whether a

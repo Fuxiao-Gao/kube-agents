@@ -50,7 +50,7 @@ func fallbackPlatformAgentImage() string {
 }
 
 const (
-	fallbackFluentBitImage = "fluent/fluent-bit:5.1.0"
+	fallbackFluentBitImage = "fluent/fluent-bit:5.1.1"
 
 	// Operator-level image overrides for installs that mirror images into a
 	// private registry. Set on the controller-manager Deployment; a CR's
@@ -146,31 +146,68 @@ func withCommonLabels(obj metav1.Object, agent *agentv1alpha1.PlatformAgent) {
 // sites keeps this function total, so no caller can emit an empty
 // OTEL_EXPORTER_OTLP_ENDPOINT, and keeps the manifest builders pure — they take no client
 // and cannot discover anything themselves.
-func otelTelemetryEnvVars(agentType, name, namespace, endpoint string) []corev1.EnvVar {
-	if endpoint == "" {
-		endpoint = managedOTelEndpoint
-	}
-	return []corev1.EnvVar{
+//
+// disabled says the controller resolved otlpSourceNone: discovery probed, this cluster
+// has no collector, and nothing configured one. Then no endpoint is emitted at all and
+// the SDK is switched off instead.
+//
+// What this silences is the stock OpenTelemetry SDK's *metric* exporter, which reads
+// OTEL_EXPORTER_OTLP_ENDPOINT directly and is what actually floods the log: on a
+// collector-less cluster it POSTs /v1/metrics to a name that never resolves, once per
+// export interval, for the life of the pod. Omitting the endpoint on its own would not
+// stop it — with the variable unset the SDK falls back to its own default of
+// http://localhost:4318 and trades the DNS failure for a refused connection at the same
+// rate — so the variable has to be set, not merely skipped. OTEL_SDK_DISABLED=true is
+// also already the off switch charts/kube-agents/README.md tells operators to set by hand
+// for exactly this cluster shape; this makes it the default there.
+//
+// It does NOT reach the hermes_otel plugin, which is where agent *spans* go. That
+// plugin does not read OTEL_EXPORTER_OTLP_ENDPOINT at all — its backend is baked into the
+// image and rewritten at start-up by deploy/shared/otel_config.py, which leaves the baked
+// value alone when the endpoint is empty. So on this path the plugin keeps pointing at
+// the managed collector. That is latent rather than noisy (the plugin exports only when
+// there are spans, and it logs no retry storm), but it is not fixed here.
+//
+// It stays overridable: mergeEnvVars applies spec.deployment.env last, so an operator who
+// wants the exporter pointed somewhere regardless can set either variable themselves.
+func otelTelemetryEnvVars(agentType, name, namespace, endpoint string, disabled bool) []corev1.EnvVar {
+	envs := []corev1.EnvVar{
 		{
 			Name:  "OTEL_SERVICE_NAME",
 			Value: name + "-gateway",
 		},
-		{
-			Name:  "OTEL_EXPORTER_OTLP_ENDPOINT",
-			Value: endpoint,
-		},
-		{
-			Name:  "OTEL_EXPORTER_OTLP_PROTOCOL",
-			Value: "http/protobuf",
-		},
-		{
-			Name: "OTEL_RESOURCE_ATTRIBUTES",
-			Value: fmt.Sprintf(
-				"service.namespace=%s,k8s.namespace.name=%s,kubeagents.agent_type=%s,kubeagents.agent_name=%s",
-				namespace, namespace, agentType, name,
-			),
-		},
 	}
+
+	if disabled {
+		envs = append(envs, corev1.EnvVar{
+			Name:  "OTEL_SDK_DISABLED",
+			Value: "true",
+		})
+	} else {
+		if endpoint == "" {
+			endpoint = managedOTelEndpoint
+		}
+		envs = append(envs,
+			corev1.EnvVar{
+				Name:  "OTEL_EXPORTER_OTLP_ENDPOINT",
+				Value: endpoint,
+			},
+			corev1.EnvVar{
+				Name:  "OTEL_EXPORTER_OTLP_PROTOCOL",
+				Value: "http/protobuf",
+			},
+		)
+	}
+
+	// Identity, not export configuration: kept in both cases. OTEL_SERVICE_NAME in
+	// particular is what docker-entrypoint passes to otel_config.py as --service-name.
+	return append(envs, corev1.EnvVar{
+		Name: "OTEL_RESOURCE_ATTRIBUTES",
+		Value: fmt.Sprintf(
+			"service.namespace=%s,k8s.namespace.name=%s,kubeagents.agent_type=%s,kubeagents.agent_name=%s",
+			namespace, namespace, agentType, name,
+		),
+	})
 }
 
 // deriveAgentImageFromOperator derives the platform-agent image from an operator image reference.
@@ -179,11 +216,12 @@ func otelTelemetryEnvVars(agentType, name, namespace, endpoint string) []corev1.
 // platform-agent manifest, so it falls back to a tag if present before the digest (e.g. :v1@sha256:...)
 // or :latest.
 // E.g.:
-//   "ghcr.io/gke-labs/kube-agents/k8s-operator:0.2.0"                -> "ghcr.io/gke-labs/kube-agents/platform-agent:0.2.0"
-//   "ghcr.io/gke-labs/kube-agents/k8s-operator:rc_2608201147_1c06e1a" -> "ghcr.io/gke-labs/kube-agents/platform-agent:rc_2608201147_1c06e1a"
-//   "ghcr.io/gke-labs/kube-agents/k8s-operator@sha256:111111..."    -> "ghcr.io/gke-labs/kube-agents/platform-agent:latest"
-//   "mirror.corp.internal:5000/kube-agents/k8s-operator:0.2.0"       -> "mirror.corp.internal:5000/kube-agents/platform-agent:0.2.0"
-//   "k8s-operator:1c06e1ab71fdeea55e6100e61c0394206188a5ba"          -> "platform-agent:1c06e1ab71fdeea55e6100e61c0394206188a5ba"
+//
+//	"ghcr.io/gke-labs/kube-agents/k8s-operator:0.2.0"                -> "ghcr.io/gke-labs/kube-agents/platform-agent:0.2.0"
+//	"ghcr.io/gke-labs/kube-agents/k8s-operator:rc_2608201147_1c06e1a" -> "ghcr.io/gke-labs/kube-agents/platform-agent:rc_2608201147_1c06e1a"
+//	"ghcr.io/gke-labs/kube-agents/k8s-operator@sha256:111111..."    -> "ghcr.io/gke-labs/kube-agents/platform-agent:latest"
+//	"mirror.corp.internal:5000/kube-agents/k8s-operator:0.2.0"       -> "mirror.corp.internal:5000/kube-agents/platform-agent:0.2.0"
+//	"k8s-operator:1c06e1ab71fdeea55e6100e61c0394206188a5ba"          -> "platform-agent:1c06e1ab71fdeea55e6100e61c0394206188a5ba"
 func deriveAgentImageFromOperator(operatorImage string) string {
 	lastSlash := strings.LastIndex(operatorImage, "/")
 	prefix := ""
@@ -228,7 +266,7 @@ func fluentBitImage() string {
 
 // resolveAgentImage determines the full image reference using the optional deployment spec and a fallback default.
 //
-// qualify_image_ref() in k8s-operator/scripts/common.sh is the provisioning-time
+// qualify_image_ref() in scripts/installer/common.sh is the provisioning-time
 // twin of this rule and must agree on how a reference is split. The no-tag
 // fallback deliberately differs: this path is serving a live CR and settles for
 // "latest", while the shell helper can still abort the run and does.
@@ -385,7 +423,7 @@ func mergeAnnotations(defaults map[string]string, custom map[string]string) map[
 }
 
 // resolveDeploymentReplicasAndStrategy determines the replica count and deployment strategy
-// based on HighAvailability and ScaleToZero settings in the DeploymentSpec.
+// based on Availability and ScaleToZero settings in the DeploymentSpec.
 func resolveDeploymentReplicasAndStrategy(deployment *agentv1alpha1.DeploymentSpec) (int32, appsv1.DeploymentStrategy) {
 	replicas := int32(1)
 	strategy := appsv1.DeploymentStrategy{
@@ -404,11 +442,40 @@ func resolveDeploymentReplicasAndStrategy(deployment *agentv1alpha1.DeploymentSp
 		}
 
 		if intendedReplicas > 1 {
+			// maxUnavailable is resolved here rather than handed to Kubernetes as a
+			// percentage, and it never lands below 1. Kubernetes rounds a maxSurge
+			// percentage up and a maxUnavailable percentage down, so
+			// defaultSurgePercent on both sides rendered maxSurge 1 /
+			// maxUnavailable 0 at 2 and 3 replicas — the shape that cannot roll at
+			// all under a namespace ResourceQuota with no room for one more gateway
+			// Pod. The old ReplicaSet may not shrink, the surge Pod is refused with
+			// FailedCreate, and the rollout stalls until progressDeadlineSeconds,
+			// including the rollout carrying the fix for whatever prompted it
+			// (#749).
+			//
+			// Scaling defaultSurgePercent rather than hard-coding its arithmetic
+			// keeps one source for the percentage: change the constant and both
+			// sides move together. roundUp=false is what Kubernetes itself would
+			// have applied; the floor is the only added behaviour, and it binds
+			// only at 2 and 3 replicas, where the percentage had no representable
+			// answer other than "make no progress".
+			// An error here means defaultSurgePercent is not a parseable
+			// percentage, which is a constant in this file rather than input; the
+			// floor below then supplies 1 and the rollout still makes progress.
+			scaled, err := intstr.GetScaledValueFromIntOrPercent(
+				ptr.To(intstr.FromString(defaultSurgePercent)), int(intendedReplicas), false)
+			if err != nil {
+				scaled = 0
+			}
+			maxUnavailable := int32(scaled) // #nosec G115 -- bounded by intendedReplicas
+			if maxUnavailable < 1 {
+				maxUnavailable = 1
+			}
 			strategy = appsv1.DeploymentStrategy{
 				Type: appsv1.RollingUpdateDeploymentStrategyType,
 				RollingUpdate: &appsv1.RollingUpdateDeployment{
 					MaxSurge:       &intstr.IntOrString{Type: intstr.String, StrVal: defaultSurgePercent},
-					MaxUnavailable: &intstr.IntOrString{Type: intstr.String, StrVal: defaultSurgePercent},
+					MaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: maxUnavailable},
 				},
 			}
 		}

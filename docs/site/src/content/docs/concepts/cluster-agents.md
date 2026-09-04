@@ -32,7 +32,7 @@ Delegation runs on the shared kanban board — agents never pass context to each
 3. The worker completes the card with the grounded root-cause analysis in `result` — the field the gateway posts into the requesting chat thread verbatim — and the machine-readable form of it, including the proposed manifest patch, in `metadata`.
 4. The Platform Agent reads the result and decides whether to submit the fix through the [declarative workflow](/kube-agents/concepts/declarative-workflow/) (`submit-suggestion`). The write path never moves to the cluster side.
 
-For multi-cluster work the Platform Agent fans out one card per cluster plus a fan-in card assigned to itself, synthesizing every parent's `metadata` once all complete — see the `workload-rebalancing` skill for the pattern.
+For multi-cluster work the Platform Agent fans out one card per cluster, keeps its own card open while they run, and completes it with the synthesized answer once every per-cluster card has finished — the image refuses a completion that would hand back a dispatch receipt while they are still running (`deploy/docker/patches/kanban_children_settled.py`). See the `workload-rebalancing` skill for the pattern.
 
 ## Event triage
 
@@ -40,7 +40,7 @@ A Kubernetes event alert arrives as a card like any other. The [event watcher](h
 
 The Cluster Agent finishes it with `kanban_complete` and nothing else, passing the whole report as `result`. Every card carries a subscription to the session it was filed from, and the notifier posts a subscribed card's `result` to chat when the card turns terminal — so completing the card is the delivery, threaded under the alert it answers. What made that fail before was the address rather than the mechanism: an event session's ambient platform is `api_server`, which no chat adapter can deliver to, so the subscription was written well-formed and undeliverable and every report was produced and dropped.
 
-The report ends by inviting a reply — `To authorize: reply 'apply'`, or `apply Option B` to name one of the remediation options directly. That reply is ordinary chat ingress and lands on the Planning Agent, which did not do the investigation and cannot see the card. What makes it resolve is a row the notifier writes in the same step that posts the report, keyed to the thread it posted into: a `pre_gateway_dispatch` hook finds it and prepends the report to the user's words, so `apply Option B` reaches an agent that knows what Option B was. Acting on it is still the Platform Agent's job through `submit-suggestion` — the fix ships as a Pull Request, and nothing is written to the live cluster.
+The report ends by inviting a reply — `To authorize: reply 'apply'`, and where it proposes more than one remediation option, `apply Option B` to name one directly. That reply is ordinary chat ingress and lands on the Planning Agent, which did not do the investigation and cannot see the card. What makes it resolve is a row the notifier writes in the same step that posts the report, keyed to the thread it posted into: a `pre_gateway_dispatch` hook finds it and prepends the report to the user's words, so `apply Option B` reaches an agent that knows what Option B was. Acting on it is still the Platform Agent's job through `submit-suggestion` — the fix ships as a Pull Request, and nothing is written to the live cluster.
 
 ## Security posture
 

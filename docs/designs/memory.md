@@ -376,8 +376,8 @@ The second is backward compatibility, and it is what picks _which_ store. The fi
 store is what this repository shipped before `kube_agents_memory` existed. Every
 place a default is taken is a place something older is being read: an upgrade
 re-running `install.sh` with no `--memory`, a CR written against the previous CRD
-schema and reconciled by a newer operator, a `vars.sh` from before
-`MEMORY_PROVIDER` was prompted for. Defaulting those to ranked recall would grow
+schema and reconciled by a newer operator, an install configuration from before
+the memory question was prompted for. Defaulting those to ranked recall would grow
 each of them an API server and a Postgres database nobody asked for, and would
 point the agent at a Hindsight service the install never deployed. Taking a
 default has to mean "keep what you have". An enterprise fleet that wants ranked
@@ -392,15 +392,15 @@ to agree about it, and the reason they are listed together is that a disagreemen
 between any two of them is silent: the install still succeeds, and what is wrong
 is either a database nobody asked for or a memory tool that never loads.
 
-| Where                                               | What it holds                                                                  |
-| --------------------------------------------------- | ------------------------------------------------------------------------------ |
-| `install.sh --memory=file\|hindsight\|off`          | the question a human answers, also prompted interactively                      |
-| `MEMORY_PROVIDER` in `k8s-operator/scripts/vars.sh` | the answer, as a provider name; validated against `MEMORY_PROVIDER_CHOICES`    |
-| `spec.harness.memory.provider`                      | the answer, on the CR — the only copy the running system reads                 |
-| `MEMORY_PROVIDER` env on the pod                    | the same value, for the entrypoint, which runs before `config.yaml` is in play |
+| Where                                      | What it holds                                                                  |
+| ------------------------------------------ | ------------------------------------------------------------------------------ |
+| `install.sh --memory=file\|hindsight\|off` | the question a human answers, also prompted interactively                      |
+| `MEMORY` in `install.env`                  | the answer, as the mode the flag takes; `memory_provider_from_mode` maps it    |
+| `spec.harness.memory.provider`             | the answer, on the CR — the only copy the running system reads                 |
+| `MEMORY_PROVIDER` env on the pod           | the same value, for the entrypoint, which runs before `config.yaml` is in play |
 
-`MEMORY_PROVIDER` is the only variable in that answer. The install also writes
-`MEMORY_ENABLED`, and it is deliberately **not** consulted anywhere in the list
+`MEMORY_PROVIDER` is the only variable in that answer. The install also renders
+`MEMORY_ENABLED` into the tfvars, and it is deliberately **not** consulted anywhere in the list
 above: it switches on Hermes' own `MEMORY.md`/`USER.md`, a store with no per-user
 scoping that each provider here replaces rather than supplements, so every install
 this repository has ever written set it `false` while running a provider quite
@@ -449,7 +449,7 @@ It adds exactly two workloads to `kubeagents-system`.
 
 **1. `hindsight-api` — a `Deployment`, one replica** (`api.yaml`).
 
-- Image `ghcr.io/vectorize-io/hindsight-api:0.9.1`, pinned by digest. The pin
+- Image `ghcr.io/vectorize-io/hindsight-api:0.9.2`, pinned by digest. The pin
   lives in `images.json` at the repository root and the manifest takes it as a
   variable, so a mirrored install can point it at an approved registry.
 - Serves HTTP on **8888** behind a ClusterIP `Service` of the same name;
@@ -470,6 +470,26 @@ It adds exactly two workloads to `kubeagents-system`.
   model `model-default`), so routing and cost attribution stay in one place. The
   API key is the literal string `none`, matching how the agents authenticate;
   it is a placeholder the client library insists on, not a credential.
+  `HINDSIGHT_API_LLM_TEMPERATURE=none` omits `temperature` from those calls.
+  Hindsight would otherwise send one, and a model that refuses an explicit
+  temperature answers 400 — which reaches the agent as
+  `500 Fact extraction failed`, so memory records nothing at all rather than
+  recording it badly. Which models refuse it is not knowable here, since the
+  model is whatever the installer chose. It applies to all four operations,
+  which is deliberate — any of them sending a temperature draws the same 400 —
+  and each therefore falls back from a tuned value to the model's default:
+  retain from 0.1, reflect from 0.9, consolidation and verification from 0.0.
+  Consolidation writes the observations recall reads, so its dedup and delta
+  passes stop being pinned; `HINDSIGHT_API_LLM_TEMPERATURE_RETAIN` narrows the
+  omission to fact extraction where a model tolerates the rest.
+  The gateway is the wrong place to fix this. `litellm_settings` is the only
+  gateway-wide place to put it, and neither switch there does the job:
+  `drop_params` drops what LiteLLM believes the provider rejects, and it
+  believes Vertex Claude accepts `temperature`; `additional_drop_params` set
+  there was measured against a live install and the retain still returned 400,
+  because LiteLLM honours it in a model entry's `litellm_params` rather than
+  globally. Per-model it would work, at the price of editing a config every
+  agent request passes through in order to accommodate one caller.
 - Requests 2 CPU/1Gi, limits 4 CPU/4Gi. Runs non-root, no privilege escalation, all
   capabilities dropped. The CPU numbers are sized for model inference rather than for
   serving HTTP, though measurement says the headroom goes unused —
@@ -477,10 +497,55 @@ It adds exactly two workloads to `kubeagents-system`.
 
 **2. `hindsight-postgresql` — a `StatefulSet`, one replica** (`postgresql.yaml`).
 
-- `ankane/pgvector`, digest-pinned in `images.json` alongside the API image,
-  because upstream publishes only a floating `latest` tag and a reschedule could
-  otherwise change the database engine underneath the data. pgvector supplies the
-  vector extension the embeddings need.
+- The pg15 line of `pgvector/pgvector`, digest-pinned in `images.json` alongside the
+  API image, because upstream rebuilds a version tag in place when the Postgres base
+  is patched and a reschedule could otherwise move to a Postgres minor nobody chose.
+  pgvector supplies the vector extension the embeddings need. `images.json` is also
+  where the constraints on that tag are written, the pg15 line among them.
+- **Bumping the image does not move the extension in a database that already
+  exists.** Postgres records the version at `CREATE EXTENSION` and keeps it until
+  someone runs `ALTER EXTENSION vector UPDATE`, so a fresh install gets whatever the
+  image ships while an upgraded one stays where it was — an install created under
+  the 0.5.1 image still reads `0.5.1` from `pg_extension` afterwards. Nothing here
+  runs the update, and an un-updated extension keeps working: the upgrade scripts
+  across this range only add objects, and the HNSW on-disk format is unchanged
+  between the two versions, so the newer library serves the older declarations and
+  reads the existing index. pgvector's own upgrade procedure does say to run the
+  statement, so it is appropriate rather than forbidden. What it gates is mostly
+  SQL-level additions Hindsight does not use — `halfvec` and `sparsevec` among them
+  — but not only those: `vector--0.5.1--0.6.0.sql` sets `STORAGE = external` on the
+  `vector` type, which stops Postgres compressing embeddings and does apply to the
+  column Hindsight writes. At 384 dimensions that is 1,544 bytes, compressed only
+  when the whole row crosses the TOAST threshold, so the effect here is small — but
+  it is not nothing, and "nothing this deployment needs" would be too strong.
+- **The library moves even when the extension does not, and that is the part you
+  feel.** GUCs are registered by the shared library at load, not declared in the
+  extension's SQL, so a new one appears as soon as a backend loads the new library —
+  which the StatefulSet restart guarantees. `hnsw.iterative_scan` is the one that
+  matters: Hindsight 0.9 defaults `HINDSIGHT_API_ANN_ITERATIVE_SCAN=true` and asks
+  for it on every pooled connection. Without it an HNSW scan makes one ground-layer
+  pass and ends when that pass is exhausted, which can happen before the query's
+  `LIMIT` is met; with it the scan resumes in `ef_search`-sized rounds until the
+  `LIMIT` is met or `hnsw.max_scan_tuples` is reached. Hindsight sets that ceiling to
+  4,000 against pgvector's own default of 20,000, and both are tunable through
+  `HINDSIGHT_API_ANN_*`. It needs pgvector 0.8.0, a higher floor than the 0.5.0
+  Hindsight needs overall. Measured on a 20,000-row table at pgvector's default
+  `ef_search=40` — the shipped recall path uses 200 and `strict_order` — a
+  `LIMIT 500` query on a forced HNSW index scan returned 391 rows with the setting
+  off and 500 with it on. Note that 391 is neither the `LIMIT` nor `ef_search`: how
+  far a single pass gets is a property of the graph, so "capped at `ef_search`" is
+  the wrong mental model even though Hindsight's own comments use it.
+  `HINDSIGHT_API_ANN_ITERATIVE_SCAN=false` is the kill switch.
+- **The switch lands on existing installs with no `ALTER EXTENSION`, no config
+  change, and no API restart** — worth spelling out, because the API caches any GUC
+  the server rejects in a process-wide set it never clears, which would otherwise
+  mean a pod that had probed against the old library skipped the setting forever.
+  That path is never taken: pgvector only began reserving the `hnsw.` prefix in
+  0.6.0, so on 0.5.1 the setting was accepted all along as an inert placeholder
+  rather than rejected, and Postgres applies a placeholder's value to the real
+  variable the moment the library defining it loads. Upstream's comment on that
+  branch says an older pgvector rejects the setting; that is true from 0.6.0 onward
+  and not of the 0.5.1 this install is coming from.
 - One 8Gi `ReadWriteOnce` volume from a `volumeClaimTemplate`. `PGDATA` points at a
   **subdirectory** of the mount, not the root: the RWO volume arrives with a
   `lost+found` entry and `initdb` refuses a non-empty data directory.
@@ -530,6 +595,12 @@ Enough of the model to read the wrapper.
   makes context cost independent of corpus size.
 
 #### What a recall costs
+
+Everything measured here and in the section below was taken against the pgvector
+0.5.1 library, which could not run iterative scans. That changes which units the
+retrieval stages return, not how many the reranker scores — its input is bounded by
+the recall budget, which the paragraphs below show this bank already saturates — so
+the stage-4 cost these numbers are dominated by stands.
 
 A recall is not a database query with a model bolted on; it is a model inference
 with a database query in front of it, and the two differ by three orders of
@@ -633,7 +704,7 @@ too, since each agent turn opens its own connection.
 
 Two things this does not buy. Single-user latency is unchanged — 13.2s against 13.6s
 — so replicas add capacity, not speed. And a replica is not free of Postgres:
-`ankane/pgvector` ships stock `max_connections = 100` while
+the Postgres image ships stock `max_connections = 100` while
 `HINDSIGHT_API_DB_POOL_MAX_SIZE` defaults to 100 _per pod_, so one replica already
 sits at parity with the server. The runs above pinned it to 40. Postgres itself never
 participated, at 12–19m of CPU throughout.
@@ -1106,12 +1177,12 @@ front door.
 
 When it is on, four things change, because one of them failing open would be silent:
 
-| Surface            | Behaviour under `read_only`                                                                         |
-| ------------------ | --------------------------------------------------------------------------------------------------- |
-| Tool schemas       | `memory_retain` is not advertised at all                                                            |
-| `handle_tool_call` | A `memory_retain` call is refused with `status: read_only`, worded so it does not read as retryable |
-| Automatic capture  | `sync_turn` and `on_session_end` do not fire, and `_auto_retain` is cleared on the stock provider   |
-| System prompt      | `SYSTEM_PROMPT_READ_ONLY` — says there is no write path, and not to cache what was read             |
+| Surface            | Behaviour under `read_only`                                                                                                  |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| Tool schemas       | `memory_retain` is not advertised at all                                                                                     |
+| `handle_tool_call` | A `memory_retain` call is refused with `status: read_only`, worded so it does not read as retryable                          |
+| Automatic capture  | `sync_turn` and `on_session_end` do not fire, and `_auto_retain` is cleared on the stock provider                            |
+| System prompt      | `SYSTEM_PROMPT_READ_ONLY` — says there is no write path, where to nominate a finding instead, and not to cache what was read |
 
 Omitting the schema is the primary control; advertising the tool and refusing the
 call would spend a turn and read as a transient failure worth retrying. The refusal
@@ -1119,7 +1190,11 @@ is the backstop for an invented call or a schema cached across a config change.
 
 **Not `memory_retain`, in any form.** A specialist that could write shared memory
 could launder its own derived-from-prior-runs conclusions into the corpus as facts.
-What it works out during a task is a finding for its result, not a recorded fact.
+What it works out during a task is a finding for its result, not a recorded fact —
+which leaves the question of how a finding that _should_ be recorded ever gets
+there. [Nominating a finding](#nominating-a-finding-the-card-is-the-write-path)
+below is the answer, and it keeps this objection intact by putting a person between
+the finding and the write.
 
 The prompt's "do not cache what you read" is a partial, prose-only mitigation for
 the skill-file fork; the durable control — making the specialist's own skill
@@ -1128,6 +1203,68 @@ directory unwritable — is tracked separately.
 [`tests/memory/test_read_only_profile.py`](../../tests/memory/test_read_only_profile.py)
 locks down all four surfaces, that reads are untouched, and that the setting
 defaults off.
+
+##### Nominating a finding: the card is the write path
+
+Read-only closes the write and leaves a gap it does not close: the agent best placed
+to discover a durable operational fact is the one that cannot record one. A
+specialist works out that an image crash-loops until a particular environment
+variable is set; the next card to deploy that image works it out again, at the same
+cost. Nothing in the shared corpus could have come from a card, because a discovery
+had no route out of the run it happened in.
+
+The route is the card, and what travels along it is a nomination rather than a
+write:
+
+1. The worker puts the fact in `result`, in a short `**Worth remembering**` block,
+   and repeats the same sentences in
+   `kanban_complete(metadata={"memory_candidates": [...]})` as a flat list of
+   strings. `result` is what the gateway posts into the user's thread verbatim, so
+   the person sees it with no extra turn spent; `metadata` is the machine-readable
+   copy `kanban_show` hands back later.
+2. A Platform Agent that fanned the work out carries its sub-workers'
+   `memory_candidates` onto its own card — it reads every child's `metadata` with
+   `kanban_show` while waiting the children out (`SOUL.md` §6; the fan-in card
+   that used to carry this hop was retired by #1010) — so a nomination survives a
+   hop of delegation instead of dying with the sub-card.
+3. If the user asks to keep it, the Chat Agent reads the card with `kanban_show`,
+   takes the sentence verbatim rather than from the thread it never saw, and writes
+   it with `memory_retain(scope: "shared")`.
+
+The person in step 3 is the control, not a formality: it is what keeps **Not
+`memory_retain`, in any form** true. Nothing a specialist concluded enters the
+corpus because the specialist thought it should. The bar the Chat Agent applies is
+`SHARED_SCOPE_TEST` unchanged, and the worker prompts state the same bar, so the
+filtering happens twice and the second time with someone watching.
+
+Why the user has to ask, rather than the harness offering: a completed card does not
+wake the Chat Agent. `completed` is deliberately absent from `wake_on_events` in
+[`agents/chat/config.yaml`](../../agents/chat/config.yaml), because the woken turn
+would re-read a card whose full result the user is already looking at — measured at
+5.9 s and 32,460 input tokens on one card, for nothing. Auto-triaging nominations
+would mean buying that turn back. Putting the nomination in `result` instead spends
+no turn at all: it is sitting in the message the user is reading, and "keep that" is
+a turn that was going to happen anyway.
+
+None of this is new machinery. `memory_candidates` is an ordinary key in an
+already free-form `metadata` dict, alongside `pr_url` and `proposed_patch`; what
+changed is prose — the three personas and `SYSTEM_PROMPT_READ_ONLY`.
+
+Three limits follow from that, and prose cannot lift any of them. The relay's
+middle hop is prose-only: nothing checks that the waiting Platform Agent actually
+copies its children's `memory_candidates` into its own card's `metadata`, so a
+nomination it drops while synthesizing is gone, and a `kanban_show` on the id the
+Chat Agent knows returns nothing — indistinguishable from nobody having nominated
+anything. (Before #1010 retired the fan-in card this was worse: the collection
+point was a card nothing linked back to the one the user was looking at, and the
+fan-in context serialised each prerequisite's `metadata` with a per-field cap and
+sorted keys, so `memory_candidates` sorted after a large `findings` payload and
+could be truncated away silently.) And a nomination copied **verbatim** is a faithful
+relay of text the specialist read somewhere — a pod annotation, an issue comment —
+which the person approving "remember that" is reading as a fact rather than
+auditing as a string. The control is a person, and a person is the right control
+for whether something is worth keeping, not for whether it was authored in good
+faith.
 
 ### Where the connection settings come from
 

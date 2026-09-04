@@ -25,10 +25,12 @@ spec:
   deployment: { ... } # container image, pull policy, containers, volumes
   security: { ... } # service account + Workload Identity
   telemetry: { ... } # OTLP collector endpoint (optional)
+  networkPolicy: { ... } # generated egress NetworkPolicy (optional)
   integration: { ... } # Google Chat, Slack, GitHub
+  mode: today # unsupported dev toggle for the A2A stack (optional)
 ```
 
-`spec.deployment`, `spec.security`, and `spec.telemetry` are inlined from the shared `AgentSpec`, so they are common to every agent type. `spec.harness` is required; `spec.integration` and `spec.telemetry` are optional.
+`spec.deployment`, `spec.security`, `spec.telemetry`, and `spec.networkPolicy` are inlined from the shared `AgentSpec`, so they are common to every agent type. `spec.harness` is required; `spec.integration`, `spec.telemetry`, and `spec.networkPolicy` are optional. `spec.mode` is an optional enum (`today`/`next`, absent means `today`) and, like `experimental.platformFrontDoor`, **unsupported**: it is the dev toggle from `docs/designs/spec-mode-switch.md` that keeps the A2A `next` stack dark, it is deliberately not surfaced in the Helm chart, and nothing renders differently under `next` yet.
 
 ## `spec.harness`
 
@@ -64,8 +66,10 @@ Reaching it means getting inside the pod's network namespace — `kubectl port-f
 9119:9119` on an ordinary node pool, and
 [`scripts/hermes-dashboard-tunnel.py`](https://github.com/gke-labs/kube-agents/blob/main/scripts/hermes-dashboard-tunnel.py)
 on a GKE Sandbox (gVisor) one, where port-forward is set up in the host-side netns and cannot see
-the sandbox's listener. That script is canonical on both the access path and why the loopback bind
-is deliberate. The container's readiness probe runs `curl` against loopback for the same reason a
+the sandbox's listener. That script is canonical on the dashboard's access path and on why the
+loopback bind is deliberate; the exec relay it uses to get inside the sandbox lives in
+[`scripts/exec_tunnel.py`](https://github.com/gke-labs/kube-agents/blob/main/scripts/exec_tunnel.py),
+shared with the E2E suite, which reaches the agent API the same way and for the same reason. The container's readiness probe runs `curl` against loopback for the same reason a
 `tcpSocket` probe cannot work here: kubelet dials the pod IP, and nothing is listening on it.
 
 `sessionKVApiKeySecretRef` is optional in the API but not in practice, and the `503` above is the
@@ -397,18 +401,68 @@ Default image: derived dynamically from the operator's container image at runtim
 
 - `serviceAccountName` — the KSA the pod runs as. `kubeagents-platform-agent` by convention.
 - `serviceAccountAnnotations` — passed through to the KSA. Typically holds `iam.gke.io/gcp-service-account` for Workload Identity binding.
+- `splitCredentialBrokerPod` — default `false`, and **leave it off for now**. Renders the credential broker as its own Deployment and Service instead of a sidecar. The broker still runs commands in a directory the agent created on the shared data volume, so today both Pods have to see the same files: on the default ReadWriteOnce disk the broker Pod cannot attach the volume, never becomes ready, and every proxied command reports the credential proxy as unavailable. That coupling is being removed rather than worked around — the broker will own the workspace on its own ordinary volume and take file content from the agent instead of a directory — and the flag becomes adoptable then. A ReadWriteMany claim satisfies the current design if you want it, but it is not something this product requires of you, and co-scheduling both Pods on one node is not a workaround. **Also requires `harness.eventWatcher.enabled: false`** — the event watcher lives in the credential container and delivers over the agent Pod's loopback, so the split strands it; asking for both is refused with `Degraded`/`SplitBrokerStrandsEventWatcher`. See [Credential isolation § Splitting the broker into its own Pod](/kube-agents/reference/credential-isolation/#splitting-the-broker-into-its-own-pod).
+
+- `egressPolicy` — `None` (default) or `Allowlist`. `Allowlist` renders a default-deny egress NetworkPolicy on the agent Pod, with the link-local metadata server's credential API left off the allowlist (the address is permitted on port 53 alone, where it is the Cloud DNS for GKE resolver). **It blocks nothing today, and cannot — unless `networkPolicy.enabled: false` has withheld the gateway policy on a Helm install, in which case this becomes the Pod's only policy and default-denies for real on an enforcing CNI (a Kustomize install still carries the static `platform-agent-core-egress` set over the same Pod).** Everywhere else: adding a policy is monotone — policies selecting one Pod are unioned and the API has no deny rule — and the same Pod is already selected by `<name>-gateway-netpol`, which permits `169.254.169.254/32` on TCP 80 and on port 53, the discovered metadata-daemon port (`988` by default) to both link-local metadata addresses, and TCP 443 to `0.0.0.0/0` minus the private ranges. So enabling this widens the Pod's permitted egress (by the broker on 8765, and by the collector namespace on 4317/4318 when the agent is not exporting telemetry) and narrows nothing; what you get is an auditable object, not enforcement. Narrowing the gateway policy once the broker has left the Pod is what makes it a control, and the capability cost lands then. **Requires `splitCredentialBrokerPod: true`** — a NetworkPolicy selects Pods and not containers, and the broker reaches the metadata server on purpose, so the combination is refused with `Degraded`/`EgressPolicyRequiresSplitBroker` rather than rendered. It will also do nothing on a cluster whose CNI does not enforce NetworkPolicy, which the operator cannot detect. See [Credential isolation § Denying the sandbox the metadata server](/kube-agents/reference/credential-isolation/#denying-the-sandbox-the-metadata-server).
+- `egressAllowlist` — tunes `egressPolicy: Allowlist`. `controlPlaneCIDRs` permits the Kubernetes API server on 443 (absent by default, which costs the agent container its API-server connection; a bare address — what the documented `gcloud` command emits for a public endpoint — is widened to a single-host prefix); `extraRules` are NetworkPolicy egress rules appended verbatim — except that a rule the operator will not render (an `ipBlock` reaching a metadata address, including in IPv4-mapped form; a rule with no `to` peers; a peer naming no `ipBlock`, `podSelector` or `namespaceSelector`; an invalid CIDR, in `cidr` or `except`; an `except` outside its `cidr`, which the API server would reject in a way that wedges the whole reconcile; or `controlPlaneCIDRs` wider than /16 IPv4 or /32 IPv6) is refused loudly rather than silently dropped: the agent goes `Degraded`/`EgressAllowlistRefused`, the workload stops being reconciled, and the policy keeps being rendered minus the refused destinations.
+- `scopedServiceAccounts` — the cluster→service-account mapping for the [scoped service account pool](/kube-agents/reference/security-and-iam/#the-scoped-service-account-pool). Absent (the default) the pool is disarmed and the broker runs on the agent's own identity. A non-empty list arms it: the operator renders the mapping into the credential-proxy ConfigMap, mounts it read-only, and sets `CREDENTIAL_PROXY_SCOPED_SA_POOL=1` on the broker, which then mints a short-lived token for the account a request's target cluster maps to and refuses a cluster with no entry (`403`, rule `gcp.scoped-sa.unmapped-scope`) rather than falling back to the wider credential. The list is keyed on `(projectId, location, clusterName)` so a duplicate cluster is rejected at `kubectl apply` rather than crashlooping the broker at startup; entries are bounded at 100 and each component is pattern-validated. **Leave it empty for now**: pool members currently hold no IAM grant, so an armed pool turns every mapped-cluster read into a `Forbidden` — see the caution on the pool section.
 
 The Workload Identity target GSA (`kubeagents-platform-gsa@<project>.iam.gserviceaccount.com`) is created and bound by the [`kube-agents-iam` Terraform module](https://github.com/gke-labs/kube-agents/tree/main/terraform/modules/kube-agents-iam) with one of these permission sets:
 
 - `read-only` (default)
-- `gke-admin`
 - `custom` (roles supplied via the installer's `--custom-roles`, the composition's `project_roles`)
 
 ## `spec.telemetry`
 
 - `otlpEndpoint` — the OTLP/HTTP collector **base** URL (no `/v1/traces` suffix; the exporters append their own per-signal path). Up to 2048 characters, `http://` or `https://`.
 
-Optional, and omitting it is the point: with the field absent the operator discovers an in-cluster collector and falls back to GKE Managed OpenTelemetry. Setting it pins the endpoint and suppresses discovery. The full precedence ladder, the discovery order, and the Helm value that drives LiteLLM and the NetworkPolicy alongside this field are on [Deploy → Telemetry](/kube-agents/deploy/telemetry/#pointing-at-your-own-collector).
+Optional, and omitting it is the point: with the field absent the operator discovers an in-cluster collector, falls back to GKE Managed OpenTelemetry when it cannot establish what the cluster has, and disables export altogether when discovery finds no collector (`otlpEndpointSource: None`). Setting it pins the endpoint and suppresses discovery. The full precedence ladder, the discovery order, and the Helm value that drives LiteLLM and the NetworkPolicy alongside this field are on [Deploy → Telemetry](/kube-agents/deploy/telemetry/#pointing-at-your-own-collector).
+
+## `spec.networkPolicy`
+
+Configures the operator-generated egress `NetworkPolicy`.
+
+- `enabled` (bool, optional) — toggle operator-managed NetworkPolicy generation. Default `true` (unset
+  means on). Setting `false` stops generation and deletes the two policies the operator owns for this
+  agent, `<name>-gateway-netpol` and the `<name>-fqdn-netpol` `FQDNNetworkPolicy`. Both deletions
+  check the owner reference first, so a policy of the same name that the operator did not create
+  survives.
+- `dnsClusterIPs` ([]string, optional, max 8 items) — pins the cluster DNS Service ClusterIPs in
+  rule 1, suppressing dynamic discovery from `kube-system/kube-dns`. Each entry is a bare IPv4 or
+  IPv6 address with no prefix. Admission bounds the IPv4 octets and rejects the leading-zero form
+  (`010.96.0.10`) that Go's `net.ParseIP` refuses, so the usual typos are apply-time errors; a malformed
+  IPv6 literal can still get past it, in which case the operator drops the entry and falls back to
+  discovery, and says so in its log.
+- `metadataDaemon` (object, optional) — pins the node-local cloud metadata daemon IP in rule 3. Its
+  one field, `endpoint`, is required within it, so `metadataDaemon: {}` is rejected; an explicit
+  `endpoint: ""` suppresses rule 3 entirely, for datapaths without a post-NAT daemon. Leave it
+  unspecified to let the operator discover the container port from the `kube-system/gke-metadata-server`
+  DaemonSet on port `metadata-server` (promoting `metadataDaemonIPSource` to `Discovered`). If undiscoverable,
+  it falls back to `169.254.169.252` on port `988`. Overriding the endpoint explicitly opts out of port
+  discovery and uses port `988`.
+- `additionalEgress` ([]EgressRule, optional, max 32 items) — appends custom CIDR and port egress
+  rules to the generated policy. A peer CIDR broader than `/12` (IPv4) or `/48` (IPv6) is rejected at
+  admission, so that a caller-supplied range cannot be widened into an unrestricted egress bypass.
+  One shape gets past that check and is dropped by the operator instead: an IPv4-mapped IPv6 block
+  such as `::ffff:0:0/96` is a 128-bit prefix by every textual measure, so it clears the IPv6 floor,
+  and the operator re-measures it against the IPv4 floor once it has collapsed it to the IPv4 block
+  it means. An `except` block that is not a strict subset of its peer's CIDR is dropped too — the API
+  server rejects the whole policy for one that is not — and a rule left with no usable peer is
+  dropped whole — a rule carrying ports and no peer would otherwise permit egress to every
+  destination. All three are logged, so the operator's log is where a rule that did not take effect
+  explains itself.
+
+  A rule's `ports` list is optional, and omitting it is not one of those drops: a rule with peers
+  and no ports permits **every** port to those peers, which is what a NetworkPolicy egress rule with
+  an empty port list means. Nothing is logged, because nothing was dropped. List the ports unless
+  that is what you want.
+
+  A peer's `except` entries may be written bare (`10.0.1.5`, meaning a `/32`) as well as with a
+  prefix, the same as `cidr`. Unlike `cidr` there is no prefix floor on them, because an `except`
+  has to be a strict subset of its peer to be kept at all.
+
+Annotations (`kubeagents.x-k8s.io/dns-cluster-ip` and `kubeagents.x-k8s.io/metadata-daemon-ip`) remain
+available as escape hatches and take precedence over `spec.networkPolicy`.
 
 ## `spec.integration`
 
@@ -424,26 +478,32 @@ See [`k8s-operator/api/v1alpha1/platformagent_types.go`](https://github.com/gke-
 
 The operator writes observed state to the `status` subresource:
 
-| Field                            | Type   | Purpose                                                                                                |
-| -------------------------------- | ------ | ------------------------------------------------------------------------------------------------------ |
-| `phase`                          | string | Overall state (`Pending`, `Provisioning`, `Ready`, `Failed`).                                          |
-| `address`                        | string | Fully qualified domain name (FQDN) of the agent service.                                               |
-| `lastReconcileTime`              | time   | Timestamp of the last status update.                                                                   |
-| `conditions`                     | list   | Standard `metav1.Condition` observations, keyed by `type`.                                             |
-| `deploymentStatus.name`          | string | Name of the underlying Deployment.                                                                     |
-| `deploymentStatus.readyReplicas` | int32  | Number of fully ready replicas.                                                                        |
-| `serviceStatus.endpoint`         | string | Primary URL/IP (with protocol and port) to reach the agent.                                            |
-| `storageStatus.bound`            | bool   | Whether the primary PVC has been provisioned.                                                          |
-| `telemetry.otlpEndpoint`         | string | The OTLP collector the agent was wired to.                                                             |
-| `telemetry.otlpEndpointSource`   | string | Which rung of the ladder answered: `DeploymentEnv`, `Spec`, `OperatorEnv`, `Discovered`, or `Default`. |
+| Field                                  | Type     | Purpose                                                                                             |
+| -------------------------------------- | -------- | --------------------------------------------------------------------------------------------------- |
+| `phase`                                | string   | Overall state (`Pending`, `Provisioning`, `Ready`, `Degraded`, `Failed`).                           |
+| `address`                              | string   | Fully qualified domain name (FQDN) of the agent service.                                            |
+| `lastReconcileTime`                    | time     | Timestamp of the last status update.                                                                |
+| `conditions`                           | list     | Standard `metav1.Condition` observations, keyed by `type`.                                          |
+| `deploymentStatus.name`                | string   | Name of the underlying Deployment.                                                                  |
+| `deploymentStatus.readyReplicas`       | int32    | Number of fully ready replicas.                                                                     |
+| `serviceStatus.endpoint`               | string   | Primary URL/IP (with protocol and port) to reach the agent.                                         |
+| `storageStatus.bound`                  | bool     | Whether the primary PVC has been provisioned.                                                       |
+| `telemetry.otlpEndpoint`               | string   | The OTLP collector the agent was wired to.                                                          |
+| `telemetry.otlpEndpointSource`         | string   | Which rung answered: `DeploymentEnv`, `Spec`, `OperatorEnv`, `Discovered`, `None`, or `Default`.    |
+| `networkPolicy.generated`              | bool     | Whether the operator-managed NetworkPolicy is active. `false` when disabled, or not yet reconciled. |
+| `networkPolicy.dnsClusterIPs`          | []string | The DNS ClusterIPs written into rule 1.                                                             |
+| `networkPolicy.dnsClusterIPsSource`    | string   | Which rung answered: `Annotation`, `Spec`, `OperatorEnv`, `Discovered`, or `Default`.               |
+| `networkPolicy.metadataDaemonIP`       | string   | The post-NAT daemon IP in rule 3, empty when suppressed.                                            |
+| `networkPolicy.metadataDaemonPort`     | int32    | The post-NAT daemon port in rule 3, resolved from live DaemonSet or default (`988`).                |
+| `networkPolicy.metadataDaemonIPSource` | string   | Which rung answered: `Annotation`, `Spec`, `OperatorEnv`, `Discovered`, `Default`, or `Suppressed`. |
 
 Three condition types appear in `conditions`, and only the first is always present:
 
-| Type           | Written                                      | Meaning                                                                                                                      |
-| -------------- | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `Ready`        | Always                                       | Tracks `phase`; its `reason` and `message` carry whatever the reconcile is waiting on.                                       |
-| `Degraded`     | Only while degraded                          | Something in the spec cannot be honoured — today, `Reason: InvalidGitRepoURL`.                                               |
-| `EventWatcher` | Only while `eventWatcher.enabled` is `false` | `status: False`, `Reason: DisabledBySpec`. The emergency stop is still pressed and no cluster events are reaching the agent. |
+| Type           | Written                                      | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| -------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Ready`        | Always                                       | Tracks `phase`; its `reason` and `message` carry whatever the reconcile is waiting on — including the five spec refusals that park `phase: Degraded` (`RuntimeClassNotFound`, `SplitBrokerStrandsEventWatcher`, `EgressPolicyRequiresSplitBroker`, `EgressAllowlistRefused`, `ModeNotRecognized`). The last is the version-skew refusal from the mode spec and behaves differently on purpose: today's stack still renders in full and the refusal is reported at the end, rather than returning early. |
+| `Degraded`     | Only while degraded                          | Something in the spec cannot be honoured — today, `Reason: InvalidGitRepoURL`. The refusals above ride the `Ready` condition instead of this one.                                                                                                                                                                                                                                                                                                                                                       |
+| `EventWatcher` | Only while `eventWatcher.enabled` is `false` | `status: False`, `Reason: DisabledBySpec`. The emergency stop is still pressed and no cluster events are reaching the agent.                                                                                                                                                                                                                                                                                                                                                                            |
 
 `EventWatcher` is absent on a healthy install rather than `True`, deliberately: the operator can say
 it asked for a watcher, but nothing here checks that one is alive, and a permanently-`True`
@@ -526,7 +586,7 @@ from chat. The platform credentials and endpoints that have no `config.yaml` equ
 through a companion `/etc/hermes/.env`, which Hermes applies last with `override=True` and refuses to
 let the agent overwrite — without that, a container env var would beat the pinned `platforms.*` leaf.
 
-That file also pins one value that is not a credential at all: `API_SERVER_KEY=cluster-internal-trusted`,
+That file also pins two values that are not credentials at all. The first is `API_SERVER_KEY=cluster-internal-trusted`,
 the non-secret loopback sentinel the Hermes API server on `127.0.0.1:8642` validates. It is pinned here
 because Hermes' stage2 hook generates a random `API_SERVER_KEY` into `$HERMES_HOME/.env` whenever that
 file carries none, and the PVC `.env` is applied with `override=True` too — ahead of the container env,
@@ -535,6 +595,10 @@ credential proxy, the startup probe and every in-pod loopback call get `401 Inva
 (issue #786). The container entrypoint warns at boot when this pin and the container env disagree.
 The credential that guards the API from _outside_ is `API_SERVER_EXTERNAL_KEY`, set from
 `hermes.apiServerSecretRef`; the sidecar authenticates the caller against it and swaps in the sentinel.
+The second is `KUBEAGENTS_MODE` (`today` or `next`, from `spec.mode`) — the mode switch's delivery
+contract (`docs/designs/spec-mode-switch.md`). It is pinned always, with the real value, because an
+absent key is a key the agent may write, and it is read back by exactly one module,
+`agents/platform/scripts/runtime_mode.py` (a grep test enforces the pair).
 
 One consequence is worth knowing before you edit `renderConfigYAML`: the managed overlay is a
 leaf-level merge, and a list is a leaf, so a list rendered here **replaces** the image's rather than
