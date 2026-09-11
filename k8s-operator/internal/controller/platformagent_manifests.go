@@ -3965,6 +3965,19 @@ func safeSandboxEnvOverrides(custom []corev1.EnvVar) []corev1.EnvVar {
 	// on stderr, reported in chat like any other script failure) before the
 	// script arms or prints, so an arbitrary value reaches nothing but that
 	// one message and its own failure report.
+	//
+	// GITOPS_BASE_BRANCH names the branch submit-suggestion (directory mode) and
+	// fleet-audit remediation open pull requests against
+	// (agents/platform/scripts/gitops_workspace.py, resolve_base_branch; unset
+	// means the repository's default branch; content mode takes the broker's
+	// default and ignores it). It steers only the PR base
+	// inside the repository the operator already pins via
+	// integration.github.gitRepo: it cannot name another repository, grant
+	// access, or change what runs, and the PR still has to clear that
+	// repository's own review and merge rules. A value naming a branch that
+	// does not exist fails the PR open with GitHub's error, nothing more. The
+	// bench's GitOps fix cycle (gke-labs/kube-agents#1307) sets it per run to a
+	// throwaway run/<id> branch that a controller in the task cluster syncs.
 	allowed := map[string]struct{}{
 		"ALERT_DAILY_LIMIT_CRITICAL": {},
 		// Not a severity, unlike its three neighbours: the drift detector's
@@ -3979,6 +3992,7 @@ func safeSandboxEnvOverrides(custom []corev1.EnvVar) []corev1.EnvVar {
 		"EOD_EXCLUDE_NAMESPACES":      {},
 		"FEEDBACK_PROMPT_DELAY":       {},
 		"FEEDBACK_PROMPT_ENABLED":     {},
+		"GITOPS_BASE_BRANCH":          {},
 		envHermesOtelEnabled:          {},
 		"OTEL_EXPORTER_OTLP_ENDPOINT": {},
 		"OTEL_EXPORTER_OTLP_PROTOCOL": {},
