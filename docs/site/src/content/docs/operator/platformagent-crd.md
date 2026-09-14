@@ -524,7 +524,7 @@ The operator writes observed state to the `status` subresource:
 | `phase`                                | string   | Overall state (`Pending`, `Provisioning`, `Ready`, `Degraded`, `Failed`).                                                                       |
 | `observedGeneration`                   | int64    | The `metadata.generation` the status was last computed from. Behind `metadata.generation` from a spec edit until the reconcile that follows it. |
 | `address`                              | string   | Fully qualified domain name (FQDN) of the agent service.                                                                                        |
-| `lastReconcileTime`                    | time     | Timestamp of the last status update.                                                                                                            |
+| `lastReconcileTime`                    | time     | Timestamp of the last status write. A reconcile that changes nothing in the status leaves it where it was.                                      |
 | `conditions`                           | list     | Standard `metav1.Condition` observations, keyed by `type`.                                                                                      |
 | `deploymentStatus.name`                | string   | Name of the underlying Deployment.                                                                                                              |
 | `deploymentStatus.readyReplicas`       | int32    | Number of fully ready replicas.                                                                                                                 |
