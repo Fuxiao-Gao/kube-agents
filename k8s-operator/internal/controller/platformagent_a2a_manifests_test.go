@@ -227,9 +227,15 @@ func TestSystemUsersAckGrantsAreScopedPerStream(t *testing.T) {
 		"worker":    {"$JS.ACK.TASKS.>"},
 		"agent":     nil,
 		"provision": nil,
-		"seed":      nil,
-		"web":       nil,
-		"sys":       nil,
+		// The session's grants are derived, so it holds no listed grant of
+		// any kind, ack included. What it actually gets at mint time is
+		// also ack-free: its three consumers are ack-none pulls, and an ack
+		// grant on the shared TASKS stream cannot distinguish consumers, so
+		// granting one would let a session +TERM the gateway's deliveries.
+		"session": nil,
+		"seed":    nil,
+		"web":     nil,
+		"sys":     nil,
 	}
 
 	for _, id := range a2aIdentities(agent) {
@@ -972,10 +978,21 @@ func TestBuildA2AGatewaySpawnArming(t *testing.T) {
 		}
 	}
 
-	// The spawner projects the bus password from this Secret; the gateway's
-	// baked default is right only for a CR named platform-agent.
-	if env["A2A_NATS_CREDS_SECRET"].Value != "test-agent-a2a-nats-creds" {
-		t.Errorf("A2A_NATS_CREDS_SECRET = %+v, want the Secret this CR's render actually creates", env["A2A_NATS_CREDS_SECRET"])
+	// The session identity the spawner runs pods as. The gateway has no
+	// default for it and refuses to boot without it, so an unrendered value
+	// here is a CrashLoopBackOff rather than a silent fallback — but the
+	// name still has to be this CR's, because the callout's map is keyed on
+	// exactly it.
+	if env["A2A_SESSION_SERVICE_ACCOUNT"].Value != "test-agent-a2a-session" {
+		t.Errorf("A2A_SESSION_SERVICE_ACCOUNT = %+v, want this CR's session ServiceAccount", env["A2A_SESSION_SERVICE_ACCOUNT"])
+	}
+	// And no bus password reaches the spawner any more. It projected the
+	// static `worker` credential into every session pod, where the model
+	// harness could read it back out of /proc/1/environ (gke-labs#1270);
+	// sessions now mint their own. A re-added reference here is that hole
+	// returning by way of the render.
+	if _, ok := env["A2A_NATS_CREDS_SECRET"]; ok {
+		t.Error("the gateway is still told the bus credentials Secret; the spawner has no use for it and naming it invites the env-injected password back")
 	}
 
 	pods := buildA2AGatewayRole(agent).Rules[0]

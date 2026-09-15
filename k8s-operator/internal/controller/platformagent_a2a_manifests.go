@@ -25,11 +25,15 @@ package controller
 // streams, retention, and the account layout; subjects come from the payload
 // spec (docs/designs/spec-a2a-payloads.md).
 //
-// PLAYGROUND POSTURE (stage 1): static per-component NATS users instead of
-// the auth callout, single-node R1 JetStream (production: 3-node R3), no
-// audit exporter, no breaker, gateway sweep as the only janitor. Each has a
-// decided design in the specs; none gates letting people play. Static creds
-// are the playground, not the product.
+// PLAYGROUND POSTURE (stage 1): single-node R1 JetStream (production: 3-node
+// R3), no audit exporter, no breaker, gateway sweep as the only janitor. Each
+// has a decided design in the specs; none gates letting people play.
+//
+// Authentication came off that list. The auth callout is armed, and the
+// identities that have a ServiceAccount and a client that presents it — the
+// session pods above all — authenticate through it. The static users that
+// remain are enumerated in a2aPostureComment below, which travels onto the
+// cluster in the rendered config; keep the two in step.
 
 import (
 	"context"
@@ -118,14 +122,16 @@ const (
 	// registry; graduation moves this to the release pipeline alongside the
 	// other first-party images.
 	//
-	// None of the four A2A images are in images.json, deliberately: the
-	// inventory documents what a SUPPORTED install pulls, and mode next is an
+	// None of the A2A images are in images.json, deliberately: the inventory
+	// documents what a SUPPORTED install pulls, and mode next is an
 	// unsupported dev toggle. That exemption is graduation debt alongside the
 	// registry move — a mirrored or air-gapped install that flips next must
-	// override all four via the env vars until then.
+	// override every one of them via the env vars until then. There are five
+	// now: NATS, provision, gateway, worker, and the auth callout
+	// (A2A_CALLOUT_IMAGE, in platformagent_a2a_callout.go).
 	defaultA2AGatewayImage = "northamerica-northeast1-docker.pkg.dev/bnaylor-kagents-dev/a2a-demo/gateway:latest"
 
-	// The session-pod image, on the same terms as the three above. The
+	// The session-pod image, on the same terms as the others. The
 	// gateway binary carries this same default of its own (gateway/config.go),
 	// which is what a gateway run outside the operator falls back to; the
 	// operator renders the env unconditionally so that the override exists
@@ -206,10 +212,17 @@ const (
 # Authentication is NOT on that list any more. The auth callout is armed: a
 # client presents a projected Kubernetes ServiceAccount token, the callout
 # validates it against the cluster with a TokenReview, and answers with the
-# permission set the operator mapped that identity to. The users that remain
-# static below are the ones with nothing to present - a browser, a session pod
-# that carries no ServiceAccount, an operator at a port-forward, the callout
-# itself - and each says so where it is defined.`
+# permission set the operator mapped that identity to. Session pods go through
+# it, and a session's grants are derived from the pod the API server attested
+# rather than read from a map, so two sessions on one account cannot reach each
+# other.
+#
+# The users that remain static below are of two kinds, and each says which it
+# is where it is defined. Some have nothing to present: a browser, an operator
+# at a port-forward, the callout itself, which cannot authenticate through
+# itself. The rest have a ServiceAccount and could move tomorrow, but no client
+# that sends a token yet - moving the identity before the program that uses it
+# would refuse the workload at connect.`
 )
 
 func a2aNATSImage() string {
@@ -265,6 +278,17 @@ func a2aNATSClientURL(agent *agentv1alpha1.PlatformAgent) string {
 // authenticate to NATS, not to talk to the API server.
 func a2aProvisionServiceAccountName(agent *agentv1alpha1.PlatformAgent) string {
 	return agent.Name + "-a2a-provision"
+}
+
+// Spawned session pods run as their own ServiceAccount so the callout has an
+// identity to resolve them by, and so the projected token they carry is bound
+// to their own pod. It holds no RBAC at all, and that is the security property:
+// the token's whole purpose is to be presented to NATS, and a session pod that
+// could reach the API server with it would have gained something no session
+// needs. One ServiceAccount is shared by every session — the pod claim is what
+// separates them, not the account. See sessionIdentity.
+func a2aSessionServiceAccountName(agent *agentv1alpha1.PlatformAgent) string {
+	return agent.Name + "-a2a-session"
 }
 
 // a2aLabels returns the common labels with part-of overridden to a2a-next and
@@ -783,11 +807,19 @@ authorization {
     #
     # This is a bypass and not a fallback — a listed user with a wrong
     # password is refused statically and never reaches the callout at all.
-    # Every name here is a principal that cannot present a ServiceAccount
-    # token: the callout itself (it cannot authenticate through itself), the
-    # session workers (a session pod carries no Kubernetes identity yet), the
-    # browser-facing read user (a browser never can), and the operator's own
-    # $SYS login.
+    # The list is the callout itself, which cannot authenticate through
+    # itself, plus every identity marked STATIC above. The session entry is
+    # absent exactly because it is not one: a session pod presents a
+    # pod-bound ServiceAccount token and the callout scopes it to its own
+    # task, so worker is no longer the credential a session holds. Do not
+    # read this list as the session path.
+    #
+    # A name is here for one of two reasons, and each identity's own comment
+    # above says which. It can hold no projected token at all — the browser
+    # read user, the $SYS login held by a person, the seed tooling that is
+    # applied rather than run. Or it could and has not moved yet: the
+    # agent-side workloads still on worker, and gateway. The first group is
+    # permanent; the second is the remaining migration.
     auth_users: [ ` + renderA2AAuthUsers(agent) + ` ]
   }
 }
@@ -996,10 +1028,21 @@ func a2aSessionNetpolName(agent *agentv1alpha1.PlatformAgent) string {
 //	            selector matches after the ClusterIP translation, so the port
 //	            that must be granted is the container's.
 //
-// There is no API-server rule, no 443 and no metadata rule beyond DNS, because
-// a session pod carries no ServiceAccount and no Workload Identity (spawn.go
-// sets AutomountServiceAccountToken: false and names none). A worker that
-// needs the internet is a design change, not a policy widening.
+// There is no API-server rule, no 443 and no metadata rule beyond DNS, and the
+// reason changed with per-session credentials without the policy changing.
+//
+// A session pod now DOES carry a ServiceAccount and a Kubernetes token — the
+// projected bus token, audience-bound to the bus and bound by the kubelet to
+// this pod. What it does not carry is a route to the API server, and this
+// policy is what withholds it. The kubelet delivers the token through the
+// volume, so the credential arrives without the pod ever dialling anything;
+// AutomountServiceAccountToken stays false in spawn.go so no second,
+// default-audience token rides along; and the session ServiceAccount holds no
+// RBAC and no Workload Identity annotation, so the token would buy nothing
+// even if a route existed. Three independent reasons, which is deliberate:
+// this is the pod that executes model output.
+//
+// A worker that needs the internet is a design change, not a policy widening.
 //
 // PolicyTypes carries Ingress with no rules on purpose: nothing dials a
 // session pod, so a listener in a worker is an accident and an accident should
@@ -1544,10 +1587,10 @@ func buildA2AGatewayRoleBinding(agent *agentv1alpha1.PlatformAgent) *rbacv1.Role
 }
 
 // buildA2AGatewayDeployment renders the A2A gateway (the chatops gateway of
-// docs/designs/spec-chatops-gateway.md: Discord adapter and session manager;
-// the program itself arrives in its own PR). It is expected to crash-loop until
-// the gateway image is reachable and the discord-bot Secret is created — both
-// are optional references so the render never blocks the rest of the stack.
+// docs/designs/spec-chatops-gateway.md: Discord adapter and session manager).
+// It is expected to crash-loop until the gateway image is reachable and the
+// discord-bot Secret is created — both are optional references so the render
+// never blocks the rest of the stack.
 func buildA2AGatewayDeployment(agent *agentv1alpha1.PlatformAgent) *appsv1.Deployment {
 	name := a2aGatewayName(agent)
 	labels := a2aLabels(agent, "gateway")
@@ -1620,18 +1663,6 @@ func buildA2AGatewayDeployment(agent *agentv1alpha1.PlatformAgent) *appsv1.Deplo
 							// when it matches the gateway's own default, so
 							// the operator-side override reaches it.
 							{Name: "A2A_WORKER_IMAGE", Value: a2aWorkerImage()},
-							// The Secret the spawner projects the bus
-							// password from. The gateway's baked default
-							// spells it for a CR named platform-agent, so on
-							// any install that renames the CR every session
-							// pod would wedge in CreateContainerConfigError
-							// on a Secret that does not exist — and wedge
-							// silently, because a pod that never runs never
-							// reaches a terminal phase for the sweeper to
-							// find, holding its session slot until the
-							// deadline. Same travel-together rule as the
-							// namespace and the owner.
-							{Name: "A2A_NATS_CREDS_SECRET", Value: a2aNATSName(agent) + "-creds"},
 							// The namespace from the downward API, not a baked
 							// default: the boot-time owner resolution below
 							// reads the gateway's own Deployment in THIS
@@ -1655,6 +1686,16 @@ func buildA2AGatewayDeployment(agent *agentv1alpha1.PlatformAgent) *appsv1.Deplo
 							// or anything else — deletes the gateway. The
 							// Role above grants the one get this needs.
 							{Name: "A2A_OWNER_DEPLOYMENT", Value: name},
+							// The identity spawned sessions run as. Rendered
+							// rather than baked for the same reason as the
+							// creds Secret above: the gateway's default spells
+							// it for a CR named platform-agent, and on a
+							// renamed CR every session pod would fail to
+							// schedule against a ServiceAccount that does not
+							// exist. The callout's map is keyed on this exact
+							// name, so the render and the spawner must agree
+							// or every session is refused at connect.
+							{Name: "A2A_SESSION_SERVICE_ACCOUNT", Value: a2aSessionServiceAccountName(agent)},
 						},
 						VolumeMounts: []corev1.VolumeMount{{
 							Name: "principal-map", MountPath: "/etc/a2a/principal-map", ReadOnly: true,
@@ -1932,6 +1973,11 @@ func (r *PlatformAgentReconciler) a2aNamespacedTeardown(agent *agentv1alpha1.Pla
 		{&rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: a2aCalloutName(agent), Namespace: agent.Namespace}}, r.a2aReader()},
 		{&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: a2aCalloutName(agent), Namespace: agent.Namespace}}, r.Client},
 		{&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: a2aProvisionServiceAccountName(agent), Namespace: agent.Namespace}}, r.Client},
+		// The session identity. Removed on a flip to today alongside the
+		// session fence below: with the gateway gone nothing spawns pods that
+		// would mount a token for it, and leaving it behind would leave a
+		// mintable bus identity in a namespace that no longer runs a bus.
+		{&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: a2aSessionServiceAccountName(agent), Namespace: agent.Namespace}}, r.Client},
 		{&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: a2aCalloutKeysName(agent), Namespace: agent.Namespace}}, r.a2aReader()},
 		{&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: a2aAuthMapName(agent), Namespace: agent.Namespace}}, r.a2aReader()},
 		{&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: a2aGatewayName(agent), Namespace: agent.Namespace}}, r.a2aReader()},

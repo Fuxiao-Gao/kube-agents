@@ -11,14 +11,16 @@ Every image an install pulls or a rebuild needs, and how their tags are managed.
 
 [`images.json`](https://github.com/gke-labs/kube-agents/blob/main/images.json) at the repository root is the source of truth for this list. It is what `make mirror-images` copies from, what the chart and the dev tooling resolve their third-party pins from, and what the table below is generated from — so there is one pin per image, not one per install path.
 
-One set of images is deliberately absent: the four the A2A `next` stack pulls — NATS, nats-box,
-the gateway and the session worker. The inventory documents what a supported install pulls, and
-`spec.mode: next` is an unsupported dev toggle, so those pins live as defaults on the operator's
-`A2A_NATS_IMAGE`, `A2A_PROVISION_IMAGE`, `A2A_GATEWAY_IMAGE` and `A2A_WORKER_IMAGE` env vars
-instead. They join this inventory when the stack graduates; until then a mirrored or air-gapped
-install that flips `next` has to override all four.
+One set of images is deliberately absent: the five the A2A `next` stack pulls — NATS, nats-box,
+the gateway, the session worker and the auth callout. The inventory documents what a supported
+install pulls, and `spec.mode: next` is an unsupported dev toggle, so those pins live as defaults
+on the operator's `A2A_NATS_IMAGE`, `A2A_PROVISION_IMAGE`, `A2A_GATEWAY_IMAGE`,
+`A2A_WORKER_IMAGE` and `A2A_CALLOUT_IMAGE` env vars instead. They join this inventory when the
+stack graduates; until then a mirrored or air-gapped install that flips `next` has to override
+all five — and missing the callout is the expensive one to miss, since nothing authenticates to
+the bus without it.
 
-The exemption covers those four published images, not the bases they are built from. `golang` and
+The exemption covers those five published images, not the bases they are built from. `golang` and
 `node` in the build-time table below carry `a2a/Dockerfile.gateway` and `a2a/Dockerfile.worker`
 alongside every other builder, because an override of `A2A_WORKER_IMAGE` names an image someone
 still has to build, and a build in a mirrored environment has to resolve its bases like any other.

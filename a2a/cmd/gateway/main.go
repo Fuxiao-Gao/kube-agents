@@ -1,11 +1,16 @@
 // The a2a chatops gateway: chat (Discord or Google Chat) in, tasks on the bus out.
 //
-// PLAYGROUND POSTURE: static per-component NATS users instead of the auth
-// callout, bot token as a plain Secret, no exporter, no breaker, gateway
-// sweep as the only janitor. Each has a decided design in
-// docs/designs/spec-nats-deployment.md and spec-chatops-gateway.md; the
-// auth callout is the product path and stage 2 work. Static creds are the
-// playground, not the product.
+// PLAYGROUND POSTURE: bot token as a plain Secret, no exporter, no breaker,
+// gateway sweep as the only janitor. Each has a decided design in
+// docs/designs/spec-nats-deployment.md and spec-chatops-gateway.md.
+//
+// The auth callout is no longer on that list - it is armed, and the sessions
+// this gateway spawns authenticate through it with per-pod grants. The gateway
+// itself is still a static NATS user, and that is sequencing rather than
+// posture: it has a ServiceAccount and a map entry could be rendered for it
+// tomorrow, but this program dials with NATS_USER/NATS_PASSWORD and moving the
+// identity before the program would refuse the gateway at connect on every
+// install.
 package main
 
 import (

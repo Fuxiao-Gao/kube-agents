@@ -3,9 +3,17 @@
 // sidecar in the platform-agent pod. Design: a2a/docs/hermes-bridge.md.
 //
 // PLAYGROUND POSTURE: this deployment exists to prove the A2A fabric shape.
-// Static bus credentials, a shared bus user, and no queue-staleness guard
-// are the playground, not the product - the auth callout, per-identity
-// users, and the stage-3 dispatcher replace them.
+// A shared bus user and no queue-staleness guard are the playground, not the
+// product; the stage-3 dispatcher replaces the second.
+//
+// The first is now this program's own debt. The auth callout is armed, but
+// main() below sets nats.UserInfo from the environment and has no path that
+// reads a projected ServiceAccount token, so the bridge cannot authenticate
+// through the callout; it is the last workload of its kind still holding a
+// shared password. Note there is nothing waiting for it either: the rendered
+// map has no `agent` principal and deliberately so, so moving the bridge means
+// giving it an identity of its own rather than reaching for one already there.
+// a2a/docs/hermes-bridge.md owns the move.
 package main
 
 import (
