@@ -96,7 +96,31 @@ resource "null_resource" "incident" {
       # Own kubeconfig, own credentials; see prebuilt/autoops-incident step 0
       # for the full chain of why the ambient context cannot be trusted here.
       kubeconfig_dir="$(mktemp -d)"
-      trap 'rm -rf "$kubeconfig_dir"' EXIT
+
+      # Failure-path cleanup, the incumbent's (prebuilt/autoops-incident,
+      # step 0, which argues it in full): a plant that fails after creating
+      # the namespace deletes it, so the next run starts clean; guarded on
+      # `planted_ns`, which step 1 sets right before the create, so a
+      # namespace this run did not make is never deleted from here.
+      planted_ns=""
+      on_exit() {
+        status=$?
+        set +e
+        if [ "$status" -ne 0 ] && [ -n "$planted_ns" ]; then
+          echo "Plant failed (exit $status). State of ${local.ns} before cleanup:" >&2
+          ${local.kubectl} get pods -o wide >&2
+          ${local.kubectl} get events --sort-by=.lastTimestamp >&2
+          echo "Deleting ${local.ns} so the next run starts from a clean namespace." >&2
+          kubectl delete namespace "${local.ns}" --ignore-not-found --wait=false >&2
+        fi
+        rm -rf "$kubeconfig_dir"
+      }
+      trap on_exit EXIT
+      # A Prow deadline delivers SIGTERM, and bash does not run an EXIT trap
+      # when the shell dies from an untrapped signal; steps 2 and 3 can hold
+      # this script for twelve minutes, so the deadline kill is a real path.
+      trap 'exit 143' TERM INT
+
       KUBECONFIG="$kubeconfig_dir/config"
       export KUBECONFIG
 
@@ -112,9 +136,36 @@ resource "null_resource" "incident" {
       gcloud container clusters get-credentials "${var.host_cluster_name}" \
         --location "${var.host_cluster_location}" --project "$project" --quiet
 
+      # ---- 0b. Clear what an earlier run left behind ------------------------
+      # The incumbent's step 0b, for the incumbent's reason: against a leftover
+      # ${local.ns} the apply below reports `unchanged`, the old pod keeps its
+      # UID, the watcher dedups {UID, reason} against a window opened hours
+      # ago, and step 3 times out with everything looking healthy. Gated on the
+      # managed-by label step 1 writes: a namespace of this name we did not
+      # plant is a stop, not a target.
+      if kubectl get namespace "${local.ns}" >/dev/null 2>&1; then
+        leftover_owner="$(kubectl get namespace "${local.ns}" \
+          -o jsonpath='{.metadata.labels.managed-by}' 2>/dev/null || true)"
+        if [ "$leftover_owner" != "${local.ci_labels["managed-by"]}" ]; then
+          echo "ERROR: ${local.ns} already exists on ${var.host_cluster_name} but is not labelled managed-by=${local.ci_labels["managed-by"]} (found '$leftover_owner'). This stack did not create it, so it will not delete it. Remove it by hand if it is stale." >&2
+          exit 1
+        fi
+        echo "Found a leftover ${local.ns} from an earlier run; deleting it before planting."
+        if ! kubectl delete namespace "${local.ns}" --ignore-not-found --wait=true --timeout=180s; then
+          echo "ERROR: could not clear the leftover ${local.ns} within 180s, so this run cannot plant a fresh pod and the watcher would dedup against the old one. Its current state follows." >&2
+          kubectl get namespace "${local.ns}" -o yaml >&2 || true
+          exit 1
+        fi
+      fi
+
+      # Recorded before anything is planted, so the step-3 log poll cannot
+      # match a `fire` line left by an earlier run against this namespace name.
       started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
       # ---- 1. Plant it ------------------------------------------------------
+      # Set before the create, not after (the incumbent's rule): a create that
+      # half-succeeds still leaves a namespace this run must remove.
+      planted_ns=1
       kubectl create namespace "${local.ns}" --dry-run=client -o yaml | kubectl apply -f -
       kubectl label namespace "${local.ns}" --overwrite \
         managed-by="${local.ci_labels["managed-by"]}" \
