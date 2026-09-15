@@ -457,7 +457,7 @@ githubMinter:
 fluentBit:
   image:
     repository: docker.io/fluent/fluent-bit
-    tag: "5.1.1"
+    tag: "5.1.2"
 
 # The shell sandbox StatefulSet the operator renders beside every agent pod.
 # Same shape as fluentBit above and for the same reason: the chart never renders
