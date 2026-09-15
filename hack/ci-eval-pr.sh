@@ -1330,7 +1330,7 @@ TASKS=(
   # bench/tf/prebuilt/autoops-incident/main.tf for why it cannot, and why it
   # is the host cluster and not the per-run one that gets the incident.
   # autoops-warning-event-triage: moved to NIGHTLY_TASKS 2026-09-03 (tofu wall clock, #1218/#1202).
-  # Five registered scenarios stay commented out, and eleven more run in the
+  # Six registered scenarios stay commented out, and ten more run in the
   # nightly tier only -- NIGHTLY_TASKS below; the task-registration lint
   # reads both arrays. A commented entry here counts as registered, so a
   # line is a promise the scenario exists, not that it runs; the
@@ -1588,7 +1588,13 @@ NIGHTLY_TASKS=(
   #      profile (#1593); the stack itself provisions since the
   #      agent-api-auth fix (#1591 is the incumbent's copy of it).
   "./tasks/ai-security-planted-model-audit/task.yaml"
-  "./tasks/autoops-crashloop-config-triage/task.yaml"
+  # autoops-crashloop-config-triage: registered, commented out until #1593
+  # lands. Until the host cluster's Cluster Agent profile exists, every card
+  # the watcher opens for it blocks, so a nightly rep is ~5-8 minutes of the
+  # serialized infra lock recording a 0/3 that says nothing about the case.
+  # Uncomment with the #1593 fix (or right after it); the entry below is the
+  # line to restore, its unit_cost_hint entry stays.
+  # "./tasks/autoops-crashloop-config-triage/task.yaml"
 )
 
 # Which matrix this run gets. "presubmit" -- the default, and what every

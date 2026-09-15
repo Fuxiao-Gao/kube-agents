@@ -1,8 +1,11 @@
-# NIGHTLY-ACTIVE — registered in hack/ci-eval-pr.sh NIGHTLY_TASKS, not
-# TASKS, since 2026-09-15: tofu-provisioned, so it serializes on the infra
-# lock for a whole invocation, the shape #1218 moved out of presubmit;
-# the nightly record informs the roster edit that would admit it
-# (#1568: roster by default, record verdicts reported). Measured before the move: 0/3 on build 2099607409826729984 with the stack provisioning cleanly; every card blocked on #1593.
+# REGISTERED, COMMENTED OUT in hack/ci-eval-pr.sh NIGHTLY_TASKS until #1593
+# lands: the host cluster's Cluster Agent profile is never scaffolded in the
+# install, so every triage card the watcher opens for this namespace blocks
+# and no report exists to grade (0/3 on build 2099607409826729984, with the
+# stack itself provisioning cleanly and every safeguard green). Nightly, not
+# presubmit, once uncommented: tofu-provisioned, so it serializes on the
+# infra lock for a whole invocation, the shape #1218 moved out of presubmit;
+# the nightly record informs the roster edit that would admit it (#1568).
 # The paragraph below is the original activation note, kept for what it
 # explains.
 #
