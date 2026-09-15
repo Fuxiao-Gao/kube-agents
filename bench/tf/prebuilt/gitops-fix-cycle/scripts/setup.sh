@@ -1,35 +1,35 @@
 #!/usr/bin/env bash
 #
-# Seed b-0011's broken state from the GitOps repository instead of applying it.
+# Seed a task's broken state from the GitOps repository instead of applying it.
 # Runs during `tofu apply`, after the cluster exists and the run branch has been
 # cut, and before the agent starts. Steps:
 #
 #   1. kubectl credentials for the task cluster;
-#   2. metrics-server, exactly as the original b-0011 setup.sh (kubectl top is
-#      part of the scenario);
+#   2. metrics-server where the platform ships none (b-0011's scenario uses
+#      kubectl top; harmless for the others);
 #   3. Argo CD core (controller, repo-server, redis; no API server or UI) at a
 #      pinned release;
-#   4. a repository credential and one Application whose source is the task
-#      directory on the run branch, automated sync with prune and self-heal;
-#   5. wait for the Application to report Synced, then assert the seeded
-#      condition holds: pricer 2/2 ready, checkout 2/4 ready with the rest
-#      blocked by the payments quota, spec at 256Mi / :1.0.0 / 4 replicas.
-#
-# Why 2 and not the original's 3: the original reaches 3 only because its
-# in-place rollout leaves one old 64Mi pod behind. A single sync of the broken
-# state never creates that pod. Sync waves in the manifests (gating, then
-# pricer, then the rest) keep pricer at 2/2, which the task's ready-floor
-# safeguard requires from the first sample. See render-broken-base.sh.
+#   4. a repository credential and one Application, named after the task,
+#      whose source is the task directory on the run branch, automated sync
+#      with prune and self-heal;
+#   5. wait for the Application to report Synced, then source the task's
+#      seeded-condition assertions (scripts/seed/<task>.sh);
+#   6. onboard the cluster with the platform agent (optional).
 #
 # Nothing here writes to the cluster after the Application exists; from this
 # point on, Argo is the only writer.
 set -euo pipefail
 
 : "${INFRA_PROVIDER:?}" "${CLUSTER_NAME:?}" "${KUBECONFIG:?}" "${WAIT_TIMEOUT:?}"
-: "${GITOPS_REPO:?}" "${GITOPS_RUN_BRANCH:?}" "${GITOPS_TASK_PATH:?}" "${GITOPS_TOKEN_FILE:?}" "${ARGOCD_VERSION:?}"
+: "${GITOPS_REPO:?}" "${GITOPS_RUN_BRANCH:?}" "${GITOPS_TASK:?}" "${GITOPS_TASK_PATH:?}"
+: "${GITOPS_TOKEN_FILE:?}" "${ARGOCD_VERSION:?}"
 
 export KUBECONFIG
-APP_NAME="b-0011"
+# The Application is named after the task; the harness looks it up under the
+# same name (GITOPS_ARGO_APP). The seed assertions live beside this script,
+# one file per task.
+APP_NAME="${GITOPS_TASK}"
+GITOPS_SEED_SCRIPT="$(cd "$(dirname "$0")" && pwd)/seed/${GITOPS_TASK}.sh"
 METRICS_SERVER_MANIFEST="https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.9.0/components.yaml"
 POLL_SECONDS=3
 PROFILE_HOME_MODE=2770
@@ -182,21 +182,11 @@ EXPECT=Synced wait_for "application sync status" $((WAIT_TIMEOUT * 2)) \
 synced_rev="$(kubectl -n argocd get application "${APP_NAME}" -o jsonpath='{.status.sync.revision}')"
 echo "    synced revision ${synced_rev}"
 
-echo "==> Asserting the seeded condition"
-EXPECT=256Mi wait_for "checkout memory request" "${WAIT_TIMEOUT}" \
-  kubectl -n payments get deploy checkout -o jsonpath='{.spec.template.spec.containers[?(@.name=="web")].resources.requests.memory}'
-EXPECT=hashicorp/http-echo:1.0.0 wait_for "checkout image" "${WAIT_TIMEOUT}" \
-  kubectl -n payments get deploy checkout -o jsonpath='{.spec.template.spec.containers[?(@.name=="web")].image}'
-EXPECT=4 wait_for "checkout spec.replicas" "${WAIT_TIMEOUT}" \
-  kubectl -n payments get deploy checkout -o jsonpath='{.spec.replicas}'
-EXPECT=2 wait_for "pricer readyReplicas" "${WAIT_TIMEOUT}" \
-  kubectl -n payments get deploy pricer -o jsonpath='{.status.readyReplicas}'
-EXPECT=2 wait_for "checkout readyReplicas (quota-bound)" "${WAIT_TIMEOUT}" \
-  kubectl -n payments get deploy checkout -o jsonpath='{.status.readyReplicas}'
-wait_for "quota-denied checkout pod event" "${WAIT_TIMEOUT}" \
-  bash -c "kubectl -n payments get events --field-selector reason=FailedCreate -o name | head -1"
-wait_for "metrics API returns pod data" "${WAIT_TIMEOUT}" \
-  bash -c "kubectl top pods -n payments --no-headers 2>/dev/null | head -1"
+echo "==> Asserting the seeded condition (${GITOPS_SEED_SCRIPT})"
+[ -r "${GITOPS_SEED_SCRIPT}" ] || { echo "SEED FAIL: no seed assertions at ${GITOPS_SEED_SCRIPT}" >&2; exit 1; }
+SEED_SUMMARY=""
+# shellcheck source=/dev/null
+. "${GITOPS_SEED_SCRIPT}"
 
 # ---------------------------------------------------------------------------
 # 6. onboard the cluster with the platform agent (optional)
@@ -266,4 +256,4 @@ fi
 
 echo "==> Seed complete."
 echo "    Application : argocd/${APP_NAME} -> ${GITOPS_REPO} ${GITOPS_TASK_PATH} @ ${GITOPS_RUN_BRANCH} (${synced_rev})"
-echo "    payments    : checkout 2/4 ready (quota-bound at 256Mi), pricer 2/2"
+echo "    Seeded      : ${SEED_SUMMARY}"

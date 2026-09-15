@@ -4,7 +4,7 @@
 # tasks/kind/b-0011 (gke-labs/devops-bench PR #244): checkout's memory request was
 # inflated to 256Mi, the payments quota strands two of its four replicas. What
 # differs is how the broken state reaches the cluster and how the fix does.
-# The stack (bench/tf/prebuilt/b-0011-gitops) cuts a per-run branch of the
+# The stack (bench/tf/prebuilt/gitops-fix-cycle, gitops_task b-0011) cuts a per-run branch of the
 # GitOps repo from a pinned broken-base commit, installs Argo CD, and syncs the
 # task directory from that branch. The agent is read-only on the cluster and
 # remediates by opening a pull request against the run branch; the repo's
@@ -28,9 +28,10 @@ fixtures: []
 infrastructure:
   deployer: "tofu"
   provider: "gcp"
-  stack: "prebuilt/b-0011-gitops"
+  stack: "prebuilt/gitops-fix-cycle"
   teardown: true
   variables:
+    gitops_task: "b-0011"
     node_count: 1
     machine_type: "e2-standard-2"
     # Pinned so {{NAMESPACE}} and the stack agree; the stack itself does not
