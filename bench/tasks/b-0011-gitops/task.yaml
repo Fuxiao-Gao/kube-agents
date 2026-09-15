@@ -62,8 +62,11 @@ expected_output: ""
 # (docs/designs/bench-case-format.md), so a `hold` case reds
 # `make bench-case-check`; `assert` evaluates the same predicate once, after the
 # run, instead of sampling it throughout. Restore `hold` when the pin moves to a
-# devops-bench that implements it. Nothing else is edited: the pilot changes how
-# the fix reaches the cluster, not how it is scored.
+# devops-bench that implements it. Until then `bench/hack/run-gitops-pilot.sh`
+# runs a rendered copy with these five back to `hold` whenever the installed
+# devops-bench accepts it (DEVOPS_BENCH_PIN), so a measured run scores all
+# seven. Nothing else is edited: the pilot changes how the fix reaches the
+# cluster, not how it is scored.
 verification_spec:
   - name: resource-request-inflated@checkout.wl
     role: objective
