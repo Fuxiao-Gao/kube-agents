@@ -13,7 +13,8 @@
 # at P=4, build 2094432646640701440), so activation rides the authoring
 # PR instead of a follow-up. MEASURED: 3/3 GREEN on that run — build
 # 2094517532634386432 (2026-08-31), 280s/489s/267s per repetition; the
-# 400 unit_cost_hint is that measurement rounded.
+# unit_cost_hint was 400 from that measurement and is 1250 since the
+# 2026-09-14 run (980s/1249s/1929s, build 2099539376672346112).
 #
 # WHAT THIS GRADES THAT rca-remediation-pr DOES NOT. Both cases end in a
 # pull request through the submit-suggestion skill, and both read the PR
