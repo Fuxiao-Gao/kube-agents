@@ -1328,7 +1328,7 @@ TASKS=(
   # bench/tf/prebuilt/autoops-incident/main.tf for why it cannot, and why it
   # is the host cluster and not the per-run one that gets the incident.
   # autoops-warning-event-triage: moved to NIGHTLY_TASKS 2026-09-03 (tofu wall clock, #1218/#1202).
-  # Five registered scenarios stay commented out, and eight more run in the
+  # Five registered scenarios stay commented out, and eleven more run in the
   # nightly tier only -- NIGHTLY_TASKS below; the task-registration lint
   # reads both arrays. A commented entry here counts as registered, so a
   # line is a promise the scenario exists, not that it runs; the
@@ -1571,6 +1571,22 @@ NIGHTLY_TASKS=(
   # only and earns its record here. The default unit_cost_hint fits the
   # measured runs.
   "./tasks/cluster-agent-stalled-controller-healthy-silence/task.yaml"
+  # #1023's fleet-audits and incident-triage second cases, nightly from the
+  # start (2026-09-15). Both are tofu-provisioned and hold the infra lock for
+  # a whole invocation, the shape #1218 moved out of presubmit; the
+  # authoring PR's run 1 reproduced it (a 2279s audit rep starved its sibling
+  # past the 1800s lock wait). The record they build here is what a later
+  # BOOTSTRAP_ADMITTED edit cites (#1568). Measured in that PR's presubmit
+  # runs:
+  #   -- ai-security-planted-model-audit: 2/3 on build 2099607409826729984
+  #      (1415-1488s a repetition with the ledger write; the miss is #1590);
+  #      0/3 on 2099539466187182080 (#1590 x3, #1592 x2).
+  #   -- autoops-crashloop-config-triage: 0/3 on 2099607409826729984, every
+  #      card blocked on the host cluster's unscaffolded Cluster Agent
+  #      profile (#1593); the stack itself provisions since the
+  #      agent-api-auth fix (#1591 is the incumbent's copy of it).
+  "./tasks/ai-security-planted-model-audit/task.yaml"
+  "./tasks/autoops-crashloop-config-triage/task.yaml"
 )
 
 # Which matrix this run gets. "presubmit" -- the default, and what every
@@ -1861,6 +1877,11 @@ unit_cost_hint() {
     obtainability-planted-pdb | stockout-pinned-pool) echo 900 ;;
     upgrade-readiness-lagging-cluster | consistency-drift-outlier) echo 900 ;;
     compliance-rbac-overgrant | rca-remediation-pr) echo 700 ;;
+    # Nightly-only. The audit measured 1415-1488s a repetition with its ledger
+    # write (build 2099607409826729984); the crashloop triage takes the
+    # incumbent autoops hint (same watcher and card waits) until it passes.
+    ai-security-planted-model-audit) echo 1450 ;;
+    autoops-crashloop-config-triage) echo 900 ;;
     consistency-authorized-networks-probe) echo 300 ;;
     # Nightly-only since 2026-09-09. Median of its first three measured
     # repetitions (615/715/166s, build 2097362391401500672); the 200s default
