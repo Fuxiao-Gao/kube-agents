@@ -144,18 +144,27 @@ verification_spec:
       tool_names: ["kanban_list"]
       require_success: true
 
-  # DIVERGENCE FROM THE INCUMBENT, recorded: its fourth objective ("What to
-  # do" + "Option A") grades the delivery contract's lettered options, and
-  # it is deliberately NOT carried here. _triage_task_body letters options
-  # only when there are two or more remediations and explicitly does not
-  # letter a single-option report — and unlike the OOM plant, whose
-  # limit-vs-allocation gap guarantees two sound fixes, a missing config
-  # file can legitimately have one (supply the file). Requiring "Option A"
-  # would red a correct single-remediation triage. The cost, accepted: a
-  # one-line summary that names the two planted nouns passes checks the
-  # incumbent's fourth objective would have failed; the verbatim-
-  # reproduction instruction stays in the prompt and the judge reference
-  # still grades it.
+  # The delivery contract, carried verbatim from the incumbent
+  # (triage-delivers-an-actionable-report in autoops-warning-event-triage,
+  # whose comment argues it in full). "What to do" plus EITHER a lettered
+  # option OR the "To authorize:" call to action is the bar the notifier's
+  # `actionable_report` enforces in production, and the single-remediation
+  # shape a missing config file can legitimately produce passes it: the
+  # template forbids the letter there and writes "To authorize:" instead,
+  # which is why the check is a disjunction (the #1101 relaxation). This case
+  # first dropped the objective on the belief that it required "Option A"
+  # outright; kube-agents-bot's pass on 1571d4f4 pointed out the incumbent
+  # no longer does. Without it a one-line reply naming the two planted nouns
+  # would clear every objective, which is the shape the incumbent added the
+  # check to catch. bench/tests/test_triage_delivery_contract.py pins this
+  # check to the template for both cases.
+  - name: triage-delivers-an-actionable-report
+    role: objective
+    mode: assert
+    check:
+      type: report_contains
+      required_phrases: ["What to do"]
+      any_of_phrases: ["Option A", "To authorize:"]
   - name: triage-names-the-workload
     role: objective
     mode: assert
