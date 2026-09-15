@@ -630,7 +630,7 @@ platformAgent:
     # images.json like every other third-party image.
     image:
       repository: docker.io/alpine/k8s
-      tag: "1.36.2"
+      tag: "1.36.4"
     # How long to wait for the finalizer to clear.
     timeout: 120s
     # Bounds the Job itself (image pull, scheduling) above that wait.
