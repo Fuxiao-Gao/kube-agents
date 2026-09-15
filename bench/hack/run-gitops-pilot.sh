@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Run the b-0011-gitops pilot case (gke-labs/kube-agents#1307) from a laptop
+# Run a GitOps fix-cycle pilot case (gke-labs/kube-agents#1307; TASK=b-0011 or
+# b-0022b, case ./tasks/<TASK>-gitops) from a laptop
 # against a kube-agents install, end to end: per-run branch, task cluster with
 # Argo CD, agent turn, wait for the PR to merge and Argo to sync, verify, tear
 # down. Everything here is what hack/ci-eval-pr.sh would do for this case once
@@ -9,8 +10,8 @@
 # What it does, in order:
 #   1. bench venv on the pinned upstream devops-bench, or on DEVOPS_BENCH_PIN
 #      when set. If the installed devops-bench accepts `mode: hold`, the case
-#      is run from a rendered copy with its five safeguards restored to hold
-#      (all seven checks scored); otherwise the committed case runs as is.
+#      is run from a rendered copy with its safeguards restored to hold (every
+#      check scored); otherwise the committed case runs as is.
 #   2. Tells the agent which branch its PR must target. Default
 #      (BASE_BRANCH_MODE=default-branch): the stack switches the repository's
 #      default branch to the run branch for the run and restores it on destroy.
@@ -19,13 +20,14 @@
 #      reached the pod; it needs an operator whose sandbox env allowlist carries
 #      that variable (this change adds it; no release has it yet).
 #   3. Reads PLATFORM_AGENT_TOKEN and the judge key from the install's secret.
-#   4. Runs `devops-bench ./tasks/b-0011-gitops --agent-type kubeagents` with
+#   4. Runs `devops-bench ./tasks/<TASK>-gitops --agent-type kubeagents` with
 #      the stack and harness pointed at the same run branch.
 #   5. On exit (env mode), removes GITOPS_BASE_BRANCH from the PlatformAgent.
 #
 # Inputs (env, all optional):
 #   GCP_PROJECT_ID (fuxiaogao-gkedemos)  GCP_LOCATION (us-central1-a)
 #   AGENT_HOST_CONTEXT (gke_<project>_us-central1_platform-agent-host)
+#   TASK (b-0011) which case to run: ./tasks/<TASK>-gitops, stack gitops_task <TASK>
 #   CLUSTER_NAME (gitops-pilot-<timestamp>; also seeds the run branch name)
 #   GITOPS_TOKEN_FILE (~/.config/gitops-pilot/github-token)
 #   GITOPS_REPO (stack default)   JUDGE_MODEL (gemini-3.1-pro-preview)
@@ -52,7 +54,7 @@ readonly LITELLM_CONFIGMAP_NAME_PREFIX="litellm-config"
 # The LiteLLM alias the platform agent calls; the model behind it is what the
 # result row's `model` field should carry (the leaderboard keys setups by it).
 readonly AGENT_MODEL_ALIAS="model-default"
-readonly RENDERED_TASKS_TEMPLATE="b-0011-gitops-hold.XXXXXX"
+readonly RENDERED_TASKS_TEMPLATE="gitops-hold.XXXXXX"
 
 : "${GCP_PROJECT_ID:=fuxiaogao-gkedemos}"
 : "${GCP_LOCATION:=us-central1-a}"
@@ -62,7 +64,7 @@ readonly RENDERED_TASKS_TEMPLATE="b-0011-gitops-hold.XXXXXX"
 : "${GITOPS_TOKEN_FILE:=${HOME}/.config/gitops-pilot/github-token}"
 : "${JUDGE_MODEL:=gemini-3.1-pro-preview}"
 
-TASK="b-0011"
+: "${TASK:=b-0011}"   # devops-bench task id; the case is ./tasks/${TASK}-gitops
 RUN_BRANCH="run/${CLUSTER_NAME}/${TASK}"   # must match the stack's locals.run_branch
 CR="platformagents.kubeagents.x-k8s.io/platform-agent"
 K=(kubectl --context "${AGENT_HOST_CONTEXT}" -n "${AGENT_NAMESPACE}")
@@ -95,8 +97,8 @@ echo "==> run ${CLUSTER_NAME}: branch ${RUN_BRANCH}"
 # 1. venv -------------------------------------------------------------------
 uv sync -q
 # Default: the upstream pin from pyproject/uv.lock. It runs this harness but
-# rejects `mode: hold`, so the five hold safeguards land in
-# verification_parse_errors and only the two converge objectives are scored.
+# rejects `mode: hold`, so the hold safeguards land in
+# verification_parse_errors and only the converge objectives are scored.
 #
 # DEVOPS_BENCH_PIN installs another devops-bench over it, given as a pip
 # requirement (`devops-bench @ git+https://github.com/<owner>/devops-bench@<sha>`).
@@ -113,13 +115,14 @@ if [ -n "${DEVOPS_BENCH_PIN:-}" ]; then
 fi
 
 # 1b. task source -----------------------------------------------------------
-# The committed case carries its five safeguards as `mode: assert` because the
+# The committed case carries its safeguards as `mode: assert` because the
 # repository's pin rejects `hold` (see the comment in task.yaml). When the
 # installed devops-bench accepts hold, run a rendered copy with the safeguards
-# restored to `hold`, so all seven checks are scored and the safeguards are
+# restored to `hold`, so every check is scored and the safeguards are
 # sampled through the agent's turn rather than read once at the end. The copy
 # keeps the task's directory name, which is what lands on the result row.
 TASK_SOURCE="./tasks/${TASK}-gitops"
+[ -f "${TASK_SOURCE}/task.yaml" ] || { echo "no case at ${TASK_SOURCE} (TASK=${TASK})" >&2; exit 1; }
 HOLD_SUPPORTED="$(uv run --no-sync python - <<'PY'
 from devops_bench.verification.spec import parse_entries
 probe = [{"name": "p", "role": "safeguard", "severity": "recoverable", "mode": "hold",
@@ -247,6 +250,8 @@ export TF_VAR_gitops_run_branch="${RUN_BRANCH}" TF_VAR_gitops_token_file="${GITO
 export TF_VAR_agent_host_context="${AGENT_HOST_CONTEXT}" TF_VAR_agent_namespace="${AGENT_NAMESPACE}"
 [ -n "${GITOPS_REPO:-}" ] && export TF_VAR_gitops_repo="${GITOPS_REPO}"
 export GITOPS_RUN_BRANCH="${RUN_BRANCH}" GITOPS_TOKEN_FILE
+# The stack names the Argo Application after the task; the harness looks it up.
+export GITOPS_ARGO_APP="${TASK}"
 export GITOPS_ARGO_CONTEXT="gke_${GCP_PROJECT_ID}_${GCP_LOCATION}_${CLUSTER_NAME}"
 # tofu fetches the kind module over https; a global insteadOf to ssh breaks it.
 export GIT_CONFIG_GLOBAL=/dev/null

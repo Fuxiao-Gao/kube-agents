@@ -1,9 +1,10 @@
 # The GitOps fix cycle for bench cases (Integration Spec v1)
 
 Status: pilot, written from the code that ran on 2026-09-10 and 2026-09-15 (gke-labs/kube-agents#1307).
-Scope: one devops-bench task, `b-0011`, on a per-run GKE cluster, against one GitOps
-repository on GitHub. Everything here exists and was exercised end to end at least once;
-the "Findings" section says which parts held and which did not.
+Scope: two devops-bench tasks, `b-0011` and `b-0022b`, each on a per-run GKE cluster,
+against one GitOps repository on GitHub, through one parameterised stack. Everything here
+exists and was exercised end to end at least once; the "Findings" section says which parts
+held and which did not.
 
 ## Why this exists
 
@@ -39,15 +40,26 @@ tasks/b-0011/
   00-gating.yaml     namespaces, network policies, the payments ResourceQuota  (sync-wave -2)
   10-workloads.yaml  deployments, services, statefulset, ingress               (pricer: wave -1)
   kustomization.yaml
+tasks/b-0022b/
+  00-gating.yaml     the storefront Namespace                                  (sync-wave -2)
+  10-workloads.yaml  shelfview (0 replicas), storelookup, aislefeed, search-api (probe on 9099),
+                     their Services, the suspended price-refresh CronJob
+  kustomization.yaml
 ```
 
 The content is **rendered, not hand-written**:
-`bench/tf/prebuilt/b-0011-gitops/scripts/render-broken-base.sh <stack>/manifests <out>`
-takes the stack's healthy seed manifests and applies the same three mutations the original
-`setup.sh` made live (checkout memory request 64Mi -> 256Mi, image `:1.0` -> `:1.0.0`,
-replicas 2 -> 4). The repo therefore cannot drift from the stack without a diff showing it.
+`bench/tf/prebuilt/gitops-fix-cycle/scripts/render-broken-base.sh <task> <stack>/manifests/<task> <out>`
+takes the task's healthy seed manifests from the stack and applies that task's rule. For
+b-0011 that is the same three mutations the original `setup.sh` made live (checkout memory
+request 64Mi -> 256Mi, image `:1.0` -> `:1.0.0`, replicas 2 -> 4). For b-0022b the three
+faults are already declarative in the manifests (shelfview scaled to 0, the CronJob
+suspended, the probe port wrong), so the rule only adds the gating wave and refuses to
+render if any fault is missing. The repo therefore cannot drift from the stack without a
+diff showing it. Broken-base commits: b-0011 `a48b227c`, b-0022b `0099372f`, recorded in
+the stack's `locals.broken_base_sha`.
 
-Two Argo annotations are part of the rendered base and are load-bearing:
+Two Argo annotations are part of the rendered b-0011 base and are load-bearing (the
+b-0022b base carries only the gating wave):
 
 - `argocd.argoproj.io/sync-wave`: gating objects `-2`, `pricer` `-1`, everything else `0`.
   A flat apply lets `checkout` take the 832Mi quota before `pricer`, leaving `pricer` at
@@ -57,7 +69,8 @@ Two Argo annotations are part of the rendered base and are load-bearing:
   ingress class and a ClusterIP backend, so GKE never programs it; without the exclusion
   the Application stays Progressing forever and the completion signal never fires.
 
-The broken base is a commit SHA recorded in the stack (`gitops_broken_base_sha`). The
+The broken base is a commit SHA recorded in the stack (`locals.broken_base_sha`, per task;
+`gitops_broken_base_sha` overrides it). The
 repository's default branch holds it; no run writes the default branch's content (the
 pilot-only default-branch mode below moves the default-branch pointer, not its content).
 
@@ -67,10 +80,11 @@ are disabled org-wide. Both shaped the design below.
 
 ## Branch naming and lifecycle
 
-Run branch: `run/<cluster_name>/b-0011`, where `<cluster_name>` is the per-run task
-cluster name devops-bench already generates. The prompt names the branch through the
-`{{CLUSTER_NAME}}` placeholder because prompt templating has no other per-run value; the
-stack's `locals.run_branch` and `bench/tasks/b-0011-gitops/task.yaml` must stay in step.
+Run branch: `run/<cluster_name>/<task>`, where `<cluster_name>` is the per-run task
+cluster name devops-bench already generates and `<task>` is the stack's `gitops_task`. The
+prompt names the branch through the `{{CLUSTER_NAME}}` placeholder because prompt
+templating has no other per-run value; the stack's `locals.run_branch` and each
+`bench/tasks/<task>-gitops/task.yaml` must stay in step.
 
 The branch is a Terraform resource (`null_resource.run_branch` in the stack) with a create
 provisioner that force-points `refs/heads/<run branch>` at the broken base through the
@@ -81,12 +95,17 @@ as long as the cluster. The script refuses any branch outside `run/**`.
 The agent's PR branches are `platform-agent/<change>-<target>`, as submit-suggestion
 already names them. The check workflow deletes them on merge.
 
-## What the stack installs (`bench/tf/prebuilt/b-0011-gitops`)
+## What the stack installs (`bench/tf/prebuilt/gitops-fix-cycle`)
 
-Inputs beyond the usual cluster variables: `gitops_repo`, `gitops_task_path`,
-`gitops_broken_base_sha`, `gitops_run_branch` (empty = derived), `gitops_token_file`,
-`argocd_version`, `agent_host_context`/`agent_namespace` (onboarding, below), and the
-pilot-only `gitops_switch_default_branch`/`gitops_restore_default_branch`.
+One stack serves every task on the cycle. `gitops_task` (set by the case's
+`infrastructure.variables`) selects the healthy manifests under `manifests/<task>/`, the
+seed assertions in `scripts/seed/<task>.sh`, the broken-base commit, the repository path
+`tasks/<task>`, the run branch and the Argo Application's name. Inputs beyond the usual
+cluster variables: `gitops_task`, `gitops_repo`, `gitops_task_path` and
+`gitops_broken_base_sha` (empty = the task's defaults), `gitops_run_branch` (empty =
+derived), `gitops_token_file`, `argocd_version`, `agent_host_context`/`agent_namespace`
+(onboarding, below), and the pilot-only
+`gitops_switch_default_branch`/`gitops_restore_default_branch`.
 
 `scripts/setup.sh`, in order:
 
@@ -102,12 +121,17 @@ pilot-only `gitops_switch_default_branch`/`gitops_restore_default_branch`.
 4. A repository Secret (`argocd.argoproj.io/secret-type: repository`) with the token from
    `gitops_token_file`, then one Application: source = repo / task path / run branch,
    destination = in-cluster, `syncPolicy.automated {prune, selfHeal}` with retry.
-5. Wait for `status.sync.status == Synced`, then assert the seeded condition: checkout at
-   256Mi / `:1.0.0` / 4 replicas with 2 ready, pricer 2/2, a quota-denied pod event,
-   `kubectl top` returning data. Two ready, not the original's three: the original reaches
-   three only because an old 64Mi pod survives its in-place rollout; a single sync never
-   creates it. Health is deliberately not required at seed time (Progressing is the broken
-   state).
+5. Wait for `status.sync.status == Synced`, then source the task's seed assertions. For
+   b-0011: checkout at 256Mi / `:1.0.0` / 4 replicas with 2 ready, pricer 2/2, a
+   quota-denied pod event, `kubectl top` returning data. Two ready, not the original's
+   three: the original reaches three only because an old 64Mi pod survives its in-place
+   rollout; a single sync never creates it. For b-0022b: shelfview at 0 replicas, the
+   price-refresh CronJob suspended with no succeeded Job, search-api's readiness probe on
+   9099 (its `readyReplicas` is absent and not asserted), and the three safeguards
+   already true (storelookup 3/3, aislefeed
+   3/3, the shelfview Service selector `app: shelfview`), since the live monitor samples
+   them from its first tick. Health is deliberately not required at seed time
+   (Progressing is the broken state).
 6. **Onboarding** (when `agent_host_context` is set): scaffold the Cluster Agent profile
    for the new cluster inside the agent pod, from the shared workspace and under
    `umask 0002`, then prove the worker's path (`kubectl` through the credential proxy
@@ -131,11 +155,12 @@ kubeconfig outside the home is what made the worker's first `kubectl` succeed th
 
 ## What the harness passes to the agent
 
-The prompt is devops-bench b-0011's, unchanged, with a paragraph before it naming the
+The prompt is the devops-bench task's, unchanged, with a paragraph before it naming the
 cluster and project and a paragraph after it naming the repository, path and run branch
-(the style `tasks/gcp/multi-region-failover` already uses for its repo) and, since
-task_version 2, saying that changes reach that branch only through a pull request against
-it (see the direct-push finding below for why).
+(the style `tasks/gcp/multi-region-failover` already uses for its repo) and saying that
+changes reach that branch only through a pull request against it (b-0011-gitops added
+that sentence at task_version 2; b-0022b-gitops has it from its first version; see the
+direct-push finding below for why).
 
 The PR base. In directory mode `submit-suggestion` resolves it as `GITOPS_BASE_BRANCH`,
 else the remote's advertised default branch (`git remote set-head origin --auto`), else
@@ -166,13 +191,16 @@ devops-bench accepts hold), PlatformAgent env patch with a landed-check, tokens 
 install's Secret, `AGENT_MODEL` resolved from the install's LiteLLM config so the result
 row names the model behind the agent, `TF_VAR_*` for the stack, `GITOPS_*` for the
 harness, `--no-sync` so `uv run` does not undo a pin, and the cleanup of the env on exit.
-The run record (`manifest.json`, `results.json`, `rows.json`) of the run on the current
-configuration, run 16 (`run_20260915_203122_413219`), is kept under
-`bench/tasks/b-0011-gitops/evidence/<run id>/`, the layout devops-bench PR #244 uses for its
-own evidence; `rows.json` is the artifact the devops-bench leaderboard ingests. Earlier runs
-are summarised in the Findings below and in gke-labs/kube-agents#1307's comments; their
-records are not in the tree (run 11 has none: its results directory was removed by hand
-during teardown; run 14 failed in the seed).
+The run record (`manifest.json`, `results.json`, `rows.json`) of each task's run on the
+current configuration is kept under `bench/tasks/<task>-gitops/evidence/<run id>/`, the
+layout devops-bench PR #244 uses for its own evidence; `rows.json` is the artifact the
+devops-bench leaderboard ingests. For b-0011 that is run 16 (`run_20260915_203122_413219`);
+for b-0022b its run 4 (`run_20260916_012016_583296`, the first on two nodes; its committed
+`results.json` has two pod IPs in the agent's report rewritten to RFC 5737 addresses for the
+case sanitizer). Earlier runs are summarised in the
+Findings below and in gke-labs/kube-agents#1307's comments; their records are not in the
+tree (b-0011 run 11 has none: its results directory was removed by hand during teardown;
+b-0011 run 14 and b-0022b run 1 failed in the seed).
 
 ## How the PR is found and what "done" means
 
@@ -188,7 +216,9 @@ delegated-work wait, active only when `GITOPS_RUN_BRANCH` is set:
    `GITOPS_MERGE_TIMEOUT` (600s)
    -> `merge_timeout`.
 3. Poll the branch head (`GET .../branches/<run branch>`) and the Argo Application
-   (`kubectl --context <task cluster> -n argocd get application b-0011 -o json`) until
+   (`kubectl --context <task cluster> -n argocd get application <task> -o json`; the name
+   is `GITOPS_ARGO_APP`, which the wrapper sets to the task and which otherwise defaults
+   to the run branch's last segment) until
    `status.sync.status == Synced`, `status.sync.revision == <branch head>` and
    `status.health.status == Healthy` (`GITOPS_SYNC_TIMEOUT`, 300s) -> `merged`; else
    `sync_timeout`. The head is re-read each poll because it can move after the merge (it
@@ -275,6 +305,39 @@ wait, which is now 15.
   violated 337.8s into the window: `outcomeScore: 0.0`, `catastrophic: true`, coverage 1.0,
   `pod-ready` passing. Every layer of the cycle was observed in one run: prompt, PR, check,
   merge, sync, live safeguard, verifiers, row.
+- **b-0022b on the same stack (2026-09-15, 0.5.0, `gemini-3.7-flash`).** The parameterised
+  stack seeded it on the first attempt whose assertions were right (b-0022b run 1 failed on
+  an assertion of mine that read an absent `readyReplicas` as a mismatch, not on the seed;
+  run 2 passed seed and onboarding). The agent diagnosed the search-api probe port, fixed
+  it correctly (`9099 -> 8085`), and left shelfview at 0 and the CronJob suspended, so it
+  remediated one fault of three and reported done. It landed the fix by pushing commit
+  `1068e7b1` straight onto the run branch, with the same "changes reach that branch only
+  through a pull request" sentence in its prompt that run 16 had obeyed: the sentence is a
+  mitigation, not a control (#1498). All nine entries were evaluated, the three hold
+  safeguards held for 208 samples, `readiness-probe-port-set` and `pod-ready@search-api`
+  passed, three objectives failed, `report-job-succeeded` errored at the deadline (next
+  bullet), and the harness recorded `no_pr`; the row is `outcomeScore: null`, unpublishable.
+  Run 2 also ran on one node, which cannot fit a correct fix: shelfview at 3 x 150m needs
+  450m of CPU and the node had 217m free once the other workloads were placed, so the
+  case now asks for two nodes. Runs 3 (one node) and 4 (two nodes) repeated run 2's agent
+  behaviour exactly, probe fix by direct push and nothing else, and both scored: `outcomeScore`
+  0.33, two of six objectives met, `catastrophic: false`, safeguards held for 203 to 215
+  samples. Three runs, one behaviour: on this task the agent stops after the first fault it
+  finds.
+- **Parallel children at the deadline (integration branch; b-0022b run 2).** b-0022b's
+  `report-job-succeeded` objective is a `type: all` of two converging children. When the
+  entry does not converge, both children were recorded `error: evaluation did not complete
+before the deadline` rather than `fail`: the runner's `_run_parallel` waits only
+  `_CHILD_HANDOFF_GRACE_SEC` (1s) past the deadline for children that polled to the end,
+  and a child whose last `kubectl get job -l ... ` call outlives that second is treated as
+  never observed. The entry then reads `error`, correctness is withheld, coverage drops to
+  8/9 and the row's `outcomeScore` is null, the same unpublishable shape as the budget
+  share produced on b-0011 run 9. It is intermittent: b-0022b run 3, same one-node
+  configuration and the same agent outcome (probe fixed by direct push, `no_pr`), recorded
+  the entry `fail` and produced a scorable row (`outcomeScore` 0.33, two of six objectives
+  met, `catastrophic: false`). Nothing in the wrapper can compensate; the fix belongs in
+  devops-bench (a grace period that covers one poll of the slowest child, or the child's
+  own last observation carried into the result).
 - **Onboarding is a prerequisite, not a nicety** (runs 1, 2, 6): see the stack's step 6.
 - **Completion signal**: the first version compared Argo's revision to the merge SHA; a
   post-merge push moved the head and produced a false `sync_timeout`. Fixed to the branch
@@ -283,7 +346,8 @@ wait, which is now 15.
   from earlier admission denials for many minutes; a verifier window shorter than that
   fails `pod-ready` even when the fix is live.
 - **devops-bench pin**: the upstream commit kube-agents pins rejects `mode: hold`. The case
-  in this repository therefore carries the five safeguards as `mode: assert` (evaluated once
+  in this repository therefore carries each case's safeguards (five for b-0011, three for
+  b-0022b) as `mode: assert` (evaluated once
   after the run) so `make bench-case-check` stays green; runs 1 to 8 had them as `hold` and
   saw them land in `verification_parse_errors`. The PR #244 head (gke-labs/devops-bench
   `df600a08`) implements hold but predates upstream's `BENCH_TF_ROOT`, entry-point discovery
@@ -292,7 +356,7 @@ wait, which is now 15.
   branch `integration` (`9dedbc50`, 2026-09-11) carries hold on top of upstream (the pinned
   commit is an ancestor) and runs this harness unchanged; the wrapper installs it through
   `DEVOPS_BENCH_PIN` and, when the installed devops-bench accepts hold, runs a rendered copy
-  of the case with the five safeguards back to `hold`. Run 9 (2026-09-15) on that pin
+  of the case with its safeguards back to `hold`. Run 9 (2026-09-15) on that pin
   evaluated all seven entries with no parse errors: the five safeguards were sampled 169 to
   170 times each across the agent's turn and held.
 - **Verification budget share on the integration branch**: the post-run pass divides

@@ -1381,6 +1381,10 @@ TASKS=(
   #      a personal pilot repository. Run it locally with
   #      bench/hack/run-gitops-pilot.sh until those exist.
   # "./tasks/b-0011-gitops/task.yaml"
+  #   -- b-0022b-gitops (#1307): the second pilot task through the same stack
+  #      (gitops_task b-0022b); parked for the same reason. Run it locally with
+  #      TASK=b-0022b bench/hack/run-gitops-pilot.sh.
+  # "./tasks/b-0022b-gitops/task.yaml"
   #
   # The declared-intent variation (#1341): the obtainability SOP's §4a reads
   # the linked repositories before it reports a posture, and this case grades
