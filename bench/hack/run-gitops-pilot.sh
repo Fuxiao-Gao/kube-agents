@@ -12,12 +12,12 @@
 #      is run from a rendered copy with its five safeguards restored to hold
 #      (all seven checks scored); otherwise the committed case runs as is.
 #   2. Tells the agent which branch its PR must target. Default
-#      (BASE_BRANCH_MODE=env): sets GITOPS_BASE_BRANCH on the PlatformAgent's
-#      spec.deployment.env, waits for the rollout, and checks the value reached
-#      the pod (it needs the operator's sandbox env allowlist to carry that
-#      variable; this change adds it). BASE_BRANCH_MODE=default-branch is the
-#      fallback for an operator without it: the stack switches the repository's
-#      default branch for the run.
+#      (BASE_BRANCH_MODE=default-branch): the stack switches the repository's
+#      default branch to the run branch for the run and restores it on destroy.
+#      BASE_BRANCH_MODE=env sets GITOPS_BASE_BRANCH on the PlatformAgent's
+#      spec.deployment.env instead, waits for the rollout, and checks the value
+#      reached the pod; it needs an operator whose sandbox env allowlist carries
+#      that variable (this change adds it; no release has it yet).
 #   3. Reads PLATFORM_AGENT_TOKEN and the judge key from the install's secret.
 #   4. Runs `devops-bench ./tasks/b-0011-gitops --agent-type kubeagents` with
 #      the stack and harness pointed at the same run branch.
@@ -198,17 +198,17 @@ echo "==> result row model: ${AGENT_MODEL} (LiteLLM alias ${AGENT_MODEL_ALIAS})"
 # pilot notes):
 #   env             set GITOPS_BASE_BRANCH on the PlatformAgent. Needs an
 #                   operator whose sandbox env allowlist carries that variable
-#                   (this change adds it); the measured runs used it on an
-#                   install at release 0.4.0 plus that one line.
-#   default-branch  fallback for an operator without it: the stack makes the
-#                   run branch the repository's default for the run and
-#                   restores it on destroy; the agent re-asks the remote for
-#                   its default before each PR. One run at a time (the stack
-#                   refuses to switch when the default already points at a
-#                   run/** branch), and BENCH_NO_TEARDOWN=true leaves the
-#                   repository's default on the run branch until the destroy
-#                   is run by hand. Pilot-only.
-: "${BASE_BRANCH_MODE:=env}"
+#                   (this change adds it; no release has it yet). Runs 1 to 13
+#                   used it on an install at release 0.4.0 plus that one line.
+#   default-branch  the stack makes the run branch the repository's default
+#                   for the run and restores it on destroy; the agent re-asks
+#                   the remote for its default before each PR. Runs 14 onward
+#                   used it, on release 0.5.0 with the stock operator. One run
+#                   at a time (the stack refuses to switch when the default
+#                   already points at a run/** branch), and
+#                   BENCH_NO_TEARDOWN=true leaves the repository's default on
+#                   the run branch until the destroy is run by hand. Pilot-only.
+: "${BASE_BRANCH_MODE:=default-branch}"
 
 case "${BASE_BRANCH_MODE}" in
   default-branch)

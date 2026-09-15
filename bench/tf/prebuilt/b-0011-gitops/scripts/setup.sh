@@ -35,6 +35,18 @@ POLL_SECONDS=3
 PROFILE_HOME_MODE=2770
 KUBECONFIG_FILE_MODE=664
 PROFILE_NAME_PATTERN='^[a-z0-9-]+$'
+# Release 0.5.0 runs the agent's shell in a sandbox pod of its own: kubectl,
+# gcloud and the credential-proxy wrappers live there, not in the gateway
+# container, and the scaffold mirrors each profile into it. The StatefulSet's
+# presence is how the seed tells that layout from the 0.4.0 sidecar one.
+SHELL_SANDBOX_STATEFULSET=platform-agent-shell
+SHELL_SANDBOX_POD="${SHELL_SANDBOX_STATEFULSET}-0"
+SHELL_SANDBOX_USER=agent
+# The sandbox's data volume (the sandbox entrypoint's DATA default): profile
+# homes under profiles/, the shared scripts under scripts/.
+SANDBOX_DATA_ROOT=/opt/data
+SANDBOX_PROFILES_DIR="${SANDBOX_DATA_ROOT}/profiles"
+SANDBOX_PREFLIGHT_SCRIPT="${SANDBOX_DATA_ROOT}/scripts/cluster_preflight.sh"
 
 # ---------------------------------------------------------------------------
 # 1. credentials
@@ -208,28 +220,48 @@ if [ -n "${AGENT_HOST_CONTEXT:-}" ]; then
   profile="$(printf '%s' "${profile}" | tail -n 1)"
   [[ "${profile}" =~ ${PROFILE_NAME_PATTERN} ]] || { echo "SEED FAIL: unexpected profile name '${profile}'" >&2; exit 1; }
   echo "    profile: ${profile}"
-  # Mode 2770, like every profile the install created itself: group access is
-  # what lets the credential-proxy sidecar (uid 10001, group hermes) read the
-  # pinned kubeconfig. A 2775 home gets tightened to 0700 by Hermes on the
-  # worker's first start, after which every kubectl through the proxy fails
-  # with "kubeconfig is unreadable" and the card blocks (run 2, 2026-09-10).
-  # Then prove the path the worker will take: kubectl through the proxy with
-  # the pinned kubeconfig, and the preflight the worker runs first.
-  # Hermes tightens the profile home to 0700 on the worker's first start
-  # (measured: 2770 after scaffold, 0700 one second after spawn), which locks
-  # the proxy out of anything inside it. So the pinned kubeconfig lives
-  # outside the home, in the shared group-readable .kubeconfigs/ directory the
-  # platform MCP server already uses, and the profile's .env points there.
-  kubeconfig_rel=".kubeconfigs/kubeconfig_${PROJECT_ID}_${CLUSTER_NAME}_${LOCATION}.yaml"
-  kubectl --context "${AGENT_HOST_CONTEXT}" -n "${AGENT_NAMESPACE}" exec deploy/platform-agent-gateway -c platform-agent -- \
-    sh -c "set -e; cd /opt/data; umask 0002; d=profiles/${profile}; k=${kubeconfig_rel}; \
-      test -s \$d/USER.md && test -s \$d/kubeconfig.yaml; chmod ${PROFILE_HOME_MODE} \$d; \
-      mkdir -p .kubeconfigs && cp \$d/kubeconfig.yaml \$k && chmod ${KUBECONFIG_FILE_MODE} \$k; \
-      sed -i \"s#^KUBECONFIG=.*#KUBECONFIG=/opt/data/\$k#\" \$d/.env; grep -q \"^KUBECONFIG=/opt/data/\$k\" \$d/.env; \
-      KUBECONFIG=/opt/data/\$k kubectl get --raw=/readyz >/dev/null; \
-      KUBECONFIG=/opt/data/\$k HERMES_HOME=/opt/data/\$d bash /opt/data/scripts/cluster_preflight.sh --json | grep -q '\"status\": \"ok\"'" \
-    || { echo "SEED FAIL: Cluster Agent profile ${profile} is not usable (missing files, or kubectl/preflight through the proxy failed)" >&2; exit 1; }
-  echo "    profile usable: kubeconfig pinned at /opt/data/${kubeconfig_rel}; kubectl via proxy and preflight ok"
+  # Then prove the path the worker will take: kubectl through the credential
+  # proxy with the pinned kubeconfig, and the preflight the worker runs first.
+  # Where that path runs depends on the install's layout. The probe's exit
+  # status is checked apart from its output: an API error here must not be
+  # read as "no sandbox" and send a 0.5.0 install down the sidecar path.
+  sandbox_sts="$(kubectl --context "${AGENT_HOST_CONTEXT}" -n "${AGENT_NAMESPACE}" get statefulset "${SHELL_SANDBOX_STATEFULSET}" -o name --ignore-not-found)" \
+    || { echo "SEED FAIL: could not query ${AGENT_HOST_CONTEXT} for the ${SHELL_SANDBOX_STATEFULSET} StatefulSet" >&2; exit 1; }
+  if [ -n "${sandbox_sts}" ]; then
+    # Sandbox layout (release 0.5.0 onward). The scaffold pinned KUBECONFIG at
+    # the profile home; its gcloud ran inside the sandbox, so the kubeconfig
+    # file is on the sandbox-side copy of the home (the mirror pushes only the
+    # directory skeleton and USER.md, never a credential). The worker's
+    # kubectl and preflight run there over SSH as the sandbox user, so prove
+    # the path from there, with a login shell so the wrappers' PATH applies;
+    # the gateway container has no kubectl to prove it with.
+    kubectl --context "${AGENT_HOST_CONTEXT}" -n "${AGENT_NAMESPACE}" exec "${SHELL_SANDBOX_POD}" -- \
+      runuser -u "${SHELL_SANDBOX_USER}" -- bash -lc "set -e; d=${SANDBOX_PROFILES_DIR}/${profile}; \
+        test -s \$d/USER.md && test -s \$d/kubeconfig.yaml; \
+        KUBECONFIG=\$d/kubeconfig.yaml kubectl get --raw=/readyz >/dev/null; \
+        KUBECONFIG=\$d/kubeconfig.yaml HERMES_HOME=\$d bash ${SANDBOX_PREFLIGHT_SCRIPT} --json | grep -q '\"status\": \"ok\"'" \
+      || { echo "SEED FAIL: Cluster Agent profile ${profile} is not usable in the shell sandbox (missing files, or kubectl/preflight through the proxy failed)" >&2; exit 1; }
+    echo "    profile usable: kubeconfig at the profile home in ${SHELL_SANDBOX_POD}; kubectl via proxy and preflight ok"
+  else
+    # Sidecar layout (release 0.4.0, which the pilot install ran until
+    # 2026-09-15; kept for installs still on it, and exercised by no run or
+    # test since): the credential proxy is a sidecar that
+    # reads the profile's kubeconfig itself, and Hermes tightens the profile
+    # home to 0700 on the worker's first start, which locks the sidecar out.
+    # So the kubeconfig is copied outside the home into the group-readable
+    # .kubeconfigs/ directory the platform MCP server already uses, and the
+    # profile's .env points there.
+    kubeconfig_rel=".kubeconfigs/kubeconfig_${PROJECT_ID}_${CLUSTER_NAME}_${LOCATION}.yaml"
+    kubectl --context "${AGENT_HOST_CONTEXT}" -n "${AGENT_NAMESPACE}" exec deploy/platform-agent-gateway -c platform-agent -- \
+      sh -c "set -e; cd /opt/data; umask 0002; d=profiles/${profile}; k=${kubeconfig_rel}; \
+        test -s \$d/USER.md && test -s \$d/kubeconfig.yaml; chmod ${PROFILE_HOME_MODE} \$d; \
+        mkdir -p .kubeconfigs && cp \$d/kubeconfig.yaml \$k && chmod ${KUBECONFIG_FILE_MODE} \$k; \
+        sed -i \"s#^KUBECONFIG=.*#KUBECONFIG=/opt/data/\$k#\" \$d/.env; grep -q \"^KUBECONFIG=/opt/data/\$k\" \$d/.env; \
+        KUBECONFIG=/opt/data/\$k kubectl get --raw=/readyz >/dev/null; \
+        KUBECONFIG=/opt/data/\$k HERMES_HOME=/opt/data/\$d bash /opt/data/scripts/cluster_preflight.sh --json | grep -q '\"status\": \"ok\"'" \
+      || { echo "SEED FAIL: Cluster Agent profile ${profile} is not usable (missing files, or kubectl/preflight through the proxy failed)" >&2; exit 1; }
+    echo "    profile usable: kubeconfig pinned at /opt/data/${kubeconfig_rel}; kubectl via proxy and preflight ok"
+  fi
 fi
 
 echo "==> Seed complete."
