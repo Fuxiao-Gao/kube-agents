@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# b-0011 through the GitOps fix cycle (Option C pilot, gke-labs/kube-agents#1307).
+# devops-bench tasks through the GitOps fix cycle (Option C pilot,
+# gke-labs/kube-agents#1307). One stack for every task on the cycle; the
+# case's task.yaml picks the task through var.gitops_task.
 #
-# The devops-bench b-0011 stack applies its manifests and then mutates the
-# payments/checkout Deployment in place. This stack seeds the same broken state
-# a different way: the broken manifests live in a GitOps repository, this stack
+# A devops-bench stack applies its manifests (and, for b-0011, mutates a
+# Deployment in place afterwards). This stack seeds the same broken state a
+# different way: the broken manifests live in a GitOps repository, this stack
 # cuts a per-run branch from a pinned "broken base" commit, installs Argo CD on
 # a fresh cluster, and points one Application at that branch. The cluster is
 # broken because the repo says so. The agent is read-only on the cluster and
@@ -24,10 +26,11 @@
 # repo merges it when it passes, Argo syncs it, and the task's unchanged
 # verification_spec grades the result.
 #
-# manifests/ here is the HEALTHY baseline copied from the b-0011 stack. It is
-# not applied at run time. scripts/render-broken-base.sh derives the repo's
-# broken base from it, so the repo content and this stack cannot drift apart
-# without a diff showing it.
+# manifests/<task>/ is the HEALTHY baseline copied from that task's devops-bench
+# stack. It is not applied at run time. scripts/render-broken-base.sh derives
+# the repo's broken base from it, so the repo content and this stack cannot
+# drift apart without a diff showing it. scripts/seed/<task>.sh holds the
+# task's seeded-condition assertions.
 #
 # Lifecycle. The run branch is a null_resource with a create and a destroy
 # provisioner, so it lives exactly as long as the task cluster: devops-bench's
@@ -61,9 +64,18 @@ locals {
     "build-id"    = var.prow_build_id != "" ? var.prow_build_id : "local"
     "pull-number" = var.prow_pull_number != "" ? var.prow_pull_number : "none"
   }
+  # Per-task facts. The broken-base commit is what render-broken-base.sh
+  # produced for the task, committed to gitops_repo under tasks/<task>/;
+  # record a new one here when the render changes.
+  broken_base_sha = {
+    "b-0011"  = "a48b227c54f76ee0a1c92a85ddf4d4eab8c4174c"
+    "b-0022b" = "0099372f696fb34c83728d24d8de18466b8df168"
+  }
+  task_path = var.gitops_task_path != "" ? var.gitops_task_path : "tasks/${var.gitops_task}"
+  base_sha  = var.gitops_broken_base_sha != "" ? var.gitops_broken_base_sha : local.broken_base_sha[var.gitops_task]
   # The task prompt names this branch via {{CLUSTER_NAME}}, so the default
-  # must stay in step with bench/tasks/b-0011-gitops/task.yaml.
-  run_branch = var.gitops_run_branch != "" ? var.gitops_run_branch : "run/${var.cluster_name}/b-0011"
+  # must stay in step with bench/tasks/<task>-gitops/task.yaml.
+  run_branch = var.gitops_run_branch != "" ? var.gitops_run_branch : "run/${var.cluster_name}/${var.gitops_task}"
 }
 
 provider "google" {
@@ -91,7 +103,7 @@ resource "null_resource" "run_branch" {
   triggers = {
     repo            = var.gitops_repo
     branch          = local.run_branch
-    base_sha        = var.gitops_broken_base_sha
+    base_sha        = local.base_sha
     token_file      = var.gitops_token_file
     switch_default  = tostring(var.gitops_switch_default_branch)
     restore_default = var.gitops_restore_default_branch
@@ -147,7 +159,8 @@ resource "null_resource" "setup" {
       WAIT_TIMEOUT      = var.wait_timeout
       GITOPS_REPO       = var.gitops_repo
       GITOPS_RUN_BRANCH = local.run_branch
-      GITOPS_TASK_PATH  = var.gitops_task_path
+      GITOPS_TASK       = var.gitops_task
+      GITOPS_TASK_PATH  = local.task_path
       GITOPS_TOKEN_FILE = var.gitops_token_file
       ARGOCD_VERSION    = var.argocd_version
       AGENT_HOST_CONTEXT = var.agent_host_context
