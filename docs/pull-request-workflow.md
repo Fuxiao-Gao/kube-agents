@@ -165,7 +165,8 @@ Poll on a schedule rather than continuously — nothing is worth checking in the
 once a minute. Expect the review by 15 minutes; at 30 with nothing posted, stop waiting and tell the
 user the bot dropped this one. Nothing retries on its own, so ask whether to spend a trigger — and
 say which: a review that goes missing was a first-review-width one, so `/review all` is what replaces
-it, and `/review` narrows the retry to what the bot is certain of.
+it, and `/review` narrows the retry to what the bot is certain of (plus any marked high-severity near
+miss).
 
 Two things make a wait read wrong:
 
