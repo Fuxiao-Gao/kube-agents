@@ -51,6 +51,14 @@ LOGGER = logging.getLogger("credential-proxy")
 SLACK_EVENT_QUEUE_MAXSIZE = 1000
 SLACK_ERROR_DIAGNOSTIC_FIELDS = ("ok", "error", "needed", "provided")
 
+# Bounds on the pre-authentication body drain in AgentAPIProxyHandler. The body has
+# to be read in full for the 401 to survive the close, so these bound what reading it
+# costs rather than whether it happens: the chunk size keeps the discard flat in
+# memory whatever the Content-Length, and the deadline stops an unauthenticated caller
+# parking a handler thread by announcing a body and then stalling mid-send.
+AGENT_API_DRAIN_CHUNK_BYTES = 64 * 1024
+AGENT_API_DRAIN_TIMEOUT_SECONDS = 10
+
 # GitHub "owner/name" slug validation, shared with the agent-side callers via
 # `repo_ref` — which imports nothing but the standard library precisely so this
 # process, the one holding the credentials, can use it. The linear-time segment
@@ -785,8 +793,14 @@ class AgentAPIProxyHandler(BaseHTTPRequestHandler):
         supplied = self.headers.get("Authorization", "")
         expected = f"Bearer {self.external_key}"
         if not hmac.compare_digest(supplied, expected):
+            self._drain_request_body()
             self.send_error(HTTPStatus.UNAUTHORIZED)
             return
+        # The three refusals below cannot drain -- see _drain_request_body -- so a
+        # caller that sent a body may read the close before the response. They are
+        # answers to a malformed or oversized request, where the framing is already
+        # in doubt; the 401 above is the one a working client hits by holding the
+        # wrong key, and it is the one that has to arrive.
         if self.headers.get("Transfer-Encoding"):
             self.send_error(HTTPStatus.BAD_REQUEST)
             return
@@ -850,6 +864,55 @@ class AgentAPIProxyHandler(BaseHTTPRequestHandler):
             self.close_connection = True
         finally:
             upstream.close()
+
+    def _drain_request_body(self) -> None:
+        """Read the request body so a refusal is not lost to a connection reset.
+
+        Closing a socket that still holds unread request bytes sends a TCP RST,
+        and the peer discards whatever it has not yet handed to the application
+        -- including the response written a moment earlier. A client that POSTed
+        a body with the wrong key therefore read ECONNRESET rather than the 401
+        this handler sent, which is indistinguishable from a dead listener and
+        cost real time during an RC investigation.
+
+        This runs before authentication, so it is reachable by any caller the
+        listener accepts, and it is bounded three ways: it declines a body over
+        max_request_bytes or one this handler cannot frame, it discards in
+        AGENT_API_DRAIN_CHUNK_BYTES chunks rather than materialising the body,
+        and it gives up after AGENT_API_DRAIN_TIMEOUT_SECONDS so a client that
+        announces a body and stalls cannot hold the handler thread.
+
+        Declining the oversized case has a cost worth stating: a body over
+        max_request_bytes still loses its refusal to the reset, which is the
+        symptom this method exists to remove. Draining it anyway would mean
+        reading an unbounded stream from an unauthenticated caller to make an
+        error message survive, which is the trade the size limit already
+        refused.
+        """
+        if self.headers.get("Transfer-Encoding"):
+            return
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return
+        if content_length <= 0 or content_length > self.max_request_bytes:
+            return
+        previous_timeout = self.connection.gettimeout()
+        try:
+            self.connection.settimeout(AGENT_API_DRAIN_TIMEOUT_SECONDS)
+            remaining = content_length
+            while remaining > 0:
+                chunk = self.rfile.read(min(remaining, AGENT_API_DRAIN_CHUNK_BYTES))
+                if not chunk:
+                    # The peer closed mid-body; there is nothing left to drain.
+                    break
+                remaining -= len(chunk)
+        except (ConnectionError, TimeoutError, OSError):
+            # The peer went away or stalled mid-body. There is nothing left to protect.
+            LOGGER.debug("PlatformAgent API request body drain failed", exc_info=True)
+        finally:
+            with contextlib.suppress(OSError):
+                self.connection.settimeout(previous_timeout)
 
     @staticmethod
     def _sanitize_header(value: str) -> str:
