@@ -308,6 +308,7 @@ data:
       workspace_root: /opt/data
   managed.env: |
     API_SERVER_KEY=cluster-internal-trusted
+    HERMES_HOME_MODE=2770
     KUBEAGENTS_MODE=today
   profile-platform.overlay.yaml: |
     memory:
@@ -846,6 +847,8 @@ spec:
               value: /tmp/credential-proxy/home
             - name: CREDENTIAL_PROXY_POLICY
               value: /etc/credential-proxy/policy.json
+            - name: CREDENTIAL_PROXY_MAX_OUTPUT_BYTES
+              value: "8388608"
             - name: CREDENTIAL_PROXY_STATE_DIR
               value: /var/lib/credential-proxy
             - name: CREDENTIAL_PROXY_UNIX_SOCKET
@@ -1138,6 +1141,8 @@ spec:
               value: kubeagents-system
             - name: HERMES_MANAGED_DIR
               value: /etc/hermes
+            - name: HERMES_HOME_MODE
+              value: "2770"
             - name: HERMES_WRITE_SAFE_ROOT
               value: /opt/data:/home/agent
             - name: TERMINAL_CWD
@@ -1241,6 +1246,8 @@ spec:
               value: /opt/data
             - name: HERMES_MANAGED_DIR
               value: /etc/hermes
+            - name: HERMES_HOME_MODE
+              value: "2770"
             - name: HOME
               value: /opt/data/home
             - name: SESSION_KV_DB_PATH
