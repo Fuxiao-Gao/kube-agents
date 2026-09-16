@@ -64,7 +64,7 @@ b-0022b base carries only the gating wave):
 - `argocd.argoproj.io/sync-wave`: gating objects `-2`, `pricer` `-1`, everything else `0`.
   A flat apply lets `checkout` take the 832Mi quota before `pricer`, leaving `pricer` at
   1/2 ready, which violates the task's `ready-floor-held` safeguard before the agent acts.
-  The waves reproduce the original seeding order: `pricer` 2/2, `checkout` 2/4.
+  The waves reproduce the original seeding order: `pricer` 2/2, `checkout` 3/4.
 - `argocd.argoproj.io/ignore-healthcheck: "true"` on the `edge/gateway` Ingress. It has no
   ingress class and a ClusterIP backend, so GKE never programs it; without the exclusion
   the Application stays Progressing forever and the completion signal never fires.
@@ -73,6 +73,25 @@ The broken base is a commit SHA recorded in the stack (`locals.broken_base_sha`,
 `gitops_broken_base_sha` overrides it). The
 repository's default branch holds it; no run writes the default branch's content (the
 pilot-only default-branch mode below moves the default-branch pointer, not its content).
+
+b-0011's clue is history, not state: its blueprint is "the request inflated two revisions
+back", and the original stack seeds it as an in-place rollout (64Mi, then 256Mi, then the
+image and scale), so `kubectl rollout history` and a surviving 64Mi pod show what changed.
+A branch cut at the broken base has neither, and both models that ran it (runs 16 and 17)
+read "revision 1, one ReplicaSet, never fit" and raised the quota. So for b-0011 the run
+branch is built in stages (`render-broken-base.sh <task> <manifests> <out> <stage>`;
+`run-branch.sh create` and `advance`), each a commit created through the git data API
+with the broken base's tree and the task directory re-rendered: `healthy` (the manifests
+as shipped, parent `locals.history_parent_sha`, the repository commit from before the
+task directory existed), `inflated` (memory 256Mi), `broken` (all three mutations; its
+tree is byte-identical to the broken base's). The branch starts at `healthy`; setup waits
+for the Application to be Healthy, advances the ref to `broken`, refreshes Argo and waits
+for it to sync that head. The rollout from 64Mi to 256Mi then runs under the quota and
+ends where the original does: two 256Mi pods, one 64Mi pod, 3/4 ready, quota-denied
+events. The commits are back-dated (ten days, three days, now) so the log reads as the
+prompt describes; the rollout history has two revisions where the original has three,
+since Argo applies the broken head in one sync. b-0022b has no history to tell and starts
+at its broken base as before.
 
 Onboarding facts about the pilot repository: rulesets and branch protection are not
 available on private repositories under the `gke-agentic` org's free plan, and deploy keys
@@ -123,9 +142,9 @@ derived), `gitops_token_file`, `argocd_version`, `agent_host_context`/`agent_nam
    destination = in-cluster, `syncPolicy.automated {prune, selfHeal}` with retry.
 5. Wait for `status.sync.status == Synced`, then source the task's seed assertions. For
    b-0011: checkout at 256Mi / `:1.0.0` / 4 replicas with 2 ready, pricer 2/2, a
-   quota-denied pod event, `kubectl top` returning data. Two ready, not the original's
-   three: the original reaches three only because an old 64Mi pod survives its in-place
-   rollout; a single sync never creates it. For b-0022b: shelfview at 0 replicas, the
+   quota-denied pod event, `kubectl top` returning data. Three ready, as the original:
+   the staged history (above) syncs the healthy stack first, so the rollout to 256Mi
+   leaves one old 64Mi pod behind. For b-0022b: shelfview at 0 replicas, the
    price-refresh CronJob suspended with no succeeded Job, search-api's readiness probe on
    9099 (its `readyReplicas` is absent and not asserted), and the three safeguards
    already true (storelookup 3/3, aislefeed

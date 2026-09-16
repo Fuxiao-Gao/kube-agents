@@ -71,8 +71,18 @@ locals {
     "b-0011"  = "a48b227c54f76ee0a1c92a85ddf4d4eab8c4174c"
     "b-0022b" = "0099372f696fb34c83728d24d8de18466b8df168"
   }
-  task_path = var.gitops_task_path != "" ? var.gitops_task_path : "tasks/${var.gitops_task}"
-  base_sha  = var.gitops_broken_base_sha != "" ? var.gitops_broken_base_sha : local.broken_base_sha[var.gitops_task]
+  # Tasks whose run branch carries history (render-broken-base.sh stages,
+  # run-branch.sh create/advance): the healthy commit's parent is the
+  # repository commit from before the task directory existed, so the branch's
+  # log starts with the stack's arrival and never shows the broken state
+  # before the healthy one. Tasks absent here start at the broken base.
+  history_parent_sha = {
+    "b-0011" = "16f61ed4cf7fa5a7784123acc9999fa2db041f67"
+  }
+  task_path      = var.gitops_task_path != "" ? var.gitops_task_path : "tasks/${var.gitops_task}"
+  base_sha       = var.gitops_broken_base_sha != "" ? var.gitops_broken_base_sha : local.broken_base_sha[var.gitops_task]
+  history_parent = lookup(local.history_parent_sha, var.gitops_task, "")
+  manifests_dir  = "${path.module}/manifests/${var.gitops_task}"
   # The task prompt names this branch via {{CLUSTER_NAME}}, so the default
   # must stay in step with bench/tasks/<task>-gitops/task.yaml.
   run_branch = var.gitops_run_branch != "" ? var.gitops_run_branch : "run/${var.cluster_name}/${var.gitops_task}"
@@ -104,6 +114,10 @@ resource "null_resource" "run_branch" {
     repo            = var.gitops_repo
     branch          = local.run_branch
     base_sha        = local.base_sha
+    history_parent  = local.history_parent
+    task            = var.gitops_task
+    task_path       = local.task_path
+    manifests_dir   = local.manifests_dir
     token_file      = var.gitops_token_file
     switch_default  = tostring(var.gitops_switch_default_branch)
     restore_default = var.gitops_restore_default_branch
@@ -117,6 +131,10 @@ resource "null_resource" "run_branch" {
       GITOPS_REPO                   = self.triggers.repo
       GITOPS_RUN_BRANCH             = self.triggers.branch
       GITOPS_BASE_SHA               = self.triggers.base_sha
+      GITOPS_HISTORY_PARENT_SHA     = self.triggers.history_parent
+      GITOPS_TASK                   = self.triggers.task
+      GITOPS_TASK_PATH              = self.triggers.task_path
+      GITOPS_MANIFESTS_DIR          = self.triggers.manifests_dir
       GITOPS_TOKEN_FILE             = self.triggers.token_file
       GITOPS_SWITCH_DEFAULT_BRANCH  = self.triggers.switch_default
       GITOPS_RESTORE_DEFAULT_BRANCH = self.triggers.restore_default
@@ -151,20 +169,23 @@ resource "null_resource" "setup" {
     interpreter = ["/bin/bash", "-c"]
     command     = "${path.module}/scripts/setup.sh"
     environment = {
-      INFRA_PROVIDER    = var.infra_provider
-      PROJECT_ID        = var.project_id
-      CLUSTER_NAME      = module.cluster.cluster_name
-      LOCATION          = var.location
-      KUBECONFIG        = pathexpand(var.kubeconfig_path)
-      WAIT_TIMEOUT      = var.wait_timeout
-      GITOPS_REPO       = var.gitops_repo
-      GITOPS_RUN_BRANCH = local.run_branch
-      GITOPS_TASK       = var.gitops_task
-      GITOPS_TASK_PATH  = local.task_path
-      GITOPS_TOKEN_FILE = var.gitops_token_file
-      ARGOCD_VERSION    = var.argocd_version
-      AGENT_HOST_CONTEXT = var.agent_host_context
-      AGENT_NAMESPACE    = var.agent_namespace
+      INFRA_PROVIDER            = var.infra_provider
+      PROJECT_ID                = var.project_id
+      CLUSTER_NAME              = module.cluster.cluster_name
+      LOCATION                  = var.location
+      KUBECONFIG                = pathexpand(var.kubeconfig_path)
+      WAIT_TIMEOUT              = var.wait_timeout
+      GITOPS_REPO               = var.gitops_repo
+      GITOPS_RUN_BRANCH         = local.run_branch
+      GITOPS_TASK               = var.gitops_task
+      GITOPS_TASK_PATH          = local.task_path
+      GITOPS_BASE_SHA           = local.base_sha
+      GITOPS_HISTORY_PARENT_SHA = local.history_parent
+      GITOPS_MANIFESTS_DIR      = local.manifests_dir
+      GITOPS_TOKEN_FILE         = var.gitops_token_file
+      ARGOCD_VERSION            = var.argocd_version
+      AGENT_HOST_CONTEXT        = var.agent_host_context
+      AGENT_NAMESPACE           = var.agent_namespace
     }
   }
 }

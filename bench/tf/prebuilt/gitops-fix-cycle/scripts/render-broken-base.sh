@@ -12,7 +12,14 @@
 #
 # b-0011. The original setup.sh applies the manifests and then makes three live
 #   mutations to payments/checkout (memory request 64Mi -> 256Mi, image :1.0 ->
-#   :1.0.0, replicas 2 -> 4); those are applied here. Ordering: setup.sh deploys
+#   :1.0.0, replicas 2 -> 4); those are applied here. The task's clue is that
+#   history: the request was inflated in an earlier revision and this morning's
+#   build update (image, scale) came on top of it. A single sync of the broken
+#   state has no history, so the branch is built in three stages, each a commit
+#   (run-branch.sh): `healthy` (the manifests as shipped), `inflated` (memory
+#   256Mi), `broken` (all three mutations). Argo syncs healthy first and then
+#   the broken head, so the cluster keeps the old 64Mi ReplicaSet exactly as
+#   the original's in-place rollout does. Ordering: setup.sh deploys
 #   everything healthy first and only then inflates checkout, so pricer already
 #   holds its 128Mi of the 832Mi payments quota when checkout's 256Mi pods
 #   arrive. A flat apply of the broken state races the two and pricer can end
@@ -37,19 +44,25 @@
 # neither task's files reference CLUSTER_NAME today, so nothing is substituted
 # here. If that changes, add it.
 #
-# Usage: render-broken-base.sh <task> <stack manifests dir for the task> <output dir>
+# Usage: render-broken-base.sh <task> <stack manifests dir for the task> <output dir> [stage]
+#   stage (b-0011 only): healthy | inflated | broken (default). b-0022b has one
+#   stage, broken.
 set -euo pipefail
 
-TASK="${1:?usage: $0 <task> <manifests dir> <output dir>}"
-SRC="${2:?usage: $0 <task> <manifests dir> <output dir>}"
-OUT="${3:?usage: $0 <task> <manifests dir> <output dir>}"
+TASK="${1:?usage: $0 <task> <manifests dir> <output dir> [stage]}"
+SRC="${2:?usage: $0 <task> <manifests dir> <output dir> [stage]}"
+OUT="${3:?usage: $0 <task> <manifests dir> <output dir> [stage]}"
+STAGE="${4:-broken}"
 mkdir -p "${OUT}"
 
-python3 - "${TASK}" "${SRC}" "${OUT}" <<'PY'
+python3 - "${TASK}" "${SRC}" "${OUT}" "${STAGE}" <<'PY'
 import sys
 import yaml
 
-task, src, out = sys.argv[1:4]
+task, src, out, stage = sys.argv[1:5]
+STAGES = {"b-0011": ("healthy", "inflated", "broken"), "b-0022b": ("broken",)}
+if stage not in STAGES.get(task, ()):
+    sys.exit(f"render-broken-base: task {task!r} has no stage {stage!r} (stages: {STAGES.get(task)})")
 WAVE = "argocd.argoproj.io/sync-wave"
 IGNORE_HEALTH = "argocd.argoproj.io/ignore-healthcheck"
 
@@ -86,10 +99,12 @@ if task == "b-0011":
     for doc in workloads:
         meta = doc.get("metadata", {})
         if doc.get("kind") == "Deployment" and meta.get("name") == "checkout" and meta.get("namespace") == "payments":
-            doc["spec"]["replicas"] = 4
             (web,) = [c for c in doc["spec"]["template"]["spec"]["containers"] if c["name"] == "web"]
-            web["resources"]["requests"]["memory"] = "256Mi"
-            web["image"] = "hashicorp/http-echo:1.0.0"
+            if stage in ("inflated", "broken"):
+                web["resources"]["requests"]["memory"] = "256Mi"
+            if stage == "broken":
+                doc["spec"]["replicas"] = 4
+                web["image"] = "hashicorp/http-echo:1.0.0"
             break
     else:
         sys.exit("render-broken-base: payments/checkout Deployment not found")
@@ -123,4 +138,4 @@ resources:
   - 10-workloads.yaml
 YAML
 
-echo "rendered ${TASK} broken base into ${OUT}"
+echo "rendered ${TASK} ${STAGE} stage into ${OUT}"
