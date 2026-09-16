@@ -12,12 +12,17 @@
 #   4. a repository credential and one Application, named after the task,
 #      whose source is the task directory on the run branch, automated sync
 #      with prune and self-heal;
-#   5. wait for the Application to report Synced, then source the task's
-#      seeded-condition assertions (scripts/seed/<task>.sh);
+#   5. wait for the Application to report Synced. For a task with staged
+#      history (GITOPS_HISTORY_PARENT_SHA set; b-0011) the branch starts at
+#      its healthy commit, so wait for the Application to be Healthy, then
+#      advance the branch to the broken head (run-branch.sh advance), ask
+#      Argo to refresh, and wait for it to sync that head. Then source the
+#      task's seeded-condition assertions (scripts/seed/<task>.sh);
 #   6. onboard the cluster with the platform agent (optional).
 #
-# Nothing here writes to the cluster after the Application exists; from this
-# point on, Argo is the only writer.
+# Nothing here writes to the cluster after the Application exists (the refresh
+# in step 5 is an annotation on Argo's own object); from this point on, Argo
+# is the only writer.
 set -euo pipefail
 
 : "${INFRA_PROVIDER:?}" "${CLUSTER_NAME:?}" "${KUBECONFIG:?}" "${WAIT_TIMEOUT:?}"
@@ -30,6 +35,10 @@ export KUBECONFIG
 # one file per task.
 APP_NAME="${GITOPS_TASK}"
 GITOPS_SEED_SCRIPT="$(cd "$(dirname "$0")" && pwd)/seed/${GITOPS_TASK}.sh"
+RUN_BRANCH_SCRIPT="$(cd "$(dirname "$0")" && pwd)/run-branch.sh"
+# Argo polls the repository every three minutes; the annotation makes it look
+# now, so the staged advance does not spend a poll interval waiting.
+ARGO_REFRESH_ANNOTATION="argocd.argoproj.io/refresh=normal"
 METRICS_SERVER_MANIFEST="https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.9.0/components.yaml"
 POLL_SECONDS=3
 PROFILE_HOME_MODE=2770
@@ -181,6 +190,23 @@ EXPECT=Synced wait_for "application sync status" $((WAIT_TIMEOUT * 2)) \
   kubectl -n argocd get application "${APP_NAME}" -o jsonpath='{.status.sync.status}'
 synced_rev="$(kubectl -n argocd get application "${APP_NAME}" -o jsonpath='{.status.sync.revision}')"
 echo "    synced revision ${synced_rev}"
+
+if [ -n "${GITOPS_HISTORY_PARENT_SHA:-}" ]; then
+  # Staged history: what just synced is the healthy commit. Let every workload
+  # roll out (Argo health covers Deployments and StatefulSets; the Ingress is
+  # excluded in the render) before the broken head lands, as the original
+  # stack's live mutations come after its rollouts have settled.
+  echo "==> Waiting for the healthy stage (${synced_rev}) to be Healthy before the history advances"
+  EXPECT=Healthy wait_for "application health" $((WAIT_TIMEOUT * 2)) \
+    kubectl -n argocd get application "${APP_NAME}" -o jsonpath='{.status.health.status}'
+  echo "==> Advancing ${GITOPS_RUN_BRANCH} to the broken head"
+  broken_head="$("${RUN_BRANCH_SCRIPT}" advance)"
+  kubectl -n argocd annotate application "${APP_NAME}" "${ARGO_REFRESH_ANNOTATION}" --overwrite >/dev/null
+  EXPECT="Synced ${broken_head}" wait_for "application synced at the broken head" $((WAIT_TIMEOUT * 2)) \
+    kubectl -n argocd get application "${APP_NAME}" -o jsonpath='{.status.sync.status} {.status.sync.revision}'
+  synced_rev="${broken_head}"
+  echo "    synced revision ${synced_rev}"
+fi
 
 echo "==> Asserting the seeded condition (${GITOPS_SEED_SCRIPT})"
 [ -r "${GITOPS_SEED_SCRIPT}" ] || { echo "SEED FAIL: no seed assertions at ${GITOPS_SEED_SCRIPT}" >&2; exit 1; }
