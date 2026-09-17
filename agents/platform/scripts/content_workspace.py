@@ -100,6 +100,7 @@ DEFAULT_MAX_MATCH_CHARS = 400
 # imported: this is the enforcement point, and a control that depends on a skill
 # module being importable is a control that disappears when the skill moves.
 PROTECTED_BRANCHES = frozenset({"main", "master", "production"})
+PROTECTED_BRANCH_PREFIXES = ("run/",)
 
 # The complete set of git subcommands this module ever issues. Not a policy
 # knob and not derived from any request — a literal, so that "what git can the
@@ -481,7 +482,7 @@ def check_expected_sha(value: object, field: str) -> str:
     return sha
 
 
-def check_branch(name: object) -> str:
+def check_branch(name: object, base_branch: str = "") -> str:
     """A branch name the broker is willing to *author*.
 
     `check_branch_name` first, then the protected set, so a suggestion can never
@@ -491,9 +492,32 @@ def check_branch(name: object) -> str:
     from would make the feature useless, and reading is not authoring.
     """
     branch = check_branch_name(name)
-    if branch.casefold() in PROTECTED_BRANCHES:
+    protected = set(PROTECTED_BRANCHES)
+    override = (
+        base_branch.strip()
+        or os.environ.get("CREDENTIAL_PROXY_BASE_BRANCH", "").strip()
+        or os.environ.get("GITOPS_BASE_BRANCH", "").strip()
+    )
+    if override:
+        norm_override = override.strip()
+        if norm_override.startswith("refs/heads/"):
+            norm_override = norm_override[len("refs/heads/"):]
+        elif norm_override.startswith("heads/"):
+            norm_override = norm_override[len("heads/"):]
+        protected.add(norm_override.casefold())
+
+    norm_branch = branch.strip()
+    if norm_branch.startswith("refs/heads/"):
+        norm_branch = norm_branch[len("refs/heads/"):]
+    elif norm_branch.startswith("heads/"):
+        norm_branch = norm_branch[len("heads/"):]
+
+    if (
+        norm_branch.casefold() in protected
+        or any(norm_branch.casefold().startswith(p) for p in PROTECTED_BRANCH_PREFIXES)
+    ):
         raise ContentWorkspaceError(
-            f"'{branch}' is a rollout branch; suggestions are proposed on their "
+            f"'{branch}' is a rollout, base, or run branch; suggestions are proposed on their "
             "own branch and merged by a human"
         )
     return branch
@@ -541,6 +565,7 @@ class Workspace:
     # the pull request's branch rather than on the base, and a caller that
     # assumed the base would silently rewrite the reviewed work.
     started_from: str = ""
+    default_branch: str = ""
     shallow: bool = False
     metadata: dict = field(default_factory=dict)
 
@@ -568,6 +593,7 @@ class ContentWorkspaceStore:
         tree_root: str | Path,
         agent_workspace_root: str | Path,
         runner: GitRunner,
+        base_branch: str = "",
     ) -> None:
         # Resolved, because `assert_disjoint_roots` resolves both sides and
         # `_redact` matches this value against paths git prints -- which git
@@ -590,6 +616,11 @@ class ContentWorkspaceStore:
             # the `git_hooks_dir` chmod in the executor already warns.
             LOGGER.warning("could not restrict the content workspace root %s", self.tree_root)
         self._runner = runner
+        self.base_branch = (
+            base_branch.strip()
+            or os.environ.get("CREDENTIAL_PROXY_BASE_BRANCH", "").strip()
+            or os.environ.get("GITOPS_BASE_BRANCH", "").strip()
+        )
         self._workspaces: dict[str, Workspace] = {}
         # One lock, held across the whole of every public verb.
         #
@@ -782,7 +813,8 @@ class ContentWorkspaceStore:
                     base_sha="",
                     shallow=depth is not None,
                 )
-                workspace.base = base or self._default_branch(workspace)
+                workspace.default_branch = self._default_branch(workspace)
+                workspace.base = base or workspace.default_branch
                 workspace.base_sha = self._sha(workspace, f"origin/{workspace.base}")
                 workspace.started_from = f"origin/{workspace.base}"
                 # Only when the caller named one, and only when it is really
@@ -1101,7 +1133,41 @@ class ContentWorkspaceStore:
                     "this workspace was opened shallow, which makes it "
                     "read-only; reopen it without a depth to author a change"
                 )
-            branch = check_branch(branch)
+            branch = check_branch(branch, base_branch=self.base_branch)
+            norm_branch = branch.strip()
+            if norm_branch.startswith("refs/heads/"):
+                norm_branch = norm_branch[len("refs/heads/"):]
+            elif norm_branch.startswith("heads/"):
+                norm_branch = norm_branch[len("heads/"):]
+
+            norm_base = (workspace.base or "").strip()
+            if norm_base.startswith("refs/heads/"):
+                norm_base = norm_base[len("refs/heads/"):]
+            elif norm_base.startswith("heads/"):
+                norm_base = norm_base[len("heads/"):]
+
+            norm_default = (getattr(workspace, "default_branch", "") or "").strip()
+            if norm_default.startswith("refs/heads/"):
+                norm_default = norm_default[len("refs/heads/"):]
+            elif norm_default.startswith("heads/"):
+                norm_default = norm_default[len("heads/"):]
+
+            norm_configured = self.base_branch.strip()
+            if norm_configured.startswith("refs/heads/"):
+                norm_configured = norm_configured[len("refs/heads/"):]
+            elif norm_configured.startswith("heads/"):
+                norm_configured = norm_configured[len("heads/"):]
+
+            if (
+                (norm_base and norm_branch.casefold() == norm_base.casefold())
+                or (norm_default and norm_branch.casefold() == norm_default.casefold())
+                or (norm_configured and norm_branch.casefold() == norm_configured.casefold())
+                or any(norm_branch.casefold().startswith(p) for p in PROTECTED_BRANCH_PREFIXES)
+            ):
+                raise ContentWorkspaceError(
+                    f"'{branch}' is the workspace base, remote default, or run branch; suggestions are proposed on their "
+                    "own branch and merged by a human"
+                )
             self._git(workspace, ["check-ref-format", "--branch", branch])
             if not isinstance(message, str) or not message.strip():
                 raise ContentWorkspaceError("message must be a non-empty string")
@@ -1262,7 +1328,41 @@ class ContentWorkspaceStore:
         """
         with self._lock:
             workspace = self.get(handle)
-            branch = check_branch(branch)
+            branch = check_branch(branch, base_branch=self.base_branch)
+            norm_branch = branch.strip()
+            if norm_branch.startswith("refs/heads/"):
+                norm_branch = norm_branch[len("refs/heads/"):]
+            elif norm_branch.startswith("heads/"):
+                norm_branch = norm_branch[len("heads/"):]
+
+            norm_base = (workspace.base or "").strip()
+            if norm_base.startswith("refs/heads/"):
+                norm_base = norm_base[len("refs/heads/"):]
+            elif norm_base.startswith("heads/"):
+                norm_base = norm_base[len("heads/"):]
+
+            norm_default = (getattr(workspace, "default_branch", "") or "").strip()
+            if norm_default.startswith("refs/heads/"):
+                norm_default = norm_default[len("refs/heads/"):]
+            elif norm_default.startswith("heads/"):
+                norm_default = norm_default[len("heads/"):]
+
+            norm_configured = self.base_branch.strip()
+            if norm_configured.startswith("refs/heads/"):
+                norm_configured = norm_configured[len("refs/heads/"):]
+            elif norm_configured.startswith("heads/"):
+                norm_configured = norm_configured[len("heads/"):]
+
+            if (
+                (norm_base and norm_branch.casefold() == norm_base.casefold())
+                or (norm_default and norm_branch.casefold() == norm_default.casefold())
+                or (norm_configured and norm_branch.casefold() == norm_configured.casefold())
+                or any(norm_branch.casefold().startswith(p) for p in PROTECTED_BRANCH_PREFIXES)
+            ):
+                raise ContentWorkspaceError(
+                    f"'{branch}' is the workspace base, remote default, or run branch; suggestions are proposed on their "
+                    "own branch and merged by a human"
+                )
             if workspace.branch != branch:
                 raise ContentWorkspaceError(
                     f"nothing has been committed on '{branch}' in this workspace"

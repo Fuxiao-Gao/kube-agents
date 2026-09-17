@@ -1,3 +1,4 @@
+import argparse
 import base64
 import io
 import json
@@ -1099,6 +1100,95 @@ class GitHardeningTest(unittest.TestCase):
             git_argument_violation(["git", "push", "-f", "origin", "audit"])
         )
 
+    def test_git_push_to_protected_or_base_branch_is_refused(self):
+        for argv in (
+            ["git", "push", "origin", "main"],
+            ["git", "push", "origin", "master"],
+            ["git", "push", "origin", "production"],
+            ["git", "push", "origin", "refs/heads/main"],
+            ["git", "push", "origin", "heads/main"],
+            ["git", "push", "origin", "HEAD:main"],
+            ["git", "push", "origin", "HEAD:refs/heads/master"],
+            ["git", "push", "origin", "HEAD:heads/main"],
+            ["git", "push", "--force-with-lease", "origin", "main"],
+            ["git", "--attr-source", "HEAD", "push", "origin", "main"],
+            ["git", "--attr-source", "commit", "push", "origin", "main"],
+            # Refspec-less pushes
+            ["git", "push"],
+            ["git", "push", "origin"],
+            # Global option desync protection: -C push push origin (#1498)
+            ["git", "-C", "push", "push", "origin"],
+            # --repo option variants (#1498)
+            ["git", "push", "--repo", "x", "origin"],
+            ["git", "push", "--repo=x", "origin"],
+            ["git", "push", "--repo", "origin"],
+            ["git", "push", "--repo", "x", "origin", "main"],
+            # Bulk and pattern pushes
+            ["git", "push", "--all", "origin"],
+            ["git", "push", "--mirror", "origin"],
+            ["git", "push", "origin", ":"],
+            ["git", "push", "origin", "refs/heads/*:refs/heads/*"],
+            # End-of-options '--' delimiter before protected refspecs (#1498)
+            ["git", "push", "origin", "--", "HEAD:main", "platform-agent/y"],
+            ["git", "push", "origin", "--", "HEAD:main"],
+            ["git", "push", "origin", "--", "main"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertIsNotNone(git_argument_violation(argv))
+
+        # Run branch pushes are refused unconditionally without needing env overrides (#1498)
+        self.assertIsNotNone(
+            git_argument_violation(["git", "push", "origin", "run/test-cluster/fix-task"])
+        )
+        self.assertIsNotNone(
+            git_argument_violation(["git", "push", "origin", "HEAD:run/test-cluster/fix-task"])
+        )
+        self.assertIsNotNone(
+            git_argument_violation(["git", "--attr-source", "HEAD", "push", "origin", "run/test-cluster/fix-task"])
+        )
+
+        with mock.patch.dict(os.environ, {"GITOPS_BASE_BRANCH": "release-branch-override"}):
+            self.assertIsNotNone(
+                git_argument_violation(["git", "push", "origin", "release-branch-override"])
+            )
+            self.assertIsNotNone(
+                git_argument_violation(["git", "push", "origin", "HEAD:release-branch-override"])
+            )
+
+        with mock.patch.dict(os.environ, {"CREDENTIAL_PROXY_BASE_BRANCH": "custom-broker-base"}):
+            self.assertIsNotNone(
+                git_argument_violation(["git", "push", "origin", "custom-broker-base"])
+            )
+
+        # Bare HEAD pushes without destination branch are refused
+        self.assertIsNotNone(git_argument_violation(["git", "push", "origin", "HEAD"]))
+        self.assertIsNotNone(git_argument_violation(["git", "push", "origin", "@"]))
+
+        # Legitimate feature branch pushes are allowed
+        self.assertIsNone(
+            git_argument_violation(["git", "push", "origin", "platform-agent/my-fix"])
+        )
+        self.assertIsNone(
+            git_argument_violation(["git", "push", "origin", "HEAD:platform-agent/my-fix"])
+        )
+        self.assertIsNone(
+            git_argument_violation(["git", "-C", "push", "push", "origin", "HEAD:platform-agent/my-fix"])
+        )
+        self.assertIsNone(
+            git_argument_violation(["git", "push", "--force-with-lease", "origin", "HEAD:platform-agent/my-fix"])
+        )
+        self.assertIsNone(
+            git_argument_violation(["git", "push", "origin", "--", "HEAD:platform-agent/my-fix"])
+        )
+
+        # Positional pathspecs named 'push' after '--' are not treated as push subcommands
+        self.assertIsNone(
+            git_argument_violation(["git", "checkout", "--", "push"])
+        )
+        self.assertIsNone(
+            git_argument_violation(["git", "blame", "--", "push"])
+        )
+
     def test_a_subcommand_that_runs_a_command_is_refused(self):
         # `git bisect run <cmd>` executes <cmd> in the credential container.
         # Demonstrated through the proxy from inside a valid lease, in two
@@ -1232,7 +1322,7 @@ class GitHardeningTest(unittest.TestCase):
         # Scanning every token cannot disagree with git about where the
         # subcommand is.
         self.assertEqual(
-            _git_plan(["git", "--attr-source", "HEAD", "help", "-m", "git"])[0], "HEAD"
+            _git_plan(["git", "--attr-source", "HEAD", "help", "-m", "git"])[0], "help"
         )
         self.assertIsNotNone(
             git_argument_violation(["git", "--attr-source", "HEAD", "help", "-m", "git"])
@@ -1299,6 +1389,313 @@ class GitHardeningTest(unittest.TestCase):
         self.assertIsNone(
             git_argument_violation(["git", "config", "--get", "remote.origin.url"])
         )
+
+    def test_alias_configuration_and_repo_local_execution_are_refused(self):
+        # Configuring aliases via git config is refused by git_argument_violation (#1498).
+        self.assertIsNotNone(
+            git_argument_violation(["git", "config", "alias.p", "push origin main"])
+        )
+        self.assertIsNotNone(
+            git_argument_violation(["git", "config", "alias.co", "checkout"])
+        )
+        self.assertIsNotNone(
+            git_argument_violation(["git", "config", "--add", "alias.st", "status"])
+        )
+        self.assertIsNotNone(
+            git_argument_violation(["git", "config", "include.path", "/opt/data/scratch/aliases"])
+        )
+        self.assertIsNotNone(
+            git_argument_violation(["git", "config", "--add", "include.path", "more.cfg"])
+        )
+        self.assertIsNotNone(
+            git_argument_violation(["git", "config", "includeIf.gitdir:foo.path", "more.cfg"])
+        )
+
+        # In a repository with repo-local aliases in .git/config, executing an alias that
+        # resolves to a push to a protected or run branch is refused by git_lease_violation (#1498).
+        executor = self.executor()
+        repo = self.repository(executor)
+        self.append_repository_config(
+            repo,
+            "\n[alias]\n\tp-main = push origin main\n\tp-run = push origin HEAD:refs/heads/run/test/task\n\tp-feature = push origin HEAD:platform-agent/valid\n\tshell-push = !sh -c 'git push origin HEAD:refs/heads/main'\n\tbad-bisect = bisect run /payload.sh\n",
+        )
+        # Aliases resolving to protected/run pushes are refused even without a lease
+        self.assertIsNotNone(
+            executor.git_lease_violation(["git", "p-main"], cwd=str(repo))
+        )
+        self.assertIsNotNone(
+            executor.git_lease_violation(["git", "p-run"], cwd=str(repo))
+        )
+        # Shell aliases with ! are refused (Thread 1)
+        v = executor.git_lease_violation(["git", "shell-push"], cwd=str(repo))
+        self.assertIsNotNone(v)
+        self.assertIn("shell aliases cannot be executed", v or "")
+
+        # Alias expanding to refused subcommand (bisect run) is refused (Thread 1)
+        self.assertIsNotNone(
+            executor.git_lease_violation(["git", "bad-bisect"], cwd=str(repo))
+        )
+
+        # Alias checks run even when require_git_lease is False (Thread 9)
+        executor.require_git_lease = False
+        self.assertIsNotNone(
+            executor.git_lease_violation(["git", "p-main"], cwd=str(repo))
+        )
+        self.assertIsNotNone(
+            executor.git_lease_violation(["git", "shell-push"], cwd=str(repo))
+        )
+        executor.require_git_lease = True
+
+        # Capitalized [Alias] header, duplicate keys, and % in value (Thread 5)
+        repo2 = self.repository(executor)
+        self.append_repository_config(
+            repo2,
+            "\n[Alias]\n\tcap-p = push origin main\n\tremote.origin.fetch = +refs/heads/*:refs/remotes/origin/*\n\tremote.origin.fetch = +refs/pull/*:refs/remotes/pull/*\n\tpercent = log --format=%H\n",
+        )
+        self.assertIsNotNone(
+            executor.git_lease_violation(["git", "cap-p"], cwd=str(repo2))
+        )
+
+        # include.path is followed and aliases inside it are checked (Thread 6)
+        inc_file = repo2 / "extra.inc"
+        inc_file.write_text("[alias]\n\tinc-p = push origin main\n", encoding="utf-8")
+        self.append_repository_config(
+            repo2,
+            f"\n[include]\n\tpath = {inc_file}\n",
+        )
+        self.assertIsNotNone(
+            executor.git_lease_violation(["git", "inc-p"], cwd=str(repo2))
+        )
+
+        # Bare 'push' token before '--' in non-subcommand position is NOT refused as push (Thread 2)
+        self.assertIsNone(
+            credential_proxy.git_push_violation(["git", "stash", "push", "-m", "wip"])
+        )
+        self.assertIsNone(
+            credential_proxy.git_push_violation(["git", "commit", "-m", "push"])
+        )
+        self.assertIsNone(
+            credential_proxy.git_push_violation(["git", "checkout", "-b", "push"])
+        )
+
+        # --attr-source push push origin is refused as refspec-less push (Thread 8)
+        v_attr = credential_proxy.git_push_violation(["git", "--attr-source", "push", "push", "origin"])
+        self.assertIsNotNone(v_attr)
+        self.assertIn("explicit destination refspec", v_attr or "")
+
+        # An alias resolving to a mutating push to a valid feature branch requires a lease
+        self.assertIsNotNone(
+            executor.git_lease_violation(["git", "p-feature"], cwd=str(repo))
+        )
+        # With lease established, the valid feature branch alias is permitted
+        leased_dir = self.leased(executor)
+        subprocess.run(["git", "init", "--quiet"], cwd=leased_dir, check=True, capture_output=True)
+        self.append_repository_config(
+            leased_dir,
+            "\n[alias]\n\tp-feature = push origin HEAD:platform-agent/valid\n",
+        )
+        self.assertIsNone(
+            executor.git_lease_violation(["git", "p-feature"], cwd=str(leased_dir))
+        )
+
+        # Recursive alias resolution (Thread 3)
+        self.append_repository_config(
+            repo,
+            "\n[alias]\n\trec-a = rec-b\n\trec-b = push origin main\n",
+        )
+        self.assertIsNotNone(
+            executor.git_lease_violation(["git", "rec-a"], cwd=str(repo))
+        )
+
+        # Builtin subcommands cannot be shadowed by alias (Thread 4)
+        self.append_repository_config(
+            repo,
+            "\n[alias]\n\tpush = status\n",
+        )
+        # Real push outside lease is still mutating and requires a lease (not shadowed to status)
+        self.assertIsNotNone(
+            executor.git_lease_violation(["git", "push", "origin", "HEAD:platform-agent/valid"], cwd=str(repo))
+        )
+
+        # Config parsing edge cases (Thread 7): comments, inline keys, continuations, quotes
+        self.append_repository_config(
+            repo,
+            "\n[alias] ; comment\n\tp-comment = push origin main\n[alias]p-inline = push origin main\n\tp-cont = push \\\n  origin main\n\tp-quote = pu\"sh origin\" main\n",
+        )
+        for alias_name in ("p-comment", "p-inline", "p-cont", "p-quote"):
+            with self.subTest(alias=alias_name):
+                self.assertIsNotNone(
+                    executor.git_lease_violation(["git", alias_name], cwd=str(repo))
+                )
+
+        # --shallow-file and --attr-source in _git_plan (Thread 2 & Thread 6)
+        sub_shallow, _ = credential_proxy._git_plan(["git", "--shallow-file", "x", "push", "origin", "main"])
+        self.assertEqual("push", sub_shallow)
+        sub_attr, _ = credential_proxy._git_plan(["git", "--attr-source", "HEAD", "push", "origin", "main"])
+        self.assertEqual("push", sub_attr)
+        self.assertIsNotNone(
+            credential_proxy.git_argument_violation(["git", "--shallow-file", "/tmp/shallow", "status"])
+        )
+
+        # Directory mode remote default branch protection (Thread 9)
+        repo_trunk = self.repository(executor, name="repo_trunk")
+        remotes_dir = repo_trunk / ".git" / "refs" / "remotes" / "origin"
+        remotes_dir.mkdir(parents=True, exist_ok=True)
+        (remotes_dir / "HEAD").write_text("ref: refs/remotes/origin/release-trunk\n", encoding="utf-8")
+        self.assertIsNotNone(
+            executor.git_lease_violation(["git", "push", "origin", "HEAD:release-trunk"], cwd=str(repo_trunk))
+        )
+
+        # Colliding -C value and alias name (Thread 1)
+        sub_dir = repo / "myalias"
+        sub_dir.mkdir(parents=True, exist_ok=True)
+        self.append_repository_config(
+            repo,
+            "\n[alias]\n\tmyalias = push\n",
+        )
+        self.assertIsNotNone(
+            executor.git_lease_violation(["git", "-C", "myalias", "myalias", "origin", "main"], cwd=str(repo))
+        )
+
+        # 11-deep alias chain fails closed (Thread 4)
+        alias_chain = "\n[alias]\n"
+        for i in range(1, 11):
+            alias_chain += f"\ta{i} = a{i+1}\n"
+        alias_chain += "\ta11 = push origin main\n"
+        self.append_repository_config(repo, alias_chain)
+        v_depth = executor.git_lease_violation(["git", "a1"], cwd=str(repo))
+        self.assertIsNotNone(v_depth)
+        self.assertIn("exceeding depth", v_depth or "")
+
+        # Directory mode remote default branch protection via ref inspection (#1498)
+        bare_remote = Path(self.temp_dir.name) / "bare_remote.git"
+        subprocess.run(["git", "init", "--bare", "-b", "release-trunk", str(bare_remote)], check=True, capture_output=True)
+        seed_work = Path(self.temp_dir.name) / "seed_work"
+        subprocess.run(["git", "clone", str(bare_remote), str(seed_work)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(seed_work), "config", "user.name", "Test User"], check=True)
+        subprocess.run(["git", "-C", str(seed_work), "config", "user.email", "test@example.com"], check=True)
+        (seed_work / "README.md").write_text("hello\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(seed_work), "add", "."], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(seed_work), "commit", "-m", "init"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(seed_work), "push", "origin", "release-trunk"], check=True, capture_output=True)
+
+        clone_dir = Path(executor.workspace_dir) / "clone_trunk"
+        subprocess.run(["git", "clone", str(bare_remote), str(clone_dir)], check=True, capture_output=True)
+        # Push to release-trunk is detected and refused as a protected rollout/base branch even without lease checks
+        executor.require_git_lease = False
+        v = executor.git_lease_violation(["git", "push", "origin", "HEAD:release-trunk"], cwd=str(clone_dir))
+        self.assertIsNotNone(v)
+        self.assertIn("to protected branch 'release-trunk' is refused", v or "")
+
+        # Pushing to platform-agent/* feature branch is allowed
+        self.assertIsNone(
+            executor.git_lease_violation(["git", "push", "origin", "HEAD:platform-agent/fix-bug"], cwd=str(clone_dir))
+        )
+        executor.require_git_lease = True
+
+        # Content workspace store honours base_branch argument (#1498, Thread 5)
+        import content_workspace
+        store_flag = content_workspace.ContentWorkspaceStore(
+            Path(self.temp_dir.name) / "trees_flag",
+            Path(self.temp_dir.name) / "agent_flag",
+            executor.execute_workspace_git,
+            base_branch="custom-cli-base",
+        )
+        h = "a" * 32
+        store_flag._workspaces[h] = content_workspace.Workspace(h, "acme/repo", Path(self.temp_dir.name), "main", "sha", shallow=False)
+        with self.assertRaises(content_workspace.ContentWorkspaceError) as ctx:
+            store_flag.commit(h, "custom-cli-base", "msg", [])
+        self.assertIn("custom-cli-base", str(ctx.exception))
+        with self.assertRaises(content_workspace.ContentWorkspaceError) as ctx:
+            store_flag.push(h, "custom-cli-base")
+        self.assertIn("custom-cli-base", str(ctx.exception))
+
+        # Checked alias expansion is returned by resolve_git_command and executed directly (Thread 8)
+        repo_alias = self.repository(executor, name="repo_alias")
+        self.append_repository_config(
+            repo_alias,
+            "\n[alias]\n\tstatus-alias = status --short\n\tbroken-chain = undefined-target\n",
+        )
+        violation, exec_argv = executor.resolve_git_command(["git", "status-alias"], cwd=str(repo_alias))
+        self.assertIsNone(violation)
+        self.assertEqual(["git", "status", "--short"], exec_argv)
+
+        # Alias chain ending in an undefined target is refused as an undefined alias (#1498)
+        violation, _ = executor.resolve_git_command(["git", "broken-chain"], cwd=str(repo_alias))
+        self.assertIsNotNone(violation)
+        self.assertIn("undefined alias target (undefined_alias)", violation or "")
+
+        # Recognized builtins that are not aliases are permitted and execute directly (#1498)
+        violation, exec_argv = executor.resolve_git_command(["git", "gc"], cwd=str(repo_alias))
+        self.assertIsNone(violation)
+        self.assertEqual(["git", "gc"], exec_argv)
+
+        # Unknown subcommands that are not recognized git builtins or defined aliases fail closed (#1498)
+        violation, _ = executor.resolve_git_command(["git", "zz-unknown"], cwd=str(repo_alias))
+        self.assertIsNotNone(violation)
+        self.assertIn("not a recognized git subcommand or alias", violation or "")
+
+        # Abbreviated push options like --rep consume separate values and refuse refspec-less pushes (#1498)
+        v_rep = executor.git_lease_violation(["git", "push", "--rep", "custom_remote", "origin"], cwd=str(repo_alias))
+        self.assertIsNotNone(v_rep)
+        self.assertIn("without an explicit destination refspec is refused", v_rep or "")
+
+        # Pushes from a subdirectory with -C .. redirect resolve cwd correctly without double redirect (#1498)
+        sub_dir = clone_dir / "subdir"
+        sub_dir.mkdir()
+        executor.require_git_lease = False
+        v_sub = executor.git_lease_violation(["git", "-C", "..", "push", "origin", "HEAD:release-trunk"], cwd=str(sub_dir))
+        self.assertIsNotNone(v_sub)
+        self.assertIn("to protected branch 'release-trunk' is refused", v_sub or "")
+        executor.require_git_lease = True
+
+        # Alias expansion whose head is a case-variant of a builtin canonicalizes to lowercase
+        # and undergoes push violation and lease checks (#1498, Thread 13)
+        self.append_repository_config(
+            repo_alias,
+            "\n[alias]\n\tp = Push origin HEAD:main\n\tpush = push\n",
+        )
+        violation, _ = executor.resolve_git_command(["git", "p"], cwd=str(repo_alias))
+        self.assertIsNotNone(violation)
+        self.assertIn("to protected branch 'main' is refused", violation or "")
+
+        # Direct uppercase variant is rejected as not a recognized git subcommand (#1498)
+        violation, _ = executor.resolve_git_command(["git", "Push", "origin", "HEAD:main"], cwd=str(repo_alias))
+        self.assertIsNotNone(violation)
+        self.assertIn("not a recognized git subcommand or alias", violation or "")
+
+        # lfs is not a git builtin and falls back to alias inspection (#1498, Thread 14)
+        self.append_repository_config(
+            repo_alias,
+            "\n[alias]\n\tlfs = push origin HEAD:main\n",
+        )
+        violation, _ = executor.resolve_git_command(["git", "lfs"], cwd=str(repo_alias))
+        self.assertIsNotNone(violation)
+        self.assertIn("to protected branch 'main' is refused", violation or "")
+
+        # Unaliased non-builtin lfs fails closed as unrecognized subcommand
+        repo_no_lfs = self.repository(executor, name="repo_no_lfs")
+        violation, _ = executor.resolve_git_command(["git", "lfs"], cwd=str(repo_no_lfs))
+        self.assertIsNotNone(violation)
+        self.assertIn("not a recognized git subcommand or alias", violation or "")
+
+        # Bounded file reads: oversized refs/remotes/<remote>/HEAD or .git files are skipped (#1498, Thread 15)
+        oversized_head = repo_alias / ".git" / "refs" / "remotes" / "origin" / "HEAD"
+        oversized_head.parent.mkdir(parents=True, exist_ok=True)
+        oversized_head.write_text("ref: refs/remotes/origin/main\n" + "x" * 8192, encoding="utf-8")
+        from credential_proxy import _detect_repo_default_branch, _find_repo_root
+        self.assertIsNone(_detect_repo_default_branch(repo_alias, "origin"))
+
+        # Valid small HEAD ref is detected
+        oversized_head.write_text("ref: refs/remotes/origin/release-trunk\n", encoding="utf-8")
+        self.assertEqual(_detect_repo_default_branch(repo_alias, "origin"), "release-trunk")
+
+        # Oversized .git file is skipped by _find_repo_root
+        fake_sub = repo_alias / "subproject"
+        fake_sub.mkdir()
+        fake_git = fake_sub / ".git"
+        fake_git.write_text("gitdir: ../.git\n" + "y" * 8192, encoding="utf-8")
+        self.assertEqual(_find_repo_root(fake_sub), repo_alias)
 
     def test_a_git_dir_redirect_cannot_reach_outside_the_workspace(self):
         # `_execute` refuses a cwd outside the shared workspace and the lease
@@ -1545,6 +1942,34 @@ class GitLeaseGateWiringTest(unittest.TestCase):
         # gate let it through rather than answering 403 itself.
         self.assertEqual(200, status)
         self.assertEqual("completed", body["status"])
+
+    def test_an_alias_in_leased_repo_is_expanded_and_executed_over_v1_exec(self):
+        workspace = (
+            CredentialProxyHandler.executor.workspace_dir / "gitops" / "t_card"
+        )
+        repo_dir = workspace / "acme__fleet"
+        subprocess.run(["git", "init", "--quiet", str(repo_dir)], check=True)
+        subprocess.run(["git", "-C", str(repo_dir), "config", "alias.status-short", "status --porcelain"], check=True)
+        (workspace / ".lease").write_text('{"lease": "t_card"}', encoding="utf-8")
+
+        executed_argvs = []
+        original_execute = CredentialProxyHandler.executor.execute
+
+        def recording_execute(argv, **kwargs):
+            executed_argvs.append(argv)
+            return original_execute(argv, **kwargs)
+
+        with mock.patch.object(CredentialProxyHandler.executor, "execute", side_effect=recording_execute):
+            status, body = self.post(
+                {
+                    "argv": ["git", "status-short"],
+                    "cwd": str(repo_dir),
+                }
+            )
+        self.assertEqual(200, status)
+        self.assertEqual("completed", body["status"])
+        self.assertTrue(len(executed_argvs) > 0)
+        self.assertEqual(["git", "status", "--porcelain"], executed_argvs[0])
 
 
 class CommandExecutorTest(unittest.TestCase):
@@ -3216,6 +3641,72 @@ class ServeArmsTheReadOnlyGateTest(unittest.TestCase):
     def test_serve_leaves_the_gate_armed_on_a_typo(self):
         CredentialProxyHandler.enforce_read_only = False
         self.assertTrue(self._serve_with("banana"))
+
+    def test_serve_wires_base_branch_and_refuses_push_with_env_cleared(self):
+        # Wires --base-branch CLI argument into CredentialProxyHandler.base_branch
+        # and CredentialProxyHandler.vcs.base_branch, and verifies git_push_violation
+        # enforces the configured base branch even with environment variables clear (#1498).
+        args = argparse.Namespace(
+            policy=str(self.policy_path),
+            host="127.0.0.1",
+            port=0,
+            unix_socket=str(Path(self.tmp.name) / "backend.sock"),
+            timeout_seconds=5,
+            max_request_bytes=1 << 20,
+            max_output_bytes=1 << 20,
+            state_dir=str(Path(self.tmp.name) / "state"),
+            role="full",
+            base_branch="release/custom-base",
+        )
+        environment = {
+            "API_SERVER_EXTERNAL_KEY": "external",
+            "CREDENTIAL_PROXY_BOOTSTRAP_COMMAND": "",
+            "CREDENTIAL_PROXY_SCOPED_SA_POOL": "0",
+        }
+        bound = []
+
+        class FakeServer:
+            def __init__(self, *a, **k):
+                bound.append(self)
+
+            def serve_forever(self):
+                pass
+
+            def server_close(self):
+                pass
+
+        class FakeThread:
+            def __init__(self, target, daemon=True):
+                pass
+
+            def start(self):
+                pass
+
+        def stop(*_):
+            raise self._Stop()
+
+        try:
+            with mock.patch.dict(os.environ, environment, clear=True), \
+                    mock.patch.object(credential_proxy, "ThreadingHTTPServer", FakeServer), \
+                    mock.patch.object(credential_proxy.threading, "Thread", FakeThread), \
+                    mock.patch.object(credential_proxy.ThreadingUnixHTTPServer, "serve_forever", stop):
+                with self.assertRaises(self._Stop):
+                    credential_proxy.serve(args)
+
+            self.assertEqual("release/custom-base", CredentialProxyHandler.base_branch)
+            self.assertIsNotNone(CredentialProxyHandler.vcs)
+            assert CredentialProxyHandler.vcs is not None
+            self.assertEqual("release/custom-base", CredentialProxyHandler.vcs.base_branch)
+
+            # With environment cleared, push to release/custom-base is refused via CredentialProxyHandler.base_branch
+            with mock.patch.dict(os.environ, {}, clear=True):
+                violation = git_argument_violation(["git", "push", "origin", "release/custom-base"])
+                self.assertIsNotNone(violation)
+                self.assertIn("protected branch 'release/custom-base' is refused", violation or "")
+        finally:
+            CredentialProxyHandler.base_branch = ""
+            for s in bound:
+                s.server_close()
 
 
 class ReadOnlyOverTheSocketTest(unittest.TestCase):

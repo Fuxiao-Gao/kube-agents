@@ -1655,10 +1655,25 @@ GIT_MUTATING_SUBCOMMANDS = frozenset(
 
 # git's own global options, split by whether they consume the next argument.
 # Needed to find the subcommand in `git --literal-pathspecs add …` (which
-# audit_report issues) without mistaking a flag for a verb.
+# audit_report issues) without mistaking a flag for a verb. Includes options
+# added in git ≥2.40 so neither `_git_plan` nor the push scanner desynchronises
+# on options such as `--attr-source`, `--config-env`, or `--shallow-file` (#1498).
 _GIT_GLOBAL_WITH_VALUE = frozenset(
-    {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"}
+    {
+        "-C",
+        "-c",
+        "--git-dir",
+        "--work-tree",
+        "--namespace",
+        "--exec-path",
+        "--super-prefix",
+        "--attr-source",
+        "--config-env",
+        "--shallow-file",
+    }
 )
+
+_GIT_PUSH_GLOBAL_WITH_VALUE = _GIT_GLOBAL_WITH_VALUE
 
 # Directory `core.hooksPath` is pinned to. It lives under the state dir, which
 # is a sidecar-only emptyDir, and is created empty and mode 0500 at startup.
@@ -1834,6 +1849,7 @@ _GIT_REFUSED_ARGUMENTS = {
     "--exec-path": "chooses where git looks for the program to run",
     "--git-dir": "points git at a repository outside the shared workspace",
     "--work-tree": "points git at a tree outside the shared workspace",
+    "--shallow-file": "points git at a shallow file outside the shared workspace",
     # `git config --global` writes the very file GIT_CONFIG_GLOBAL pins, and
     # `config` is not a mutating verb so it needs no lease. Demonstrated: the
     # agent writes `alias.zz = !<payload>` into the broker's own global config
@@ -2088,6 +2104,209 @@ def _git_refused_name(argument: str) -> str:
     )
 
 
+def _detect_repo_default_branch(repo_dir: Path | None, remote: str = "origin") -> str | None:
+    """Best-effort detection of remote default branch from local clone ref metadata (#1498).
+
+    Reads refs/remotes/<remote>/HEAD directly without subprocess or network calls.
+    On repositories with non-standard default trunks, this local detection acts as a
+    cooperative guard against accidental pushes; authoritative protection against
+    deliberate workspace ref manipulation requires setting CREDENTIAL_PROXY_BASE_BRANCH
+    or GITOPS_BASE_BRANCH.
+    """
+    if not repo_dir:
+        return None
+    repo_root = _find_repo_root(repo_dir) or Path(repo_dir)
+    remotes = [remote] if remote == "origin" else [remote, "origin"]
+    for rem in remotes:
+        for head_candidate in (
+            repo_root / ".git" / "refs" / "remotes" / rem / "HEAD",
+            repo_root / "refs" / "remotes" / rem / "HEAD",
+        ):
+            try:
+                if head_candidate.is_file() and head_candidate.stat().st_size <= 4096:
+                    with open(head_candidate, "r", encoding="utf-8", errors="replace") as f:
+                        text = f.read(4096).strip()
+                    prefix = f"ref: refs/remotes/{rem}/"
+                    if text.startswith(prefix):
+                        branch = text[len(prefix):].strip()
+                        if branch:
+                            return branch
+                    if text.startswith("ref: refs/heads/"):
+                        branch = text[len("ref: refs/heads/"):].strip()
+                        if branch:
+                            return branch
+                    if text.startswith("ref:"):
+                        ref = text.split(":", 1)[1].strip()
+                        return ref.split("/")[-1]
+            except Exception:
+                pass
+    return None
+
+
+def git_push_violation(argv: list[str], cwd: Path | str | None = None) -> str | None:
+    """Refuse direct pushes to protected rollout or base branches (#1498)."""
+    if not argv or Path(argv[0]).name != "git":
+        return None
+
+    # Locate 'push' subcommand by walking past global options. The first
+    # non-option token after global options is the subcommand slot.
+    idx = 1
+    push_idx = -1
+    while idx < len(argv):
+        arg = argv[idx]
+        if arg == "--":
+            break
+        name, sep, _ = arg.partition("=")
+        if name in _GIT_PUSH_GLOBAL_WITH_VALUE and not sep:
+            idx += 2
+            continue
+        if arg.startswith("-"):
+            idx += 1
+            continue
+        if arg.lower() == "push":
+            push_idx = idx
+        break
+
+    if push_idx == -1:
+        return None
+
+    push_args = argv[push_idx + 1:]
+
+    protected = {"main", "master", "production"}
+    handler_base = getattr(CredentialProxyHandler, "base_branch", "")
+    base_override = (
+        handler_base
+        or os.environ.get("CREDENTIAL_PROXY_BASE_BRANCH", "").strip()
+        or os.environ.get("GITOPS_BASE_BRANCH", "").strip()
+    )
+    if base_override:
+        norm_override = base_override.strip().lower()
+        if norm_override.startswith("refs/heads/"):
+            norm_override = norm_override[len("refs/heads/"):]
+        elif norm_override.startswith("heads/"):
+            norm_override = norm_override[len("heads/"):]
+        protected.add(norm_override)
+
+    has_tags = False
+    positional: list[str] = []
+    idx = 0
+    while idx < len(push_args):
+        arg = push_args[idx]
+        if arg in ("--all", "--mirror"):
+            return (
+                f"`git push {arg}` is refused: pushing all branches directly "
+                "is not permitted."
+            )
+        if arg == "--tags":
+            has_tags = True
+            idx += 1
+            continue
+        if arg == "--repo":
+            if idx + 1 < len(push_args):
+                idx += 2
+                continue
+            idx += 1
+            continue
+        if arg.startswith("--repo="):
+            idx += 1
+            continue
+        if arg == "-o":
+            if idx + 1 < len(push_args):
+                idx += 2
+                continue
+            idx += 1
+            continue
+        if arg.startswith("-o") and len(arg) > 2:
+            idx += 1
+            continue
+        if arg == "--":
+            positional.extend(push_args[idx + 1:])
+            break
+        if arg.startswith("--"):
+            opt_name, sep, _ = arg.partition("=")
+            if (
+                len(opt_name) > 2
+                and any(
+                    opt.startswith(opt_name)
+                    for opt in ("--repo", "--receive-pack", "--exec", "--push-option", "--recurse-submodules")
+                )
+            ):
+                if sep:
+                    idx += 1
+                    continue
+                if idx + 1 < len(push_args):
+                    idx += 2
+                    continue
+                idx += 1
+                continue
+            idx += 1
+            continue
+        if arg.startswith("-"):
+            idx += 1
+            continue
+        positional.append(arg)
+        idx += 1
+
+    remote_name = "origin"
+    if positional and ":" not in positional[0] and not positional[0].startswith("+"):
+        remote_name = positional[0]
+
+    if cwd:
+        repo_dir = Path(cwd).resolve()
+        detected_default = _detect_repo_default_branch(repo_dir, remote=remote_name)
+        if detected_default:
+            norm_def = detected_default.strip().lower()
+            if norm_def.startswith("refs/heads/"):
+                norm_def = norm_def[len("refs/heads/"):]
+            elif norm_def.startswith("heads/"):
+                norm_def = norm_def[len("heads/"):]
+            protected.add(norm_def)
+
+    # In `git push [<repository> [<refspec>...]]`, the first positional argument
+    # is the repository unless no positional arguments are supplied. Even if
+    # `--repo` is specified, git's cmd_push treats the first positional arg as the repo.
+    refspecs = positional[1:] if len(positional) > 1 else []
+
+    if not refspecs:
+        if has_tags:
+            return None
+        return (
+            "`git push` without an explicit destination refspec is refused: specify an explicit "
+            "destination branch (e.g. 'HEAD:platform-agent/<name>')."
+        )
+
+    for ref in refspecs:
+        if ref == ":" or ref.endswith(":") or (":" in ref and not ref.split(":")[-1].lstrip("+")):
+            return (
+                "`git push` with matching refspec ':' is refused: specify an explicit "
+                "destination branch."
+            )
+        target = ref.split(":")[-1].lstrip("+")
+        if "*" in target or "*" in ref:
+            return (
+                f"`git push` with wildcard refspec '{ref}' is refused: specify an explicit "
+                "destination branch."
+            )
+        if target.casefold() in {"head", "@"}:
+            return (
+                "`git push` with bare 'HEAD' refspec is refused: specify an explicit "
+                "destination branch (e.g. 'HEAD:platform-agent/<name>')."
+            )
+        norm_target = target.strip()
+        if norm_target.lower().startswith("refs/heads/"):
+            norm_target = norm_target[len("refs/heads/"):]
+        elif norm_target.lower().startswith("heads/"):
+            norm_target = norm_target[len("heads/"):]
+
+        if norm_target.casefold() in protected or norm_target.casefold().startswith("run/"):
+            return (
+                f"`git push` to protected branch '{norm_target}' is refused: changes to "
+                "base or run branches must be proposed via pull request and merged through "
+                "the approved workflow."
+            )
+    return None
+
+
 def git_argument_violation(argv: list[str]) -> str | None:
     """Why this git argv may not run, or None if it may.
 
@@ -2104,6 +2323,9 @@ def git_argument_violation(argv: list[str]) -> str | None:
     """
     if not argv or Path(argv[0]).name != "git":
         return None
+    push_violation = git_push_violation(argv)
+    if push_violation is not None:
+        return push_violation
     rest = argv[1:]
     scoped: dict[str, str] = {}
     for subcommand, (letters, why) in _GIT_REFUSED_SHORT_FOR_SUBCOMMAND.items():
@@ -2136,6 +2358,253 @@ def git_argument_violation(argv: list[str]) -> str | None:
                 "ask an operator for anything that has to change the proxy's own "
                 "configuration."
             )
+    if "config" in rest:
+        for argument in rest:
+            clean = argument.split("=", 1)[0].strip().lower()
+            if (
+                clean.startswith("alias.")
+                or clean == "alias"
+                or clean.startswith("include.")
+                or clean.startswith("includeif.")
+                or clean == "include"
+            ):
+                return (
+                    "`git config` configuring an alias or config include is refused: "
+                    "git aliases and includes cannot be configured through the credential proxy."
+                )
+    return None
+
+
+GIT_BUILTIN_SUBCOMMANDS = (
+    GIT_MUTATING_SUBCOMMANDS
+    | frozenset(_GIT_REFUSED_SUBCOMMANDS.keys())
+    | frozenset(
+        {
+            "add",
+            "am",
+            "annotate",
+            "apply",
+            "archive",
+            "bisect",
+            "blame",
+            "bugreport",
+            "bundle",
+            "cat-file",
+            "check-attr",
+            "check-ignore",
+            "check-mailmap",
+            "check-ref-format",
+            "checkout-index",
+            "commit-graph",
+            "commit-tree",
+            "config",
+            "count-objects",
+            "credential",
+            "credential-cache",
+            "credential-store",
+            "describe",
+            "diagnose",
+            "diff",
+            "diff-files",
+            "diff-index",
+            "diff-tree",
+            "difftool",
+            "fast-export",
+            "fast-import",
+            "fmt-merge-msg",
+            "for-each-ref",
+            "for-each-repo",
+            "format-patch",
+            "fsck",
+            "gc",
+            "grep",
+            "hash-object",
+            "help",
+            "hook",
+            "init",
+            "interpret-trailers",
+            "log",
+            "ls-files",
+            "ls-remote",
+            "ls-tree",
+            "maintenance",
+            "merge-base",
+            "merge-file",
+            "merge-index",
+            "merge-one-file",
+            "merge-tree",
+            "name-rev",
+            "notes",
+            "pack-refs",
+            "patch-id",
+            "prune",
+            "push",
+            "range-diff",
+            "read-tree",
+            "reflog",
+            "remote",
+            "repack",
+            "replace",
+            "rerere",
+            "rev-list",
+            "rev-parse",
+            "shortlog",
+            "show",
+            "show-branch",
+            "show-ref",
+            "status",
+            "stripspace",
+            "symbolic-ref",
+            "tag",
+            "update-index",
+            "var",
+            "verify-commit",
+            "verify-pack",
+            "verify-tag",
+            "version",
+            "whatchanged",
+            "write-tree",
+        }
+    )
+)
+
+
+def _find_repo_root(cwd: Path | str | None) -> Path | None:
+    if not cwd:
+        return None
+    cur = Path(cwd).resolve()
+    while cur != cur.parent:
+        candidate_git = cur / ".git"
+        if candidate_git.is_dir() and (candidate_git / "config").is_file():
+            return cur
+        elif candidate_git.is_file():
+            try:
+                if candidate_git.stat().st_size <= 4096:
+                    with open(candidate_git, "r", encoding="utf-8", errors="replace") as f:
+                        line = f.read(4096).strip()
+                    if line.startswith("gitdir:"):
+                        return cur
+            except Exception:
+                pass
+        elif cur.name == ".git" and (cur / "config").is_file():
+            return cur.parent
+        elif (cur / "config").is_file() and (cur / "HEAD").is_file():
+            # Bare repository root (#1498)
+            return cur
+        cur = cur.parent
+    return None
+
+
+_GIT_PROBE_ENVIRONMENT = {
+    "GIT_ALLOW_PROTOCOL": "https",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "KUBECTL_KUBERC": "false",
+}
+
+
+def _read_repo_alias(
+    cwd: Path | str | None,
+    subcommand: str | None,
+    executor: "CommandExecutor | None" = None,
+) -> list[str] | None:
+    """If `subcommand` is an alias defined in the repo-local `.git/config`, return its argv expansion.
+
+    Git never alias-expands builtin subcommands, and expands non-builtin aliases recursively.
+    Uses git config --get to ensure identical lexing, quoting, continuation, and include semantics.
+    Runs inside the executor's hardened environment (GIT_ALLOW_PROTOCOL=https, GIT_CONFIG_NOSYSTEM=1) (#1498).
+    """
+    if not cwd or not subcommand:
+        return None
+    if subcommand in GIT_BUILTIN_SUBCOMMANDS:
+        return None
+
+    repo_root = _find_repo_root(cwd)
+    if not repo_root:
+        return None
+
+    import shlex
+
+    visited: set[str] = set()
+    current_name = subcommand.lower()
+    accumulated_tokens: list[str] = []
+
+    git_bin = "git"
+    env = os.environ.copy()
+    env.update(_GIT_PROBE_ENVIRONMENT)
+    if executor is not None:
+        git_bin = executor.executables.get("git") or "git"
+        env = executor.environment.copy()
+
+    MAX_ALIAS_DEPTH = 10
+    for _ in range(MAX_ALIAS_DEPTH):
+        if current_name in GIT_BUILTIN_SUBCOMMANDS:
+            if accumulated_tokens:
+                accumulated_tokens[0] = current_name
+            break
+        if current_name in visited:
+            return ["!cycle"]
+        visited.add(current_name)
+
+        try:
+            proc = subprocess.run(
+                [git_bin, "-C", str(repo_root), "config", "--get", f"alias.{current_name}"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                env=env,
+            )
+        except Exception:
+            return ["!error"]
+
+        if proc.returncode == 1 and not proc.stderr:
+            # Not an alias in git config.
+            # If we already accumulated alias tokens, the chain terminated at an undefined
+            # subcommand name that is not a git builtin: fail closed (#1498).
+            if accumulated_tokens and current_name not in GIT_BUILTIN_SUBCOMMANDS:
+                return ["!undefined_alias", current_name]
+            if accumulated_tokens and current_name in GIT_BUILTIN_SUBCOMMANDS:
+                accumulated_tokens[0] = current_name
+            break
+        elif proc.returncode != 0:
+            # Fatal error, syntax error, excessive include depth: fail closed!
+            return ["!config_error"]
+
+        raw_val = proc.stdout.strip()
+        if not raw_val:
+            break
+        if raw_val.startswith("!"):
+            return ["!" + raw_val[1:].strip()]
+
+        try:
+            tokens = shlex.split(raw_val)
+        except Exception:
+            return ["!shlex_error"]
+
+        if not tokens:
+            break
+
+        accumulated_tokens = tokens + accumulated_tokens[1:] if accumulated_tokens else tokens
+        current_name = accumulated_tokens[0].lower()
+    else:
+        # Loop exhausted MAX_ALIAS_DEPTH without reaching a non-alias or builtin: fail closed (#1498)!
+        return ["!max_depth"]
+
+    return accumulated_tokens or None
+
+
+def _find_subcommand_index(argv: list[str]) -> int | None:
+    """Find the index of the subcommand token in argv, walking past global options."""
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        if token == "--":
+            return None
+        if not token.startswith("-"):
+            return index
+        name, sep, _ = token.partition("=")
+        if name in _GIT_GLOBAL_WITH_VALUE and not sep:
+            index += 1
+        index += 1
     return None
 
 
@@ -2808,6 +3277,91 @@ class CommandExecutor:
                 break
         return None
 
+    def resolve_git_command(self, argv: list[str], cwd: str | None) -> tuple[str | None, list[str]]:
+        """Why this git command may not run here, or None if it may, along with the execution argv.
+
+        When an alias is present, returns the checked expansion as execution argv so execution
+        does not re-read .git/config at execution time. Unknown subcommands that are neither recognized
+        git builtins nor defined aliases fail closed, preventing TOCTOU races between check and execute
+        where an agent modifies .git/config after check passes (#1498).
+        """
+        if not argv or Path(argv[0]).name != "git":
+            return None, argv
+        subcommand, redirects = _git_plan(argv)
+        candidate = Path(cwd).resolve() if cwd else self.workspace_dir
+        # `-C` is applied the way git applies it: each one relative to the last.
+        for redirect in redirects:
+            candidate = (candidate / redirect).resolve()
+
+        alias_expansion = _read_repo_alias(candidate, subcommand, executor=self)
+        if alias_expansion:
+            if alias_expansion[0].startswith("!"):
+                if alias_expansion[0] in ("!cycle", "!max_depth", "!config_error", "!error", "!shlex_error", "!undefined_alias"):
+                    err_code = alias_expansion[0][1:]
+                    return (
+                        f"`git` alias recursion, configuration error, or undefined alias target ({err_code}) is refused: "
+                        "aliases must expand cleanly without cycles, errors, exceeding depth, or undefined targets.",
+                        argv,
+                    )
+                return (
+                    "`git` alias executing a shell command (`!`) is refused: "
+                    "shell aliases cannot be executed through the credential proxy.",
+                    argv,
+                )
+            sub_idx = _find_subcommand_index(argv)
+            head = argv[:sub_idx] if sub_idx is not None else [argv[0]]
+            tail = argv[sub_idx + 1:] if sub_idx is not None else []
+            expanded_argv = head + alias_expansion + tail
+
+            arg_violation = git_argument_violation(expanded_argv)
+            if arg_violation is not None:
+                return arg_violation, argv
+
+            push_violation = git_push_violation(expanded_argv, cwd=candidate)
+            if push_violation is not None:
+                return push_violation, argv
+            subcommand, _ = _git_plan(expanded_argv)
+            if subcommand and subcommand not in GIT_BUILTIN_SUBCOMMANDS:
+                return (
+                    f"`git {subcommand}` is not a recognized git subcommand.",
+                    argv,
+                )
+            execution_argv = expanded_argv
+        else:
+            if subcommand and subcommand not in GIT_BUILTIN_SUBCOMMANDS:
+                return (
+                    f"`git {subcommand}` is not a recognized git subcommand or alias.",
+                    argv,
+                )
+            push_violation = git_push_violation(argv, cwd=candidate)
+            if push_violation is not None:
+                return push_violation, argv
+            execution_argv = argv
+
+        if not self.require_git_lease:
+            return None, execution_argv
+
+        if subcommand not in GIT_MUTATING_SUBCOMMANDS:
+            return None, execution_argv
+
+        if not self._within_workspace(candidate):
+            return (
+                f"`git {subcommand}` would run in {candidate}, outside the shared "
+                "workspace.",
+                argv,
+            )
+        if self._lease_holder(candidate) is None:
+            return (
+                f"`git {subcommand}` is only allowed inside a leased GitOps "
+                f"workspace, and {candidate} is not one (no {GIT_LEASE_MARKER} in "
+                "it or any directory above it). Other agents share this volume: "
+                "run the skill's workspace step — `audit_report.py start` for a "
+                "fleet audit, `submit_suggestion.py prepare` for a suggestion — "
+                "and work in the directory it prints.",
+                argv,
+            )
+        return None, execution_argv
+
     def git_lease_violation(self, argv: list[str], cwd: str | None) -> str | None:
         """Why this git command may not run here, or None if it may.
 
@@ -2824,34 +3378,8 @@ class CommandExecutor:
         checked by the skill (`gitops_workspace.assert_lease_owner`), which is
         the only layer that knows which lease it holds.
         """
-        if not self.require_git_lease:
-            return None
-        if not argv or Path(argv[0]).name != "git":
-            return None
-        subcommand, redirects = _git_plan(argv)
-        if subcommand not in GIT_MUTATING_SUBCOMMANDS:
-            return None
-
-        candidate = Path(cwd).resolve() if cwd else self.workspace_dir
-        # `-C` is applied the way git applies it: each one relative to the last.
-        for redirect in redirects:
-            candidate = (candidate / redirect).resolve()
-
-        if not self._within_workspace(candidate):
-            return (
-                f"`git {subcommand}` would run in {candidate}, outside the shared "
-                "workspace."
-            )
-        if self._lease_holder(candidate) is None:
-            return (
-                f"`git {subcommand}` is only allowed inside a leased GitOps "
-                f"workspace, and {candidate} is not one (no {GIT_LEASE_MARKER} in "
-                "it or any directory above it). Other agents share this volume: "
-                "run the skill's workspace step — `audit_report.py start` for a "
-                "fleet audit, `submit_suggestion.py prepare` for a suggestion — "
-                "and work in the directory it prints."
-            )
-        return None
+        violation, _ = self.resolve_git_command(argv, cwd)
+        return violation
 
     def _resolve_kubeconfig(self, context: str, *, scoped: bool = True) -> Path:
         """Turn the cluster name a caller sent into a kubeconfig the proxy wrote.
@@ -3222,7 +3750,7 @@ class CommandExecutor:
         return value[: self.max_output_bytes], True
 
 
-def build_workspace_store(executor: CommandExecutor):
+def build_workspace_store(executor: CommandExecutor, base_branch: str = ""):
     """The content-passing store, or None when the feature is off.
 
     Returning None rather than an inert object is deliberate: the handler tests
@@ -3243,12 +3771,13 @@ def build_workspace_store(executor: CommandExecutor):
         executor.content_workspace_root,
         executor.workspace_dir,
         executor.execute_workspace_git,
+        base_branch=base_branch,
     )
     LOGGER.info("content workspace enabled root=%s", executor.content_workspace_root)
     return store
 
 
-def build_vcs_broker(executor: CommandExecutor):
+def build_vcs_broker(executor: CommandExecutor, base_branch: str = ""):
     """The version-control broker. Always built; there is no switch.
 
     Unlike the content workspace this has no off state. It is the forge-neutral
@@ -3271,6 +3800,7 @@ def build_vcs_broker(executor: CommandExecutor):
         git_runner=executor.execute_vcs_git,
         cli_runner=executor.execute_forge_cli,
         refresh=executor.refresh_forge_credential,
+        base_branch=base_branch,
     )
     LOGGER.info(
         "version control enabled root=%s forges=%s",
@@ -3414,6 +3944,7 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
     # credential and an install may arm either one alone.
     a2a_chat_relay: GoogleChatRelay | None = None
     slack_relay: SlackRelay | None = None
+    base_branch: str = ""
     # None unless CREDENTIAL_PROXY_CONTENT_WORKSPACE is on. While it is None the
     # /v1/workspace/* routes answer 404 — the same answer an older broker gives,
     # which is what lets a migrating client detect support by asking rather than
@@ -3738,7 +4269,11 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
 
         # Not a policy rule: the policy matches on argv alone, and this refusal
         # turns on the working directory as well.
-        violation = self.executor.git_lease_violation(argv, cwd)
+        if hasattr(self.executor, "resolve_git_command"):
+            violation, exec_argv = self.executor.resolve_git_command(argv, cwd)
+        else:
+            violation = self.executor.git_lease_violation(argv, cwd)
+            exec_argv = argv
         if violation is not None:
             LOGGER.warning(
                 "git lease refused request_id=%s cwd=%s",
@@ -3763,6 +4298,8 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
         # be refused by the denylist with that rule id. If the gate ran first, it
         # would refuse as `kubernetes.read-only`, losing the specific rule.
         refusal_result = read_only_refusal(argv)
+        if refusal_result is None and exec_argv != argv:
+            refusal_result = read_only_refusal(exec_argv)
         if refusal_result is not None:
             refusal, log_hint = refusal_result
             safe_hint = _sanitize_for_logging(log_hint) if log_hint else "unknown"
@@ -3774,7 +4311,7 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
 
         try:
             result = self.executor.execute(
-                argv,
+                exec_argv,
                 stdin=stdin,
                 cwd=cwd,
                 kubeconfig_context=kubeconfig_context,
@@ -4456,8 +4993,17 @@ def serve(args: argparse.Namespace) -> None:
     )
     executor.bootstrap(os.getenv("CREDENTIAL_PROXY_BOOTSTRAP_COMMAND", ""))
     CredentialProxyHandler.executor = executor
-    CredentialProxyHandler.workspaces = build_workspace_store(executor)
-    CredentialProxyHandler.vcs = build_vcs_broker(executor)
+    CredentialProxyHandler.base_branch = (
+        getattr(args, "base_branch", "")
+        or os.getenv("CREDENTIAL_PROXY_BASE_BRANCH", "")
+        or os.getenv("GITOPS_BASE_BRANCH", "")
+    ).strip()
+    CredentialProxyHandler.workspaces = build_workspace_store(
+        executor, base_branch=CredentialProxyHandler.base_branch
+    )
+    CredentialProxyHandler.vcs = build_vcs_broker(
+        executor, base_branch=CredentialProxyHandler.base_branch
+    )
     CredentialProxyHandler.max_request_bytes = args.max_request_bytes
     CredentialProxyHandler.enforce_read_only = read_only_enforced()
     LOGGER.info("read-only enforcement enabled=%s", CredentialProxyHandler.enforce_read_only)
@@ -4568,6 +5114,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--state-dir",
         default=os.getenv("CREDENTIAL_PROXY_STATE_DIR", "/var/lib/credential-proxy"),
+    )
+    parser.add_argument(
+        "--base-branch",
+        default=os.getenv(
+            "CREDENTIAL_PROXY_BASE_BRANCH", os.getenv("GITOPS_BASE_BRANCH", "")
+        ),
+        help="Protected GitOps base branch that agents may not push to directly",
     )
     return parser.parse_args()
 
