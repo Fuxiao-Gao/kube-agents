@@ -660,12 +660,54 @@ profile_and_dump_on_exit() {
   # was captured above and publish_eval_dashboard never returns non-zero, so
   # this cannot change what Prow reports (errexit is already cleared above).
   publish_eval_dashboard
+  # Last, after everything slow: the eval-lifetime Boskos heartbeat started
+  # below the traps keeps the lease alive through this tail too. On a run
+  # past boskosctl's 5h --timeout nothing else beats, and the tail is not
+  # bounded by the ~5m reaper window (the artifact dump's kubectl calls
+  # carry no --request-timeout; the dashboard publish has a 900s budget), so
+  # killing it first would reopen the gap this daemon closes. The wrapper's
+  # release comes after ci-teardown.sh, minutes from now, so the daemon is
+  # gone long before it; caller_alive stops it even if this kill is never
+  # reached. Unset outside Prow.
+  kill "${EVAL_HEARTBEAT_PID:-}" 2>/dev/null || true
 }
 trap profile_and_dump_on_exit EXIT
 # A Prow deadline delivers SIGTERM, which does not run the EXIT trap on its
 # own; converting it to an exit is what lets the artifact collection above
 # fire on a deadline kill.
 trap 'exit 143' TERM INT
+
+# ─── Boskos lease heartbeat for the eval's own lifetime ──────────────────────
+# The Prow wrapper's `boskosctl heartbeat` covers this step, but boskosctl
+# stops beating after its default --timeout of 5h ("reached timeout,
+# stopping heartbeats", exit 0, so the wrapper's abort fallback never fires)
+# and the wrapper sets no --timeout. Boskos's ~5m reaper then clears the
+# lease's owner, and every later /update and the final release answer 401
+# OwnerNotMatch: the first full nightly (build 2100374258805903360,
+# 2026-09-17) lost kube-agents-evals-6 that way at 05:01Z of a run that ended
+# 05:57Z and could not hand the project back (#1491). A presubmit that
+# outlives 5h under a quota storm (#1214) is exposed the same way.
+#
+# The daemon ci-teardown.sh already runs beats here for exactly this script's
+# lifetime -- it has no timeout -- so the lease stays fresh however long the
+# fan-out and the EXIT trap's artifact tail take; profile_and_dump_on_exit
+# kills it as its last act, minutes before the wrapper's release, and the
+# daemon stops itself once this script is gone. Same endpoint and owner convention as the
+# wrapper (BOSKOS_OWNER="${JOB_NAME}-${BUILD_ID}", oss-test-infra
+# prow/prowjobs/gke-labs/kube-agents/*.yaml); outside Prow nothing is derived
+# and the daemon disables itself with one line. `disown` is load-bearing: the
+# fan-out below sizes its lanes with `jobs -rp`, and a daemon left in the job
+# table would take one of them for the whole run (and be waited on).
+if [ -n "${JOB_NAME:-}" ] && [ -n "${BUILD_ID:-}" ]; then
+  export BOSKOS_HOST="${BOSKOS_HOST:-http://boskos.boskos.svc.cluster.local}"
+  export BOSKOS_RESOURCE_NAME="${BOSKOS_RESOURCE_NAME:-${PROJECT_ID}}"
+  export BOSKOS_OWNER_NAME="${BOSKOS_OWNER_NAME:-${JOB_NAME}-${BUILD_ID}}"
+fi
+"${SCRIPT_DIR}/boskos_heartbeat.sh" &
+EVAL_HEARTBEAT_PID=$!
+# Outside Prow the daemon exits within milliseconds; if bash has already
+# reaped it, disown answers "no such job", which must not be a set -e death.
+disown "${EVAL_HEARTBEAT_PID}" 2>/dev/null || true
 
 START_TIME=$SECONDS
 echo "=== [$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Running PR Smoke Test Evaluation for PR #${PR_ID} in Namespace: ${TARGET_NAMESPACE} ==="
