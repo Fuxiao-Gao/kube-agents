@@ -325,8 +325,8 @@ per pool project — `roles/iam.serviceAccountTokenCreator` on that account, the
 grant #1238 gave the presubmit's identity — and nothing on the project itself.
 The grant lives on the service account resource, so it is per project by
 nature (the pool projects sit directly under the organisation, with no folder
-to grant on). `bench/tf/fleet`'s `fleet_reader_token_creators` defaults to both
-identities, so an apply of the fleet stack in a project grants it; for projects
+to grant on). `bench/tf/fleet`'s `fleet_reader_token_creators` defaults to the bot
+beside both runners, so an apply of the fleet stack in a project grants it; for projects
 applied before that default, the repair is one command per project:
 
 ```bash

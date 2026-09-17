@@ -725,9 +725,10 @@ echo "✓ Cluster authentication finished in $((SECONDS - STEP_START))s"
 # own.
 #
 # The other half is the token-creator grant -- `fleet_reader_token_creators`
-# in bench/tf/fleet/variables.tf, which now defaults to the Prow runner, so an
-# apply of that stack grants it. In a project whose fleet was applied before
-# that default landed, `gcloud auth print-access-token
+# in bench/tf/fleet/variables.tf, which defaults to both runners, the
+# presubmit's and the nightly's, and to the CI health bot, so an apply of that
+# stack grants each. In a project whose fleet was applied before that default
+# landed, `gcloud auth print-access-token
 # --impersonate-service-account` fails, fleet-kubeconfigs.sh warns per cluster,
 # and the role kubeconfigs keep the runner's own read-write credential. That is
 # a privilege gap on a fleet every open PR shares, not a functional one: the

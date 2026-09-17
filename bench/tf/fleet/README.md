@@ -263,7 +263,8 @@ Applying this stack is what makes it true. It provisions
 the project and nothing else, and grants `roles/iam.serviceAccountTokenCreator` on that
 account to the members in `var.fleet_reader_token_creators` — which defaults to
 `prowjob-default-sa@kube-agents-prow.iam.gserviceaccount.com`, the identity every
-presubmit runs as, and to `eval-dashboard-publisher@kube-agents-prow.iam.gserviceaccount.com`,
+presubmit runs as, to `eval-baseline-recorder@kube-agents-prow.iam.gserviceaccount.com`,
+the nightly periodic's, and to `eval-dashboard-publisher@kube-agents-prow.iam.gserviceaccount.com`,
 the CI health bot, whose hourly fixture-state scan reads every pool project's fleet as
 the reader and holds nothing else on the project
 ([`docs/ci-health.md`](../../../docs/ci-health.md), "The seeded-fleet scan").
