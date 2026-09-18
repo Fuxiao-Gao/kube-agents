@@ -114,6 +114,23 @@ as long as the cluster. The script refuses any branch outside `run/**`.
 The agent's PR branches are `platform-agent/<change>-<target>`, as submit-suggestion
 already names them. The check workflow deletes them on merge.
 
+A fresh branch is not isolation from earlier runs: merged pull requests stay listed in
+the repository, and b-0011 run 19 copied its fix from one (#1730). A run that must not see
+earlier work gets its own repository (#1773): `bench/hack/gitops-run-repo.sh create` makes
+one under the org from a single back-dated root commit holding only the README and the
+check workflow (`bench/tf/prebuilt/gitops-fix-cycle/repo/`), adds it to the minter's
+config, and prints the root commit; the wrapper (`GITOPS_REPO`) renders that repository
+into the prompt copy and passes the root as the stack's broken base and, for b-0011, the
+staged history's parent. `run-branch.sh create` then commits the broken render on the root
+for a task without staged history, so the branch is root -> broken for b-0022b and root ->
+healthy -> inflated -> broken for b-0011, with `tasks/<task>` trees identical to the pinned
+bases. The staged history's commit messages are the shape a build pipeline writes
+(`payments: update checkout deployment`); the clue is the diff and the rollout history,
+not a title. Repositories are archived after the campaign, not deleted, so handoff links
+keep resolving. The agent side of the same isolation is the wrapper's
+`AGENT_STATE_RESET`, which re-creates the `PlatformAgent` on fresh volumes with the run's
+repository as its managed repository and refuses to run unless its stores are empty.
+
 ## What the stack installs (`bench/tf/prebuilt/gitops-fix-cycle`)
 
 One stack serves every task on the cycle. `gitops_task` (set by the case's
