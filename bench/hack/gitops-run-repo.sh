@@ -44,6 +44,9 @@ readonly TEMPLATE_DIR="$(cd "$(dirname "$0")/.." && pwd)/tf/prebuilt/gitops-fix-
 readonly ROOT_COMMIT_MESSAGE="Initial import of the platform manifests"
 readonly ROOT_AUTHOR_NAME="platform-team"
 readonly ROOT_AUTHOR_EMAIL="platform-team@users.noreply.github.com"
+# The root commit predates the staged history's oldest commit (ten days), so
+# the log reads oldest-first by date as well as by parentage.
+readonly ROOT_AGE_DAYS=30
 readonly MINTER_CONFIGMAP="github-token-minter-config"
 readonly MINTER_DEPLOYMENT="github-token-minter"
 readonly MINTER_VOLUME="config-volume"
@@ -171,7 +174,9 @@ print(json.dumps({"spec": {"template": {"spec": {"containers": [{"name": c["name
     export GIT_CONFIG_GLOBAL=/dev/null
     git -C "${work}" init -q -b main
     git -C "${work}" add -A
-    git -C "${work}" -c user.name="${ROOT_AUTHOR_NAME}" -c user.email="${ROOT_AUTHOR_EMAIL}" commit -q -m "${ROOT_COMMIT_MESSAGE}"
+    root_date="$(python3 -c 'import datetime as d,sys; print((d.datetime.now(d.timezone.utc)-d.timedelta(days=int(sys.argv[1]))).strftime("%Y-%m-%dT%H:%M:%SZ"))' "${ROOT_AGE_DAYS}")"
+    GIT_AUTHOR_DATE="${root_date}" GIT_COMMITTER_DATE="${root_date}" \
+      git -C "${work}" -c user.name="${ROOT_AUTHOR_NAME}" -c user.email="${ROOT_AUTHOR_EMAIL}" commit -q -m "${ROOT_COMMIT_MESSAGE}"
     root="$(git -C "${work}" rev-parse HEAD)"
     # The token reaches git through a helper, not the URL, so it never lands
     # in the process table or a reflog.
