@@ -213,6 +213,7 @@ identifier appears, add its source here.
 | Live-test lease: ConfigMap name, TTL, install-configuration keys read, which commands count as mutations | `scripts/live_test_lease.py` |
 | PR evidence screenshots: publish branch, file-name provenance, caption format | `scripts/pr_evidence_screenshot.sh` |
 | Unresolved-thread hold: the label, the pool condition, the sweep interval, the ownership rule | `scripts/hold_unresolved_threads.py` and `.github/workflows/hold-unresolved-threads.yml` |
+| Issue triage queue: the `needs-triage` label, the `priority:` label prefix it mirrors, and when each event adds or removes it | `.github/workflows/needs-triage.yml` |
 | Flaky-check tracking: the `ci:flaky` label, the watched checks and the exclusions, the one-issue-per-container key, the never-close rule | `scripts/notify_flaky_check.py` and `.github/workflows/flaky-check-notify.yml`; the exclusion list the contract test enforces is `FLAKY_CHECK_EXCLUDED_WORKFLOWS` in `scripts/test_integration_contracts.py` |
 | Context budget for the always-loaded agent instruction files (`AGENTS.md`, `CLAUDE.md`) | `BUDGET` in `scripts/check_context_budget.py` |
 | Who may set the `approved` label on a change | `OWNERS`, `hack/OWNERS`, and `OWNERS_ALIASES` |
