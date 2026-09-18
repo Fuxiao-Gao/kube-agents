@@ -40,10 +40,12 @@ REPO_LOOKUP_RE = re.compile(
     r"gh\s+pr\s+(list|view)|gh\s+api\s+\S*pulls|gh\s+search|git\s+log|session_search|memory_search|kanban_show|kanban_list",
     re.IGNORECASE,
 )
-FIX_SUBMIT_RE = re.compile(r"submit_suggestion|submit-suggestion|gh\s+pr\s+create|git\s+push", re.IGNORECASE)
-#: Names of the front agent's own calls that are not evidence either way.
-FRONT_AGENT = ""
-
+#: A worker viewing its own card is how it reads its assignment, not a lookup.
+OWN_CARD_RE = re.compile(r'"task_id":\s*"([^"]+)"')
+#: The call that submits the fix: submit-suggestion's `submit` verb (its
+#: `prepare`, `list` and `fetch` verbs and viewing the skill are not), or a
+#: direct `gh pr create` / `git push`.
+FIX_SUBMIT_RE = re.compile(r"submit_suggestion\.py[\\\"']*\s+submit\b|gh\s+pr\s+create|git\s+push", re.IGNORECASE)
 
 def _text(entry: dict) -> str:
     args = entry.get("args")
@@ -80,7 +82,15 @@ def audit(record: dict) -> dict:
         return fix_at is None or at is None or at <= fix_at
 
     cluster_reads = [e for e in workers if before_fix(e) and (CLUSTER_READ_RE.search(_text(e)) or DELEGATION_RE.search(e.get("name", "")))]
-    repo_lookups = [e for e in workers if before_fix(e) and REPO_LOOKUP_RE.search(_text(e))]
+    def foreign_lookup(e: dict) -> bool:
+        if not REPO_LOOKUP_RE.search(_text(e)):
+            return False
+        if e.get("name") == "kanban_show":
+            m = OWN_CARD_RE.search(_text(e))
+            return not (m and m.group(1) == e.get("task"))
+        return True
+
+    repo_lookups = [e for e in workers if before_fix(e) and foreign_lookup(e)]
     agents = sorted({e["agent"] for e in workers})
     return {
         "worker_entries": len(workers),
