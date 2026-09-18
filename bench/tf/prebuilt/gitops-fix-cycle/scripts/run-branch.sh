@@ -10,7 +10,10 @@
 #          For a task with staged history (GITOPS_HISTORY_PARENT_SHA set) the
 #          branch starts instead at a fresh `healthy` commit whose parent is
 #          that SHA and whose tree is the broken base's tree with the task
-#          directory re-rendered healthy (render-broken-base.sh stages).
+#          directory re-rendered healthy (render-broken-base.sh stages). When
+#          the base does not carry the task directory at all (a per-run
+#          repository's root commit, gke-labs/kube-agents#1773) one commit
+#          adds the broken render on top of it.
 # advance: staged history only; appends the `inflated` and `broken` commits on
 #          the branch head and fast-forwards the ref. The broken commit's tree
 #          is byte-identical to the broken base's. Prints the new head on
@@ -35,13 +38,20 @@ RENDER_SCRIPT="$(cd "$(dirname "$0")" && pwd)/render-broken-base.sh"
 # Staged history for b-0011 (see render-broken-base.sh): the task's clue is
 # that the memory request was inflated in an earlier change and this morning's
 # build update came on top of it, so the commits are back-dated to read that
-# way. Ages in days before the run; the build update is "this morning".
-HEALTHY_MESSAGE="Add the payments, edge and ledger stack under tasks/b-0011 with the run-branch check workflow"
+# way. Ages in days before the run; the build update is "this morning". The
+# messages are the shape a build pipeline writes and say nothing about the
+# change: the clue is the diff and the cluster's rollout history, not a title
+# written for the task (gke-labs/kube-agents#1773).
+HEALTHY_MESSAGE="Add the payments, edge and ledger manifests under tasks/b-0011"
 HEALTHY_AGE_DAYS=10
-INFLATED_MESSAGE="payments/checkout: raise the web memory request to 256Mi"
+INFLATED_MESSAGE="payments: update checkout deployment"
 INFLATED_AGE_DAYS=3
-BROKEN_MESSAGE="payments/checkout: roll out web 1.0.0 and scale to 4 replicas"
+BROKEN_MESSAGE="payments: update checkout deployment"
 BROKEN_AGE_DAYS=0
+# A task without staged history on a base that does not carry its directory
+# yet (a per-run repository's root commit): one commit adds the broken render.
+ADD_MESSAGE_PREFIX="Add manifests under"
+ADD_AGE_DAYS=0
 # Author when the token's user cannot be read (an App token): commits still
 # need a name and an email to carry a date.
 FALLBACK_AUTHOR_NAME="platform-team"
@@ -153,6 +163,19 @@ commit_stage() {
   echo "${commit}"
 }
 
+# Whether the base commit already carries the task directory (the shared
+# pilot repository's pinned broken base does; a per-run repository's root
+# commit does not).
+base_has_task_path() {
+  local code
+  code="$(api "${GITHUB_API}/repos/${slug}/contents/${GITOPS_TASK_PATH:?}?ref=${GITOPS_BASE_SHA}")"
+  case "${code}" in
+    200) return 0 ;;
+    404) return 1 ;;
+    *) echo "run-branch: reading ${GITOPS_TASK_PATH} at ${GITOPS_BASE_SHA} failed, HTTP ${code}: $(cat "${body}")" >&2; exit 1 ;;
+  esac
+}
+
 branch_head() {
   local code
   code="$(api "${GITHUB_API}/repos/${slug}/git/refs/heads/${GITOPS_RUN_BRANCH}")"
@@ -166,8 +189,11 @@ case "${ACTION}" in
     if [ -n "${GITOPS_HISTORY_PARENT_SHA:-}" ]; then
       echo "==> run-branch: staged history for ${GITOPS_TASK:?}; healthy commit on ${GITOPS_HISTORY_PARENT_SHA}"
       target="$(commit_stage healthy "${GITOPS_HISTORY_PARENT_SHA}" "${HEALTHY_MESSAGE}" "${HEALTHY_AGE_DAYS}")"
-    else
+    elif base_has_task_path; then
       target="${GITOPS_BASE_SHA}"
+    else
+      echo "==> run-branch: ${GITOPS_BASE_SHA} does not carry ${GITOPS_TASK_PATH:?}; committing the broken render on it"
+      target="$(commit_stage broken "${GITOPS_BASE_SHA}" "${ADD_MESSAGE_PREFIX} ${GITOPS_TASK_PATH}" "${ADD_AGE_DAYS}")"
     fi
     echo "==> run-branch: ${slug} ${GITOPS_RUN_BRANCH} <- ${target}"
     code="$(api -X POST "${GITHUB_API}/repos/${slug}/git/refs" \
