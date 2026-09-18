@@ -305,6 +305,13 @@ AGENT_STORES=""
 if [ "${AGENT_STATE_RESET:-false}" = "true" ]; then
   reset_agent_state
   assert_fresh_agent
+  # The credential proxy refuses repositories the install does not manage, so
+  # the mint can only be proved once the re-applied PlatformAgent names the
+  # run's repository; proving it here fails fast instead of at the agent's
+  # first push, an hour in.
+  if [ -n "${GITOPS_REPO:-}" ] && [ "${GITOPS_REPO}" != "${DEFAULT_GITOPS_REPO}" ]; then
+    "$(dirname "$0")/gitops-run-repo.sh" check "$(basename "${GITOPS_REPO%.git}")"
+  fi
 fi
 
 # 2. agent base branch ------------------------------------------------------
