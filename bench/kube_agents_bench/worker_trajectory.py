@@ -148,15 +148,23 @@ REDACTED = "[REDACTED_SECRET]"
 WITHHELD = "[WITHHELD: redactor unavailable in the pod]"
 TOOL_ERROR_PREFIX = "Error executing tool"
 
-# What AuditRedactor's line scan leaves behind in a Secret payload: the
-# continuation lines of a block scalar under data:/stringData: (its scan blanks
-# key: value pairs only), and the JSON form, "data": {...}, closed or cut
-# short. Plus userinfo in a URL, which it has no pattern for.
+# What AuditRedactor leaves behind in the text a worker reads. In a Secret
+# payload: the continuation lines of a block scalar under data:/stringData:
+# (its line scan blanks key: value pairs only), and the JSON form,
+# "data": {...}, closed or cut short. In free text: userinfo in a URL, which
+# it has no pattern for, and a `NAME: value` / `NAME=value` line whose name
+# its key-based walk would blank in a mapping but its text pattern does not
+# (`AWS_SECRET_ACCESS_KEY:` in a `kubectl describe pod`, `client-key-data:`
+# in a kubeconfig) -- the name test reuses the redactor's own key vocabulary.
 YAML_BLOCK_RE = re.compile(r"^(\s*)(data|stringData)\s*:\s*$")
 YAML_PAIR_RE = re.compile(r"^(\s*)([^\s:]+)\s*:\s*(.*)$")
 JSON_BLOCK_RE = re.compile(r'("(?:data|stringData)"\s*:\s*\{)([^{}]*)(\}|\Z)')
 JSON_PAIR_RE = re.compile(r'("(?:[^"\\]|\\.)*"\s*:\s*")((?:[^"\\]|\\.)*)("|\Z)')
 URL_USERINFO_RE = re.compile(r"(://[^\s/:@]+:)[^\s/@]+(?=@)")
+# The separator stays on the line, so `Environment:` above an indented env
+# line does not swallow it; the value is the rest of the line, the safe side.
+TEXT_KV_RE = re.compile(r"(?m)(?<![\w.\-/\"])([\w.\-]+)([ \t]*[:=][ \t]*)([^\n]+)")
+KEY_DATA_WORDS = ({"key", "data"}, {"certificate", "data"})
 
 
 def load_redactor():
@@ -212,6 +220,34 @@ def scrub_blocks(text):
     )
 
 
+def named_value_is_sensitive(name):
+    words = redactor._get_key_words(name)
+    return bool(words & redactor.SENSITIVE_KEYS) or any(w <= words for w in KEY_DATA_WORDS)
+
+
+def blank_named_values(text):
+    return TEXT_KV_RE.sub(
+        lambda m: m.group(1) + m.group(2) + REDACTED
+        if named_value_is_sensitive(m.group(1))
+        else m.group(0),
+        text,
+    )
+
+
+def as_json(text):
+    # A string that is itself a JSON document: a `terminal` result of
+    # `kubectl get -o json`, a Secret's last-applied-configuration annotation,
+    # the arguments hermes stores as a JSON string. Walked as a value, so
+    # what is escaped inside it is seen unescaped, then re-serialised.
+    if text.lstrip()[:1] not in "{[":
+        return None
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, (dict, list)) else None
+
+
 def supplement(value, key=None):
     # The shapes the redactor lacks, applied where the strings sit so YAML
     # inside a JSON string field is seen with its newlines rather than as
@@ -220,7 +256,11 @@ def supplement(value, key=None):
     # its patterns on every string, and its key-based blanking of anything
     # under a password/token/secret/credentials-named key.
     if isinstance(value, str):
-        return scrub_blocks(URL_USERINFO_RE.sub(lambda m: m.group(1) + REDACTED, value))
+        parsed = as_json(value)
+        if parsed is not None:
+            return json.dumps(scrub(parsed))
+        text = URL_USERINFO_RE.sub(lambda m: m.group(1) + REDACTED, value)
+        return blank_named_values(scrub_blocks(text))
     if isinstance(value, dict):
         if key in ("data", "stringData"):
             return {k: REDACTED if isinstance(v, str) else supplement(v) for k, v in value.items()}

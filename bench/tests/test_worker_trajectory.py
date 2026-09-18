@@ -51,8 +51,8 @@ _CHILDREN_DDL = (
     "CREATE TABLE kanban_worker_children (child_id TEXT PRIMARY KEY, creator_id TEXT,"
     " created_at INTEGER)"
 )
+# ``messages`` only: the read never opens hermes' ``sessions`` table.
 _STORE_DDL = (
-    "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, started_at REAL, cwd TEXT)",
     "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT,"
     " content TEXT, tool_call_id TEXT, tool_calls TEXT, tool_name TEXT, timestamp REAL,"
     " active INTEGER DEFAULT 1)",
@@ -64,10 +64,6 @@ def _store(path: Path, session: str, messages: list[tuple]) -> None:
     with sqlite3.connect(path) as conn:
         for ddl in _STORE_DDL:
             conn.execute(ddl)
-        conn.execute(
-            "INSERT INTO sessions (id, source, started_at) VALUES (?, 'kanban', ?)",
-            (session, 1.0),
-        )
         for index, (role, content, tool_call_id, tool_calls, tool_name) in enumerate(messages):
             conn.execute(
                 "INSERT INTO messages (session_id, role, content, tool_call_id, tool_calls,"
@@ -175,10 +171,6 @@ def data_root(tmp_path: Path) -> Path:
     # Another card's session in the same store: must not be read.
     with sqlite3.connect(tmp_path / "profiles" / "platform" / "state.db") as conn:
         conn.execute(
-            "INSERT INTO sessions (id, source, started_at) VALUES (?, 'kanban', 0.5)",
-            (OTHER_SESSION,),
-        )
-        conn.execute(
             "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, 'user', ?, 1)",
             (OTHER_SESSION, f"work kanban task {OTHER}"),
         )
@@ -246,7 +238,7 @@ def _payload(reply: str) -> dict:
     return json.loads(body)
 
 
-def _read_result(root: Path, content, *, max_result: int = 2000) -> dict:
+def _read_result(root: Path, content) -> dict:
     """Plant one terminal call whose result row is ``content`` and read it back.
 
     ``content`` is stored as hermes stores it: a string as is, anything else
@@ -267,7 +259,7 @@ def _read_result(root: Path, content, *, max_result: int = 2000) -> dict:
             " VALUES (?, 'tool', ?, 'c1', 3)",
             (PLATFORM_SESSION, stored),
         )
-    calls = _payload(_run_script(root, [FRONT], max_result=max_result))["calls"]
+    calls = _payload(_run_script(root, [FRONT]))["calls"]
     return next(c for c in calls if c["task"] == FRONT)
 
 
@@ -353,9 +345,6 @@ def test_a_card_whose_id_extends_this_one_is_not_this_card(data_root: Path) -> N
     longer = "20260917_200000_longer"
     with sqlite3.connect(data_root / "profiles" / "platform" / "state.db") as conn:
         conn.execute(
-            "INSERT INTO sessions (id, source, started_at) VALUES (?, 'kanban', 9.0)", (longer,)
-        )
-        conn.execute(
             "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, 'user', ?, 9)",
             (longer, f"work kanban task {FRONT}2"),
         )
@@ -435,9 +424,6 @@ def test_a_retried_card_yields_every_session_it_ran_in(data_root: Path) -> None:
     """A card re-run on unblock has two sessions; both are the card's history."""
     retry = "20260917_190000_retry0"
     with sqlite3.connect(data_root / "profiles" / "platform" / "state.db") as conn:
-        conn.execute(
-            "INSERT INTO sessions (id, source, started_at) VALUES (?, 'kanban', 3.0)", (retry,)
-        )
         conn.execute(
             "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, 'user', ?, 4)",
             (retry, f"work kanban task {FRONT}"),
@@ -532,7 +518,7 @@ def test_capture_survives_a_sentinel_without_json() -> None:
     ("raw", "kept", "gone"),
     [
         ("Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345", "Authorization:", "abcdefgh"),
-        ("Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==", "Basic", "QWxhZGRpbj"),
+        ("Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==", "Authorization:", "QWxhZGRpbj"),
         (f"export GH_TOKEN={TOKEN}", "export GH_TOKEN=", TOKEN),
         ("ANTHROPIC_API_KEY=sk-ant-abcdefghijklmnopqrstuv", "ANTHROPIC_API_KEY=", "abcdefghij"),
         ("SLACK_BOT=xoxb-1234567890-abcdefghij", "SLACK_BOT=", "1234567890"),
@@ -588,6 +574,51 @@ def test_a_secrets_json_block_is_blanked_before_it_is_clipped(data_root: Path) -
     cut = js[: js.index("Q0VSVA") + 3]
     assert not cut.endswith("}") and "Q0V" in cut
     assert "QQQQ" not in _read_result(data_root, cut)["result"]
+
+
+def test_a_secrets_last_applied_annotation_is_blanked_too(data_root: Path) -> None:
+    """``-o json`` text carries the whole Secret again, escaped, in an annotation."""
+    secret = {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "stringData": {"password": "hunter2-plaintext"},
+        "metadata": {"name": "db"},
+    }
+    applied = {
+        "apiVersion": "v1",
+        "data": {"password": "aHVudGVyMg=="},
+        "kind": "Secret",
+        "metadata": {
+            "name": "db",
+            "annotations": {"kubectl.kubernetes.io/last-applied-configuration": json.dumps(secret)},
+        },
+    }
+    out = _read_result(data_root, json.dumps(applied, indent=2))["result"]
+    assert "hunter2" not in out and "aHVudGVy" not in out
+    inner = json.loads(
+        json.loads(out)["metadata"]["annotations"][
+            "kubectl.kubernetes.io/last-applied-configuration"
+        ]
+    )
+    assert inner["stringData"] == {"password": REDACTED} and inner["metadata"] == {"name": "db"}
+
+
+def test_named_values_in_free_text_are_blanked_by_the_redactors_key_words(data_root: Path) -> None:
+    """``kubectl describe pod`` env lines and a kubeconfig dump: names the redactor's
+    mapping walk would blank, in text its patterns do not reach."""
+    text = (
+        "    Environment:\n      AWS_SECRET_ACCESS_KEY:  AKIAIOSFODNN7EXAMPLE99\n"
+        "      LOG_LEVEL:  debug\n      DB_PASSWORD=pl4in\n"
+        "users:\n- user:\n    client-key-data: TFMwdExTMUNSVWRKVGlC\n"
+        "    client-certificate-data: Q0VSVA==\n"
+    )
+    out = _read_result(data_root, text)["result"]
+    for gone in ("AKIAIOSFODNN7EXAMPLE99", "pl4in", "TFMwdExT", "Q0VSVA"):
+        assert gone not in out
+    assert f"AWS_SECRET_ACCESS_KEY:  {REDACTED}" in out
+    assert f"DB_PASSWORD={REDACTED}" in out
+    assert f"client-key-data: {REDACTED}" in out
+    assert "LOG_LEVEL:  debug" in out
 
 
 def test_a_structured_result_is_scrubbed_where_its_strings_sit(data_root: Path) -> None:
@@ -654,6 +685,33 @@ def test_arguments_are_scrubbed_too(data_root: Path) -> None:
     first = captured.entries[0]
     assert TOKEN not in json.dumps(first["args"])
     assert first["args"]["command"].endswith(REDACTED)
+
+
+def test_a_manifest_inside_an_argument_is_scrubbed_with_its_newlines(data_root: Path) -> None:
+    """The arguments are a JSON string; the YAML inside is seen as YAML, not as ``\\n`` text."""
+    manifest = (
+        "apiVersion: v1\nkind: Secret\nmetadata:\n  name: tls\ndata:\n  tls.key: TFMwdExTMUNS\n"
+    )
+    with sqlite3.connect(data_root / "profiles" / "platform" / "state.db") as conn:
+        conn.execute(
+            "UPDATE messages SET tool_calls = ?"
+            " WHERE role = 'assistant' AND tool_calls LIKE '%get pods%'",
+            (
+                json.dumps(
+                    [
+                        {
+                            "name": "write_file",
+                            "arguments": json.dumps({"path": "secret.yaml", "content": manifest}),
+                        }
+                    ]
+                ),
+            ),
+        )
+    captured = worker_trajectory.capture(lambda s, t: _run_script(data_root, [FRONT]), [FRONT], 5.0)
+    first = captured.entries[0]
+    assert "TFMwdExT" not in json.dumps(first["args"])
+    assert first["args"]["path"] == "secret.yaml"
+    assert f"  tls.key: {REDACTED}" in first["args"]["content"]
 
 
 def test_ordinary_output_is_left_alone(data_root: Path) -> None:
