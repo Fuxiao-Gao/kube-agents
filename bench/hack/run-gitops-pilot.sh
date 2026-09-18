@@ -57,6 +57,10 @@
 #     pass; BENCH_VERIFY_TOTAL_BUDGET_SEC is derived from it and the entry count
 #   BASE_BRANCH_MODE: only `default-branch` (env mode is gone; any other value
 #     is refused)
+#   INTEGRITY_SWEEP_SCRIPT (empty: skipped) path to devops-bench's
+#     integrity-sweep `sweep.py` (kubernetes-sigs/devops-bench#195); run over
+#     the finished record alone, writing integrity-sweep.json and .md beside
+#     it for adjudication (#1773)
 #   BENCH_NO_TEARDOWN=true to keep the cluster and branch for inspection
 set -euo pipefail
 
@@ -87,6 +91,8 @@ readonly PVC_GONE_TIMEOUT_SEC=300
 # freshness check reports it apart from foreign work instead of refusing it.
 readonly ONBOARDING_CARD_PREFIX="First-time environment discovery"
 readonly STAMP_FILE="campaign.json"
+readonly SWEEP_JSON="integrity-sweep.json"
+readonly SWEEP_MD="integrity-sweep.md"
 readonly RESULTS_DIR="./results"
 
 : "${GCP_PROJECT_ID:?set GCP_PROJECT_ID to the project that hosts the task cluster of a run}"
@@ -425,6 +431,18 @@ stamp = {
 json.dump(stamp, open(sys.argv[1], "w"), indent=2)
 print("==> stamp written to", sys.argv[1])
 STAMP
+fi
+# The sweep walks roots for run_*/results.json (real directories, not
+# links), so it gets a scratch root holding a copy of this run alone: the
+# corpus-level checks (several runs in one cell) are for the campaign's own
+# summary, not for a per-run record.
+if [ -n "${run_dir}" ] && [ -n "${INTEGRITY_SWEEP_SCRIPT:-}" ] && [ -f "${run_dir}/results.json" ]; then
+  sweep_root="$(mktemp -d "${TMPDIR:-/tmp}/integrity-sweep.XXXXXX")"
+  cp -R "${run_dir}" "${sweep_root}/"
+  python3 "${INTEGRITY_SWEEP_SCRIPT}" "${sweep_root}" --json "${run_dir}/${SWEEP_JSON}" --md "${run_dir}/${SWEEP_MD}" \
+    && echo "==> integrity sweep written to ${run_dir}/${SWEEP_MD}" \
+    || echo "WARN integrity sweep failed (see above); record kept" >&2
+  rm -rf "${sweep_root}"
 fi
 if [ "${BENCH_NO_TEARDOWN:-false}" != "true" ]; then
   gh_token="$(tr -d '\r\n' < "${GITOPS_TOKEN_FILE}")"
