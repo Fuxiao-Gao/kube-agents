@@ -40,6 +40,9 @@ REPO_LOOKUP_RE = re.compile(
     r"gh\s+pr\s+(list|view)|gh\s+api\s+\S*pulls|gh\s+search|git\s+log|session_search|memory_search|kanban_show|kanban_list",
     re.IGNORECASE,
 )
+#: Pull-request listing or viewing, the subset of lookups never excused by
+#: being scoped to the run's own branch.
+PR_LOOKUP_RE = re.compile(r"gh\s+pr\s+(list|view)|gh\s+api\s+\S*pulls|gh\s+search", re.IGNORECASE)
 #: A worker viewing its own card is how it reads its assignment, not a lookup.
 OWN_CARD_RE = re.compile(r'"task_id":\s*"([^"]+)"')
 #: The call that submits the fix: submit-suggestion's `submit` verb (its
@@ -82,15 +85,25 @@ def audit(record: dict) -> dict:
         return fix_at is None or at is None or at <= fix_at
 
     cluster_reads = [e for e in workers if before_fix(e) and (CLUSTER_READ_RE.search(_text(e)) or DELEGATION_RE.search(e.get("name", "")))]
+    own_cards = {e.get("task") for e in workers if e.get("task")}
+    own_branch = str(outcome.get("run_branch") or "")
+
     def foreign_lookup(e: dict) -> bool:
-        if not REPO_LOOKUP_RE.search(_text(e)):
+        text = _text(e)
+        if not REPO_LOOKUP_RE.search(text):
             return False
         if e.get("name") == "kanban_show":
-            # No task_id shows the worker's own card; a task_id is foreign
-            # only when it is not the card the worker is running.
-            m = OWN_CARD_RE.search(_text(e))
-            return bool(m) and m.group(1) != e.get("task")
-        return True
+            # No task_id shows the worker's own card; a card this run's
+            # workers ran (the Cluster Agent card it delegated to) is its own.
+            m = OWN_CARD_RE.search(text)
+            return bool(m) and m.group(1) not in own_cards
+        # Listing or viewing pull requests always counts: on a per-run
+        # repository it can only show the run's own, and the handoff says so,
+        # but the count must not hide the call. Reading the run's own branch
+        # (its tree, its commits, its log) is in-scope repository work.
+        if PR_LOOKUP_RE.search(text):
+            return True
+        return not (own_branch and own_branch in text)
 
     repo_lookups = [e for e in workers if before_fix(e) and foreign_lookup(e)]
     agents = sorted({e["agent"] for e in workers})
