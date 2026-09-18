@@ -45,8 +45,9 @@
 #     (gke-labs/kube-agents#1773); it becomes the stack's broken base and, for
 #     b-0011, the staged history's parent
 #   AGENT_STATE_RESET=true re-create the PlatformAgent on fresh volumes (with
-#     GITOPS_REPO as its managed repository) before the run, then refuse to
-#     run unless its stores are empty (#1773)
+#     GITOPS_REPO as its managed repository and the event watcher off unless
+#     AGENT_EVENT_WATCHER=true) before the run, then refuse to run unless its
+#     stores hold nothing but the first-boot discovery card (#1773)
 #   DEVOPS_BENCH_PIN (empty: the repository's pin) a pip requirement for another
 #     devops-bench, e.g. `devops-bench @ git+https://github.com/pradeepvrd/devops-bench@<sha>`
 #   AGENT_MODEL (read from the install's LiteLLM config: the model behind
@@ -82,6 +83,9 @@ readonly OWNED_PVCS="platform-agent-data system-metadata"
 readonly CR_REMOVE_TIMEOUT=600s
 readonly CR_READY_TIMEOUT=900s
 readonly PVC_GONE_TIMEOUT_SEC=300
+# The card a fresh install files itself on first boot (host inventory); the
+# freshness check reports it apart from foreign work instead of refusing it.
+readonly ONBOARDING_CARD_PREFIX="First-time environment discovery"
 readonly STAMP_FILE="campaign.json"
 readonly RESULTS_DIR="./results"
 
@@ -248,7 +252,7 @@ echo "==> result row model: ${AGENT_MODEL} (LiteLLM alias ${AGENT_MODEL_ALIAS})"
 # its managed repository, and wait for Ready. Then prove the stores are empty
 # before the card is created; a non-empty store is a refusal, not a warning.
 agent_stores_report() {
-  "${K[@]}" exec -i deploy/platform-agent-gateway -c platform-agent -- python3 - <<'STORES'
+  ONBOARDING_CARD_PREFIX="${ONBOARDING_CARD_PREFIX}" "${K[@]}" exec -i deploy/platform-agent-gateway -c platform-agent -- env ONBOARDING_CARD_PREFIX="${ONBOARDING_CARD_PREFIX}" python3 - <<'STORES'
 import json, os, sqlite3
 def rows(db, table):
     if not os.path.exists(db): return 0
@@ -256,23 +260,41 @@ def rows(db, table):
     try: return c.execute(f"select count(*) from {table}").fetchone()[0]
     except sqlite3.Error: return 0
 def entries(d): return sorted(os.listdir(d)) if os.path.isdir(d) else []
+# A fresh install files itself one card, the first-time environment discovery
+# of the host cluster; it and its worker session are part of what "fresh"
+# means and are reported separately rather than counted as foreign work.
+onboarding_prefix = os.environ.get("ONBOARDING_CARD_PREFIX", "")
+cards, onboarding, sessions = [], [], set()
+if os.path.exists("/opt/data/kanban.db"):
+    kb = sqlite3.connect("file:/opt/data/kanban.db?mode=ro", uri=True)
+    for tid, title in kb.execute("select id, title from tasks"):
+        (onboarding if onboarding_prefix and str(title).startswith(onboarding_prefix) else cards).append(tid)
+    for tid, md in kb.execute("select task_id, metadata from task_runs"):
+        if tid in onboarding and md:
+            try: sessions.add(json.loads(md).get("worker_session_id"))
+            except ValueError: pass
+platform_outside = 0
+if os.path.exists("/opt/data/profiles/platform/state.db"):
+    pf = sqlite3.connect("file:/opt/data/profiles/platform/state.db?mode=ro", uri=True)
+    platform_outside = sum(1 for (sid,) in pf.execute("select session_id from messages") if sid not in sessions)
 print(json.dumps({
-    "kanban_cards": rows("/opt/data/kanban.db", "tasks"),
+    "kanban_cards": cards, "onboarding_cards": onboarding,
     "front_messages": rows("/opt/data/state.db", "messages"),
     "platform_messages": rows("/opt/data/profiles/platform/state.db", "messages"),
+    "platform_messages_outside_onboarding": platform_outside,
     "scratch": entries("/opt/data/scratch"), "gitops": entries("/opt/data/gitops"),
     "workspaces": entries("/opt/data/kanban/workspaces"),
     "profiles": entries("/opt/data/profiles")}))
 STORES
 }
 assert_fresh_agent() {
-  AGENT_STORES="$(agent_stores_report)"
+  AGENT_STORES="$(ONBOARDING_CARD_PREFIX="${ONBOARDING_CARD_PREFIX}" agent_stores_report)"
   export AGENT_STORES
   echo "==> agent stores: ${AGENT_STORES}"
   python3 -c '
 import json, os, sys
 r = json.loads(os.environ["AGENT_STORES"])
-bad = [k for k in ("kanban_cards", "front_messages", "platform_messages") if r[k]] + [k for k in ("scratch", "gitops", "workspaces") if r[k]]
+bad = [k for k in ("kanban_cards", "front_messages", "platform_messages_outside_onboarding", "scratch", "gitops", "workspaces") if r[k]]
 sys.exit(1 if bad else 0)' || { echo "the agent is not fresh (see the stores above); rerun with AGENT_STATE_RESET=true" >&2; exit 1; }
 }
 reset_agent_state() {
@@ -288,14 +310,19 @@ reset_agent_state() {
     [ "${waited}" -lt "${PVC_GONE_TIMEOUT_SEC}" ] || { echo "agent volumes still present after ${PVC_GONE_TIMEOUT_SEC}s" >&2; "${K[@]}" get pvc >&2; exit 1; }
     sleep 5; waited=$((waited + 5))
   done
+  # The event watcher turns Warning events from every watched cluster into
+  # autonomous triage cards; on a benchmark run the prompt must be the only
+  # stimulus (a reset alone made it file four cards about the host), so the
+  # re-applied agent has it off. AGENT_EVENT_WATCHER=true keeps it on.
   python3 -c '
 import json, sys
-d = json.load(open(sys.argv[1])); repo = sys.argv[2]
+d = json.load(open(sys.argv[1])); repo = sys.argv[2]; watcher = sys.argv[3] == "true"
 d.pop("status", None)
 for k in ("resourceVersion", "uid", "creationTimestamp", "generation", "managedFields", "finalizers", "deletionTimestamp"): d["metadata"].pop(k, None)
 d["metadata"].get("annotations", {}).pop("kubectl.kubernetes.io/last-applied-configuration", None)
 if repo: d["spec"].setdefault("integration", {}).setdefault("github", {})["gitRepo"] = repo
-print(json.dumps(d))' "${backup}" "${GITOPS_REPO:-}" | "${K[@]}" apply -f -
+d["spec"].setdefault("harness", {})["eventWatcher"] = {"enabled": watcher}
+print(json.dumps(d))' "${backup}" "${GITOPS_REPO:-}" "${AGENT_EVENT_WATCHER:-false}" | "${K[@]}" apply -f -
   "${K[@]}" wait "${CR}" --for=condition=Ready --timeout="${CR_READY_TIMEOUT}"
   "${K[@]}" rollout status deploy/platform-agent-gateway --timeout="${GATEWAY_ROLLOUT_TIMEOUT}" >/dev/null
   "${K[@]}" rollout status sts/"${SHELL_STATEFULSET}" --timeout="${GATEWAY_ROLLOUT_TIMEOUT}" >/dev/null
