@@ -254,8 +254,17 @@ class AgentAPIProxyTest(unittest.TestCase):
                 ("127.0.0.1", self.proxy.server_port),
                 timeout=_STALLED_CLIENT_READ_TIMEOUT_SECONDS,
             ) as client:
-                client.sendall(request)
+                # The clock starts before the request leaves, not after. The
+                # server's drain window opens once it has read the partial body,
+                # and that can happen before sendall returns to this thread: the
+                # bytes reach the kernel inside sendall, and the server thread can
+                # wake, parse, and block in its timed read first. A clock started
+                # here precedes the bytes leaving this socket, so elapsed brackets
+                # whatever window the server enforced. Started after sendall it
+                # could sit inside that window, and a loaded runner read 0.2495
+                # against the 0.25 deadline (#1740).
                 started = time.monotonic()
+                client.sendall(request)
                 status = self._read_status_line(client)
                 elapsed = time.monotonic() - started
         self.assertIn(b"401", status)
