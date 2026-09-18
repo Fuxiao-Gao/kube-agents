@@ -170,16 +170,16 @@ def load_redactor():
     # scripts/validate_bench_cases.py explains the failure otherwise).
     sys.modules[name] = module
     spec.loader.exec_module(module)
-    return module.AuditRedactor.redact_text
+    return module.AuditRedactor
 
 
 try:
-    redact_text = load_redactor()
+    redactor = load_redactor()
 except Exception as exc:
     out["errors"].append(
         "redactor %s: %s; results and arguments withheld" % (REDACTOR, exc)
     )
-    redact_text = None
+    redactor = None
 
 
 def scrub_blocks(text):
@@ -212,26 +212,28 @@ def scrub_blocks(text):
     )
 
 
-def scrub_text(text):
-    text = URL_USERINFO_RE.sub(lambda m: m.group(1) + REDACTED, text)
-    return redact_text(scrub_blocks(text))
-
-
-def scrub(value, key=None):
-    # Strings are scrubbed where they sit, so YAML inside a JSON string field
-    # is seen with its newlines rather than as escaped text; a data/stringData
-    # mapping is blanked wholesale, as the text shapes are.
-    if redact_text is None:
-        return WITHHELD
+def supplement(value, key=None):
+    # The shapes the redactor lacks, applied where the strings sit so YAML
+    # inside a JSON string field is seen with its newlines rather than as
+    # escaped text; a data/stringData mapping is blanked wholesale, as the
+    # text shapes are. AuditRedactor.redact then does the rest of the walk:
+    # its patterns on every string, and its key-based blanking of anything
+    # under a password/token/secret/credentials-named key.
     if isinstance(value, str):
-        return scrub_text(value)
+        return scrub_blocks(URL_USERINFO_RE.sub(lambda m: m.group(1) + REDACTED, value))
     if isinstance(value, dict):
         if key in ("data", "stringData"):
-            return {k: REDACTED if isinstance(v, str) else scrub(v) for k, v in value.items()}
-        return {k: scrub(v, k) for k, v in value.items()}
+            return {k: REDACTED if isinstance(v, str) else supplement(v) for k, v in value.items()}
+        return {k: supplement(v, k) for k, v in value.items()}
     if isinstance(value, list):
-        return [scrub(v) for v in value]
+        return [supplement(v) for v in value]
     return value
+
+
+def scrub(value):
+    if redactor is None:
+        return WITHHELD
+    return redactor.redact(supplement(value))
 
 
 def failed(result):

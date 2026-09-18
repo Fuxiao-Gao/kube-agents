@@ -151,7 +151,7 @@ def data_root(tmp_path: Path) -> Path:
                 [{"name": "terminal", "arguments": json.dumps({"command": "kubectl get pods"})}],
                 None,
             ),
-            ("tool", f"NAME READY\ncheckout 0/1\nGH_TOKEN={TOKEN}", None, None, "terminal"),
+            ("tool", f"NAME READY\ncheckout 0/1\nGH_TOKEN={TOKEN}", None, None, None),
             (
                 "assistant",
                 "Filing a card for the cluster agent.",
@@ -585,7 +585,8 @@ def test_a_secrets_json_block_is_blanked_before_it_is_clipped(data_root: Path) -
     assert "QQQQ" not in entry["result"] and "Q0VSVA" not in entry["result"]
     assert f'"credentials.json": "{REDACTED}", "ca.crt": "{REDACTED}"' in entry["result"]
     # An unclosed block (a tool that cut its own output) is blanked to the end.
-    cut = js[: js.index("ca.crt") + 20]
+    cut = js[: js.index("Q0VSVA") + 3]
+    assert not cut.endswith("}") and "Q0V" in cut
     assert "QQQQ" not in _read_result(data_root, cut)["result"]
 
 
@@ -597,11 +598,16 @@ def test_a_structured_result_is_scrubbed_where_its_strings_sit(data_root: Path) 
         "data": {"token": "dG9rZW4=", "count": 2},
         "output": "apiVersion: v1\ndata:\n  k: dmFsdWU=\nkind: Secret",
         "note": f"see https://bob:pw12345@example.com/x and {TOKEN}",
+        "password": "hunter2",
+        "spec": {"clientSecret": "plain-words", "image": "nginx"},
     }
     out = json.loads(_read_result(data_root, result)["result"])
     assert out["data"] == {"token": REDACTED, "count": 2}
     assert f"  k: {REDACTED}" in out["output"] and "dmFsdWU" not in out["output"]
     assert "pw12345" not in out["note"] and TOKEN not in out["note"]
+    # The redactor's own walk: a sensitive-named key is blanked whatever its value.
+    assert out["password"] == REDACTED
+    assert out["spec"] == {"clientSecret": REDACTED, "image": "nginx"}
 
 
 def test_a_configmaps_data_is_blanked_as_the_audit_log_blanks_it(data_root: Path) -> None:
