@@ -31,6 +31,13 @@
 #   CLUSTER_NAME (gitops-pilot-<timestamp>; also seeds the run branch name)
 #   GITOPS_TOKEN_FILE (~/.config/gitops-pilot/github-token)
 #   GITOPS_REPO (stack default)   JUDGE_MODEL (gemini-3.1-pro-preview)
+#   GITOPS_REPO_ROOT_SHA (main's head in GITOPS_REPO) the commit the run branch
+#     is built on when GITOPS_REPO is set: a per-run repository's root
+#     (gke-labs/kube-agents#1773); it becomes the stack's broken base and, for
+#     b-0011, the staged history's parent
+#   AGENT_STATE_RESET=true re-create the PlatformAgent on fresh volumes (with
+#     GITOPS_REPO as its managed repository) before the run, then refuse to
+#     run unless its stores are empty (#1773)
 #   DEVOPS_BENCH_PIN (empty: the repository's pin) a pip requirement for another
 #     devops-bench, e.g. `devops-bench @ git+https://github.com/pradeepvrd/devops-bench@<sha>`
 #   AGENT_MODEL (read from the install's LiteLLM config: the model behind
@@ -55,6 +62,21 @@ readonly LITELLM_CONFIGMAP_NAME_PREFIX="litellm-config"
 # result row's `model` field should carry (the leaderboard keys setups by it).
 readonly AGENT_MODEL_ALIAS="model-default"
 readonly RENDERED_TASKS_TEMPLATE="gitops-hold.XXXXXX"
+# The repository the committed cases name in their prompt; a run on another
+# repository (GITOPS_REPO) has the URL rendered into its task copy.
+readonly DEFAULT_GITOPS_REPO="https://github.com/gke-agentic/fuxiao-gkedemo-infra"
+readonly STAGED_HISTORY_TASK="b-0011"
+# Agent state reset (#1773): everything the agent remembers lives on these
+# claims; the first two are owned by the PlatformAgent and go with it, the
+# shell StatefulSet's two are not and are removed by name.
+readonly SHELL_STATEFULSET="platform-agent-shell"
+readonly SHELL_PVCS="data-platform-agent-shell-0 sshd-platform-agent-shell-0"
+readonly OWNED_PVCS="platform-agent-data system-metadata"
+readonly CR_REMOVE_TIMEOUT=600s
+readonly CR_READY_TIMEOUT=900s
+readonly PVC_GONE_TIMEOUT_SEC=300
+readonly STAMP_FILE="campaign.json"
+readonly RESULTS_DIR="./results"
 
 : "${GCP_PROJECT_ID:=fuxiaogao-gkedemos}"
 : "${GCP_LOCATION:=us-central1-a}"
@@ -132,17 +154,37 @@ entries, errors = parse_entries(probe)
 print("yes" if entries and not errors else "no")
 PY
 )"
-if [ "${HOLD_SUPPORTED}" = "yes" ]; then
+render_task_copy() {
+  [ -n "${RENDERED_TASKS}" ] && return 0
   RENDERED_TASKS="$(mktemp -d "${TMPDIR:-/tmp}/${RENDERED_TASKS_TEMPLATE}")"
   mkdir -p "${RENDERED_TASKS}/${TASK}-gitops"
+  cp "${TASK_SOURCE}/task.yaml" "${RENDERED_TASKS}/${TASK}-gitops/task.yaml"
+  TASK_SOURCE="${RENDERED_TASKS}/${TASK}-gitops"
+}
+# 1a. repository ------------------------------------------------------------
+# A run on a repository other than the committed default (#1773: one per run)
+# names it in the prompt, hands it to the harness, and builds the run branch
+# on that repository's root commit instead of the pinned broken base.
+if [ -n "${GITOPS_REPO:-}" ] && [ "${GITOPS_REPO}" != "${DEFAULT_GITOPS_REPO}" ]; then
+  slug="${GITOPS_REPO#https://github.com/}"; slug="${slug%.git}"
+  : "${GITOPS_REPO_ROOT_SHA:=$(GH_TOKEN="$(tr -d '\r\n' < "${GITOPS_TOKEN_FILE}")" gh api "repos/${slug}/commits/main" --jq .sha)}"
+  [ -n "${GITOPS_REPO_ROOT_SHA}" ] || { echo "could not read main's head in ${GITOPS_REPO}" >&2; exit 1; }
+  render_task_copy
+  sed -i.bak "s|${DEFAULT_GITOPS_REPO}|${GITOPS_REPO}|" "${TASK_SOURCE}/task.yaml" && rm -f "${TASK_SOURCE}/task.yaml.bak"
+  grep -q "${GITOPS_REPO} under" "${TASK_SOURCE}/task.yaml" || { echo "prompt render failed: ${GITOPS_REPO} not in ${TASK_SOURCE}/task.yaml" >&2; exit 1; }
+  export TF_VAR_gitops_broken_base_sha="${GITOPS_REPO_ROOT_SHA}"
+  [ "${TASK}" = "${STAGED_HISTORY_TASK}" ] && export TF_VAR_gitops_history_parent_sha="${GITOPS_REPO_ROOT_SHA}"
+  echo "==> repository ${GITOPS_REPO} (root ${GITOPS_REPO_ROOT_SHA}); prompt rendered"
+fi
+
+if [ "${HOLD_SUPPORTED}" = "yes" ]; then
+  render_task_copy
   # Only the safeguards are `assert` in the committed case; the objectives are
   # `converge`, so a plain substitution flips exactly the safeguards. Proved
   # below rather than assumed: the run must not proceed printing "hold" while
   # scoring assert because a `mode:` line grew a comment or an objective
   # became assert.
-  sed 's/^\(  *\)mode: assert$/\1mode: hold/' "${TASK_SOURCE}/task.yaml" \
-    > "${RENDERED_TASKS}/${TASK}-gitops/task.yaml"
-  TASK_SOURCE="${RENDERED_TASKS}/${TASK}-gitops"
+  sed -i.bak 's/^\(  *\)mode: assert$/\1mode: hold/' "${TASK_SOURCE}/task.yaml" && rm -f "${TASK_SOURCE}/task.yaml.bak"
   safeguard_count="$(grep -c -E '^ *role: safeguard$' "${TASK_SOURCE}/task.yaml")"
   hold_count="$(grep -c -E '^ *mode: hold$' "${TASK_SOURCE}/task.yaml")"
   [ "${safeguard_count}" -gt 0 ] && [ "${hold_count}" = "${safeguard_count}" ] \
@@ -195,6 +237,72 @@ for text in json.load(sys.stdin).get("data", {}).values():
 fi
 export AGENT_MODEL
 echo "==> result row model: ${AGENT_MODEL} (LiteLLM alias ${AGENT_MODEL_ALIAS})"
+
+# 1d. agent state reset (#1773) --------------------------------------------
+# Remove the PlatformAgent (the operator garbage-collects everything it owns,
+# the data and session-metadata claims included), remove the shell
+# StatefulSet's claims, re-apply the same spec with the run's repository as
+# its managed repository, and wait for Ready. Then prove the stores are empty
+# before the card is created; a non-empty store is a refusal, not a warning.
+agent_stores_report() {
+  "${K[@]}" exec -i deploy/platform-agent-gateway -c platform-agent -- python3 - <<'STORES'
+import json, os, sqlite3
+def rows(db, table):
+    if not os.path.exists(db): return 0
+    c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try: return c.execute(f"select count(*) from {table}").fetchone()[0]
+    except sqlite3.Error: return 0
+def entries(d): return sorted(os.listdir(d)) if os.path.isdir(d) else []
+print(json.dumps({
+    "kanban_cards": rows("/opt/data/kanban.db", "tasks"),
+    "front_messages": rows("/opt/data/state.db", "messages"),
+    "platform_messages": rows("/opt/data/profiles/platform/state.db", "messages"),
+    "scratch": entries("/opt/data/scratch"), "gitops": entries("/opt/data/gitops"),
+    "workspaces": entries("/opt/data/kanban/workspaces"),
+    "profiles": entries("/opt/data/profiles")}))
+STORES
+}
+assert_fresh_agent() {
+  AGENT_STORES="$(agent_stores_report)"
+  export AGENT_STORES
+  echo "==> agent stores: ${AGENT_STORES}"
+  python3 -c '
+import json, os, sys
+r = json.loads(os.environ["AGENT_STORES"])
+bad = [k for k in ("kanban_cards", "front_messages", "platform_messages") if r[k]] + [k for k in ("scratch", "gitops", "workspaces") if r[k]]
+sys.exit(1 if bad else 0)' || { echo "the agent is not fresh (see the stores above); rerun with AGENT_STATE_RESET=true" >&2; exit 1; }
+}
+reset_agent_state() {
+  local backup pvc waited
+  backup="${TMPDIR:-/tmp}/platformagent-$(date +%Y%m%d-%H%M%S).json"
+  "${K[@]}" get "${CR}" -o json > "${backup}"
+  echo "==> resetting agent state: PlatformAgent saved to ${backup}"
+  "${K[@]}" delete "${CR}" --wait --timeout="${CR_REMOVE_TIMEOUT}"
+  for pvc in ${SHELL_PVCS}; do "${K[@]}" delete pvc "${pvc}" --ignore-not-found --wait=false; done
+  waited=0
+  # shellcheck disable=SC2086
+  while "${K[@]}" get pvc ${OWNED_PVCS} ${SHELL_PVCS} >/dev/null 2>&1; do
+    [ "${waited}" -lt "${PVC_GONE_TIMEOUT_SEC}" ] || { echo "agent volumes still present after ${PVC_GONE_TIMEOUT_SEC}s" >&2; "${K[@]}" get pvc >&2; exit 1; }
+    sleep 5; waited=$((waited + 5))
+  done
+  python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1])); repo = sys.argv[2]
+d.pop("status", None)
+for k in ("resourceVersion", "uid", "creationTimestamp", "generation", "managedFields", "finalizers", "deletionTimestamp"): d["metadata"].pop(k, None)
+d["metadata"].get("annotations", {}).pop("kubectl.kubernetes.io/last-applied-configuration", None)
+if repo: d["spec"].setdefault("integration", {}).setdefault("github", {})["gitRepo"] = repo
+print(json.dumps(d))' "${backup}" "${GITOPS_REPO:-}" | "${K[@]}" apply -f -
+  "${K[@]}" wait "${CR}" --for=condition=Ready --timeout="${CR_READY_TIMEOUT}"
+  "${K[@]}" rollout status deploy/platform-agent-gateway --timeout="${GATEWAY_ROLLOUT_TIMEOUT}" >/dev/null
+  "${K[@]}" rollout status sts/"${SHELL_STATEFULSET}" --timeout="${GATEWAY_ROLLOUT_TIMEOUT}" >/dev/null
+  echo "==> PlatformAgent Ready on fresh volumes (managed repository: ${GITOPS_REPO:-unchanged})"
+}
+AGENT_STORES=""
+if [ "${AGENT_STATE_RESET:-false}" = "true" ]; then
+  reset_agent_state
+  assert_fresh_agent
+fi
 
 # 2. agent base branch ------------------------------------------------------
 # Two ways to make the agent's PR target the run branch (decision 3 in the
@@ -256,8 +364,53 @@ export GITOPS_ARGO_CONTEXT="gke_${GCP_PROJECT_ID}_${GCP_LOCATION}_${CLUSTER_NAME
 # tofu fetches the kind module over https; a global insteadOf to ssh breaks it.
 export GIT_CONFIG_GLOBAL=/dev/null
 
+[ -n "${GITOPS_REPO:-}" ] && export GITOPS_REPO
 echo "==> devops-bench ${TASK_SOURCE} (cluster ${CLUSTER_NAME}, argo context ${GITOPS_ARGO_CONTEXT})"
 # --no-sync: a plain `uv run` re-syncs the venv from the lockfile first, which
 # silently puts the upstream devops-bench pin back and drops `mode: hold`
 # support (run 1 verified only 2 of 7 checks for exactly this reason).
-uv run --no-sync devops-bench "${TASK_SOURCE}" --agent-type kubeagents "$@"
+rc=0
+uv run --no-sync devops-bench "${TASK_SOURCE}" --agent-type kubeagents "$@" || rc=$?
+
+# 5. stamp and leak check (#1773) -------------------------------------------
+# What the row was produced with, beside the record, so a campaign's rows can
+# be shown to share one setup; then the checks that catch a leaked run (a
+# cluster or branch left behind, the default branch still switched).
+run_dir="$(ls -td "${RESULTS_DIR}"/run_* 2>/dev/null | head -1 || true)"
+if [ -n "${run_dir}" ] && [ -n "$(find "${run_dir}" -newer "${TASK_SOURCE}/task.yaml" -name results.json | head -1)" ]; then
+  export STAMP_TASK="${TASK}" STAMP_CLUSTER="${CLUSTER_NAME}" STAMP_BRANCH="${RUN_BRANCH}" \
+    STAMP_REPO="${GITOPS_REPO:-${DEFAULT_GITOPS_REPO}}" STAMP_ROOT="${GITOPS_REPO_ROOT_SHA:-}" \
+    STAMP_MODEL="${AGENT_MODEL}" STAMP_JUDGE="${JUDGE_MODEL}" STAMP_PIN="${DEVOPS_BENCH_PIN:-repository pin}" \
+    STAMP_RESET="${AGENT_STATE_RESET:-false}" STAMP_CONTEXT="${AGENT_HOST_CONTEXT}" STAMP_NAMESPACE="${AGENT_NAMESPACE}"
+  python3 - "${run_dir}/${STAMP_FILE}" <<'STAMP'
+import json, os, subprocess, sys
+e = os.environ
+K = ["kubectl", "--context", e["STAMP_CONTEXT"], "-n", e["STAMP_NAMESPACE"]]
+def sh(*a): return subprocess.run(a, capture_output=True, text=True).stdout.strip()
+stamp = {
+  "task": e["STAMP_TASK"], "cluster": e["STAMP_CLUSTER"], "run_branch": e["STAMP_BRANCH"],
+  "gitops_repo": e["STAMP_REPO"], "gitops_repo_root_sha": e["STAMP_ROOT"],
+  "agent_model": e["STAMP_MODEL"], "judge_model": e["STAMP_JUDGE"], "devops_bench_pin": e["STAMP_PIN"],
+  "agent_image": sh(*K, "get", "deploy", "platform-agent-gateway", "-o", "jsonpath={.spec.template.spec.containers[?(@.name=='platform-agent')].image}"),
+  "operator_image": sh(*K, "get", "deploy", "kubeagents-controller-manager", "-o", "jsonpath={.spec.template.spec.containers[*].image}"),
+  "kube_agents_commit": sh("git", "rev-parse", "HEAD"),
+  "agent_state_reset": e["STAMP_RESET"],
+  "agent_stores_before_run": json.loads(e.get("AGENT_STORES") or "null"),
+}
+json.dump(stamp, open(sys.argv[1], "w"), indent=2)
+print("==> stamp written to", sys.argv[1])
+STAMP
+fi
+if [ "${BENCH_NO_TEARDOWN:-false}" != "true" ]; then
+  gh_token="$(tr -d '\r\n' < "${GITOPS_TOKEN_FILE}")"
+  repo_slug="${GITOPS_REPO:-${DEFAULT_GITOPS_REPO}}"; repo_slug="${repo_slug#https://github.com/}"; repo_slug="${repo_slug%.git}"
+  if GH_TOKEN="${gh_token}" gh api "repos/${repo_slug}/git/refs/heads/${RUN_BRANCH}" >/dev/null 2>&1; then
+    echo "WARN leak: run branch ${RUN_BRANCH} still exists in ${repo_slug}" >&2
+  fi
+  default_branch="$(GH_TOKEN="${gh_token}" gh api "repos/${repo_slug}" --jq .default_branch 2>/dev/null || true)"
+  [ "${default_branch}" = "main" ] || echo "WARN leak: default branch of ${repo_slug} is '${default_branch}', not main" >&2
+  if gcloud container clusters list --project "${GCP_PROJECT_ID}" --filter="name=${CLUSTER_NAME}" --format="value(name)" 2>/dev/null | grep -q .; then
+    echo "WARN leak: task cluster ${CLUSTER_NAME} still exists" >&2
+  fi
+fi
+exit "${rc}"

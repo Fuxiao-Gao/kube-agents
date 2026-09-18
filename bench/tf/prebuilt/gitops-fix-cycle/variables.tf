@@ -113,6 +113,12 @@ variable "gitops_broken_base_sha" {
   default     = ""
 }
 
+variable "gitops_history_parent_sha" {
+  type        = string
+  description = "Commit the staged history's healthy commit is built on (b-0011). Empty means the task's recorded commit in main.tf; a per-run repository passes its root commit (gke-labs/kube-agents#1773)."
+  default     = ""
+}
+
 variable "gitops_run_branch" {
   type        = string
   description = "Per-run branch Argo tracks and the agent's PR targets. Empty means run/<cluster_name>/<gitops_task>, which is what the task prompt tells the agent."
