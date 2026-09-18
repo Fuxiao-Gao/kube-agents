@@ -22,18 +22,22 @@ def test_counts_reads_and_lookups_before_the_fix_only():
             _worker("terminal", '{"command": "kubectl get pods -n payments"}', 100),
             _worker("mcp__gke__describe", '{"kind": "deployment"}', 110, agent="cluster-x"),
             _worker("terminal", '{"command": "gh pr list --repo o/r"}', 120),
-            _worker("terminal", '{"command": "python3 submit_suggestion.py prepare"}', 130),
+            _worker("skill_view", '{"name": "submit-suggestion"}', 105),
+            _worker("kanban_show", '{"task_id": "t_1"}', 106),
+            _worker("kanban_show", '{"task_id": "t_other"}', 107),
+            _worker("terminal", '{"command": "python3 submit_suggestion.py prepare --repo o/r"}', 125),
+            _worker("terminal", '{"command": "python3 \\"$S/submit_suggestion.py\\" submit \\\\\n --handle h"}', 130),
             _worker("terminal", '{"command": "gh pr view 7"}', 140),
             _worker("terminal", '{"command": "kubectl get pods"}', 150),
             {"name": "gitops_fix_cycle", "args": {}, "result": {"outcome": "merged", "pr_url": "u", "merged_at": "2026-09-18T00:00:00Z"}, "status": "harness"},
         ]
     }
     report = gitops_audit.audit(record)
-    assert report["worker_entries"] == 6
+    assert report["worker_entries"] == 10
     assert report["delegated_to_cluster_agent"] is True
     assert report["cluster_reads_before_fix"] == 2
-    assert report["repo_lookups_before_fix"] == 1
-    assert report["repo_lookups"] == ['terminal {"command": "gh pr list --repo o/r"}']
+    assert report["repo_lookups_before_fix"] == 2
+    assert report["repo_lookups"] == ['terminal {"command": "gh pr list --repo o/r"}', 'kanban_show {"task_id": "t_other"}']
     assert report["gitops_outcome"] == "merged"
 
 
