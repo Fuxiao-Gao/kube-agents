@@ -137,9 +137,12 @@ minter_restart() {
 
 case "${ACTION}" in
   minter-mount)
-    if minter_mounts_dir; then log "minter already mounts ${MINTER_CONFIGS_DIR}/${GITOPS_ORG}/ as a directory"; exit 0; fi
-    # Re-key <org>-<repo>.yaml -> <repo>.yaml, keep the old keys until the
-    # mount has moved, then swap the subPath mount for the directory mount.
+    # Converges the minter to one directory mount of the ConfigMap at
+    # /etc/minty/<org>/ (keys <repo>.yaml). Re-keys <org>-<repo>.yaml entries,
+    # replaces the whole mount list through a JSON patch (a strategic merge
+    # keys mounts by mountPath and would keep a subPath mount beside the
+    # directory one, which no pod can start with), waits for the rollout, then
+    # drops the old keys. Safe to rerun.
     "${K[@]}" get cm "${MINTER_CONFIGMAP}" -o json | python3 -c '
 import json, sys
 org, d = sys.argv[1], json.load(sys.stdin)
@@ -152,12 +155,19 @@ json.dump(d, sys.stdout)' "${GITOPS_ORG}" | "${K[@]}" apply -f - >&2
 import json, sys
 org, vol, d = sys.argv[1], sys.argv[2], json.load(sys.stdin)
 c = d["spec"]["template"]["spec"]["containers"][0]
-mounts = [m for m in c.get("volumeMounts", []) if m["name"] != vol]
-mounts.append({"name": vol, "mountPath": f"/etc/minty/{org}", "readOnly": True})
-print(json.dumps({"spec": {"template": {"spec": {"containers": [{"name": c["name"], "volumeMounts": mounts}]}}}}))' "${GITOPS_ORG}" "${MINTER_VOLUME}")"
-    "${K[@]}" patch deploy "${MINTER_DEPLOYMENT}" --type strategic -p "${patch}" >&2
+want = [m for m in c.get("volumeMounts", []) if m["name"] != vol] + [{"name": vol, "mountPath": f"/etc/minty/{org}", "readOnly": True}]
+if c.get("volumeMounts") == want: sys.exit(0)
+print(json.dumps([{"op": "replace", "path": "/spec/template/spec/containers/0/volumeMounts", "value": want}]))' "${GITOPS_ORG}" "${MINTER_VOLUME}")"
+    if [ -n "${patch}" ]; then
+      "${K[@]}" patch deploy "${MINTER_DEPLOYMENT}" --type json -p "${patch}" >&2
+    else
+      log "mount list already converged"
+    fi
     "${K[@]}" rollout status deploy/"${MINTER_DEPLOYMENT}" --timeout="${MINTER_ROLLOUT_TIMEOUT}" >&2
-    log "minter now reads ${MINTER_CONFIGS_DIR}/${GITOPS_ORG}/<repo>.yaml from the ConfigMap; old <org>-<repo>.yaml keys left in place"
+    for key in $("${K[@]}" get cm "${MINTER_CONFIGMAP}" -o json | python3 -c 'import json,sys; print(" ".join(k for k in json.load(sys.stdin)["data"] if k.startswith(sys.argv[1]+"-")))' "${GITOPS_ORG}"); do
+      minter_drop_key "${key}"
+    done
+    log "minter reads ${MINTER_CONFIGS_DIR}/${GITOPS_ORG}/<repo>.yaml from the ConfigMap"
     ;;
 
   create)
