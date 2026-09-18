@@ -112,6 +112,9 @@ spec:
         app: github-token-minter
         {{- include "kube-agents.labels" . | nindent 8 }}
     spec:
+      {{- with (include "kube-agents.topologySpreadConstraints" (dict "enabled" ($m.topologySpread | default dict).enabled "replicas" $m.replicaCount "selectorLabels" "app: github-token-minter")) }}
+      {{- . | nindent 6 }}
+      {{- end }}
       serviceAccountName: {{ $m.ksaName }}
       {{- with (include "kube-agents.imagePullSecrets" .) }}
       {{- . | nindent 6 }}
