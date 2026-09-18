@@ -20,7 +20,10 @@
 #   check <name>      from the shell sandbox pod, mint a token for the
 #                     repository through the credential proxy (what the agent
 #                     does before its first push). Exit 0 means the wiring
-#                     holds end to end.
+#                     holds end to end. The proxy refuses repositories the
+#                     install does not manage, so this passes only once the
+#                     PlatformAgent's gitRepo names <name> (the wrapper's
+#                     AGENT_STATE_RESET does that before calling it).
 #   archive <name>    mark the repository read-only and drop its minter entry.
 #
 # Env: GITOPS_ORG (gke-agentic), GITOPS_TOKEN_FILE (~/.config/gitops-pilot/
