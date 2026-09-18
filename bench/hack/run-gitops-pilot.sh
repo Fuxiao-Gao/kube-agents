@@ -340,7 +340,10 @@ if [ "${AGENT_STATE_RESET:-false}" = "true" ]; then
   # run's repository; proving it here fails fast instead of at the agent's
   # first push, an hour in.
   if [ -n "${GITOPS_REPO:-}" ] && [ "${GITOPS_REPO}" != "${DEFAULT_GITOPS_REPO}" ]; then
-    "$(dirname "$0")/gitops-run-repo.sh" check "$(basename "${GITOPS_REPO%.git}")"
+    # Relative to the bench directory (the cd above), not to this file: a
+    # run executes a frozen copy of this script from results/ so that an
+    # edit during the run cannot reach it.
+    ./hack/gitops-run-repo.sh check "$(basename "${GITOPS_REPO%.git}")"
   fi
 fi
 
