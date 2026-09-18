@@ -4087,8 +4087,9 @@ func TestCheckA2AUserGrants(t *testing.T) {
 // Scope, so the name is not read as more than it pins: this is the NAME-based
 // reservation. A user volume projecting the a2a-bus audience under some other
 // name defeats the reservation and leaves this test passing, which is what the
-// ByName is doing in the name. gke-labs#1667 adds the source check, with its
-// own test.
+// ByName is doing in the name. The source check is
+// TestUserAuthoredVolumesCannotCarryTheBusCredentialBySource, its sibling in
+// platformagent_a2a_bus_source_test.go.
 func TestUserAuthoredContainersCannotMountTheBusTokenByName(t *testing.T) {
 	grab := func(agent *agentv1alpha1.PlatformAgent) corev1.PodSpec {
 		t.Helper()

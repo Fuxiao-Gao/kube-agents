@@ -1985,11 +1985,27 @@ func buildPodTemplateSpec(agent *agentv1alpha1.PlatformAgent, configHash, fluent
 	// the surface for the same reason the plugin env drop is: on a today
 	// install there is no such volume, and dropping a name only the next stack
 	// cares about would be one more way to tell the feature exists.
+	//
+	// Two halves. The name half takes the reserved volume name. The source
+	// half takes any user volume that would deliver the same credential under
+	// another name -- a serviceAccountToken projection for the bus audience,
+	// or the credentials Secret -- and every mount naming it, because a mount
+	// with no volume is a Deployment the API server refuses. Neither half is a
+	// boundary against a hostile sidecar: KSA tokens are pod-scoped and the
+	// callout cannot tell which container presented one. Both are a guard
+	// against a misconfiguration by the CR's author, and are worth having on
+	// those terms -- see a2aBusCredentialVolumeNames.
 	if a2aAgentSurface(agent) {
 		initContainers = a2aStripBusTokenMounts(initContainers)
 		sidecars = a2aStripBusTokenMounts(sidecars)
 		sidecarVolumes = a2aStripBusTokenVolume(sidecarVolumes)
 		extraVolumes = a2aStripBusTokenVolume(extraVolumes)
+
+		droppedSources := a2aBusCredentialVolumeNames(agent)
+		initContainers = a2aStripMountsNamed(initContainers, droppedSources)
+		sidecars = a2aStripMountsNamed(sidecars, droppedSources)
+		sidecarVolumes = a2aStripBusCredentialSources(sidecarVolumes, agent.Name)
+		extraVolumes = a2aStripBusCredentialSources(extraVolumes, agent.Name)
 	}
 
 	homeDir := "/opt/data"
@@ -3802,8 +3818,12 @@ func buildBaseContainers(agent *agentv1alpha1.PlatformAgent, image string, envVa
 	// Gated on the surface for the same reason the strips up there are: on a
 	// today install there is no such volume, and dropping a name only the next
 	// stack cares about would be one more way to tell the feature exists.
+	// The source half of the same reservation takes the mounts of any user
+	// volume buildPodTemplateSpec dropped for what it projects or which
+	// Secret it names; see a2aBusCredentialVolumeNames.
 	if a2aAgentSurface(agent) {
 		extraVolumeMounts = a2aStripBusTokenVolumeMounts(extraVolumeMounts)
+		extraVolumeMounts = a2aStripVolumeMountsNamed(extraVolumeMounts, a2aBusCredentialVolumeNames(agent))
 	}
 
 	resources := resolveResources(agent.Spec.Deployment)

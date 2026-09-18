@@ -217,9 +217,6 @@ const (
 	a2aSysPasswordKey     = "sys-password"     // #nosec G101 -- Secret key name, not a credential
 	a2aCalloutPasswordKey = "callout-password" // #nosec G101 -- Secret key name, not a credential
 
-	// a2aCredsSecretSuffix is appended to the NATS object name.
-	a2aCredsSecretSuffix = "-creds"
-
 	// a2aProvisionJobNameInfix sits between the agent's name and the digest in
 	// the provision Job's name; a2aProvisionJobNameHashLength is how much of
 	// the hex digest follows it. Eight characters is a change detector, the
@@ -353,13 +350,25 @@ func a2aStrictEventsWriter() string {
 	return "false"
 }
 
-func a2aNATSName(agent *agentv1alpha1.PlatformAgent) string    { return agent.Name + "-a2a-nats" }
+// a2aNATSName and a2aCredsSecretName are spelled in the API package, because
+// the validating webhook recognises the credentials Secret by name and must
+// agree with the render on what that name is.
+func a2aNATSName(agent *agentv1alpha1.PlatformAgent) string {
+	return agentv1alpha1.A2ANATSName(agent.Name)
+}
 func a2aGatewayName(agent *agentv1alpha1.PlatformAgent) string { return agent.Name + "-a2a-gateway" }
-func a2aCalloutName(agent *agentv1alpha1.PlatformAgent) string { return agent.Name + "-a2a-callout" }
+func a2aCalloutName(agent *agentv1alpha1.PlatformAgent) string {
+	return agentv1alpha1.A2ACalloutName(agent.Name)
+}
+
+// a2aNATSConfigSecretName is the Secret holding the rendered nats.conf.
+func a2aNATSConfigSecretName(agent *agentv1alpha1.PlatformAgent) string {
+	return agentv1alpha1.A2ANATSConfigSecretName(agent.Name)
+}
 
 // a2aCredsSecretName is the Secret holding the static users' passwords.
 func a2aCredsSecretName(agent *agentv1alpha1.PlatformAgent) string {
-	return a2aNATSName(agent) + a2aCredsSecretSuffix
+	return agentv1alpha1.A2ACredsSecretName(agent.Name)
 }
 
 // a2aNATSAddress is the bus's in-cluster host:port. a2aNATSClientURL is the
@@ -952,7 +961,7 @@ func buildA2ANATSConfigSecret(agent *agentv1alpha1.PlatformAgent, creds *corev1.
 	return &corev1.Secret{
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      a2aNATSName(agent) + "-config",
+			Name:      a2aNATSConfigSecretName(agent),
 			Namespace: agent.Namespace,
 			Labels:    a2aLabels(agent, "nats-config"),
 		},
@@ -1071,7 +1080,7 @@ func buildA2ANATSStatefulSet(agent *agentv1alpha1.PlatformAgent, confHash string
 					Volumes: []corev1.Volume{{
 						Name: "config",
 						VolumeSource: corev1.VolumeSource{
-							Secret: &corev1.SecretVolumeSource{SecretName: a2aNATSName(agent) + "-config"},
+							Secret: &corev1.SecretVolumeSource{SecretName: a2aNATSConfigSecretName(agent)},
 						},
 					}},
 				},
@@ -2580,7 +2589,7 @@ func (r *PlatformAgentReconciler) a2aNamespacedTeardown(agent *agentv1alpha1.Pla
 		// removing it, and removing it would take a foreground delete and a
 		// wait this reconcile has no reason to block on.
 		{&networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: a2aSessionNetpolName(agent), Namespace: agent.Namespace}}, r.Client},
-		{&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: a2aNATSName(agent) + "-config", Namespace: agent.Namespace}}, r.a2aReader()},
+		{&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: a2aNATSConfigSecretName(agent), Namespace: agent.Namespace}}, r.a2aReader()},
 		// ResourceQuota is not a watched kind, so the read goes through
 		// a2aReader like the Secrets. Deleting it here is safe even with
 		// session pods still draining (see the function comment): a quota
@@ -2636,7 +2645,7 @@ func (r *PlatformAgentReconciler) cleanupA2A(ctx context.Context, agent *agentv1
 		{&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: a2aNATSName(agent), Namespace: agent.Namespace}}, r.Client},
 		{&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: a2aGatewayName(agent), Namespace: agent.Namespace}}, r.Client},
 		{&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: a2aCalloutKeysName(agent), Namespace: agent.Namespace}}, r.a2aReader()},
-		{&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: a2aNATSName(agent) + "-config", Namespace: agent.Namespace}}, r.a2aReader()},
+		{&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: a2aNATSConfigSecretName(agent), Namespace: agent.Namespace}}, r.a2aReader()},
 	}
 	anyPresent := false
 	for _, s := range sentinels {
