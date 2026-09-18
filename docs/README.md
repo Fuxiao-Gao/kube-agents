@@ -115,8 +115,11 @@ CI enforcement: `make docs-check` runs the same checks as
   Go, shell, Dockerfiles, YAML, Terraform, TypeScript) must be one too.
 - `docs-check-terminology` — `hack/check-docs-terminology.sh`; identifiers in
   prose must match their source (service-account names, versions, the
-  fleet-audit finding-id pattern and rendering caps, …), and a quoted cron
-  prompt must be a verbatim substring of the `jobs.json` it quotes.
+  fleet-audit finding-id pattern and rendering caps, …), and a fenced roster
+  entry, found by `hack/scan-cron-prompts.awk`, must carry a real job `"id"` and
+  quote enough of its prompt, verbatim, to identify it in `jobs.json` — or a
+  placeholder id in angle brackets, which marks an illustration and is left
+  ungraded.
 - `docs-check-map` — `scripts/check_docs_map.py`; every tracked `.md`/`.mdx`
   file must be matched by an inventory entry in this map (globs count), every
   path in the inventory's path column must exist, and every table row in this
