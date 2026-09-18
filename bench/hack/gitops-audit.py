@@ -29,8 +29,8 @@ from datetime import datetime, timezone
 GITOPS_ENTRY_NAME = "gitops_fix_cycle"
 #: Worker call names or argument fragments that read a cluster.
 CLUSTER_READ_RE = re.compile(
-    r"kubectl\s+(get|describe|logs|top|events|explain|rollout\s+history|api-resources)"
-    r"|mcp__gke|mcp__k8s|mcp__kubernetes|gke_|k8s_|kubernetes_",
+    r"kubectl\b[^\n|;&]*?\s(get|describe|logs|top|events|explain|rollout\s+history|api-resources)\b"
+    r"|cluster_preflight|mcp__gke|mcp__k8s|mcp__kubernetes|gke_|k8s_|kubernetes_",
     re.IGNORECASE,
 )
 #: Delegating to a Cluster Agent counts as a cluster read by proxy.
@@ -45,7 +45,7 @@ OWN_CARD_RE = re.compile(r'"task_id":\s*"([^"]+)"')
 #: The call that submits the fix: submit-suggestion's `submit` verb (its
 #: `prepare`, `list` and `fetch` verbs and viewing the skill are not), or a
 #: direct `gh pr create` / `git push`.
-FIX_SUBMIT_RE = re.compile(r"submit_suggestion\.py[\\\"']*\s+submit\b|gh\s+pr\s+create|git\s+push", re.IGNORECASE)
+FIX_SUBMIT_RE = re.compile(r"submit_suggestion\.py[\\\"']*\s+submit\b(?!\s*--help)|gh\s+pr\s+create|git\s+push", re.IGNORECASE)
 
 def _text(entry: dict) -> str:
     args = entry.get("args")
@@ -86,8 +86,10 @@ def audit(record: dict) -> dict:
         if not REPO_LOOKUP_RE.search(_text(e)):
             return False
         if e.get("name") == "kanban_show":
+            # No task_id shows the worker's own card; a task_id is foreign
+            # only when it is not the card the worker is running.
             m = OWN_CARD_RE.search(_text(e))
-            return not (m and m.group(1) == e.get("task"))
+            return bool(m) and m.group(1) != e.get("task")
         return True
 
     repo_lookups = [e for e in workers if before_fix(e) and foreign_lookup(e)]
