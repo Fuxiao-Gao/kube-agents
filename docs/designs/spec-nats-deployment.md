@@ -128,23 +128,35 @@ API server - zero key handling, works on any conformant cluster - with local JWT
 verification against the API server's `openid/v1/jwks` endpoint as the offline
 alternative.
 
-Status (amended 9/4, the callout armed; amended 9/8, sessions moved): the render now
-carries the `auth_callout` block, and a principal authenticates one of two ways.
-**Through the callout**, by presenting a projected ServiceAccount token: the bus
-provisioning Job, and every spawned session pod. **Statically**, from `nats.conf` and
-listed in `auth_users`: the callout itself, which cannot authenticate through the thing
-it is; the chatops gateway, purely as sequencing, since it has a ServiceAccount and its
-client program lands separately from this render; `web`, because a browser never can;
-`seed`, because the hand-applied seed tooling is applied rather than rendered and
-dropping its user would refuse an object already running; `sys`, a human at a
-port-forward; and the shared `worker`, which is now a shrinking residue rather than the
-session story — no session pod authenticates as it, and what keeps it alive is the seed
-tooling's twin and the agent-side workloads that have not moved, the platform agent pod
-and the Hermes bridge sidecar beside it among them.
+Status (amended 9/4, the callout armed; amended 9/8, sessions moved; amended 9/15,
+`worker` retired): the render now carries the `auth_callout` block, and a principal
+authenticates one of two ways. **Through the callout**, by presenting a projected
+ServiceAccount token: the bus provisioning Job, every spawned session pod, and the
+platform agent container. **Statically**, from `nats.conf` and listed in `auth_users`:
+the callout itself, which cannot authenticate through the thing it is; the chatops
+gateway, purely as sequencing, since it has a ServiceAccount and its client program
+lands separately from this render; `web`, because a browser never can; `seed`, because
+the hand-applied seed tooling is applied rather than rendered and dropping its user
+would refuse an object already running; `sys`, a human at a port-forward; and `bridge`,
+the Hermes bridge sidecar.
 
-Three of those are permanent - the callout, which cannot authenticate through itself;
-`web`, because a browser never can; and `sys`, which is a human rather than a workload -
-and the rest are waiting on something nameable. The single
+The shared `worker` user is gone. It was one credential held by two workloads that
+happen to share a pod — the bridge sidecar, which drives the task plane, and the `a2a`
+CLI in the agent container, which reads and writes the topic blackboard — so its grant
+set was the union of two unrelated jobs, and either workload could do the other's. It
+split into `agent` and `bridge`, and neither holds the other's streams.
+
+Four of those static users are permanent - the callout, which cannot authenticate
+through itself; `web`, because a browser never can; `sys`, which is a human rather than
+a workload; and `bridge`, for a reason worth stating because it looks like an omission.
+The callout keys its map on the ServiceAccount username `TokenReview` returns, and a
+sidecar shares its pod's ServiceAccount. A token presented by the bridge would therefore
+resolve to the `agent` entry rendered for the container beside it, and each would hold
+the union of the two grant sets - `worker` rebuilt under a new name, arrived at by
+moving the bridge onto the mechanism meant to narrow it. `Narrowing` does not help: it
+is pod-scoped, and both workloads are in the same pod. The bridge gets a token when it
+stops sharing a pod with the agent, which is the same event that retires it. The rest
+are waiting on something nameable. The single
 source for all of it - the config's APP and `$SYS` static user blocks, the callout's map,
 and the `NATS_USER` a client is handed so it can set its inbox prefix - is
 `platformagent_a2a_identities.go`; before the callout those three lived in a config
@@ -186,8 +198,9 @@ Layout:
 - **The JetStream tax.** Deny-by-default reaches JetStream's own plumbing, and three
   grants are part of being a JetStream client at all: the `$JS.API` subjects a role's
   streams and buckets need, enumerated per stream and per verb where the caller set is
-  known (the worker's list is the operator's `a2aWorkerJetStreamGrants`; a user still
-  holding `$JS.API.>` holds playground posture); `$JS.ACK.<its streams>.>` for explicit
+  known (the bridge's list is the operator's `a2aBridgeJetStreamGrants` and the agent
+  CLI's is `a2aAgentJetStreamGrants`; a user still holding `$JS.API.>` holds playground
+  posture); `$JS.ACK.<its streams>.>` for explicit
   acks - an ack is a publish, and missing this grant means every consumer redelivers
   forever while TCP health stays green, the NR-5 incident class created at connect time;
   and `$JS.FC.>` for flow control. The inbox rule cuts both ways, too: a client whose subscribe grant
@@ -199,7 +212,7 @@ Layout:
   and a consumer, never the caller, so an unscoped `$JS.ACK.>` lets any holder `+TERM`
   another principal's in-flight delivery. That narrowing has landed: every rendered
   principal's ack grant is scoped to the streams it consumes with explicit ack -
-  `$JS.ACK.TASKS.>` for the gateway and the shared worker - and the principals whose reads
+  `$JS.ACK.TASKS.>` for the gateway and the bridge - and the principals whose reads
   are ordered or ack-none hold no ack grant at all. What scoping still cannot express is
   per-consumer scope inside a granted stream, since NATS wildcards match whole tokens.
 - **Topic publish grants are exact, never namespace wildcards.** Publish grants match
@@ -250,7 +263,7 @@ Layout:
   amplifier for the deliver-subject write below; within the four
   granted streams consumer names are the caller's choice, so `web` can pull a delivery
   off another reader's consumer or retune it through create-as-update - a route that
-  reaches the gateway's relay durable from `worker` too, measured on the render: one
+  reaches the gateway's relay durable from `bridge` too, measured on the render: one
   permitted `$JS.API.CONSUMER.CREATE.TASKS.gateway-relay` retunes its filter subject, and
   one carrying `inactive_threshold` has the server reap it, ack floor and all, with
   `CONSUMER.DELETE` refused in the same run; and a consumer's
@@ -268,7 +281,7 @@ Layout:
   itself. A watcher on `a2a.agents.>` - exactly `gateway`'s subscribe grant, and inside
   `web`'s `a2a.>` - is not that principal: measured, DIRECTORY stayed empty.
   This survives per-stream scoping of any user that may create consumers at all, the
-  worker included; the closure is not holding `CONSUMER.CREATE`, which is a consumer
+  bridge included; the closure is not holding `CONSUMER.CREATE`, which is a consumer
   created per task by the dispatcher. Per-name scoping is **not** available as a
   mitigation _where the caller chooses its own consumer names_: NATS wildcards match whole
   tokens, so a `web-*` grant matches a consumer literally named `web-*` and nothing else -
@@ -346,10 +359,13 @@ The callout reads an identity-to-permissions map rendered by the operator (**ame
 callout-authenticated principal, keyed by the ServiceAccount as TokenReview spells it
 (`system:serviceaccount:<namespace>:<name>`), rendered into ConfigMap
 `<agent>-a2a-authmap` under key `identities.json`. **Amended 9/8:** that is now two
-entries - the provisioning Job and the session principal. The agent pod is **not** among
-them: it connects as the static shared `worker`, and a map entry no token can ever match
-authenticates nobody. Nor is the gateway - also a static `nats.conf` user for now - and
-there is no audit exporter or janitor yet. The designed shape is one entry per
+entries - the provisioning Job and the session principal. **Amended 9/15:** three, the
+platform agent container having joined them when `worker` was retired; its entry is
+keyed on the agent's own ServiceAccount and carries the blackboard grants and nothing
+else. The bridge sidecar is **not** among them and cannot be, for the ServiceAccount
+reason in the status section above: it would key to the agent's entry. Nor is the
+gateway - also a static `nats.conf` user for now - and there is no audit exporter or
+janitor yet. The designed shape is one entry per
 `AgentProfile` rendered from the CR's bus grants, which arrives with the CRD.
 
 The session entry is a different kind of entry and the difference is load-bearing. Every

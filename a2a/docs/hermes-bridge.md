@@ -73,29 +73,75 @@ running (the executor role). That collapse is exactly what makes it a stand-in -
 the real dispatcher arrives, the roles separate again and the bridge has nothing left to
 do.
 
-On the W6 install the bridge connects as the static `worker` user, whose grants already
-cover it: subscribe `a2a.tasks.>`, publish `a2a.tasks.*.*.events`, plus the JetStream
-tax and `$KV.runtime-state.>` for the in-flight registry below. The tax is not
-`$JS.API.>`: it is the `$JS.API` subjects the bridge emits on TASKS and
-`KV_runtime-state` — stream info, consumer create, pull, direct get, and the KV
-watcher's consumer delete — named one by one, with the CLI's topic-stream reads, in the
-operator's `a2aWorkerJetStreamGrants`; `$JS.ACK.TASKS.>`, ack scoped to the one stream this user
-consumes with explicit ack (unscoped `$JS.ACK.>` is a cross-principal +TERM); `$JS.FC.>`;
-and `_INBOX.worker.>`.
+The bridge connects as the static `bridge` user, whose grants are written for this
+program and nothing else: subscribe `a2a.tasks.platform.*.in`, publish
+`a2a.tasks.platform.*.events`, `$KV.runtime-state.>` both ways for the in-flight
+registry below, and `_INBOX.bridge.>`. Nothing wider - a bridge that can publish
+submissions is a bridge that can impersonate the gateway.
 
-**This is now the bridge's own debt rather than the deployment's posture.** The auth
-callout has armed and session pods authenticate as themselves, so the shared static user
-is no longer "the playground" — it is a residue, and this program is one of the reasons
-it survives. `cmd/hermes-bridge/main.go` sets `nats.UserInfo` from the environment and
-has no token path, so it cannot present a projected ServiceAccount token even though the
-callout would resolve one. Note what it would present it _as_: there is no `agent`
-principal in the rendered map and deliberately so, so moving the bridge means giving it
-an identity of its own rather than reaching for one already waiting.
+The JetStream tax is not `$JS.API.>`: it is the `$JS.API` subjects the bridge emits on
+TASKS and `KV_runtime-state` — stream info, consumer create, pull, direct get, and the
+KV watcher's consumer delete — named one by one in the operator's
+`a2aBridgeJetStreamGrants`; plus `$JS.ACK.TASKS.>`, ack scoped to the one stream this
+user consumes with explicit ack (unscoped `$JS.ACK.>` is a cross-principal +TERM), and
+`$JS.FC.>`. Reads go through `DIRECT.GET` and not `STREAM.MSG.GET`; the provision script
+sets `--allow-direct` on every stream so nats.go picks that route, and only that route
+is granted.
 
-The target shape, unchanged: a dedicated `bridge` identity with subscribe
-`a2a.tasks.platform.*.in`, publish `a2a.tasks.platform.*.events`, its own inbox prefix,
-and the KV grant. Nothing wider - a bridge that can publish submissions is a bridge that
-can impersonate the gateway.
+**Static is the answer here, not a residue.** `bridge` replaced the shared `worker` user
+rather than inheriting it, and it stays a password principal on purpose. The auth
+callout keys its map on the username TokenReview returns, which names a ServiceAccount;
+a sidecar shares its pod's ServiceAccount, so a projected token would resolve the bridge
+to the same map entry as the `agent` principal in the container beside it and hand each
+of them the union of the two grant sets — which is the `worker` user rebuilt under a new
+name. The callout cannot see which container opened a connection, and `Narrowing` is
+pod-scoped, so no map shape available today separates them. The bridge gets a token when
+it stops sharing a pod with the agent, which is the same event that retires it.
+
+What the split bought, measured from this side: the bridge holds no grant on
+`TOPICS-STATE` or `TOPICS-JOURNAL` at all — not the reads and not the writes. The
+blackboard belongs to the `a2a` CLI in the agent container, which is now its own callout
+principal. `TestBridgeJetStreamGrantOnARealServer`'s refused table is where that is
+measured.
+
+### Migrating an existing sidecar
+
+An install whose `spec.deployment.sidecars` entry still names the retired user fails
+closed rather than quietly: `worker` is gone from the rendered `nats.conf`, so the
+sidecar's connect is refused at authentication and the container crash-loops. Because it
+shares the agent's pod, the pod does not reach Ready — the same failure shape the
+`mode: today` flip produces above. Two edits, both in the sidecar's own `env`:
+`NATS_USER` becomes `bridge`, and `NATS_PASSWORD`'s `secretKeyRef.key` becomes
+`bridge-password`. The Secret is the same `<agent>-a2a-nats-creds`; the operator fills the
+new key on the next reconcile. It does not remove the old one: `ensureA2ACredsSecret` only
+fills keys that are missing or empty and never prunes, so `worker-password` stays in the
+Secret of an upgraded install indefinitely. It is dead data rather than a live credential —
+`worker` is no longer a user in the rendered `nats.conf`, so presenting that password
+authenticates to nothing — but the key's presence is not evidence the sidecar has been
+migrated, and a reader checking whether an install has taken the split should read
+`nats.conf` or the sidecar's `env`, not the Secret's key set.
+
+A third edit is owed only by an install that overrode `BRIDGE_PROFILE`, and its failure
+lands in an unhelpful place. The retired `worker` user's subscribe grant was
+`a2a.tasks.*.*.in` — the addressee position was a wildcard, so pointing the bridge at
+another addressee just worked. `bridge`'s grants name `platform` literally
+(`a2aBridgeAddressee`, which is also `defaultProfile` in the bridge's own `main.go`: one
+value living in two modules that cannot import each other). Override the env now and the
+intake half still works — the consumer is created and pulled over `$JS.API`, where the
+filter subject rides in the request body and no subject grant sees it — so the other
+addressee's task is delivered. It stops there. `accept` publishes `submitted` on
+`a2a.tasks.<other>.*.events` before it puts anything on the worker queue, and that subject
+is not in the publish list, so the publish is refused, the submission is dropped, and
+Hermes is never spawned. The refusal does not read as one: a rejected JetStream publish is
+a reply that never arrives, so the bridge logs a timeout and the submitter waits on a task
+that got no terminal event and was never run. Leave the env unset, or widen the grant in
+the operator to match — the two have to move together.
+
+The agent container is the other half of the same change and needs no edit: the operator
+stops rendering `NATS_USER`/`NATS_PASSWORD` there and mounts a projected token instead.
+One user-visible consequence — topic entries the `a2a` CLI writes now carry
+`from.session` of `agent` rather than `worker`, so a query matching on the old value
+returns nothing for entries written after the upgrade.
 
 ## Lifecycle, steering, cancel
 
