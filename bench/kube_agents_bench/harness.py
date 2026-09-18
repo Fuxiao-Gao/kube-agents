@@ -483,9 +483,11 @@ def _append_delivered(
 ) -> None:
     """Append each finished card's own result to the text the judge grades.
 
-    The worker runs as a separate hermes session, so its card result is the one
-    part of its work that crosses back; without this the graded answer is only
-    the router's closing message. ``observed`` is the status turns' trajectory
+    The worker runs as a separate hermes session, so its card result is the
+    part of its work that crosses back through the conversation (its tool
+    calls are read from its session store separately, see
+    :mod:`kube_agents_bench.worker_trajectory`); without this the graded
+    answer is only the router's closing message. ``observed`` is the status turns' trajectory
     rather than ``result.trajectory``, so the polls inform the answer without
     being graded as the agent's tool use.
     """
@@ -1010,9 +1012,12 @@ class KubeAgentsHarness(AgentHarness):
     ) -> str:
         """Poll the agent until every card it filed settles.
 
-        Only two things reach ``result``: the delivered card results, appended
-        to the agent's own answer, and the turns' token spend. Everything else
-        belongs to the harness -- see :func:`_fold_status_turn`.
+        Only two things reach ``result`` from the polling: the delivered card
+        results, appended to the agent's own answer, and the turns' token
+        spend. Everything else belongs to the harness -- see
+        :func:`_fold_status_turn`. (The workers' own tool calls join the
+        trajectory afterwards, in :meth:`_settle`, read from their session
+        stores rather than from any turn.)
 
         The harness cannot read the board itself (in-cluster SQLite, with only
         ``/v1/responses`` and ``/api/sessions`` exposed), so it asks the agent

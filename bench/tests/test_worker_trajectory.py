@@ -7,7 +7,8 @@ fanned out and their runs, plus one session store per profile in hermes'
 schema -- and the harness side is fed the script's own reply. What is asserted
 is the contract the record depends on: the walk from the front card to every
 worker, the card-to-session match, the pairing of each call with its result,
-the tags, the clipping, the scrubbing, and that ``_settle`` appends the entries
+the tags, the scrubbing (by the repository's own redactor, the file the image
+ships) and the clipping after it, and that ``_settle`` appends the entries
 after the router's calls and before the purge.
 """
 
@@ -32,6 +33,11 @@ PLATFORM_SESSION = "20260917_182332_c7b328"
 CLUSTER_SESSION = "20260917_183001_9a1b2c"
 OTHER_SESSION = "20260917_170000_000000"
 TOKEN = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+REDACTED = "[REDACTED_SECRET]"
+# The redactor the pod loads from the image, at its source path here.
+REDACTOR = (
+    Path(__file__).resolve().parents[2] / "agents" / "chat" / "defaults" / "plugins" / "common"
+) / "redactor.py"
 
 _BOARD_DDL = (
     "CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT, assignee TEXT, status TEXT,"
@@ -207,8 +213,11 @@ def _run_script(
     max_cards: int = 32,
     max_calls: int = 2000,
     max_result: int = 2000,
+    redactor: Path = REDACTOR,
 ) -> str:
     """The in-pod script under the test interpreter, with the caps the harness passes."""
+    if not REDACTOR.exists():
+        pytest.skip(f"{REDACTOR} is not beside this checkout")
     proc = subprocess.run(
         [
             sys.executable,
@@ -216,6 +225,7 @@ def _run_script(
             worker_trajectory._IN_POD_SCRIPT,
             str(root),
             worker_trajectory.CAPTURE_PRESENT,
+            str(redactor),
             str(max_cards),
             str(max_calls),
             str(max_result),
@@ -234,6 +244,31 @@ def _payload(reply: str) -> dict:
     marker, _, body = reply.partition(worker_trajectory.CAPTURE_PRESENT)
     assert marker.strip() == ""
     return json.loads(body)
+
+
+def _read_result(root: Path, content, *, max_result: int = 2000) -> dict:
+    """Plant one terminal call whose result row is ``content`` and read it back.
+
+    ``content`` is stored as hermes stores it: a string as is, anything else
+    under the ``\\x00json:`` prefix. Returns the call's entry from the payload.
+    """
+    stored = content if isinstance(content, str) else "\x00json:" + json.dumps(content)
+    with sqlite3.connect(root / "profiles" / "platform" / "state.db") as conn:
+        conn.execute(
+            "DELETE FROM messages WHERE session_id = ? AND role != 'user'", (PLATFORM_SESSION,)
+        )
+        conn.execute(
+            "INSERT INTO messages (session_id, role, tool_calls, timestamp)"
+            " VALUES (?, 'assistant', ?, 2)",
+            (PLATFORM_SESSION, json.dumps([{"id": "c1", "name": "terminal", "arguments": "{}"}])),
+        )
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, tool_call_id, timestamp)"
+            " VALUES (?, 'tool', ?, 'c1', 3)",
+            (PLATFORM_SESSION, stored),
+        )
+    calls = _payload(_run_script(root, [FRONT], max_result=max_result))["calls"]
+    return next(c for c in calls if c["task"] == FRONT)
 
 
 # ------------------------------------------------------------ the in-pod read
@@ -270,14 +305,67 @@ def test_each_call_is_paired_with_its_result_and_tagged(data_root: Path) -> None
     # ... and by tool_call_id.
     assert json.loads(calls[1]["result"]) == {"ok": False, "error": "board is full"}
     assert calls[2]["result"] == "pods: checkout CrashLoopBackOff"
+    # The failure verdict is taken in the pod, on the unclipped result.
+    assert [c["failed"] for c in calls] == [False, True, False]
     assert all(isinstance(c["at"], float) for c in calls)
     assert "_id" not in calls[0]
+
+
+def test_a_call_id_keyed_call_is_paired_by_it(data_root: Path) -> None:
+    """The other id spelling some tool-call serialisations use."""
+    with sqlite3.connect(data_root / "profiles" / "cluster-abc" / "state.db") as conn:
+        conn.execute("DELETE FROM messages WHERE role != 'user'")
+        conn.execute(
+            "INSERT INTO messages (session_id, role, tool_calls, timestamp)"
+            " VALUES (?, 'assistant', ?, 2)",
+            (
+                CLUSTER_SESSION,
+                json.dumps([{"call_id": "c9", "name": "kubectl_get", "arguments": "{}"}]),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, tool_call_id, timestamp)"
+            " VALUES (?, 'tool', 'one pod', 'c9', 3)",
+            (CLUSTER_SESSION,),
+        )
+    cluster = [c for c in _payload(_run_script(data_root, [FRONT]))["calls"] if c["task"] == CHILD]
+    assert [c["result"] for c in cluster] == ["one pod"]
+
+
+def test_a_result_whose_id_matches_no_call_is_an_orphan(data_root: Path) -> None:
+    """A stray result row never lands on an unrelated pending call (parse_response's rule)."""
+    with sqlite3.connect(data_root / "profiles" / "cluster-abc" / "state.db") as conn:
+        conn.execute("UPDATE messages SET tool_call_id = 'c_unknown' WHERE role = 'tool'")
+    payload = _payload(_run_script(data_root, [FRONT]))
+    cluster = [c for c in payload["calls"] if c["task"] == CHILD]
+    assert [c["result"] for c in cluster] == [None]
+    assert any("1 tool result(s) matched no call" in e for e in payload["errors"])
 
 
 def test_another_cards_session_in_the_same_store_is_not_read(data_root: Path) -> None:
     calls = _payload(_run_script(data_root, [FRONT]))["calls"]
     assert OTHER_SESSION not in {c["session"] for c in calls}
     assert OTHER not in {c["task"] for c in calls}
+
+
+def test_a_card_whose_id_extends_this_one_is_not_this_card(data_root: Path) -> None:
+    """``LIKE '%... t_front01%'`` alone would also take ``t_front012``'s session."""
+    longer = "20260917_200000_longer"
+    with sqlite3.connect(data_root / "profiles" / "platform" / "state.db") as conn:
+        conn.execute(
+            "INSERT INTO sessions (id, source, started_at) VALUES (?, 'kanban', 9.0)", (longer,)
+        )
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, 'user', ?, 9)",
+            (longer, f"work kanban task {FRONT}2"),
+        )
+        conn.execute(
+            "INSERT INTO messages (session_id, role, tool_calls, timestamp) VALUES"
+            " (?, 'assistant', ?, 10)",
+            (longer, json.dumps([{"name": "kanban_complete", "arguments": "{}"}])),
+        )
+    cards = {c["task"]: c for c in _payload(_run_script(data_root, [FRONT]))["cards"]}
+    assert [s["id"] for s in cards[FRONT]["sessions"]] == [PLATFORM_SESSION]
 
 
 def test_a_continuation_card_is_walked_when_the_creator_table_is_absent(tmp_path: Path) -> None:
@@ -408,7 +496,7 @@ def test_capture_yields_canonical_entries_with_secrets_scrubbed(data_root: Path)
     assert first["args"] == {"command": "kubectl get pods"}
     assert first["status"] == "completed"
     assert TOKEN not in first["result"]
-    assert "GH_TOKEN=[REDACTED]" in first["result"]
+    assert f"GH_TOKEN={REDACTED}" in first["result"]
     # A structured hermes failure is status="error", as parse_response marks it.
     assert failed["status"] == "error"
     assert cluster["agent"] == "cluster-abc"
@@ -437,66 +525,147 @@ def test_capture_survives_a_sentinel_without_json() -> None:
     assert worker_trajectory.capture(lambda s, t: reply, [FRONT], 5.0) is None
 
 
+# ------------------------------------------------------ scrubbing, in the pod
+
+
 @pytest.mark.parametrize(
     ("raw", "kept", "gone"),
     [
         ("Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345", "Authorization:", "abcdefgh"),
+        ("Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==", "Basic", "QWxhZGRpbj"),
         (f"export GH_TOKEN={TOKEN}", "export GH_TOKEN=", TOKEN),
+        ("ANTHROPIC_API_KEY=sk-ant-abcdefghijklmnopqrstuv", "ANTHROPIC_API_KEY=", "abcdefghij"),
+        ("SLACK_BOT=xoxb-1234567890-abcdefghij", "SLACK_BOT=", "1234567890"),
         ("https://user:hunter22@github.com/org/repo.git", "@github.com/org/repo.git", "hunter22"),
         (
             "-----BEGIN PRIVATE KEY-----\nMIIE...\n-----END PRIVATE KEY-----",
-            "[REDACTED]",
+            "[REDACTED_PRIVATE_KEY]",
             "MIIE",
         ),
         ('{"password": "s3cretvalue"}', '"password": "', "s3cretvalue"),
-        ("ya29.a0AfH6SMBxxxxxxxxxxxxxxxxxxxxxxxx", "[REDACTED]", "a0AfH6"),
+        ("ya29.a0AfH6SMBxxxxxxxxxxxxxxxxxxxxxxxx", REDACTED, "a0AfH6"),
     ],
 )
-def test_scrub_redacts_credential_shapes(raw: str, kept: str, gone: str) -> None:
-    out = worker_trajectory.scrub(raw)
+def test_the_pod_redacts_credential_shapes_with_the_installs_redactor(
+    data_root: Path, raw: str, kept: str, gone: str
+) -> None:
+    out = _read_result(data_root, raw)["result"]
     assert kept in out
     assert gone not in out
 
 
-def test_scrub_redacts_every_value_of_a_kubernetes_secret() -> None:
-    """``kubectl get secret -o yaml`` / ``-o json``: the key names are anything."""
+def test_a_secrets_yaml_block_is_blanked_including_block_scalars(data_root: Path) -> None:
+    """``kubectl get secret -o yaml``: pairs, and the lines under a ``|`` scalar."""
     yaml = (
         "apiVersion: v1\nkind: Secret\nmetadata:\n  name: tls\n  namespace: shop\n"
         "data:\n  tls.key: TFMwdExTMUNSVWRKVGlCUVVrbFdRVlJGSUV0RldTMHRMUzB0\n"
-        "  .dockerconfigjson: eyJhdXRocyI6eyJnaGNyLmlvIjp7fX19\n"
+        "stringData:\n  config.txt: |\n    first line with key: val\n"
+        "    SUPER_SECRET_LINE_WITHOUT_COLON_12345\n    ANOTHER_LINE\n"
         "type: kubernetes.io/tls\n"
     )
-    out = worker_trajectory.scrub(yaml)
-    assert "TFMwdExTMUNSVWRKVGlCUVVrbFdRVlJGSUV0RldTMHRMUzB0" not in out
-    assert "eyJhdXRocyI6eyJnaGNyLmlvIjp7fX19" not in out
-    assert "  tls.key: [REDACTED]\n  .dockerconfigjson: [REDACTED]\n" in out
+    out = _read_result(data_root, yaml)["result"]
+    for gone in ("TFMwdExT", "SUPER_SECRET", "ANOTHER_LINE", "first line"):
+        assert gone not in out
+    assert f"  tls.key: {REDACTED}\n" in out
+    assert f"  config.txt: {REDACTED}\n    {REDACTED}\n    {REDACTED}\n    {REDACTED}\n" in out
     assert "namespace: shop" in out and "type: kubernetes.io/tls" in out
-    js = '{"kind": "Secret", "data": {"ca.crt": "Q0VSVA==", "token": "dG9rZW4="}, "type": "x"}'
-    out = worker_trajectory.scrub(js)
-    assert "Q0VSVA==" not in out and "dG9rZW4=" not in out
-    assert '"data": {"ca.crt": "[REDACTED]", "token": "[REDACTED]"}' in out
-    assert '"type": "x"' in out
 
 
-def test_arguments_are_scrubbed_too() -> None:
-    entry = worker_trajectory._entry(
+def test_a_secrets_json_block_is_blanked_before_it_is_clipped(data_root: Path) -> None:
+    """``-o json`` with values longer than the clip: the cut lands after the scrub."""
+    big = "Q" * 3000
+    js = json.dumps(
         {
-            "name": "terminal",
-            "args": json.dumps({"command": f"gh auth login --with-token <<< {TOKEN}"}),
-            "result": "ok",
-            "agent": "platform",
-            "task": FRONT,
-            "session": PLATFORM_SESSION,
-            "at": 1.0,
+            "apiVersion": "v1",
+            "data": {"credentials.json": big, "ca.crt": "Q0VSVA=="},
+            "kind": "Secret",
         }
     )
-    assert TOKEN not in json.dumps(entry["args"])
-    assert entry["args"]["command"].endswith("[REDACTED]")
+    entry = _read_result(data_root, js)
+    assert "QQQQ" not in entry["result"] and "Q0VSVA" not in entry["result"]
+    assert f'"credentials.json": "{REDACTED}", "ca.crt": "{REDACTED}"' in entry["result"]
+    # An unclosed block (a tool that cut its own output) is blanked to the end.
+    cut = js[: js.index("ca.crt") + 20]
+    assert "QQQQ" not in _read_result(data_root, cut)["result"]
 
 
-def test_scrub_leaves_ordinary_output_alone() -> None:
+def test_a_structured_result_is_scrubbed_where_its_strings_sit(data_root: Path) -> None:
+    """A ``\\x00json:`` dict: a ``data`` mapping is blanked, and YAML inside a
+    string field is seen with its newlines rather than as escaped text."""
+    result = {
+        "kind": "Secret",
+        "data": {"token": "dG9rZW4=", "count": 2},
+        "output": "apiVersion: v1\ndata:\n  k: dmFsdWU=\nkind: Secret",
+        "note": f"see https://bob:pw12345@example.com/x and {TOKEN}",
+    }
+    out = json.loads(_read_result(data_root, result)["result"])
+    assert out["data"] == {"token": REDACTED, "count": 2}
+    assert f"  k: {REDACTED}" in out["output"] and "dmFsdWU" not in out["output"]
+    assert "pw12345" not in out["note"] and TOKEN not in out["note"]
+
+
+def test_a_configmaps_data_is_blanked_as_the_audit_log_blanks_it(data_root: Path) -> None:
+    """By shape, not by kind: the redactor's documented choice, kept here."""
+    cm = "apiVersion: v1\ndata:\n  LOG_LEVEL: debug\nkind: ConfigMap\n"
+    out = _read_result(data_root, cm)["result"]
+    assert f"  LOG_LEVEL: {REDACTED}\n" in out and "kind: ConfigMap" in out
+
+
+def test_a_clipped_structured_failure_still_reads_as_an_error(data_root: Path) -> None:
+    """The verdict is taken on the unclipped result, so the clip cannot hide it."""
+    entry = _read_result(data_root, {"exit_code": 1, "output": "x" * 3000})
+    assert entry["failed"] is True and entry["result"].endswith("chars]")
+    status = [
+        e["status"]
+        for e in worker_trajectory.capture(
+            lambda s, t: _run_script(data_root, [FRONT]), [FRONT], 5.0
+        ).entries
+        if e["task"] == FRONT
+    ]
+    assert status == ["error"]
+
+
+def test_arguments_are_scrubbed_too(data_root: Path) -> None:
+    with sqlite3.connect(data_root / "profiles" / "platform" / "state.db") as conn:
+        conn.execute(
+            "UPDATE messages SET tool_calls = ?"
+            " WHERE role = 'assistant' AND tool_calls LIKE '%get pods%'",
+            (
+                json.dumps(
+                    [
+                        {
+                            "name": "terminal",
+                            "arguments": json.dumps(
+                                {"command": f"gh auth login --with-token <<< {TOKEN}"}
+                            ),
+                        }
+                    ]
+                ),
+            ),
+        )
+    captured = worker_trajectory.capture(lambda s, t: _run_script(data_root, [FRONT]), [FRONT], 5.0)
+    assert captured is not None
+    first = captured.entries[0]
+    assert TOKEN not in json.dumps(first["args"])
+    assert first["args"]["command"].endswith(REDACTED)
+
+
+def test_ordinary_output_is_left_alone(data_root: Path) -> None:
     text = "NAME READY STATUS\ncheckout-7d9f 0/1 CrashLoopBackOff\nservice token-refresher ok"
-    assert worker_trajectory.scrub(text) == text
+    assert _read_result(data_root, text)["result"] == text
+
+
+def test_a_pod_without_the_redactor_withholds_content_and_says_so(data_root: Path) -> None:
+    """Fail closed: names, tags and statuses come back, results and arguments do not."""
+    reply = _run_script(data_root, [FRONT], redactor=data_root / "no-such-redactor.py")
+    payload = _payload(reply)
+    assert any(e.startswith("redactor ") and "withheld" in e for e in payload["errors"])
+    assert TOKEN not in reply
+    captured = worker_trajectory.capture(lambda s, t: reply, [FRONT], 5.0)
+    assert [e["name"] for e in captured.entries] == ["terminal", "kanban_create", "kubectl_get"]
+    assert [e["status"] for e in captured.entries] == ["completed", "error", "completed"]
+    assert all("WITHHELD" in e["result"] for e in captured.entries)
+    assert all(e["args"] == {"raw": e["result"]} for e in captured.entries)
 
 
 def test_settle_appends_worker_calls_after_the_routers_and_before_the_purge(

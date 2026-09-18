@@ -37,9 +37,17 @@ Each tool call becomes one devops-bench trajectory entry in the same shape
 ``parsing.parse_response`` emits (``name`` / ``args`` / ``result`` /
 ``status``) plus four tags: ``agent`` (the profile that made the call),
 ``task`` (the card it was working), ``session`` and ``at`` (epoch seconds).
-Results and arguments are clipped in the pod, so a chatty worker cannot make
-the exec output unbounded, and credential-shaped strings are scrubbed before
-anything reaches the record. The tags are also how ``tool_called`` keeps its
+Results and arguments are scrubbed and clipped inside the pod, in that order,
+so nothing credential-shaped leaves it and a chatty worker cannot make the exec
+output unbounded. The scrubber is the install's own ``AuditRedactor`` (the one
+the audit log and the LiteLLM gateway run every message through), loaded by
+path from the image (:data:`REDACTOR_PATH`), plus a supplement for what it does
+not cover: a Secret's JSON ``data`` object, the continuation lines of a block
+scalar under ``data:``, and userinfo in a URL. Blanking is by shape, not by ``kind``: a ConfigMap's
+``data:`` is blanked as a Secret's is, the call the redactor documents as the
+safe direction to err in. A pod whose redactor cannot be loaded withholds every
+result and argument rather than sending them unscrubbed; the call names, tags
+and statuses still come back. The tags are also how ``tool_called`` keeps its
 router-only contract: it skips every entry carrying ``agent``.
 
 Two readers change with this. The record's ``trajectory`` is what devops-bench
@@ -63,15 +71,14 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import shlex
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from kube_agents_bench.parsing import _call_args, _output_failed
+from kube_agents_bench.parsing import _call_args
 
-__all__ = ["WorkerCapture", "capture", "scrub"]
+__all__ = ["WorkerCapture", "capture"]
 
 _log = logging.getLogger("kube_agents_bench.worker_trajectory")
 
@@ -93,55 +100,31 @@ DATA_ROOT = "/opt/data"
 HERMES_PYTHON = "/opt/hermes/.venv/bin/python3"
 FALLBACK_PYTHON = "python3"
 
+# The install's own credential redactor: ``agents/chat/defaults/plugins/common/
+# redactor.py``, which the image copies to ``/opt/defaults`` (deploy/docker/
+# Dockerfile). Loaded by path inside the pod, so the record is scrubbed by the
+# same rules and markers as the audit log and no copy of them lives here.
+# Passed to the in-pod script as an argument so the tests can point it at the
+# repository's file.
+REDACTOR_PATH = "/opt/defaults/plugins/common/redactor.py"
+
 # Bounds applied inside the pod, so the exec output stays bounded however much
 # a worker talked. A run's workers make tens to a few hundred calls; the call
 # cap is a runaway guard, and the per-field caps keep a ``kubectl logs`` dump or
 # a manifest read from carrying the whole record with it. A clipped field ends
-# in a marker naming how much was dropped.
+# in a marker naming how much was dropped. Clipping follows scrubbing, so a cut
+# never lands inside a Secret block the scrubber then cannot see.
 MAX_CARDS = 32
 MAX_CALLS = 2000
 MAX_RESULT_CHARS = 2000
 MAX_ARGS_CHARS = 2000
 
-# Credential shapes that can appear in a tool result or argument: bearer
-# headers, GitHub and Google tokens and keys, PEM blocks, userinfo in URLs,
-# ``key=value`` assignments of the usual secret names, and the ``data:`` /
-# ``stringData:`` block of a Kubernetes Secret as ``kubectl get -o yaml`` and
-# ``-o json`` print it (the value of every key in the block, whatever the key
-# is called). Kept deliberately broad; a false positive costs one redacted
-# value, a miss publishes a credential.
-_SECRET_PATTERNS = (
-    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}"),
-    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
-    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
-    re.compile(r"\bya29\.[A-Za-z0-9._-]{20,}"),
-    re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"),
-    re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
-    re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
-    re.compile(r"(?i)(?<=://)[^\s/:@]+:[^\s/@]+(?=@)"),
-    re.compile(
-        r"(?i)\b((?:api[_-]?key|access[_-]?key|secret(?:[_-]?key)?|password|passwd|token)"
-        r'["\']?\s*[=:]\s*["\']?)([^\s"\'&]{6,})'
-    ),
-)
-# The two Secret block shapes need a second pass over the block they match,
-# one value at a time, so they are applied by ``_scrub_secret_blocks`` rather
-# than listed above. YAML: a ``data:`` line, then every deeper-indented
-# ``key: value`` line until the indent drops. JSON: ``"data": { ... }``.
-_SECRET_YAML_BLOCK_RE = re.compile(
-    r"(?m)^(?P<indent>[ \t]*)(?:data|stringData):[ \t]*\n"
-    r"(?P<body>(?:(?P=indent)[ \t]+[^\s:]+:[^\n]*(?:\n|\Z))+)"
-)
-_SECRET_YAML_VALUE_RE = re.compile(r"(?m)^([ \t]+[^\s:]+:[ \t]*)(\S[^\n]*)$")
-_SECRET_JSON_BLOCK_RE = re.compile(r'("(?:data|stringData)"\s*:\s*\{)([^{}]*)(\})')
-_SECRET_JSON_VALUE_RE = re.compile(r'("[^"]+"\s*:\s*")([^"]*)(")')
-_REDACTED = "[REDACTED]"
-
 # Runs inside the agent container under hermes' own interpreter. Plain
-# ``python3`` and ``sqlite3`` only: nothing from hermes is imported, so a
-# hermes release that moves a module cannot break the read, only a schema
-# change can -- and that lands in ``errors`` rather than in an exception.
+# ``python3`` and ``sqlite3``, plus the redactor loaded from the image: nothing
+# from hermes is imported, so a hermes release that moves a module cannot break
+# the read, only a schema change can -- and that lands in ``errors`` rather
+# than in an exception. A redactor that fails to load lands there too, and
+# withholds content rather than leaking it.
 #
 # Kept as one string rather than a file the harness would have to ship into
 # the pod: ``_agent_shell`` runs ``sh -c``, and a quoted ``python3 -c``
@@ -149,16 +132,128 @@ _REDACTED = "[REDACTED]"
 # harness side also knows -- the data root, the sentinel, the caps -- and then
 # the card ids, so no literal is spelled twice.
 _IN_POD_SCRIPT = r"""
-import json, os, sqlite3, sys
+import importlib.util, json, os, re, sqlite3, sys
 
-ROOT, SENTINEL = sys.argv[1], sys.argv[2]
-MAX_CARDS, MAX_CALLS, MAX_RESULT, MAX_ARGS = [int(a) for a in sys.argv[3:7]]
-roots = [a for a in sys.argv[7:] if a]
+ROOT, SENTINEL, REDACTOR = sys.argv[1:4]
+MAX_CARDS, MAX_CALLS, MAX_RESULT, MAX_ARGS = [int(a) for a in sys.argv[4:8]]
+roots = [a for a in sys.argv[8:] if a]
 # Seconds a read waits on a locked store before reporting the card unread. A
 # hermes writer holds a WAL lock for milliseconds; anything longer is stuck.
 SQLITE_BUSY_TIMEOUT = 10
 out = {"cards": [], "calls": [], "errors": [], "truncated": False}
 JSON_PREFIX = "\x00json:"
+PROMPT = "work kanban task "
+# The redactor's own marker, so a reader grepping artifacts finds one marker.
+REDACTED = "[REDACTED_SECRET]"
+WITHHELD = "[WITHHELD: redactor unavailable in the pod]"
+TOOL_ERROR_PREFIX = "Error executing tool"
+
+# What AuditRedactor's line scan leaves behind in a Secret payload: the
+# continuation lines of a block scalar under data:/stringData: (its scan blanks
+# key: value pairs only), and the JSON form, "data": {...}, closed or cut
+# short. Plus userinfo in a URL, which it has no pattern for.
+YAML_BLOCK_RE = re.compile(r"^(\s*)(data|stringData)\s*:\s*$")
+YAML_PAIR_RE = re.compile(r"^(\s*)([^\s:]+)\s*:\s*(.*)$")
+JSON_BLOCK_RE = re.compile(r'("(?:data|stringData)"\s*:\s*\{)([^{}]*)(\}|\Z)')
+JSON_PAIR_RE = re.compile(r'("(?:[^"\\]|\\.)*"\s*:\s*")((?:[^"\\]|\\.)*)("|\Z)')
+URL_USERINFO_RE = re.compile(r"(://[^\s/:@]+:)[^\s/@]+(?=@)")
+
+
+def load_redactor():
+    name = "kube_agents_audit_redactor"
+    spec = importlib.util.spec_from_file_location(name, REDACTOR)
+    if spec is None or spec.loader is None:
+        raise ImportError("no loader for " + REDACTOR)
+    module = importlib.util.module_from_spec(spec)
+    # Registered before the exec: the file's dataclass resolves its string
+    # annotations through sys.modules (credential_patterns in
+    # scripts/validate_bench_cases.py explains the failure otherwise).
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module.AuditRedactor.redact_text
+
+
+try:
+    redact_text = load_redactor()
+except Exception as exc:
+    out["errors"].append(
+        "redactor %s: %s; results and arguments withheld" % (REDACTOR, exc)
+    )
+    redact_text = None
+
+
+def scrub_blocks(text):
+    if "data" not in text:
+        return text
+    lines = text.split("\n")
+    block = None
+    for i, line in enumerate(lines):
+        opener = YAML_BLOCK_RE.match(line)
+        if opener:
+            block = len(opener.group(1))
+            continue
+        if block is None or not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent <= block:
+            block = None
+            continue
+        pair = YAML_PAIR_RE.match(line)
+        if pair is None:
+            lines[i] = " " * indent + REDACTED
+        elif pair.group(3):
+            lines[i] = "%s%s: %s" % (pair.group(1), pair.group(2), REDACTED)
+    text = "\n".join(lines)
+    return JSON_BLOCK_RE.sub(
+        lambda m: m.group(1)
+        + JSON_PAIR_RE.sub(lambda p: p.group(1) + REDACTED + p.group(3), m.group(2))
+        + m.group(3),
+        text,
+    )
+
+
+def scrub_text(text):
+    text = URL_USERINFO_RE.sub(lambda m: m.group(1) + REDACTED, text)
+    return redact_text(scrub_blocks(text))
+
+
+def scrub(value, key=None):
+    # Strings are scrubbed where they sit, so YAML inside a JSON string field
+    # is seen with its newlines rather than as escaped text; a data/stringData
+    # mapping is blanked wholesale, as the text shapes are.
+    if redact_text is None:
+        return WITHHELD
+    if isinstance(value, str):
+        return scrub_text(value)
+    if isinstance(value, dict):
+        if key in ("data", "stringData"):
+            return {k: REDACTED if isinstance(v, str) else scrub(v) for k, v in value.items()}
+        return {k: scrub(v, k) for k, v in value.items()}
+    if isinstance(value, list):
+        return [scrub(v) for v in value]
+    return value
+
+
+def failed(result):
+    # parsing._output_failed, on the result before it is clipped: a clipped
+    # JSON failure no longer parses, so the verdict has to be taken here.
+    if isinstance(result, str):
+        if result.startswith(TOOL_ERROR_PREFIX):
+            return True
+        try:
+            result = json.loads(result.strip())
+        except ValueError:
+            return False
+    if not isinstance(result, dict):
+        return False
+    if result.get("success") is False or result.get("ok") is False:
+        return True
+    code = result.get("exit_code", result.get("returncode"))
+    if isinstance(code, int) and code != 0:
+        return True
+    return bool(result.get("error")) and not (
+        result.get("content") or result.get("result") or result.get("structuredContent")
+    )
 
 
 def clip(text, limit):
@@ -222,6 +317,7 @@ def read_session(conn, card, profile, sid):
     seen = set()
     pending = []
     count = 0
+    orphans = 0
     rows = conn.execute(
         "SELECT id, role, content, tool_name, tool_calls, tool_call_id, timestamp "
         "FROM messages WHERE session_id = ? ORDER BY id",
@@ -241,30 +337,46 @@ def read_session(conn, card, profile, sid):
                 if len(out["calls"]) >= MAX_CALLS:
                     out["truncated"] = True
                     return count
+                arguments = fn.get("arguments")
                 entry = {
                     "name": str(fn.get("name") or ""),
-                    "args": clip(fn.get("arguments"), MAX_ARGS),
+                    "args": clip(scrub(arguments), MAX_ARGS) if arguments is not None else None,
                     "result": None,
+                    "failed": None,
                     "agent": profile,
                     "task": card,
                     "session": sid,
                     "at": row["timestamp"],
-                    "_id": tc.get("id"),
+                    "_id": tc.get("id") or tc.get("call_id"),
                 }
                 pending.append(entry)
                 out["calls"].append(entry)
                 count += 1
         elif row["role"] == "tool":
+            # parse_response's rule: an id is matched to its call or nothing,
+            # never to an unrelated pending call; a result without an id goes
+            # to the oldest unanswered call that has none, by name when the
+            # row names one.
             target = None
             if row["tool_call_id"]:
                 target = next((e for e in pending if e["_id"] == row["tool_call_id"]), None)
-            if target is None and row["tool_name"]:
-                target = next((e for e in pending if e["name"] == row["tool_name"]), None)
-            if target is None and pending:
-                target = pending[0]
-            if target is not None:
-                pending.remove(target)
-                target["result"] = clip(decode(row["content"]), MAX_RESULT)
+            else:
+                unkeyed = [e for e in pending if e["_id"] is None]
+                if row["tool_name"]:
+                    target = next((e for e in unkeyed if e["name"] == row["tool_name"]), None)
+                if target is None and unkeyed:
+                    target = unkeyed[0]
+            if target is None:
+                orphans += 1
+                continue
+            pending.remove(target)
+            result = decode(row["content"])
+            target["failed"] = failed(result)
+            target["result"] = clip(scrub(result), MAX_RESULT)
+    if orphans:
+        out["errors"].append(
+            "session %s of %s: %d tool result(s) matched no call" % (sid, profile, orphans)
+        )
     return count
 
 
@@ -289,17 +401,20 @@ def sessions_for(card, assignee, runs):
         try:
             conn = ro(path)
             rows = conn.execute(
-                "SELECT DISTINCT session_id FROM messages WHERE role = 'user' "
+                "SELECT session_id, content FROM messages WHERE role = 'user' "
                 "AND content LIKE ? ESCAPE '\\' ORDER BY id",
-                ("%work kanban task " + like_escape(card) + "%",),
+                ("%" + PROMPT + like_escape(card) + "%",),
             ).fetchall()
             conn.close()
         except sqlite3.Error as exc:
             out["errors"].append("session store for %s: %s" % (profile, exc))
             continue
+        # LIKE's trailing wildcard would also take a card whose id merely
+        # starts with this one; the id has to end where the prompt's does.
+        exact = re.compile(re.escape(PROMPT + card) + r"(?![\w-])")
         for row in rows:
             sid = row["session_id"]
-            if sid not in [f[0] for f in found]:
+            if exact.search(row["content"] or "") and sid not in [f[0] for f in found]:
                 found.append((sid, profile, "worker_prompt"))
     return found
 
@@ -405,68 +520,24 @@ class WorkerCapture:
     summary: dict[str, Any] = field(default_factory=dict)
 
 
-def _scrub_secret_blocks(text: str) -> str:
-    """Redact every value inside a Kubernetes Secret ``data`` block."""
-
-    def _yaml(match: re.Match[str]) -> str:
-        body = _SECRET_YAML_VALUE_RE.sub(lambda m: m.group(1) + _REDACTED, match.group("body"))
-        return match.group(0)[: match.start("body") - match.start()] + body
-
-    def _json(match: re.Match[str]) -> str:
-        body = _SECRET_JSON_VALUE_RE.sub(
-            lambda m: m.group(1) + _REDACTED + m.group(3), match.group(2)
-        )
-        return match.group(1) + body + match.group(3)
-
-    text = _SECRET_YAML_BLOCK_RE.sub(_yaml, text)
-    return _SECRET_JSON_BLOCK_RE.sub(_json, text)
-
-
-def scrub(text: str | None) -> str | None:
-    """Replace credential-shaped substrings with ``[REDACTED]``."""
-    if not text:
-        return text
-    text = _scrub_secret_blocks(text)
-    for pattern in _SECRET_PATTERNS:
-        if pattern.groups:
-            text = pattern.sub(lambda m: m.group(1) + _REDACTED, text)
-        else:
-            text = pattern.sub(_REDACTED, text)
-    return text
-
-
-def _scrub_tree(value: Any) -> Any:
-    """:func:`scrub` every string inside a parsed JSON value."""
-    if isinstance(value, str):
-        return scrub(value)
-    if isinstance(value, list):
-        return [_scrub_tree(v) for v in value]
-    if isinstance(value, dict):
-        return {str(k): _scrub_tree(v) for k, v in value.items()}
-    return value
-
-
-def _args(raw: Any) -> dict[str, Any]:
-    """The recorded ``arguments`` as the mapping ``ToolCall`` wants, scrubbed.
-
-    ``parsing._call_args`` is the rule (a JSON object as is, anything else --
-    including a clipped JSON string -- under ``raw``); every string in the
-    result is scrubbed.
-    """
-    return _scrub_tree(_call_args(raw))
-
-
 def _entry(call: dict[str, Any]) -> dict[str, Any]:
-    result = scrub(call.get("result")) if isinstance(call.get("result"), str) else None
+    """One trajectory entry in ``parsing.parse_response``'s shape, plus the tags.
+
+    ``status`` comes from the pod's ``failed`` verdict, taken there on the
+    result before it was clipped (a clipped JSON failure would not parse
+    here). ``args`` follow ``parsing._call_args``: a JSON object as is,
+    anything else -- a clipped or withheld string included -- under ``raw``.
+    """
+    result = call.get("result") if isinstance(call.get("result"), str) else None
     if result is None:
         status = "called"
-    elif _output_failed(result):
+    elif call.get("failed"):
         status = "error"
     else:
         status = "completed"
     return {
         "name": str(call.get("name") or ""),
-        "args": _args(call.get("args")),
+        "args": _call_args(call.get("args")),
         "result": result,
         "status": status,
         "agent": str(call.get("agent") or ""),
@@ -488,6 +559,7 @@ def command(task_ids: list[str]) -> str:
         for a in [
             DATA_ROOT,
             CAPTURE_PRESENT,
+            REDACTOR_PATH,
             str(MAX_CARDS),
             str(MAX_CALLS),
             str(MAX_RESULT_CHARS),
