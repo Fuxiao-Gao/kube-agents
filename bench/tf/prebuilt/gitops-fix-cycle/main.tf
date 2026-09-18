@@ -81,7 +81,7 @@ locals {
   }
   task_path      = var.gitops_task_path != "" ? var.gitops_task_path : "tasks/${var.gitops_task}"
   base_sha       = var.gitops_broken_base_sha != "" ? var.gitops_broken_base_sha : local.broken_base_sha[var.gitops_task]
-  history_parent = lookup(local.history_parent_sha, var.gitops_task, "")
+  history_parent = var.gitops_history_parent_sha != "" ? var.gitops_history_parent_sha : lookup(local.history_parent_sha, var.gitops_task, "")
   manifests_dir  = "${path.module}/manifests/${var.gitops_task}"
   # The task prompt names this branch via {{CLUSTER_NAME}}, so the default
   # must stay in step with bench/tasks/<task>-gitops/task.yaml.
