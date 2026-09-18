@@ -752,12 +752,17 @@ one reviewable place.
 Credentials reach the agent pod as environment, through `SecretKeyRef`, and a container's
 environment is fixed for the life of the pod: editing the Secret changes nothing a running container
 can see. So the operator does for Secrets what the config hash does for ConfigMaps. It reads the
-Secret keys the rendered pod spec consumes as environment, digests them with SHA-256, and stamps the
-result on the pod template as `kubeagents.x-k8s.io/secret-env-hash`. Rotating one of those keys moves
-the digest, which changes the template, which rolls the pod onto the new value. Both pods that read
-credentials this way are stamped: the gateway and the credential proxy.
+Secret keys the rendered pod spec consumes as environment, digests them with an HMAC-SHA256 keyed by
+the UID of each Secret they come from, and stamps the result on the pod template as
+`kubeagents.x-k8s.io/secret-env-hash`. Rotating one of those keys moves the digest, which changes the
+template, which rolls the pod onto the new value. Both pods that read credentials this way are
+stamped: the gateway and the credential proxy. The digest is keyed because the annotation is
+readable by anyone who can read pods: an unkeyed hash would let that reader verify guesses at a
+low-entropy value offline, whereas the UID is on the Secret object, and reading it takes the same
+`get` on the Secret that reads the values. (A UID also travels on Events and owner references that
+point at the Secret; the operator creates neither.)
 
-Four details decide whether you will see it happen.
+Five details decide whether you will see it happen.
 
 - **Within fifteen minutes, not immediately.** The operator does not watch Secrets — it holds no
   `list` or `watch` on them, deliberately — so nothing wakes a reconcile when one changes. A healthy
@@ -778,12 +783,18 @@ Four details decide whether you will see it happen.
   you would expect. A Secret the operator cannot read for any other reason — an API error rather than
   a `NotFound` — keeps the digest the last good pass computed, so a blip neither rolls the pod nor
   stops the rest of the reconcile.
+- **Recreating a Secret rolls the pod once, even with the same values.** The digest's key is built
+  from the UID of every Secret it reads, which an in-place edit, `kubectl apply`, or a patch keeps
+  and a delete-and-create (including `kubectl replace --force`) replaces. A metadata-only write — a new label or annotation —
+  changes neither the UID nor the values and rolls nothing.
 
 **The roll is a stop-start.** At the default single replica the gateway's update strategy is
 `Recreate`, so the old pod is terminated before the new one starts and the agent is unreachable
 across the gap — up to the startup budget of roughly ten minutes on a cold image pull. Expect one
 such restart per agent the first time an operator carrying this change reconciles: the annotation is
 new, so the first pass adds it and the template changes once, whether or not anything was rotated.
+An operator upgrade that changes how the digest is computed restarts each stamped pod once in the
+same way.
 
 ## Reconcile behavior
 

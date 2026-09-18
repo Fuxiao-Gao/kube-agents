@@ -919,10 +919,14 @@ func buildA2ANATSConfigSecret(agent *agentv1alpha1.PlatformAgent, creds *corev1.
 // accepted write to the creds Secret, so labelling it by hand, a policy
 // controller stamping the namespace, or a restore that renumbers the namespace
 // rolls the single-replica bus once with nothing the server reads having
-// changed — clients reconnect, and JetStream state lives on the PV. The
-// alternative that ignores metadata churn is a digest of the password bytes,
-// which is the alert this function exists to close, so the spurious roll is
-// the price of not hashing the credential.
+// changed — clients reconnect, and JetStream state lives on the PV. An unkeyed
+// digest of the password bytes would ignore metadata churn but is the alert
+// this function exists to close, so the spurious roll is the price of not
+// hashing the credential. secretEnvHash (platformagent_secret_hash.go) has
+// since shown a third way — an HMAC over the values keyed by the Secret's UID,
+// which ignores metadata churn without an unkeyed digest — and moving this
+// function onto it is a separate change: it alters when the bus rolls under
+// mode: next and needs its own live test.
 //
 // And the rotation it notices rolls the bus, not the bus's clients. This hash
 // rides the NATS pod template alone; the gateway Deployment and the provision
