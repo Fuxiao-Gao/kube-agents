@@ -1755,6 +1755,34 @@ _GIT_GLOBAL_WITH_VALUE = frozenset(
 
 _GIT_PUSH_GLOBAL_WITH_VALUE = _GIT_GLOBAL_WITH_VALUE
 
+# The remote a push is judged against when it names none, or names one that
+# `_detect_repo_default_branch` cannot look up.
+GIT_DEFAULT_REMOTE = "origin"
+
+# Where a clone keeps its remote-tracking refs, relative to the git directory,
+# and the file under `<remote>/` there that records the remote's default branch.
+GIT_REMOTES_REFS_DIR = Path("refs") / "remotes"
+GIT_REMOTE_HEAD_FILE = "HEAD"
+
+# What `_detect_repo_default_branch` accepts as a remote *name*. The
+# `<repository>` slot of `git push` takes a name, a URL, or a filesystem path,
+# and only a name has a tracking HEAD under `refs/remotes/` to read; a path,
+# joined onto that directory verbatim, walked out of it (`../../../../etc`)
+# and read whichever file the agent's argv pointed at (CodeQL alert #38). This
+# pre-check is deliberately thin: not empty, not the two names that mean a
+# directory, and no character that cannot be in a ref. `/` stays allowed
+# because git accepts slash-named remotes (`git remote add team/upstream …`
+# keeps `refs/remotes/team/upstream/HEAD`), and refusing it here would drop
+# the lookup, and the protection, for a remote git honours -- the same
+# narrowing an ASCII allowlist would do to `gh+fork` or `my@fork`. Containment
+# is not this check's job: `_remote_head_path` normalises the joined path at
+# the sink and refuses anything that leaves `refs/remotes/`, whatever mix of
+# `..` and `/` it was built from. A value this drops, or the sink refuses, is
+# not looked up, and the push is judged against `origin`, which is what a URL
+# push already got.
+_GIT_REMOTE_NAME_SEPARATORS = frozenset({"\\", "\0"})
+_GIT_REMOTE_NOT_A_NAME = frozenset({"", ".", ".."})
+
 # Directory `core.hooksPath` is pinned to. It lives under the state dir, which
 # is a sidecar-only emptyDir, and is created empty and mode 0500 at startup.
 # A hook only runs if git finds an executable file of the right name in the
@@ -2196,7 +2224,34 @@ def _git_refused_name(argument: str) -> str:
     )
 
 
-def _detect_repo_default_branch(repo_dir: Path | None, remote: str = "origin") -> str | None:
+def _is_git_remote_name(value: str) -> bool:
+    """Could `value` be a remote name at all? Containment is `_remote_head_path`'s."""
+    return value not in _GIT_REMOTE_NOT_A_NAME and _GIT_REMOTE_NAME_SEPARATORS.isdisjoint(value)
+
+
+def _remote_head_path(remotes_dir: Path, remote: str) -> Path | None:
+    """`<remotes_dir>/<remote>/HEAD`, or None when that path leaves `remotes_dir`.
+
+    `remote` is the agent's `git push <repository>` argument, and this is the
+    check that confines it, placed at the sink: normalise the joined path and
+    require the refs directory to be a proper prefix of it, so `../x`, an
+    absolute path, and `team/../../x` are all refused while `team/upstream`
+    resolves to its own tracking HEAD. Spelled with
+    `os.path.normpath` and `str.startswith` rather than `Path.resolve` and
+    `_within` because that pair is what CodeQL's `py/path-injection` query
+    recognises as a sanitiser; the workspace containment the rest of this
+    module does through `_within` is invisible to it.
+    """
+    base = os.path.normpath(str(remotes_dir))
+    candidate = os.path.normpath(os.path.join(base, remote, GIT_REMOTE_HEAD_FILE))
+    if candidate.startswith(base + os.sep):
+        return Path(candidate)
+    return None
+
+
+def _detect_repo_default_branch(
+    repo_dir: Path | None, remote: str = GIT_DEFAULT_REMOTE
+) -> str | None:
     """Best-effort detection of remote default branch from local clone ref metadata (#1498).
 
     Reads refs/remotes/<remote>/HEAD directly without subprocess or network calls.
@@ -2204,16 +2259,29 @@ def _detect_repo_default_branch(repo_dir: Path | None, remote: str = "origin") -
     cooperative guard against accidental pushes; authoritative protection against
     deliberate workspace ref manipulation requires setting CREDENTIAL_PROXY_BASE_BRANCH
     or GITOPS_BASE_BRANCH.
+
+    `remote` comes from the agent's argv. Only a value that stays under
+    `refs/remotes/` once joined is looked up. A URL in that slot never reached
+    here (the caller keeps `origin` for anything with a `:`); a filesystem
+    path used to be joined and read, and is now refused at the sink, so both
+    are judged against `origin`.
     """
     if not repo_dir:
         return None
     repo_root = _find_repo_root(repo_dir) or Path(repo_dir)
-    remotes = [remote] if remote == "origin" else [remote, "origin"]
+    remotes = [
+        name
+        for name in dict.fromkeys((remote, GIT_DEFAULT_REMOTE))
+        if _is_git_remote_name(name)
+    ]
     for rem in remotes:
-        for head_candidate in (
-            repo_root / ".git" / "refs" / "remotes" / rem / "HEAD",
-            repo_root / "refs" / "remotes" / rem / "HEAD",
+        for remotes_dir in (
+            repo_root / ".git" / GIT_REMOTES_REFS_DIR,
+            repo_root / GIT_REMOTES_REFS_DIR,
         ):
+            head_candidate = _remote_head_path(remotes_dir, rem)
+            if head_candidate is None:
+                continue
             try:
                 if head_candidate.is_file() and head_candidate.stat().st_size <= 4096:
                     with open(head_candidate, "r", encoding="utf-8", errors="replace") as f:
@@ -2339,7 +2407,7 @@ def git_push_violation(argv: list[str], cwd: Path | str | None = None) -> str | 
         positional.append(arg)
         idx += 1
 
-    remote_name = "origin"
+    remote_name = GIT_DEFAULT_REMOTE
     if positional and ":" not in positional[0] and not positional[0].startswith("+"):
         remote_name = positional[0]
 

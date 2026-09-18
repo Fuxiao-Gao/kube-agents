@@ -1698,6 +1698,87 @@ class GitHardeningTest(unittest.TestCase):
         fake_git.write_text("gitdir: ../.git\n" + "y" * 8192, encoding="utf-8")
         self.assertEqual(_find_repo_root(fake_sub), repo_alias)
 
+    def test_the_push_remote_cannot_name_a_head_file_outside_refs_remotes(self):
+        # CodeQL alert #38, py/path-injection. The `<repository>` argument of
+        # `git push` went into `refs/remotes/<repository>/HEAD` unchecked, so
+        # a path in that slot read a file of the agent's choosing and the gate
+        # took whatever branch it named as the remote's default. Verified on
+        # the pre-fix module with the files below planted: each of the five
+        # traversals lands on one of them, and each turned `HEAD:feature` into
+        # a refused push.
+        from credential_proxy import (
+            _detect_repo_default_branch,
+            _is_git_remote_name,
+            _remote_head_path,
+            git_push_violation,
+        )
+
+        executor = self.executor()
+        repo = self.repository(executor)
+        remotes = repo / ".git" / "refs" / "remotes"
+        for name, head in (("origin", "release-trunk"), ("upstream", "trunk")):
+            (remotes / name).mkdir(parents=True)
+            (remotes / name / "HEAD").write_text(
+                f"ref: refs/remotes/{name}/{head}\n", encoding="utf-8"
+            )
+        outside = Path(self.temp_dir.name) / "planted"
+        for planted in (
+            outside / "HEAD",  # `../../../../planted` and the absolute path
+            repo / ".git" / "refs" / "HEAD",  # `..`
+            repo / ".git" / "refs" / "planted" / "HEAD",  # `origin/../../planted`, `team/../../planted`
+        ):
+            planted.parent.mkdir(parents=True, exist_ok=True)
+            planted.write_text("ref: refs/heads/feature\n", encoding="utf-8")
+
+        traversal = os.path.relpath(outside, remotes)
+        for remote in (traversal, str(outside), "..", "origin/../../planted", "team/../../planted"):
+            with self.subTest(remote=remote):
+                self.assertIsNone(_remote_head_path(remotes, remote))
+                # Not looked up, so origin decides -- not the planted file.
+                self.assertEqual(_detect_repo_default_branch(repo, remote), "release-trunk")
+                self.assertIsNone(
+                    git_push_violation(["git", "push", remote, "HEAD:feature"], cwd=repo)
+                )
+
+        # A remote name still reads its own tracking HEAD, origin included.
+        self.assertEqual(_remote_head_path(remotes, "upstream"), remotes / "upstream" / "HEAD")
+        self.assertEqual(_detect_repo_default_branch(repo, "upstream"), "trunk")
+        self.assertIn(
+            "protected branch 'trunk'",
+            git_push_violation(["git", "push", "upstream", "HEAD:trunk"], cwd=repo) or "",
+        )
+        self.assertIn(
+            "protected branch 'release-trunk'",
+            git_push_violation(["git", "push", "origin", "HEAD:release-trunk"], cwd=repo) or "",
+        )
+        # A URL in the repository slot has no tracking HEAD and is judged
+        # against origin, as it was before.
+        self.assertIn(
+            "protected branch 'release-trunk'",
+            git_push_violation(
+                ["git", "push", "https://example.invalid/acme/fleet.git", "HEAD:release-trunk"],
+                cwd=repo,
+            )
+            or "",
+        )
+
+        # The pre-check is thin on purpose -- containment is the sink's job --
+        # so every name git accepts is still looked up, slash-named remotes and
+        # the ones an ASCII allowlist would have dropped included.
+        for accepted in ("origin", "upstream", "my-fork_2", "fork.v2", "gh+fork", "my@fork", "fôrk", "team/upstream"):
+            self.assertTrue(_is_git_remote_name(accepted), accepted)
+        for refused in ("", ".", "..", "a\\b", "a\0b"):
+            self.assertFalse(_is_git_remote_name(refused), repr(refused))
+        # And those names keep their protection: each resolves its own HEAD.
+        for name, head in (("gh+fork", "plus-trunk"), ("team/upstream", "team-trunk")):
+            (remotes / name).mkdir(parents=True)
+            (remotes / name / "HEAD").write_text(f"ref: refs/remotes/{name}/{head}\n", encoding="utf-8")
+            self.assertEqual(_remote_head_path(remotes, name), remotes / name / "HEAD")
+            self.assertIn(
+                f"protected branch '{head}'",
+                git_push_violation(["git", "push", name, f"HEAD:{head}"], cwd=repo) or "",
+            )
+
     def test_a_git_dir_redirect_cannot_reach_outside_the_workspace(self):
         # `_execute` refuses a cwd outside the shared workspace and the lease
         # gate resolves cwd plus every `-C`, but neither looks at `--git-dir`.
