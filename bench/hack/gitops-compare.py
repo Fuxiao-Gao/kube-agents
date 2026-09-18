@@ -148,7 +148,10 @@ def markdown(a: dict, b: dict) -> str:
     for label, s in (("A", a), ("B", b)):
         out.append("")
         out.append(f"{label} diagnosis, from heartbeats ({s['model']}):")
-        out.extend(f"- [{h['agent']}] {h['note']}" for h in s["heartbeats"]) or out.append("- none recorded")
+        if s["heartbeats"]:
+            out.extend(f"- [{h['agent']}] {h['note']}" for h in s["heartbeats"])
+        else:
+            out.append("- none recorded")
         if s["pr"].get("body"):
             out.append(f"{label} PR body (start): {s['pr']['body']!r}")
     return "\n".join(out)
