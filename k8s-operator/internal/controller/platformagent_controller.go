@@ -686,7 +686,14 @@ func (r *PlatformAgentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// A2A provisioning still running — Jobs are not watched (see a2aReader),
 	// so completion, failure, and the TTL removing a finished Job are all
 	// invisible without a requeue.
-	if a2aNext && !a2aState.done {
+	//
+	// gatewayHeld shares the requeue rather than getting its own: the gateway
+	// is waiting on BusCredentialsReady, which this reconcile writes on its
+	// way out, so the pass that finally sees it true has to be a pass that
+	// happens. The callout Deployment is owned and its readiness does trigger
+	// one, but a gate that only converges because something else is watched
+	// is a gate with a hidden dependency.
+	if a2aNext && (!a2aState.done || a2aState.gatewayHeld) {
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
@@ -2414,8 +2421,9 @@ func (r *PlatformAgentReconciler) reconcileRBAC(ctx context.Context, agent *agen
 	return nil
 }
 
-// splitWorkloadStatus is one of the two workloads the credential-broker split made
-// mandatory alongside the gateway, read back so Ready can depend on it.
+// splitWorkloadStatus is one workload the gateway's readiness does not cover,
+// read back so Ready can depend on it: the two the credential-broker split made
+// mandatory, and on a next install the A2A gateway as well.
 type splitWorkloadStatus struct {
 	// name is the object's name, and what the Provisioning message reports.
 	name string
@@ -2426,9 +2434,10 @@ type splitWorkloadStatus struct {
 }
 
 // readSplitWorkloads reads the shell sandbox StatefulSet and the credential broker
+// Deployment, and on an install that renders the A2A stack, the A2A gateway
 // Deployment.
 //
-// Ready has to depend on both. Before the split the credential runtime was a native
+// Ready has to depend on all of them. Before the split the credential runtime was a native
 // sidecar of the gateway pod, so a broker that could not start held the gateway out of
 // readiness and the existing pod scan reported why. Splitting it into its own pod took
 // that away: the gateway now becomes Ready on its own while the model cannot run a single
@@ -2458,10 +2467,38 @@ func (r *PlatformAgentReconciler) readSplitWorkloads(ctx context.Context, agent 
 		broker.Status.ReadyReplicas = 0
 	}
 
-	return []splitWorkloadStatus{
+	workloads := []splitWorkloadStatus{
 		{name: shellName, kind: "StatefulSet", ready: shell.Status.ReadyReplicas},
 		{name: brokerName, kind: "Deployment", ready: broker.Status.ReadyReplicas},
-	}, nil
+	}
+
+	// The A2A gateway stands in the same relation to Ready as those two: a next
+	// install without one cannot serve an A2A request at all, and nothing about the
+	// agent gateway's own readiness says so. It is also the one workload here that
+	// the operator withholds ON PURPOSE -- a2aGatewayWaitsForCallout holds the first
+	// creation while the auth callout is short of serving -- and until that hold is
+	// counted, the CR reports Ready: True beside a BusCredentialsReady of False and
+	// the two contradict each other. The hold stays; it stops being silent.
+	//
+	// a2aStackRendering, not a2aAgentSurface: this has to be the same predicate as
+	// whatever creates the Deployment. On version skew the A2A objects are frozen
+	// rather than reconciled, and that CR is already Degraded for the skew itself --
+	// a second reason to hold Ready there would report the freeze as a fault.
+	if a2aStackRendering(agent) {
+		gateway := &appsv1.Deployment{}
+		gatewayName := a2aGatewayName(agent)
+		if err := r.Get(ctx, types.NamespacedName{Namespace: agent.Namespace, Name: gatewayName}, gateway); err != nil {
+			if !errors.IsNotFound(err) {
+				return nil, fmt.Errorf("failed to get A2A gateway Deployment for status update: %w", err)
+			}
+			gateway.Status.ReadyReplicas = 0
+		}
+		workloads = append(workloads, splitWorkloadStatus{
+			name: gatewayName, kind: "Deployment", ready: gateway.Status.ReadyReplicas,
+		})
+	}
+
+	return workloads, nil
 }
 
 // updateStatusReady writes the agent's status and returns the phase it settled on, so
@@ -2519,8 +2556,9 @@ func (r *PlatformAgentReconciler) updateStatusReady(ctx context.Context, agent *
 		newAddress = fmt.Sprintf("%s.%s.svc.cluster.local", svc.Name, svc.Namespace)
 	}
 
-	// The two workloads the split made mandatory. Read before the phase is decided,
-	// because Ready is a claim about all three and not about the gateway alone.
+	// The workloads the gateway's own readiness does not cover. Read before the phase
+	// is decided, because Ready is a claim about every one of them and not about the
+	// gateway alone.
 	splitWorkloads, errSplit := r.readSplitWorkloads(ctx, agent)
 	if errSplit != nil {
 		return "", errSplit
@@ -2543,6 +2581,9 @@ func (r *PlatformAgentReconciler) updateStatusReady(ctx context.Context, agent *
 		condStatus = metav1.ConditionTrue
 		condReason = "Reconciled"
 		condMsg = "Gateway, shell sandbox and credential broker are all ready"
+		if a2aStackRendering(agent) {
+			condMsg = "Gateway, shell sandbox, credential broker and A2A gateway are all ready"
+		}
 	case errWorkload == nil:
 		if phaseOverride, reasonOverride, msgOverride := r.getDeploymentStatusDetails(ctx, agent); reasonOverride != "Provisioning" {
 			newPhase = phaseOverride
@@ -2747,18 +2788,40 @@ func (r *PlatformAgentReconciler) getDeploymentStatusDetails(ctx context.Context
 	reason = "Provisioning"
 	message = "Waiting for deployment replicas to be ready"
 
-	// All three pods, gateway first so an install with a fault in more than one of
-	// them reports the same sentence it always has. The other two are here because
-	// the faults this function names are exactly the ones the split introduced a
-	// new way to hit: a runtimeClassName the cluster has no node pool for, and a
-	// sandbox or broker image tag nothing published. Neither is visible from the
-	// gateway's own pod any more.
-	pods := make([]corev1.Pod, 0)
-	for _, selector := range []map[string]string{
+	// Every pod Ready is a claim about, gateway first so an install with a fault in
+	// more than one of them reports the same sentence it always has. The middle two
+	// are here because the faults this function names are exactly the ones the split
+	// introduced a new way to hit: a runtimeClassName the cluster has no node pool
+	// for, and a sandbox or broker image tag nothing published. Neither is visible
+	// from the gateway's own pod any more.
+	selectors := []map[string]string{
 		{"app": agent.Name + "-gateway"},
 		shellSandboxSelector(agent),
 		{"app": credentialProxyName(agent)},
-	} {
+	}
+
+	// Appended last, for that same reason, one release later: readSplitWorkloads
+	// made the A2A gateway gate Ready, and a workload that gates Ready and is never
+	// scanned leaves an operator with nothing to act on. Unscanned, a gateway pod in
+	// ImagePullBackOff or CrashLoopBackOff reads as "Waiting for Deployment
+	// <agent>-a2a-gateway to become ready" indefinitely -- which is also what the
+	// deliberate callout hold says, and what a slow scheduler says, so the phase
+	// distinguishes none of the three. Scanned, the container fault names itself.
+	//
+	// Last rather than first: the ordering above is load-bearing, and an install
+	// faulting in more than one workload has to keep reporting the sentence it
+	// always did.
+	//
+	// a2aStackRendering, the same predicate readSplitWorkloads gates on and the same
+	// one that renders the Deployment: a today install has no such pod, and a skewed
+	// one has its A2A objects frozen and is already Degraded/ModeNotRecognized for
+	// the skew itself -- a second reason there would report the freeze as a fault.
+	if a2aStackRendering(agent) {
+		selectors = append(selectors, map[string]string{"app": a2aGatewayName(agent)})
+	}
+
+	pods := make([]corev1.Pod, 0)
+	for _, selector := range selectors {
 		podList := &corev1.PodList{}
 		if err := r.List(ctx, podList, client.InNamespace(agent.Namespace), client.MatchingLabels(selector)); err != nil {
 			continue
