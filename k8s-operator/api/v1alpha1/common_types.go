@@ -180,6 +180,11 @@ var SensitiveEnvVars = map[string]struct{}{
 // half is BusCredentialRoutes below, keyed on the audience and on the Secrets
 // the operator renders with bus credentials in them.
 //
+// A hostPath entry on those same two lists is refused by a source check too,
+// and the render drops it and every mount naming it whether or not the
+// webhook ran (gke-labs#1675). That one is not part of this pair: it guards
+// the node filesystem, not the bus credential.
+//
 // Which fixes the terms this should be read on. KSA tokens are pod-scoped and
 // the callout cannot see which container presented one, so neither a name nor
 // an audience reservation is a boundary against a hostile sidecar; it is a

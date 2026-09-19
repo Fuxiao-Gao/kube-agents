@@ -43,7 +43,7 @@ Roughly 115 test files on every pull request, plus the operator's golden manifes
 
 They also answer part of question 1: the RBAC and NetworkPolicy the operator generates are diffed against a checked-in copy, down to the verb lists, so a permission we grant but did not mean to grant fails a unit test. Whether the agent stays inside the permissions it has needs a live run (§4.2).
 
-Controller and webhook tests run against fake clients, with two exceptions in the operator's controller package that start a real API server through envtest (gated on `KUBEBUILDER_ASSETS`, which `make -C k8s-operator test` sets): generation bookkeeping on the PlatformAgent status, and the write-and-requeue behaviour of a CR parked on a refusal. Nothing else below the cloud e2e tier runs a real API server; that remaining gap is §4.1b's second-ranked seam.
+Controller and webhook tests run against fake clients, with the exceptions in the operator's controller package that start a real API server through envtest (gated on `KUBEBUILDER_ASSETS`, which `make -C k8s-operator test` sets) for behaviour only a real API server exhibits: generation bookkeeping on the PlatformAgent status, the write-and-requeue behaviour of a CR parked on a refusal, the callout's RBAC, the A2A gateway's strategy changed in place over a block the server itself defaulted, and the render-side `hostPath` drop landing in a Deployment the API server accepted with no webhook in front of it — the last of those twice over, since the length limit on the condition reporting the drop is the server's too. Nothing else below the cloud e2e tier runs a real API server; that remaining gap is §4.1b's second-ranked seam.
 
 ### 4.1b Integration: real seams, fake agent (build)
 
