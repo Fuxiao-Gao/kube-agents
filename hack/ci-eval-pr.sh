@@ -1621,6 +1621,11 @@ unit_cost_hint() {
     # Nightly-only. Measured 980-1929s across build 2099539376672346112's
     # three repetitions (267-559s in August); median of the September run.
     pdb-remediation-pr) echo 1250 ;;
+    # Nightly-only. The audit measured 1415-1488s a repetition with its ledger
+    # write (build 2099607409826729984); the crashloop triage takes the
+    # incumbent autoops hint (same watcher and card waits) until it passes.
+    ai-security-planted-model-audit) echo 1450 ;;
+    autoops-crashloop-config-triage) echo 900 ;;
     consistency-authorized-networks-probe) echo 300 ;;
     # Median of its 1155 presubmit repetitions 2026-09-04 to 09-15 (p10 248s,
     # p90 1318s); the 200s default under-packed it by 2.7x (#1023).
@@ -1700,6 +1705,20 @@ for TASK in "${TASKS[@]}"; do
   fi
 done
 
+# How long a stack-bearing unit waits for lock-infra before giving up. The
+# lock is held for a unit's whole invocation and the queue launches every
+# repetition-1 unit within the first few lanes, so with N stack-bearing
+# tasks the last waiter has to outlast N-1 holders in a row: at 1800s flat
+# the third and fourth contenders in a four-tofu nightly cannot, and which
+# one loses is the mkdir race (the #1103 presubmit run showed it at N=2, a
+# 2279s audit rep starving its sibling). 1800s a contender keeps the
+# holder-died guard the flat figure was for, scaled to the matrix; the
+# presubmit, with no stack-bearing task, keeps the flat 1800s.
+STACK_CONTENDERS=0
+for HAS in "${TASK_HAS_STACK[@]}"; do [ -n "${HAS}" ] && STACK_CONTENDERS=$((STACK_CONTENDERS + 1)); done
+INFRA_LOCK_DEADLINE=$(( 1800 * (STACK_CONTENDERS > 1 ? STACK_CONTENDERS : 1) ))
+echo "Infra lock: ${STACK_CONTENDERS} stack-bearing task(s); a unit waits up to ${INFRA_LOCK_DEADLINE}s for lock-infra"
+
 # One unit, in a background subshell: its exports stay local, its output goes
 # only to its own log (kept as an artifact either way), and its run directory
 # is read back from that log's own `results:` line -- the directory-set diff
@@ -1760,7 +1779,7 @@ run_one_unit() { # <task-path> <task-name> <rep> <reuse:true|empty> <has-stack:t
     echo "<<< [$(date -u +'%Y-%m-%dT%H:%M:%SZ')] ${name} rep ${rep} gave up on its task lock" >&2
     return 0
   fi
-  if [ -n "${has_stack}" ] && ! lock_acquire "${STATE_DIR}/lock-infra"; then
+  if [ -n "${has_stack}" ] && ! lock_acquire "${STATE_DIR}/lock-infra" "${INFRA_LOCK_DEADLINE}"; then
     lock_release "${STATE_DIR}/lock-task-${name}"
     echo "<<< [$(date -u +'%Y-%m-%dT%H:%M:%SZ')] ${name} rep ${rep} gave up on the infra lock" >&2
     return 0
