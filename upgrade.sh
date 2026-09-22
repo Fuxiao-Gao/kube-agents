@@ -339,6 +339,68 @@ matches_release_bundle_ref() {
   return 1
 }
 
+# Sets RECORDED_PLUGIN_IMAGE_TAG_KEYS to the Helm keys, one per line, of the
+# plugin image tags the release's user-supplied values record
+# (`plugins.<name>.image.tag`), for the harness step to re-tag with the agent
+# and sandbox tags. Read from the recorded values rather than from the enabled
+# flags because the composition records the tag for a disabled plugin too;
+# derived from the values rather than from a list of plugin names so that a
+# plugin added to the chart and the composition is covered without a change
+# here. The chart the keys are applied to is pinned to this script's commit by
+# the source check, so its `plugins` block matches.
+#
+# A read that fails is an error, not an empty list: an empty list would run
+# the pre-fix re-tag and leave the plugin images behind, with the omission
+# surfacing only from the image check after the Helm move. It assigns rather
+# than prints, as gke_dns_endpoint_flag does, so that the caller runs it as a
+# plain command: print_error writes to stdout, which a command substitution
+# would swallow, and under `set -E` the ERR trap would fire in the
+# substitution's subshell and again in the parent. `trap - ERR` inside its own
+# substitutions for the same reason, on bash 3.2 in particular. Arguments:
+# release, namespace.
+RECORDED_PLUGIN_IMAGE_TAG_KEYS=""
+recorded_plugin_image_tag_keys() {
+  local release="$1" namespace="$2" values keys stderr_file
+  RECORDED_PLUGIN_IMAGE_TAG_KEYS=""
+  # stderr kept apart from the JSON: Helm writes warnings there on successful
+  # commands too (a group-readable kubeconfig, for one), and merged into the
+  # capture they would break the jq parse of values that are fine.
+  stderr_file="$(mktemp)"
+  if ! values="$(trap - ERR; helm get values "$release" -n "$namespace" -o json 2>"$stderr_file")"; then
+    print_error "Could not read the values of Helm release '${release}' in '${namespace}' to find the plugin image tags: $(cat "$stderr_file")"
+    rm -f "$stderr_file"
+    return 1
+  fi
+  if ! keys="$(trap - ERR; jq -r '(.plugins // {}) | if type == "object" then to_entries[] | select(((.value.image.tag? // "") | tostring) != "") | "plugins.\(.key).image.tag" else error("plugins is not an object") end' <<<"$values" 2>"$stderr_file")"; then
+    print_error "Could not read the plugin image tags from the values of Helm release '${release}': $(cat "$stderr_file")"
+    rm -f "$stderr_file"
+    return 1
+  fi
+  rm -f "$stderr_file"
+  RECORDED_PLUGIN_IMAGE_TAG_KEYS="$keys"
+}
+
+# Sets HARNESS_RETAG_KEYS, the Helm keys the harness step re-tags: the agent
+# and sandbox tags, then every plugin tag the release records. A function of
+# its own so the assembly runs under test with a stub helm, rather than being
+# pinned by the text of the case branch. A read loop rather than the bash 4
+# array builtin: operators run this from macOS, whose bash is 3.2. Arguments:
+# release, namespace.
+HARNESS_RETAG_KEYS=()
+harness_retag_keys() {
+  local release="$1" namespace="$2" key
+  HARNESS_RETAG_KEYS=("platformAgent.deployment.image.tag" "agentSandbox.image.tag")
+  recorded_plugin_image_tag_keys "$release" "$namespace"
+  # An if, not `[ -n ] &&`: with nothing recorded the here-string is one empty
+  # line, the test fails, the loop's status is that failure, and under
+  # `set -e` the harness step would stop on an install with no plugins.
+  while IFS= read -r key; do
+    if [ -n "$key" ]; then
+      HARNESS_RETAG_KEYS+=("$key")
+    fi
+  done <<<"$RECORDED_PLUGIN_IMAGE_TAG_KEYS"
+}
+
 # The two refusals that do not need a ref to make sense: an unversioned source
 # directory, and a dirty one. Split out of verify_local_source_ref because a
 # tagless run still applies this checkout's Terraform and charts to a live
@@ -587,6 +649,12 @@ main() {
   print_info "Target Image Tag: ${C_BOLD}${PARAM_IMAGE_TAG}${C_RESET}"
 
   local required_tools=(gcloud kubectl helm)
+  # jq: the harness step's plugin re-tag reads the release's values with it,
+  # and the post-upgrade image check that harness and full modes run has
+  # needed it all along. The operator step does neither.
+  if [ "$PARAM_UPGRADE_MODE" != "operator" ]; then
+    required_tools+=(jq)
+  fi
   if [ "$PARAM_UPGRADE_MODE" = "full" ]; then
     required_tools+=(terraform)
   fi
@@ -893,7 +961,13 @@ main() {
       # at the same commit, and the shell the agent reaches over ssh is the
       # half that runs the new tools. Retagging the agent alone leaves the
       # StatefulSet on the previous image.
-      helm_retag "platformAgent.deployment.image.tag" "agentSandbox.image.tag"
+      # The plugin images move with them for the same reason, when the
+      # release records them: the operator renders them into the gateway as
+      # stage-<plugin> init containers or plugin-<name> image volumes, and
+      # the image check below reads both. A plain call, not a substitution: a
+      # failed read stops the run here, once, with its own message shown.
+      harness_retag_keys "$KUBE_AGENTS_HELM_RELEASE" "$target_namespace"
+      helm_retag "${HARNESS_RETAG_KEYS[@]}"
       print_success "Platform Agent deployment upgraded successfully!"
       ;;
 
