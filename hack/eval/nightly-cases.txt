@@ -143,8 +143,9 @@
 # its citation check was widened) and moved here on 2026-09-09: knowledge
 # grounding is a cross-cutting persona behavior, not one of the core
 # journeys the presubmit gate exists for, so it earns its record in the full
-# catalog instead. Priced at 600s in unit_cost_hint.
-./tasks/knowledge-grounding-sources-probe/task.yaml
+# catalog instead. Priced at 600s in unit_cost_hint. TEMPORARILY in
+# presubmit-cases.txt for #1765's build, to measure its new answer_query
+# safeguard; its line returns here before that pull request merges.
 
 # The silence case for the gke-stall-detection skill (#1342), in the
 # cluster-agent-healthy-workload-no-finding shape and on the same fixture: a

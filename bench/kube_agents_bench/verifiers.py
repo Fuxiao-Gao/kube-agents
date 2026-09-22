@@ -81,6 +81,11 @@ _NO_TRANSCRIPT_REASON = (
     "agent execution (kube_agents_bench.transcript is empty), so this check "
     "could not be evaluated"
 )
+_NO_WORKER_CALLS_REASON = (
+    "no delegated worker's tool calls are in the trajectory: either no card was "
+    "delegated or the worker-trajectory capture did not run, so a check scoped to "
+    "the workers cannot observe its subject"
+)
 
 # Emphasis and code markers, dropped before matching. The agent answers in
 # Markdown, and a phrase spanning an emphasised word cannot match the raw
@@ -205,28 +210,41 @@ class ReportContainsVerifier(BaseVerifier):
 class ToolCalledVerifier(BaseVerifier):
     """Count trajectory entries whose tool name is in ``tool_names``.
 
-    THE COUNT IS THE ROUTER'S, NOT THE FLEET'S. By this harness's
-    design, this verifier counts only the delegating turn's calls: poll-turn
-    calls are the harness's own bookkeeping and are kept out of the
-    trajectory (``_fold_status_turn``), and the delegated workers' calls,
-    which the harness appends after settlement tagged with the ``agent``
-    that made them (``worker_trajectory``), are skipped here so the count
-    keeps meaning what it always has. This verifier can therefore assert
-    what the ROUTER did (``kanban_create`` is the router's own call) and
-    nothing about what a worker did on a cluster — a mutation safeguard
-    built on it would be blind to the very calls it fears. Use a
-    cluster-state check (``resource_property``) for those.
+    ``scope`` says whose calls count. The trajectory holds two kinds of
+    entry: the delegating turn's own calls (poll-turn calls are the
+    harness's bookkeeping and are kept out, ``_fold_status_turn``), and the
+    delegated workers' calls, which the harness appends after settlement
+    tagged with the ``agent`` that made them (``worker_trajectory``).
+
+    - ``router`` (the default, and what every check written before the
+      workers' calls were recorded means): the delegating turn's calls only,
+      so ``kanban_create`` counts and the worker's ``kanban_complete`` does
+      not. A cluster-mutation safeguard in this scope is blind to the calls
+      it fears; use a cluster-state check (``resource_property``) for those.
+    - ``workers``: the tagged entries only -- what the platform worker and
+      any Cluster Agent called on the run's cards. This is the scope that
+      sees which MCP tool a worker reached for.
+    - ``all``: both.
+
+    ``workers`` and ``all`` fail closed on a trajectory that carries no
+    tagged entry: a worker that ran made at least one call (its
+    ``kanban_complete``), so no tagged entry means the capture did not run,
+    or the router never delegated, and either way the check cannot observe
+    its subject -- ``status="error"``, never a pass, the same rule
+    ``worker_commands`` applies to an absent capture.
 
     Passes when at least ``minimum_calls`` matching calls were made. Wrapped
     in a ``none`` compound, it is the safeguard shape "this tool was never
-    called", within the router-only limits above. Names match the harness's
-    canonical trajectory entries (``ToolCall.to_dict()["name"]``), e.g.
-    ``kanban_create``.
+    called", within the chosen scope. Names match the harness's canonical
+    trajectory entries (``ToolCall.to_dict()["name"]``), e.g.
+    ``kanban_create``; a worker's entries carry the name the profile's
+    session store recorded for the tool.
     """
 
     type: Literal["tool_called"]
     tool_names: list[str] = Field(min_length=1)
     minimum_calls: int = Field(default=1, ge=1)
+    scope: Literal["router", "workers", "all"] = "router"
     # Objectives set this: a call the harness marked status="error" produced
     # no effect (kanban_create that failed filed no card), so counting it
     # would pass a check whose subject never happened. Safeguards leave it
@@ -244,13 +262,23 @@ class ToolCalledVerifier(BaseVerifier):
                 elapsed_time=time.monotonic() - start,
                 reason=_NO_TRANSCRIPT_REASON,
             )
+        entries = [entry for entry in snap.trajectory if isinstance(entry, dict)]
+        if self.scope != "router" and not any(entry.get("agent") for entry in entries):
+            return VerificationResult(
+                success=False,
+                status="error",
+                elapsed_time=time.monotonic() - start,
+                reason=_NO_WORKER_CALLS_REASON,
+            )
+        if self.scope == "router":
+            entries = [entry for entry in entries if not entry.get("agent")]
+        elif self.scope == "workers":
+            entries = [entry for entry in entries if entry.get("agent")]
         wanted = set(self.tool_names)
         calls = [
             entry
-            for entry in snap.trajectory
-            if isinstance(entry, dict)
-            and not entry.get("agent")
-            and entry.get("name") in wanted
+            for entry in entries
+            if entry.get("name") in wanted
             and not (self.require_success and entry.get("status") == "error")
         ]
         count = len(calls)
@@ -259,7 +287,7 @@ class ToolCalledVerifier(BaseVerifier):
             success=ok,
             elapsed_time=time.monotonic() - start,
             reason=(
-                f"{count} call(s) to {sorted(wanted)} in the trajectory"
+                f"{count} call(s) to {sorted(wanted)} in the {self.scope} trajectory"
                 f" (minimum {self.minimum_calls})"
             ),
             raw={"matching_calls": count},

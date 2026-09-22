@@ -261,8 +261,9 @@ One role the catalog still lacks: a **cross-cluster tripwire** on cluster B or C
   clean inventory table would also list, the check uses `scope: finding_ids`
   so it reads the ids of findings actually filed rather than the body's Scope
   table, which names every audited cluster on every run.
-- `tool_called` sees only the delegating turn's calls — worker mutations are
-  structurally invisible to it. Mutation safeguards are therefore
+- `tool_called` sees the delegating turn's calls by default and the workers'
+  tagged calls under `scope: workers`; a call is intent, not effect, and a
+  capture that did not run is `status: "error"`. Mutation safeguards are therefore
   cluster-state checks (the planted defect object survived the run) where the
   defect is a Kubernetes object, and documented residuals where it is
   GKE-level (node pools, versions, disks, logging config), whose integrity the

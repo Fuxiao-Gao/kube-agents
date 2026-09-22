@@ -139,6 +139,11 @@
 # 2026-08-27 redesign (a real SRE question graded on kanban_create plus
 # cluster names).
 ./tasks/agent-kanban-smoke/task.yaml
+# TEMPORARY SEAT, #1765: knowledge-grounding-sources-probe sits here for one
+# measured presubmit build of its new safeguard (no worker calls Developer
+# Knowledge's answer_query), the incident-triage-oom-event-probe precedent.
+# The line goes back to nightly-cases.txt before the pull request merges.
+./tasks/knowledge-grounding-sources-probe/task.yaml
 
 # Moved out to nightly-cases.txt, for the record:
 #   the seven held-out cases this file ran without blocking, on 2026-09-22
