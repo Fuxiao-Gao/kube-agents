@@ -1360,10 +1360,11 @@ not, and nothing bridges the gap: `tools/environments/ssh.py` defines no `_wrap_
 of its own, and its `_ensure_remote_dirs` creates `~/.hermes` and three children and
 stops. Any other working directory has to already exist on the sandbox.
 
-The Kanban dispatcher is where that bites. `hermes_cli/kanban_db.py` allocates a
-per-card scratch workspace under `workspaces_root(board)/<task id>` and `mkdir`s it — on
-the agent pod's PVC — then pins the path as the worker's `TERMINAL_CWD` and launches the
-worker process with the same path as its own `cwd`. The worker's terminal resolves that
+The Kanban dispatcher is where that bites. `hermes_cli/kanban_db_workspace.py`
+(`resolve_workspace`) allocates a per-card scratch workspace under
+`workspaces_root(board)/<task id>` and `mkdir`s it — on the agent pod's PVC — then
+`hermes_cli/kanban_db_dispatch.py` pins the path as the worker's `TERMINAL_CWD` and
+launches the worker process with the same path as its own `cwd`. The worker's terminal resolves that
 as its working directory and the `cd` runs on the sandbox, which has a different
 ReadWriteOnce volume. Every command a delegated card runs exits 126 with no output and
 no message the model can act on. There is no shared-filesystem answer available: both
