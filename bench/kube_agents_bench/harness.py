@@ -1049,15 +1049,19 @@ def _purge_card_state(task_ids: list[str], timeout: float) -> None:
     _agent_shell(script, timeout)
 
 
-def _worker_token_buckets(by_agent: dict[str, dict[str, int]]) -> dict[str, Any] | None:
+def _worker_token_buckets(
+    by_agent: dict[str, dict[str, int]], unbilled: list[dict[str, str]]
+) -> dict[str, Any] | None:
     """The workers' counts in the record's buckets, per profile and summed.
 
-    ``by_agent`` is :attr:`worker_trajectory.WorkerCapture.tokens`: hermes'
-    column names per profile. Each profile gets the same buckets the front
-    door's row is read into, with ``total`` summed per :data:`_TOTAL_BUCKETS`
-    (reasoning reported, not added twice), and the profiles add up under the
-    top-level keys. ``None`` when no session reported counts, which is not the
-    same as a run whose workers cost nothing.
+    ``by_agent`` and ``unbilled`` are :class:`worker_trajectory.WorkerCapture`'s
+    ``tokens`` and ``unbilled``: hermes' column names per profile, and the
+    sessions that reported no counts. Each profile gets the same buckets the
+    front door's row is read into, with ``total`` summed per
+    :data:`_TOTAL_BUCKETS` (reasoning reported, not added twice), and the
+    profiles add up under the top-level keys; ``unbilled`` rides along so a
+    partial sum says so in the record. ``None`` when no session reported
+    counts, which is not the same as a run whose workers cost nothing.
     """
     if not by_agent:
         return None
@@ -1070,6 +1074,7 @@ def _worker_token_buckets(by_agent: dict[str, dict[str, int]]) -> dict[str, Any]
         workers["by_agent"][agent] = counts
         for bucket, value in counts.items():
             workers[bucket] += value
+    workers["unbilled"] = list(unbilled)
     return workers
 
 
@@ -2377,7 +2382,7 @@ class KubeAgentsHarness(AgentHarness):
         else:
             result.trajectory.extend(captured.entries)
             result.metadata["worker_trajectory"] = captured.summary
-            result.tokens["workers"] = _worker_token_buckets(captured.tokens)
+            result.tokens["workers"] = _worker_token_buckets(captured.tokens, captured.unbilled)
         _purge_card_state(awaited, _EXEC_TIMEOUT)
 
     @staticmethod

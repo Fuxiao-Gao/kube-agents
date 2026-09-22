@@ -2234,7 +2234,11 @@ def test_the_workers_tokens_are_added_after_the_front_doors_row(
         "total": 3100,
     }
     assert result.tokens["front_door"] == front_door
-    assert result.tokens["workers"] == {**workers, "by_agent": {"platform": workers}}
+    assert result.tokens["workers"] == {
+        **workers,
+        "by_agent": {"platform": workers},
+        "unbilled": [],
+    }
     assert {k: result.tokens[k] for k in front_door} == {
         k: front_door[k] + workers[k] for k in front_door
     }

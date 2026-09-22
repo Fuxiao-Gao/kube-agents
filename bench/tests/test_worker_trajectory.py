@@ -856,6 +856,57 @@ def test_a_session_with_no_row_and_no_usage_rows_is_reported(data_root: Path) ->
     ]
 
 
+def test_an_all_zero_row_with_nothing_to_fall_back_on_is_not_billed_as_free(
+    data_root: Path,
+) -> None:
+    """A session with assistant rows made model calls; zeros mean untracked, not zero."""
+    with sqlite3.connect(data_root / "profiles" / "platform" / "state.db") as conn:
+        conn.execute(
+            "UPDATE sessions SET input_tokens = 0, output_tokens = 0, cache_read_tokens = 0,"
+            " cache_write_tokens = 0, reasoning_tokens = 0 WHERE id = ?",
+            (PLATFORM_SESSION,),
+        )
+
+    payload = _payload(_run_script(data_root, [FRONT]))
+
+    cards = {c["task"]: c for c in payload["cards"]}
+    assert cards[FRONT]["sessions"][0]["tokens"] is None
+    assert payload["errors"] == [
+        f"session {PLATFORM_SESSION} of platform: no token counts in the store"
+    ]
+
+
+def test_a_failing_usage_read_costs_the_session_its_counts_not_its_place(
+    data_root: Path,
+) -> None:
+    """The calls were already read; a broken usage table must not drop the session."""
+    with sqlite3.connect(data_root / "profiles" / "platform" / "state.db") as conn:
+        conn.execute(
+            "UPDATE sessions SET input_tokens = 0, output_tokens = 0, cache_read_tokens = 0,"
+            " cache_write_tokens = 0, reasoning_tokens = 0 WHERE id = ?",
+            (PLATFORM_SESSION,),
+        )
+        # A per-model table missing one of the five columns: the fallback's
+        # SELECT raises rather than returning.
+        conn.execute("CREATE TABLE session_model_usage (session_id TEXT, input_tokens INTEGER)")
+
+    payload = _payload(_run_script(data_root, [FRONT]))
+
+    cards = {c["task"]: c for c in payload["cards"]}
+    session = cards[FRONT]["sessions"][0]
+    assert session["id"] == PLATFORM_SESSION
+    assert session["tokens"] is None
+    assert session["calls"] == 2
+    assert [c["name"] for c in payload["calls"] if c["task"] == FRONT] == [
+        "terminal",
+        "kanban_create",
+    ]
+    assert len(payload["errors"]) == 1
+    assert payload["errors"][0].startswith(
+        f"session {PLATFORM_SESSION} of platform: token counts: "
+    )
+
+
 def test_per_model_usage_is_summed_when_the_session_row_is_empty(data_root: Path) -> None:
     """A hermes that attributes usage per model leaves the row at zero; the rows add up."""
     with sqlite3.connect(data_root / "profiles" / "platform" / "state.db") as conn:
@@ -886,21 +937,24 @@ def test_capture_sums_the_counts_per_profile(data_root: Path) -> None:
 
     assert captured is not None
     assert captured.tokens == {"platform": PLATFORM_TOKENS, "cluster-abc": CLUSTER_TOKENS}
+    assert captured.unbilled == []
 
 
-def test_a_profiles_sessions_add_up_and_an_unbilled_one_adds_nothing() -> None:
+def test_a_profiles_sessions_add_up_and_an_unbilled_one_is_named_instead() -> None:
     cards = [
         {
+            "task": FRONT,
             "sessions": [
                 {"agent": "platform", "tokens": {"input_tokens": 10, "output_tokens": 1}},
                 {"agent": "platform", "tokens": {"input_tokens": 5, "reasoning_tokens": 2}},
-                {"agent": "cluster-abc", "tokens": None},
-            ]
-        }
+            ],
+        },
+        {"task": CHILD, "sessions": [{"id": "s9", "agent": "cluster-abc", "tokens": None}]},
     ]
-    assert worker_trajectory._tokens_by_agent(cards) == {
-        "platform": {"input_tokens": 15, "output_tokens": 1, "reasoning_tokens": 2}
-    }
+    assert worker_trajectory._tokens_by_agent(cards) == (
+        {"platform": {"input_tokens": 15, "output_tokens": 1, "reasoning_tokens": 2}},
+        [{"agent": "cluster-abc", "task": CHILD, "session": "s9"}],
+    )
 
 
 def test_settle_records_the_workers_tokens_in_the_records_buckets(
@@ -935,9 +989,35 @@ def test_settle_records_the_workers_tokens_in_the_records_buckets(
         "output": 350,
         "total": 7014,
         "by_agent": {"platform": platform, "cluster-abc": cluster},
+        "unbilled": [],
     }
     # Not yet in the run's own buckets: that waits for the front door's row.
     assert "input" not in result.tokens and "front_door" not in result.tokens
+
+
+def test_settle_names_the_sessions_a_partial_sum_is_missing(
+    data_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One profile billed, the other's store had no counts: the sum says which."""
+    with sqlite3.connect(data_root / "profiles" / "cluster-abc" / "state.db") as conn:
+        conn.execute("DROP TABLE sessions")
+    reply = _run_script(data_root, [FRONT])
+    monkeypatch.setattr(
+        harness,
+        "_agent_shell",
+        lambda script, timeout: reply if worker_trajectory.CAPTURE_PRESENT in script else "",
+    )
+    result = AgentResult(output="filed", trajectory=[])
+    result.metadata["final_message"] = "filed"
+
+    harness.KubeAgentsHarness._settle(result, [], [FRONT])
+
+    workers = result.tokens["workers"]
+    assert workers["total"] == 6500
+    assert list(workers["by_agent"]) == ["platform"]
+    assert workers["unbilled"] == [
+        {"agent": "cluster-abc", "task": CHILD, "session": CLUSTER_SESSION}
+    ]
 
 
 def test_settle_appends_worker_calls_after_the_routers_and_before_the_purge(
