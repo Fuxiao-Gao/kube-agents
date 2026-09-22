@@ -315,9 +315,9 @@ def test_run_parses_agent_response(stub_agent: _StubAgentServer) -> None:
     # The session row replaces the envelope's counts wholesale. input is the
     # *non-cached* prompt per TOKEN_BUCKETS, so it is the row's 1076 and not
     # the envelope's cache-inclusive 60468. reasoning sits inside output, so
-    # the total leaves it out rather than billing the thinking twice. The
-    # card was delegated but the pod answered nothing, so the workers are
-    # "unreadable" (None), not absent and not zero.
+    # the total leaves it out rather than billing the thinking twice. This
+    # turn filed no card, so there is no ``workers`` key: that key, even as
+    # None, means the run delegated.
     assert result.tokens == {
         "input": 1076,
         "cached": 51200,
@@ -325,7 +325,6 @@ def test_run_parses_agent_response(stub_agent: _StubAgentServer) -> None:
         "reasoning": 1024,
         "output": 79,
         "total": 60547,
-        "workers": None,
     }
     assert result.metadata["session_id"] == _SESSION_ID
     assert stub_agent.session_lookups == [f"/api/sessions/{_SESSION_ID}"]

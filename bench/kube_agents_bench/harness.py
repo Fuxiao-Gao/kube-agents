@@ -1083,7 +1083,9 @@ def _fold_worker_tokens(tokens: dict[str, Any]) -> None:
     record keeps both halves and the top level is the run. A run that
     delegated nothing has no ``workers`` key and is left alone, and so is one
     whose workers could not be billed (``workers`` is ``None``): its top level
-    stays the router's, and ``metadata["worker_trajectory"]["errors"]`` says why.
+    stays the router's. Which of the two it was is on the in-process
+    ``metadata["worker_trajectory"]`` -- ``None`` when the pod read never ran,
+    a summary whose ``errors`` name the unbilled sessions when it did.
     """
     workers = tokens.get("workers")
     if not isinstance(workers, dict):
@@ -2367,7 +2369,11 @@ class KubeAgentsHarness(AgentHarness):
         captured = worker_trajectory.capture(_agent_shell, awaited, _EXEC_TIMEOUT)
         if captured is None:
             result.metadata["worker_trajectory"] = None
-            result.tokens["workers"] = None
+            # A run that filed no card settles too (nothing to wait for), and
+            # has no workers to bill: leave the key out. ``None`` is for a run
+            # that did delegate and whose pod could not be read.
+            if awaited:
+                result.tokens["workers"] = None
         else:
             result.trajectory.extend(captured.entries)
             result.metadata["worker_trajectory"] = captured.summary

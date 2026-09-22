@@ -824,6 +824,38 @@ def test_a_store_without_usage_columns_reports_it_and_keeps_the_calls(data_root:
     ]
 
 
+def test_a_sessions_table_without_usage_columns_is_reported_too(data_root: Path) -> None:
+    """The table exists but predates the counts: same answer as no table."""
+    with sqlite3.connect(data_root / "profiles" / "platform" / "state.db") as conn:
+        conn.execute("DROP TABLE sessions")
+        conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT)")
+        conn.execute("INSERT INTO sessions VALUES (?, 'work')", (PLATFORM_SESSION,))
+
+    payload = _payload(_run_script(data_root, [FRONT]))
+
+    cards = {c["task"]: c for c in payload["cards"]}
+    assert cards[FRONT]["sessions"][0]["tokens"] is None
+    assert cards[FRONT]["sessions"][0]["calls"] == 2
+    assert payload["errors"] == [
+        f"session {PLATFORM_SESSION} of platform: no token counts in the store"
+    ]
+
+
+def test_a_session_with_no_row_and_no_usage_rows_is_reported(data_root: Path) -> None:
+    """Messages without a sessions row: the calls are read, the spend is named missing."""
+    with sqlite3.connect(data_root / "profiles" / "platform" / "state.db") as conn:
+        conn.execute("DELETE FROM sessions WHERE id = ?", (PLATFORM_SESSION,))
+
+    payload = _payload(_run_script(data_root, [FRONT]))
+
+    cards = {c["task"]: c for c in payload["cards"]}
+    assert cards[FRONT]["sessions"][0]["tokens"] is None
+    assert cards[FRONT]["sessions"][0]["calls"] == 2
+    assert payload["errors"] == [
+        f"session {PLATFORM_SESSION} of platform: no token counts in the store"
+    ]
+
+
 def test_per_model_usage_is_summed_when_the_session_row_is_empty(data_root: Path) -> None:
     """A hermes that attributes usage per model leaves the row at zero; the rows add up."""
     with sqlite3.connect(data_root / "profiles" / "platform" / "state.db") as conn:
@@ -970,6 +1002,17 @@ def test_gaps_leaves_out_notes_that_hide_no_worker() -> None:
 
 def test_gaps_is_empty_for_a_complete_read() -> None:
     assert worker_trajectory.gaps({"cards": [], "errors": [], "unread": [], "truncated": False, "calls": 3}) == []
+
+
+def test_settle_of_a_run_that_filed_no_card_bills_no_workers(no_cluster_exec: list[str]) -> None:
+    """Settling with nothing awaited is the undelegated path: no ``workers`` key at all."""
+    result = AgentResult(output="answered", trajectory=[])
+    result.metadata["final_message"] = "answered"
+    harness.KubeAgentsHarness._settle(result, [], [])
+    assert "workers" not in result.tokens
+    assert result.metadata["worker_trajectory"] is None
+    # Nothing to read, so the pod is not asked.
+    assert not any(worker_trajectory.CAPTURE_PRESENT in s for s in no_cluster_exec)
 
 
 # ---------------------------------------------------------- tool_called stays
