@@ -879,7 +879,7 @@
         "args": {
           "command": "cd /opt/data/kanban/workspaces/t_9c0f6540 && git clone --depth 20 --branch run/gitops-pilot-20260918-141238/b-0011 https://github.com/gke-agentic/kage-eval-20260918-claude-1 repo 2>&1 | tail -5; ls repo/tasks/b-0011 2>&1"
         },
-        "result": "{\"output\": \"\", \"exit_code\": -1, \"error\": \"BLOCKED: Security scan \u2014 [MEDIUM] URL uses raw IP address: URL points to IP address 0.0.0.20 instead of a domain name; [MEDIUM] Schemeless URL in sink context: URL without explicit scheme passed to a command that downloads/executes content but single-query mode (-q) runs without a user present to approve it. Find an alternative approach that avoids this command. To allow dangerous commands in single-query mode, set approvals.single_query_mode: approve in config.yaml.\", \"status\": \"blocked\"}",
+        "result": "{\"output\": \"\", \"exit_code\": -1, \"error\": \"BLOCKED: Security scan \u2014 [MEDIUM] URL uses raw IP address: URL points to IP address 192.0.2.20 instead of a domain name; [MEDIUM] Schemeless URL in sink context: URL without explicit scheme passed to a command that downloads/executes content but single-query mode (-q) runs without a user present to approve it. Find an alternative approach that avoids this command. To allow dangerous commands in single-query mode, set approvals.single_query_mode: approve in config.yaml.\", \"status\": \"blocked\"}",
         "status": "error",
         "agent": "cluster-fuxiaogao-gkedemos-gitops-pilot-20260918-14123-97b2c62a",
         "task": "t_9c0f6540",
