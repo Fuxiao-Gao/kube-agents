@@ -94,6 +94,12 @@ readonly STAMP_FILE="campaign.json"
 readonly SWEEP_JSON="integrity-sweep.json"
 readonly SWEEP_MD="integrity-sweep.md"
 readonly RESULTS_DIR="./results"
+# Rollout wait after the reset re-creates the agent: the data volume is
+# ReadWriteOnce, so the new pod waits for the old one to release it, then
+# cold-starts (plugin and skill sync, MCP discovery). Fifteen minutes covers
+# the worst case the pilot saw (run 10, 2026-09-15: the startup probe was still
+# failing at ten).
+readonly GATEWAY_ROLLOUT_TIMEOUT=900s
 
 : "${GCP_PROJECT_ID:?set GCP_PROJECT_ID to the project that hosts the task cluster of a run}"
 : "${AGENT_HOST_CONTEXT:?set AGENT_HOST_CONTEXT to the kubectl context of the cluster running the platform agent}"
@@ -107,6 +113,7 @@ readonly RESULTS_DIR="./results"
 : "${TASK:=b-0011}"   # devops-bench task id; the case is ./tasks/${TASK}-gitops
 RUN_BRANCH="run/${CLUSTER_NAME}/${TASK}"   # must match the stack's locals.run_branch
 K=(kubectl --context "${AGENT_HOST_CONTEXT}" -n "${AGENT_NAMESPACE}")
+CR="platformagents.kubeagents.x-k8s.io/platform-agent"
 
 cd "$(dirname "$0")/.."
 [ -r "${GITOPS_TOKEN_FILE}" ] || { echo "token file ${GITOPS_TOKEN_FILE} missing (contents read/write and administration on the GitOps repository: the run makes its branch the repository's default)" >&2; exit 1; }
