@@ -109,7 +109,7 @@ directory.
 
 `spec.deployment.env` is applied to the credential runtime because it may
 contain credentials. A short allowlist may also be copied to the sandbox — the
-OpenTelemetry settings, `EOD_EXCLUDE_NAMESPACES`, `GITOPS_BASE_BRANCH` (the branch submit-suggestion opens pull requests against, inside the repository the operator already pins), the `ALERT_DAILY_LIMIT_*` alert ceilings, and the
+OpenTelemetry settings, `EOD_EXCLUDE_NAMESPACES`, the `ALERT_DAILY_LIMIT_*` alert ceilings, and the
 `FEEDBACK_PROMPT_*` switch and delay —
 but only as literal values; all `valueFrom` sources are rejected. A name earns a
 place on that list only if an arbitrary value for it cannot redirect state,

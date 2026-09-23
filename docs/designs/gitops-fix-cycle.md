@@ -141,22 +141,22 @@ The PR base. In directory mode `submit-suggestion` resolves it as `GITOPS_BASE_B
 else the remote's advertised default branch (`git remote set-head origin --auto`), else
 `main` (`agents/platform/scripts/gitops_workspace.py`); content mode takes the broker's
 default and does not read the variable. The agent used directory mode in the measured
-runs. Two ways to make that the run branch:
+runs. The pilot makes that the run branch in **default-branch mode** (pilot only; used
+for runs 14 onward): the stack makes the run branch the repository's default branch for
+the run and restores the original on destroy. Works because the skill re-asks the remote
+before every PR; one run at a time.
 
-- **env mode** (used for runs 1 to 13): `GITOPS_BASE_BRANCH` is set on the
-  PlatformAgent's `spec.deployment.env` for the run. This needs the operator change that
-  adds the variable to `safeSandboxEnvOverrides` (the sandbox env allowlist); the pilot
-  install ran release 0.4.0 plus that one line for runs 1 to 13. Each change rolls the
-  agent pod, and its
-  cold start has taken from 7 minutes to over 10 (ReadWriteOnce data volume hand-off plus
-  profile sync; run 10 on 2026-09-15 was still failing its startup probe at 10 minutes), so
-  the wrapper waits up to 15.
-- **default-branch mode** (pilot only; the wrapper's default, used for runs 14 onward on
-  the 0.5.0 install whose stock operator lacks the allowlist line): the stack makes the run branch
-  the repository's default branch for the run and restores the original on destroy. Works
-  because the skill re-asks the remote before every PR; one run at a time.
+Runs 1 to 13 used **env mode** instead: `GITOPS_BASE_BRANCH` set on the PlatformAgent's
+`spec.deployment.env`, on a 0.4.0 install whose operator was rebuilt to copy the variable
+into the agent container (each change rolled the agent pod, whose cold start took from 7
+to over 10 minutes). That mode is gone: on the shell-sandbox layout every command the
+agent runs executes in `platform-agent-shell-0`, whose environment is built from scratch
+and does not take `spec.deployment.env` (`docs/designs/agent-shell-sandboxing.md`), so the
+variable reaches the gateway container and never the process that opens the PR. The
+per-run base is the credential broker's to enforce (#1498; its direct-push half landed as
+#1669, the base-branch half is #1848).
 
-Both are advisory from the agent's point of view: in run 7 a session ran
+Both modes were advisory from the agent's point of view: in run 7 a session ran
 `export GITOPS_BASE_BRANCH=main` and opened a PR against `main`. See Findings.
 
 The run wrapper `bench/hack/run-gitops-pilot.sh` wires all of this for a laptop run:
@@ -201,11 +201,10 @@ health, elapsed) go into `result.metadata["gitops"]` and, because devops-bench p
 The verifiers run only after this wait returns, so they grade the synced cluster (or the
 still-broken one). The pilot records the outcome and does not score it.
 
-Order of one run, end to end: wrapper sets the agent's base branch (env mode) or asks the
-stack to switch the repository default (default-branch mode) -> devops-bench `tofu apply`
-(cluster, run branch, Argo, seed, onboarding) -> agent turn and delegated cards -> GitOps
-wait -> verifiers -> `tofu destroy` (cluster and run branch, and the default branch
-restored) -> wrapper clears the agent's base branch.
+Order of one run, end to end: wrapper asks the stack to switch the repository default ->
+devops-bench `tofu apply` (cluster, run branch, Argo, seed, onboarding) -> agent turn and
+delegated cards -> GitOps wait -> verifiers -> `tofu destroy` (cluster and run branch, and
+the default branch restored).
 
 ## Repository-side check
 
