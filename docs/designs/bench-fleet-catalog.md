@@ -269,8 +269,8 @@ also need a GitOps-repo write path — the six audit scenarios and both remediat
 contained by pinning it to a throwaway repository per eval project.
 
 Asserting read-only from inside a case is a state check against the fixture — "the
-planted defect survived the run" — and not `tool_called`, which sees only the delegating
-turn's calls and would be blind to a worker's mutation. On the standing fleet that check
+planted defect survived the run" — and not `tool_called`, which even under `scope: workers`
+sees the call a worker made and not what it changed. On the standing fleet that check
 is `fleet_resource_property`, which resolves the cluster from the fixture role; plain
 `resource_property` reads the ambient kubeconfig and suits only a case whose deployer
 built its own cluster, as `gpu-stress-test-diagnosis` does.

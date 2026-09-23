@@ -206,6 +206,22 @@ class ReportContainsVerifier(BaseVerifier):
         )
 
 
+# Hermes' MCP dispatch wrapper: a worker's trajectory entry named this carries
+# the tools it actually invoked under args["calls"][*]["name"].
+_TOOL_CALL_WRAPPER = "tool_call"
+
+
+def _wrapped_tool_names(entry: dict[str, Any]) -> set[str]:
+    """Tool names a ``tool_call`` wrapper entry invoked; empty for any other."""
+    if entry.get("name") != _TOOL_CALL_WRAPPER:
+        return set()
+    args = entry.get("args")
+    calls = args.get("calls") if isinstance(args, dict) else None
+    if not isinstance(calls, list):
+        return set()
+    return {str(c.get("name")) for c in calls if isinstance(c, dict) and c.get("name")}
+
+
 @VERIFIERS.register("tool_called")
 class ToolCalledVerifier(BaseVerifier):
     """Count trajectory entries whose tool name is in ``tool_names``.
@@ -239,6 +255,15 @@ class ToolCalledVerifier(BaseVerifier):
     trajectory entries (``ToolCall.to_dict()["name"]``), e.g.
     ``kanban_create``; a worker's entries carry the name the profile's
     session store recorded for the tool.
+
+    A worker reaches an MCP tool through Hermes' ``tool_call`` wrapper: the
+    entry is named ``tool_call`` and the tool actually invoked sits in its
+    arguments, ``{"calls": [{"name": "mcp__developer_knowledge__search_documents",
+    "arguments": {...}}]}`` (measured on build 2102459327938826240, #1765).
+    A name in ``tool_names`` therefore also matches a ``tool_call`` entry
+    whose ``calls`` list names it, else a worker's MCP calls would be
+    invisible to this check by name. One wrapper entry counts once however
+    many of its calls match; ``require_success`` reads the wrapper's status.
     """
 
     type: Literal["tool_called"]
@@ -278,7 +303,7 @@ class ToolCalledVerifier(BaseVerifier):
         calls = [
             entry
             for entry in entries
-            if entry.get("name") in wanted
+            if (entry.get("name") in wanted or _wrapped_tool_names(entry) & wanted)
             and not (self.require_success and entry.get("status") == "error")
         ]
         count = len(calls)
@@ -449,9 +474,9 @@ _MAX_NAMED_COMMANDS = 5
 class WorkerCommandsVerifier(BaseVerifier):
     """Pattern checks against the terminal commands the delegated workers ran.
 
-    The one check that sees the ROUTE a worker took rather than the answer it
-    gave. ``tool_called`` cannot: it skips the worker entries the harness
-    appends to the trajectory, by design (see its docstring).
+    Sees the ROUTE a worker took rather than the answer it gave, through the
+    terminal commands it typed; ``tool_called`` under ``scope: workers`` is
+    the companion for the MCP tool calls it made (see its docstring).
     The harness reads each delegated card's worker log before purging it and
     stashes every ``💻 $`` line as a command (``transcript.worker_commands``);
     this verifier matches Python regular expressions against those strings,

@@ -39,12 +39,24 @@
 # What the case CAN assert about the tool choice, since #1746 put the
 # workers' calls in the trajectory: that no worker called `answer_query`.
 # The lookup happens in the platform worker (the front door has no
-# knowledge tools), so the safeguard reads `scope: workers`; an attempted
-# call counts whether or not the API answered, so it holds in the pool
-# projects too, where every Developer Knowledge call fails. It is the
-# #1765 red/green: the pre-#1765 personas preferred `answer_query` for
-# exactly this kind of conceptual question. If the capture did not run the
-# check errors rather than passing, which is VerificationCoverage < 1.0.
+# knowledge tools), so the safeguard reads `scope: workers`. The worker
+# reaches an MCP tool through Hermes' `tool_call` wrapper -- the entry is
+# named `tool_call` and the tool invoked sits in its arguments -- and
+# tool_called reads through that wrapper. An attempted call counts whether
+# or not the API answered, so it holds in the pool projects too, where the
+# Developer Knowledge tools ARE listed but every call 403s (the pool's
+# agent identity lacks roles/serviceusage.serviceUsageConsumer for its own
+# project, the grant #945 added to full-install and the pool never got) and
+# the worker falls back to web search. Measured on build 2102459327938826240
+# (#1765, kube-agents-evals-8), rep 1, 221s: tool_search -> tool_describe
+# -> tool_call(mcp__developer_knowledge__search_documents) -> 403 ->
+# web_search x4 -> report; all four checks passed, VerificationCoverage
+# 1.0, so the capture runs in this case's shape. The red on main's personas
+# is a peer build the same day (2102475235713355776, PR #1652, GREEN): its
+# obtainability-pdb-semantics worker spent one
+# mcp__developer_knowledge__answer_query call through the same wrapper. If
+# the capture did not run the check errors rather than passing, which is
+# VerificationCoverage < 1.0.
 #
 # Isolation class: read-only (no cluster touched at all).
 # Tier: nightly -- registered in hack/eval/nightly-cases.txt since
@@ -145,9 +157,10 @@ verification_spec:
         # a day for the whole project. scope: workers reads the platform
         # worker's (and any Cluster Agent's) calls, which is where the lookup
         # happens; no require_success, because the attempt is the spend and
-        # the pool projects' API is unreachable anyway. Three spellings: the
-        # name Hermes exposes to the model, its single-underscore form, and
-        # the bare method name, whichever the session store recorded.
+        # the pool projects' calls 403 anyway. The worker invokes it through
+        # the tool_call wrapper, which tool_called reads through (measured:
+        # the name inside is mcp__developer_knowledge__answer_query); the
+        # other two spellings cost nothing and cover a renamed dispatch.
         - type: tool_called
           scope: workers
           tool_names:

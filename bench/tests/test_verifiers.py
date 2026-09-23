@@ -738,6 +738,63 @@ _WORKER_TAGGED = [
 ]
 
 
+# The shape build 2102459327938826240 recorded (#1765): the worker discovers
+# the MCP tool with tool_search, then invokes it through Hermes' tool_call
+# wrapper, so the entry is named tool_call and the real name is in args.
+_WORKER_TOOL_CALL_WRAPPED = [
+    {"name": "kanban_create", "args": {}, "status": "completed"},
+    {
+        "name": "tool_search",
+        "args": {"queries": ["developer knowledge"]},
+        "status": "completed",
+        "agent": "platform",
+    },
+    {
+        "name": "tool_call",
+        "args": {
+            "calls": [
+                {
+                    "name": "mcp__developer_knowledge__answer_query",
+                    "arguments": {"query": "GKE Autopilot compute classes"},
+                }
+            ]
+        },
+        "status": "completed",
+        "agent": "platform",
+    },
+    {"name": "kanban_complete", "args": {}, "status": "completed", "agent": "platform"},
+]
+
+
+def test_tool_called_sees_through_the_tool_call_wrapper():
+    transcript.set("done", _WORKER_TOOL_CALL_WRAPPED)
+    v = ToolCalledVerifier(
+        type="tool_called", tool_names=["mcp__developer_knowledge__answer_query"], scope="workers"
+    )
+    res = v.verify(5.0)
+    assert res.status == "pass" and res.raw == {"matching_calls": 1}
+    # tool_search only LISTED the tool; that is not a call.
+    other = ToolCalledVerifier(
+        type="tool_called", tool_names=["mcp__developer_knowledge__search_documents"], scope="workers"
+    )
+    assert other.verify(5.0).status == "fail"
+    # The wrapper's own name still matches as a plain entry name.
+    assert ToolCalledVerifier(type="tool_called", tool_names=["tool_call"], scope="workers").verify(5.0).status == "pass"
+
+
+def test_tool_call_wrapper_with_malformed_args_matches_nothing():
+    transcript.set(
+        "done",
+        [
+            {"name": "kanban_create", "args": {}, "status": "completed"},
+            {"name": "tool_call", "args": {"raw": "clipped"}, "status": "completed", "agent": "platform"},
+            {"name": "tool_call", "args": {"calls": "not-a-list"}, "status": "completed", "agent": "platform"},
+        ],
+    )
+    v = ToolCalledVerifier(type="tool_called", tool_names=["answer_query"], scope="workers")
+    assert v.verify(5.0).status == "fail"
+
+
 def test_tool_called_default_scope_skips_the_workers_tagged_entries():
     transcript.set("done", _WORKER_TAGGED)
     v = ToolCalledVerifier(type="tool_called", tool_names=["kanban_complete"])
