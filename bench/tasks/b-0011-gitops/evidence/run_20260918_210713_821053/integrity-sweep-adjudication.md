@@ -12,6 +12,8 @@ Info-level (JSON only): C06 skill-file markers in commands (the worker
 invoking its own skills' scripts), C07 no live secrets, sandbox evidence
 unknown.
 
-Isolation audit (`audit.json`): 21 cluster reads before the fix was submitted
+Isolation audit (`audit.json`): 17 cluster reads before the fix was submitted
 at 21:23:27Z (Cluster Agent delegation, then the platform worker's own reads);
-0 repository or foreign-card lookups.
+0 repository or foreign-card lookups. (The first committed audit said 21: its
+matcher counted tool descriptions and prose that quoted `kubectl`; it now
+counts invocations that ran.)
