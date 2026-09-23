@@ -137,11 +137,11 @@ cluster and project and a paragraph after it naming the repository, path and run
 task_version 2, saying that changes reach that branch only through a pull request against
 it (see the direct-push finding below for why).
 
-The PR base. In directory mode `submit-suggestion` resolves it as `GITOPS_BASE_BRANCH`,
-else the remote's advertised default branch (`git remote set-head origin --auto`), else
-`main` (`agents/platform/scripts/gitops_workspace.py`); content mode takes the broker's
-default and does not read the variable. The agent used directory mode in the measured
-runs. The pilot makes that the run branch in **default-branch mode** (pilot only; used
+The PR base. `submit-suggestion` resolves it as `CREDENTIAL_PROXY_BASE_BRANCH`, else
+`GITOPS_BASE_BRANCH`, else the remote's advertised default branch (`git remote set-head
+origin --auto`), else `main` (`agents/platform/scripts/gitops_workspace.py`; content mode
+reads the same pair in `content_workspace.py`). The agent used directory mode in the
+measured runs. The pilot makes that the run branch in **default-branch mode** (pilot only; used
 for runs 14 onward): the stack makes the run branch the repository's default branch for
 the run and restores the original on destroy. Works because the skill re-asks the remote
 before every PR; one run at a time.
@@ -162,10 +162,12 @@ Both modes were advisory from the agent's point of view: in run 7 a session ran
 The run wrapper `bench/hack/run-gitops-pilot.sh` wires all of this for a laptop run:
 venv (optionally another devops-bench through `DEVOPS_BENCH_PIN`, with the case rendered
 to `mode: hold` and the verification budget sized to the entry count when that
-devops-bench accepts hold), PlatformAgent env patch with a landed-check, tokens from the
-install's Secret, `AGENT_MODEL` resolved from the install's LiteLLM config so the result
-row names the model behind the agent, `TF_VAR_*` for the stack, `GITOPS_*` for the
-harness, `--no-sync` so `uv run` does not undo a pin, and the cleanup of the env on exit.
+devops-bench accepts hold), the repository URL rendered into the task copy when
+`GITOPS_REPO` is not the committed default, the stack asked to make the run branch the
+repository's default for the run, tokens from the install's Secret, `AGENT_MODEL` resolved
+from the install's LiteLLM config so the result row names the model behind the agent,
+`TF_VAR_*` for the stack, `GITOPS_*` for the harness, `--no-sync` so `uv run` does not
+undo a pin, and the removal of the rendered task copy on exit.
 Run records (`manifest.json`, `results.json`, `rows.json`) are kept under
 `bench/tasks/b-0011-gitops/evidence/<run id>/`, the layout devops-bench PR #244 uses for its
 own evidence; `rows.json` is the artifact the devops-bench leaderboard ingests. Only the
@@ -184,10 +186,12 @@ delegated-work wait, active only when `GITOPS_RUN_BRANCH` is set:
    after the run started appears (`GITOPS_PR_TIMEOUT`, default 900s); older ones belong to a
    previous run of the same branch. None: outcome `no_pr`. A failed poll is counted and
    retried until the phase deadline, in every phase.
-2. Poll the PR: merged -> continue; closed unmerged, or a check run concluded
-   failure, cancelled, timed_out or action_required -> `pr_rejected`; else until
-   `GITOPS_MERGE_TIMEOUT` (600s)
-   -> `merge_timeout`.
+2. Poll the PR: merged -> continue; closed unmerged, or the merge check (the check
+   runs `GITOPS_MERGE_CHECK` names, default `check`; other checks on the head are
+   ignored, and `action_required` waits) concluded failure, cancelled or timed_out ->
+   `pr_rejected`, unless a later PR of this run exists against the branch, in which
+   case the wait moves to it and records the first under `superseded`; else until
+   `GITOPS_MERGE_TIMEOUT` (600s) -> `merge_timeout`.
 3. Poll the branch head (`GET .../branches/<run branch>`) and the Argo Application
    (`kubectl --context <task cluster> -n argocd get application b-0011 -o json`) until
    `status.sync.status == Synced`, `status.sync.revision == <branch head>` and
@@ -222,7 +226,8 @@ trigger it.
 
 GitHub-specific today: the REST calls for branches and PRs, check-run conclusions, the
 App identity the agent pushes with, the check workflow, and the token model (a
-fine-grained PAT with contents read/write on one repository for the pilot; the leaderboard
+fine-grained PAT with contents read/write, plus administration for the default-branch
+switch, on one repository for the pilot; the leaderboard
 repository should use a GitHub App for Argo since deploy keys are disabled). Landing this
 upstream in devops-bench needs a small git-provider interface: cut/reset/delete branch,
 list PRs by base, PR state and checks, branch head.
