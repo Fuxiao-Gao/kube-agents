@@ -107,7 +107,7 @@ variable "gitops_run_branch" {
 
 variable "gitops_token_file" {
   type        = string
-  description = "File holding a GitHub token for gitops_repo: contents read/write on that one repository (branch create/delete, Argo repo access)."
+  description = "File holding a GitHub token for gitops_repo: contents read/write on that one repository (branch create/delete, Argo repo access), plus administration when gitops_switch_default_branch is set (the default-branch switch)."
   default     = "~/.config/gitops-pilot/github-token"
 }
 
