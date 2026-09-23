@@ -24,6 +24,8 @@ import sys
 from datetime import datetime, timezone
 
 AUDIT_SCRIPT = pathlib.Path(__file__).with_name("gitops-audit.py")
+# Ceiling on one `gh pr view`; a PR that takes longer to read is reported as unavailable.
+GH_TIMEOUT_S = 30
 GITOPS_ENTRY_NAME = "gitops_fix_cycle"
 HEARTBEAT_NAME = "kanban_heartbeat"
 MAX_HEARTBEATS = 6
@@ -54,7 +56,7 @@ def _pr(url: str) -> dict:
     if not url:
         return {}
     try:
-        out = subprocess.run(["gh", "pr", "view", url, "--json", PR_FIELDS], capture_output=True, text=True, timeout=30)
+        out = subprocess.run(["gh", "pr", "view", url, "--json", PR_FIELDS], capture_output=True, text=True, timeout=GH_TIMEOUT_S)
     except (OSError, subprocess.TimeoutExpired):
         return {}
     if out.returncode != 0:

@@ -87,6 +87,9 @@ readonly OWNED_PVCS="platform-agent-data system-metadata"
 readonly CR_REMOVE_TIMEOUT=600s
 readonly CR_READY_TIMEOUT=900s
 readonly PVC_GONE_TIMEOUT_SEC=300
+readonly PVC_POLL_INTERVAL_SEC=5
+# The branch a repository is left on after a run (the stack restores it).
+readonly REPO_DEFAULT_BRANCH="main"
 # The card a fresh install files itself on first boot (host inventory); the
 # freshness check reports it apart from foreign work instead of refusing it.
 readonly ONBOARDING_CARD_PREFIX="First-time environment discovery"
@@ -185,8 +188,8 @@ render_task_copy() {
 # GITOPS_HISTORY_PARENT_SHA says otherwise).
 slug="${GITOPS_REPO#https://github.com/}"; slug="${slug%.git}"
 if [ -z "${GITOPS_BROKEN_BASE_SHA:-}" ]; then
-  : "${GITOPS_REPO_ROOT_SHA:=$(GH_TOKEN="$(tr -d '\r\n' < "${GITOPS_TOKEN_FILE}")" gh api "repos/${slug}/commits/main" --jq .sha)}"
-  [ -n "${GITOPS_REPO_ROOT_SHA}" ] || { echo "could not read main's head in ${GITOPS_REPO}" >&2; exit 1; }
+  : "${GITOPS_REPO_ROOT_SHA:=$(GH_TOKEN="$(tr -d '\r\n' < "${GITOPS_TOKEN_FILE}")" gh api "repos/${slug}/commits/${REPO_DEFAULT_BRANCH}" --jq .sha)}"
+  [ -n "${GITOPS_REPO_ROOT_SHA}" ] || { echo "could not read ${REPO_DEFAULT_BRANCH}'s head in ${GITOPS_REPO}" >&2; exit 1; }
   GITOPS_BROKEN_BASE_SHA="${GITOPS_REPO_ROOT_SHA}"
   if [ "${TASK}" = "${STAGED_HISTORY_TASK}" ]; then : "${GITOPS_HISTORY_PARENT_SHA:=${GITOPS_REPO_ROOT_SHA}}"; fi
 fi
@@ -321,7 +324,7 @@ reset_agent_state() {
   # shellcheck disable=SC2086
   while "${K[@]}" get pvc ${OWNED_PVCS} ${SHELL_PVCS} >/dev/null 2>&1; do
     [ "${waited}" -lt "${PVC_GONE_TIMEOUT_SEC}" ] || { echo "agent volumes still present after ${PVC_GONE_TIMEOUT_SEC}s" >&2; "${K[@]}" get pvc >&2; exit 1; }
-    sleep 5; waited=$((waited + 5))
+    sleep "${PVC_POLL_INTERVAL_SEC}"; waited=$((waited + PVC_POLL_INTERVAL_SEC))
   done
   # The event watcher turns Warning events from every watched cluster into
   # autonomous triage cards; on a benchmark run the prompt must be the only
@@ -345,16 +348,17 @@ AGENT_STORES=""
 if [ "${AGENT_STATE_RESET:-false}" = "true" ]; then
   reset_agent_state
   assert_fresh_agent
-  # The credential proxy refuses repositories the install does not manage, so
-  # the mint can only be proved once the re-applied PlatformAgent names the
-  # run's repository; proving it here fails fast instead of at the agent's
-  # first push, an hour in.
-  if [ -n "${GITOPS_REPO:-}" ] && [ "${GITOPS_REPO}" != "${DEFAULT_GITOPS_REPO}" ]; then
-    # Relative to the bench directory (the cd above), not to this file: a
-    # run executes a frozen copy of this script from results/ so that an
-    # edit during the run cannot reach it.
-    ./hack/gitops-run-repo.sh check "$(basename "${GITOPS_REPO%.git}")"
-  fi
+fi
+# The credential proxy refuses repositories the install does not manage, so a
+# run on another repository proves the mint before the cluster exists: after
+# the reset, once the re-applied PlatformAgent names the run's repository, or
+# right away when there was no reset (a PlatformAgent still naming the
+# previous repository fails here, not at the agent's first push an hour in).
+if [ -n "${GITOPS_REPO:-}" ] && [ "${GITOPS_REPO}" != "${DEFAULT_GITOPS_REPO}" ]; then
+  # Relative to the bench directory (the cd above), not to this file: a
+  # run executes a frozen copy of this script from results/ so that an
+  # edit during the run cannot reach it.
+  ./hack/gitops-run-repo.sh check "$(basename "${GITOPS_REPO%.git}")"
 fi
 
 # 2. agent base branch ------------------------------------------------------
@@ -461,7 +465,7 @@ if [ "${BENCH_NO_TEARDOWN:-false}" != "true" ]; then
     echo "WARN leak: run branch ${RUN_BRANCH} still exists in ${repo_slug}" >&2
   fi
   default_branch="$(GH_TOKEN="${gh_token}" gh api "repos/${repo_slug}" --jq .default_branch 2>/dev/null || true)"
-  [ "${default_branch}" = "main" ] || echo "WARN leak: default branch of ${repo_slug} is '${default_branch}', not main" >&2
+  [ "${default_branch}" = "${REPO_DEFAULT_BRANCH}" ] || echo "WARN leak: default branch of ${repo_slug} is '${default_branch}', not ${REPO_DEFAULT_BRANCH}" >&2
   if gcloud container clusters list --project "${GCP_PROJECT_ID}" --filter="name=${CLUSTER_NAME}" --format="value(name)" 2>/dev/null | grep -q .; then
     echo "WARN leak: task cluster ${CLUSTER_NAME} still exists" >&2
   fi

@@ -1,7 +1,7 @@
 name: GitOps run-branch check
 
 # Required check for the Option C pilot (gke-labs/kube-agents#1307). PRs opened by
-# the platform agent target a per-run branch `run/<build-id>/<task>`. This job
+# the platform agent target a per-run branch `run/<cluster>/<task>`. This job
 # validates the change and, because rulesets and required checks are not
 # available on this private repo under the org's plan, performs the merge itself
 # when everything passes. A PR that fails here stays open, so Argo CD never sees
@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: YAML parses
         run: |
