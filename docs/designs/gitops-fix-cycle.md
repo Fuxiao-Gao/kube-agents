@@ -233,10 +233,16 @@ Run records (`manifest.json`, `results.json`, `rows.json`) are kept under
 `bench/tasks/<task>-gitops/evidence/<run id>/`, the layout devops-bench PR #244 uses for its
 own evidence; `rows.json` is the artifact the devops-bench leaderboard ingests. Only the
 isolated campaign runs (gke-labs/kube-agents#1773: one repository per run, the agent's state
-reset before each task-run) are kept there. The shared-install runs are summarised in the
-Findings below and in gke-labs/kube-agents#1307's comments; their records are not in the
-tree (b-0011 run 11 has none: its results directory was removed by hand during teardown;
-b-0011 run 14 and b-0022b run 1 failed in the seed).
+reset before each task-run) are kept there, each with its `campaign.json` version stamp,
+`audit.json` isolation counts, integrity sweep and adjudication: b-0011 on `claude-opus-5`
+(`run_20260918_181403_840299`) and on `gemini-3.7-flash` (`run_20260918_210713_821053`),
+b-0022b on `claude-opus-5` (`run_20260918_185657_889776`). The b-0022b cell on
+`gemini-3.7-flash` has no record yet: its one campaign attempt (2026-09-18) ended in the
+harness's status-turn transport failure with an empty trajectory and a null row, and is
+rerun rather than kept. The shared-install runs are summarised in the Findings below and in
+gke-labs/kube-agents#1307's comments; their records are not in the tree (b-0011 run 11 has
+none: its results directory was removed by hand during teardown; b-0011 run 14 and b-0022b
+run 1 failed in the seed).
 
 ## How the PR is found and what "done" means
 
