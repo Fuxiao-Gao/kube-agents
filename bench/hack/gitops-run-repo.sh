@@ -191,9 +191,13 @@ print(json.dumps([{"op": "replace", "path": "/spec/template/spec/containers/0/vo
     GIT_AUTHOR_DATE="${root_date}" GIT_COMMITTER_DATE="${root_date}" \
       git -C "${work}" -c user.name="${ROOT_AUTHOR_NAME}" -c user.email="${ROOT_AUTHOR_EMAIL}" commit -q -m "${ROOT_COMMIT_MESSAGE}"
     root="$(git -C "${work}" rev-parse HEAD)"
-    # The token reaches git through a helper, not the URL, so it never lands
-    # in the process table or a reflog.
-    git -C "${work}" -c credential.helper="!f() { echo username=x-access-token; echo password=$(token); }; f" \
+    # The token reaches git through a helper that reads the file when git
+    # asks for credentials: single-quoted, so the shell does not expand it
+    # onto git's argv (where the process table and a set -x trace would show
+    # it for the whole push), and the path travels in the environment, as
+    # GH_TOKEN does for gh above.
+    GITOPS_TOKEN_PATH="${GITOPS_TOKEN_FILE/#\~/$HOME}" \
+      git -C "${work}" -c credential.helper='!f() { echo username=x-access-token; echo "password=$(tr -d "\r\n" < "${GITOPS_TOKEN_PATH}")"; }; f' \
       push -q "https://github.com/${GITOPS_ORG}/${NAME}.git" main:main >&2
     log "    root commit ${root}"
     # GitHub answers this with 403 for an OAuth token (tested 2026-09-18), so
