@@ -27,8 +27,9 @@
 #   agent has done anything (measured 2026-09-09 on a scratch GKE cluster). Argo
 #   CD sync waves reproduce the original order: gating objects (namespaces,
 #   quota, netpols) in wave -2, pricer in wave -1, everything else in the
-#   default wave 0. Result: pricer 2/2, checkout 2/4 ready with the rest
-#   quota-blocked, quota 640Mi/832Mi. The edge/gateway Ingress is excluded from
+#   default wave 0. Result: pricer 2/2 and, once the staged history has synced
+#   healthy before broken, checkout 3/4 ready with the rest quota-blocked (2/4
+#   from a branch cut at the broken base alone), quota 704Mi/832Mi. The edge/gateway Ingress is excluded from
 #   Argo health: it has no ingress class and a ClusterIP backend, so GKE never
 #   programs it, and Argo's Ingress health would pin the Application at
 #   Progressing and starve the harness's completion signal.
