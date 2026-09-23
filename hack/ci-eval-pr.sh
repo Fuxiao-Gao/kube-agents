@@ -1616,6 +1616,7 @@ unit_cost_hint() {
     # nightly 2026-09-15 unmeasured; same SOP-faithful audit shape, same band.
     obtainability-planted-pdb | stockout-pinned-pool) echo 900 ;;
     upgrade-readiness-lagging-cluster | consistency-drift-outlier) echo 900 ;;
+    consistency-no-environment-label) echo 900 ;;
     fleet-cost-idle-pool) echo 900 ;;
     compliance-rbac-overgrant | rca-remediation-pr) echo 700 ;;
     # Nightly-only. Measured 980-1929s across build 2099539376672346112's
@@ -1645,7 +1646,7 @@ unit_cost_hint() {
 # The harness's delegation ceiling for one unit, in seconds: how long
 # devops-bench keeps polling the Platform Agent for a delegated worker before
 # it grades whatever the parent has said so far. Every unit inherits the
-# global AGENT_DELEGATION_TIMEOUT exported in section 3 (2700s); the six
+# global AGENT_DELEGATION_TIMEOUT exported in section 3 (2700s); the seven
 # full-audit units -- SOP dispatch, a delegated worker sweeping the fleet,
 # a ledger write, one closing line -- get 3000s.
 #
@@ -1678,6 +1679,7 @@ unit_delegation_timeout() {
   case "$1" in
     compliance-rbac-overgrant | obtainability-planted-pdb | stockout-pinned-pool) echo 3000 ;;
     upgrade-readiness-lagging-cluster | consistency-drift-outlier | fleet-cost-idle-pool) echo 3000 ;;
+    consistency-no-environment-label) echo 3000 ;;
     *) echo "${AGENT_DELEGATION_TIMEOUT:-1800}" ;;
   esac
 }
