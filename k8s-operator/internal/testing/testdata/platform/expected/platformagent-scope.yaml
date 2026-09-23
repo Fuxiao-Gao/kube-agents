@@ -352,11 +352,22 @@ data:
       provider: ""
   scope.json: |
     {
-      "present": false,
-      "projects": [],
+      "present": true,
+      "projects": [
+        "payments-prod",
+        "payments-staging"
+      ],
       "exclude": {
-        "projects": [],
-        "clusters": []
+        "projects": [
+          "*-sandbox"
+        ],
+        "clusters": [
+          {
+            "projectId": "payments-staging",
+            "location": "us-central1",
+            "clusterName": "scratch-cluster"
+          }
+        ]
       }
     }
 kind: ConfigMap
@@ -952,7 +963,7 @@ spec:
               value: kube-agents-gkedemos
             - name: GOOGLE_CHAT_SUBSCRIPTION_NAME
               value: projects/kube-agents-gkedemos/subscriptions/kubeagents-google-chat-events-sub
-          image: ghcr.io/gke-labs/kube-agents/credential-proxy:latest
+          image: ghcr.io/gke-labs/kube-agents/credential-proxy:v9.9.9
           imagePullPolicy: IfNotPresent
           name: envoy-credential-proxy
           ports:
@@ -1224,7 +1235,7 @@ spec:
             - name: API_SERVER_MODEL_NAME
               value: model-default
             - name: HERMES_GATEWAY_PROFILE
-          image: ghcr.io/gke-labs/kube-agents/platform-agent:latest
+          image: ghcr.io/gke-labs/kube-agents/platform-agent:v9.9.9
           imagePullPolicy: IfNotPresent
           name: platform-agent
           ports:
@@ -1320,7 +1331,7 @@ spec:
               value: skip
             - name: PLATFORM_AGENT_ROLE
               value: sidecar
-          image: ghcr.io/gke-labs/kube-agents/platform-agent:latest
+          image: ghcr.io/gke-labs/kube-agents/platform-agent:v9.9.9
           imagePullPolicy: IfNotPresent
           name: platform-agent-dashboard
           ports:
@@ -1414,7 +1425,7 @@ spec:
           command:
             - sh
             - -ec
-          image: ghcr.io/gke-labs/kube-agents/platform-agent:latest
+          image: ghcr.io/gke-labs/kube-agents/platform-agent:v9.9.9
           imagePullPolicy: IfNotPresent
           name: sandbox-credential-cleanup
           resources:
@@ -1445,7 +1456,7 @@ spec:
           command:
             - /bin/sh
             - -c
-          image: ghcr.io/gke-labs/kube-agents/platform-agent:latest
+          image: ghcr.io/gke-labs/kube-agents/platform-agent:v9.9.9
           imagePullPolicy: IfNotPresent
           name: sandbox-ssh-key
           resources:
@@ -1507,7 +1518,7 @@ spec:
               value: "true"
             - name: CREDENTIAL_PROXY_ROLE
               value: api-proxy
-          image: ghcr.io/gke-labs/kube-agents/credential-proxy:latest
+          image: ghcr.io/gke-labs/kube-agents/credential-proxy:v9.9.9
           imagePullPolicy: IfNotPresent
           name: agent-api-auth
           ports:
@@ -1522,7 +1533,7 @@ spec:
             timeoutSeconds: 3
           resources:
             limits:
-              cpu: "1"
+              cpu: "2"
               ephemeral-storage: 2Gi
               memory: 2Gi
             requests:

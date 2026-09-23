@@ -250,6 +250,74 @@ const credentialProxyPolicyJSON = `{
   ]
 }`
 
+// scopeDeclaration is the on-disk shape of spec.scope, the file
+// cluster_agent_reconcile.py reads. Field order is the JSON order; every list is
+// sorted before rendering so an unchanged CR renders byte-identical bytes and the
+// config hash does not move.
+type scopeDeclaration struct {
+	// Present says whether the CR carries a scope block at all. The reconcile reads a
+	// block that is absent as "nothing declared": it lists the management project alone
+	// and retires nothing, because the ordinary way a block goes missing is a write
+	// through an older operator's webhook, not an operator dropping every project. An
+	// empty `projects` list in a present block is the declaration that drops projects.
+	Present  bool                    `json:"present"`
+	Projects []string                `json:"projects"`
+	Exclude  scopeExcludeDeclaration `json:"exclude"`
+}
+
+type scopeExcludeDeclaration struct {
+	Projects []string                        `json:"projects"`
+	Clusters []agentv1alpha1.ScopeClusterRef `json:"clusters"`
+}
+
+// renderScopeJSON renders spec.scope for the pod. It is rendered on every install,
+// an empty declaration when the CR has no scope, so that the reconcile can tell
+// "the operator declared nothing" from "the declaration never reached this pod":
+// the second is what a rollback to an operator without the field looks like, and
+// the reconcile must not prune on it (docs/designs/multi-project-scope.md §7). The
+// `present` flag tells a CR with no block (false) from one whose block is present
+// but empty (true): an empty block and a block whose every list is empty render the
+// same bytes, and a missing block renders differently by that one field.
+func renderScopeJSON(agent *agentv1alpha1.PlatformAgent) string {
+	scope := agent.Spec.Scope
+	if scope == nil {
+		scope = &agentv1alpha1.ScopeSpec{}
+	}
+	decl := scopeDeclaration{
+		Present:  agent.Spec.Scope != nil,
+		Projects: append([]string{}, scope.Projects...),
+		Exclude: scopeExcludeDeclaration{
+			Projects: []string{},
+			Clusters: []agentv1alpha1.ScopeClusterRef{},
+		},
+	}
+	if scope.Exclude != nil {
+		decl.Exclude.Projects = append(decl.Exclude.Projects, scope.Exclude.Projects...)
+		decl.Exclude.Clusters = append(decl.Exclude.Clusters, scope.Exclude.Clusters...)
+	}
+	sort.Strings(decl.Projects)
+	sort.Strings(decl.Exclude.Projects)
+	sort.Slice(decl.Exclude.Clusters, func(i, j int) bool {
+		a, b := decl.Exclude.Clusters[i], decl.Exclude.Clusters[j]
+		if a.ProjectID != b.ProjectID {
+			return a.ProjectID < b.ProjectID
+		}
+		if a.Location != b.Location {
+			return a.Location < b.Location
+		}
+		return a.ClusterName < b.ClusterName
+	})
+	out, err := json.MarshalIndent(decl, "", "  ")
+	if err != nil {
+		// Three string slices cannot fail to marshal; if they ever do, an empty
+		// scope is the safe render: the reconcile falls back to today's behaviour
+		// rather than acting on a partial declaration.
+		manifestsLog.Error(err, "rendering spec.scope failed; rendering no scope")
+		return ""
+	}
+	return string(out) + "\n"
+}
+
 // buildConfigMap generates the ConfigMap manifest containing config.yaml
 func buildConfigMap(agent *agentv1alpha1.PlatformAgent, agentPlugins []*agentv1alpha1.AgentPlugin) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
@@ -298,6 +366,7 @@ func buildConfigMapData(agent *agentv1alpha1.PlatformAgent, agentPlugins []*agen
 		managedEnvKey:     renderManagedEnv(agent),
 		"leader_elect.py": leaderElectScript,
 	}
+	data[scopeConfigKey] = renderScopeJSON(agent)
 
 	untargeted, targeted := partitionPluginsByProfile(filterValidAgentPlugins(agentPlugins))
 
@@ -402,7 +471,7 @@ func renderManagedEnv(agent *agentv1alpha1.PlatformAgent) string {
 		lines = append(lines, fmt.Sprintf("%s=%s", key, value))
 	}
 
-	// UNCONDITIONAL, and one of the three pins here that are not about chat. Every chat key
+	// UNCONDITIONAL, and one of the five pins here that are not about chat. Every chat key
 	// below exists because the agent could otherwise write a competing value into the PVC
 	// .env; this one exists because something already does, on every boot, without being
 	// asked.
@@ -451,6 +520,23 @@ func renderManagedEnv(agent *agentv1alpha1.PlatformAgent) string {
 	// from the container env: one delivery path means one answer
 	// (docs/designs/spec-mode-switch.md).
 	add(kubeagentsModeEnvKey, string(renderMode(agent, "settings")))
+
+	// The scope path, pinned for the same reason as HERMES_HOME_MODE: the container env
+	// is the layer a line in the PVC .env outranks, and the reconcile is a cron script
+	// that inherits the gateway's environment after that file is applied. Without the
+	// pin, one `KUBEAGENTS_SCOPE_FILE=/opt/data/scope.json` line written by the agent
+	// would hand it a declaration it authored; with it, save_env_value refuses the key
+	// and the ConfigMap stays the only answer to "what is declared".
+	add(scopeFileEnvKey, scopeDir+"/"+scopeFileName)
+
+	// RECONCILE_PROJECT, pinned empty. The reconcile reads it as the management project
+	// ahead of the metadata server, and since the scope prune exists a management
+	// identity that changes retires the old project's profiles. Unpinned, one line in
+	// the PVC .env would re-point it, and two clean runs later every profile of the
+	// real management project would be gone. Nothing in the operator or the chart sets
+	// it, so pinning it empty costs no install anything; the script treats an empty
+	// value as unset and asks the metadata server.
+	add(reconcileProjectEnvKey, "")
 
 	integration := agent.Spec.Integration
 	if integration == nil {
@@ -689,6 +775,29 @@ const (
 	// managedVolumeName projects the two keys above into managedScopeDir under the names
 	// Hermes expects (config.yaml and .env).
 	managedVolumeName = "platform-agent-managed-vol"
+
+	// scopeConfigKey holds the rendered spec.scope in the config ConfigMap, on every install:
+	// an empty declaration when the CR has no scope, so the reconcile can tell a declared
+	// nothing from a render that never arrived. It rides in this ConfigMap so a scope edit
+	// moves the config hash and rolls the pod (docs/designs/multi-project-scope.md §5).
+	scopeConfigKey = "scope.json"
+
+	// scopeVolumeName projects scopeConfigKey into scopeDir for the agent container. The
+	// volume is marked optional so a ConfigMap written by an older operator, which has no
+	// such key, still mounts (as an empty directory) instead of holding the pod in
+	// ContainerCreating during a roll; the reader treats the missing file as "no render",
+	// not as an empty scope. It is not under managedScopeDir on purpose: /etc/hermes is
+	// Hermes' administrator policy directory and holds exactly what managed_scope.py reads.
+	scopeVolumeName = "platform-agent-scope-vol"
+	scopeDir        = "/etc/kube-agents"
+	scopeFileName   = "scope.json"
+
+	// scopeFileEnvKey tells cluster_agent_reconcile.py where the declaration is. One
+	// reader, by design; a second code site naming this key is a review comment.
+	scopeFileEnvKey = "KUBEAGENTS_SCOPE_FILE"
+	// reconcileProjectEnvKey is the reconcile's management-project override, pinned
+	// empty in the managed .env (see renderManagedEnv) so the agent cannot write it.
+	reconcileProjectEnvKey = "RECONCILE_PROJECT"
 
 	// gitopsStateVolumeName projects the GitOps state ConfigMap as a mounted directory
 	// volume into the agent container so skills can read managed repositories directly from disk.
@@ -2561,6 +2670,16 @@ func buildPodTemplateSpec(agent *agentv1alpha1.PlatformAgent, configHash, fluent
 		Name:  "HERMES_MANAGED_DIR",
 		Value: managedScopeDir,
 	})
+	// Always set, scope or not: the file is always rendered, and a fixed path keeps "what
+	// is declared" a question about the ConfigMap alone. Also pinned in the managed .env
+	// (renderManagedEnv), which is the layer that makes the container env's answer stick.
+	envVars = append(envVars, corev1.EnvVar{
+		Name:  scopeFileEnvKey,
+		Value: scopeDir + "/" + scopeFileName,
+	})
+	// The managed .env pins RECONCILE_PROJECT empty (renderManagedEnv says why), and the
+	// two renders must agree, so the container env carries the same empty value.
+	envVars = append(envVars, corev1.EnvVar{Name: reconcileProjectEnvKey, Value: ""})
 	// The other half of the umask note at the top of this file. That umask governs what
 	// the entrypoints create; this governs what Hermes then re-tightens. Hermes chmods
 	// HERMES_HOME and ten named subdirectories to 0700 on every process start, and a cron
@@ -3029,6 +3148,15 @@ func buildDefaultVolumeMounts(homeDir string) []corev1.VolumeMount {
 			// directory a CR edit re-pins live, without a restart.
 			Name:      managedVolumeName,
 			MountPath: managedScopeDir,
+			ReadOnly:  true,
+		},
+		{
+			// The scope declaration, read by cluster_agent_reconcile.py through
+			// scopeFileEnvKey. A directory mount for the same reason as the managed scope:
+			// a CR edit reaches the file without a restart, and the pod rolls anyway
+			// because the key lives in the hashed ConfigMap.
+			Name:      scopeVolumeName,
+			MountPath: scopeDir,
 			ReadOnly:  true,
 		},
 		{
@@ -4467,6 +4595,24 @@ func buildDefaultVolumes(agent *agentv1alpha1.PlatformAgent) []corev1.Volume {
 						{Key: managedConfigKey, Path: "config.yaml"},
 						{Key: managedEnvKey, Path: ".env"},
 					},
+					DefaultMode: ptr.To(int32(0444)),
+				},
+			},
+		},
+		{
+			// The scope declaration (scopeConfigKey), optional so that a ConfigMap
+			// written by an operator predating the key mounts an empty directory instead
+			// of holding the pod in ContainerCreating during a roll.
+			Name: scopeVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: agent.Name + "-config",
+					},
+					Items: []corev1.KeyToPath{
+						{Key: scopeConfigKey, Path: scopeFileName},
+					},
+					Optional:    ptr.To(true),
 					DefaultMode: ptr.To(int32(0444)),
 				},
 			},

@@ -211,6 +211,15 @@ Two things they surfaced that outlive them. **The corpus rewarded finding faults
 
 Two things hold it, and neither is a change this repository can make on its own. **The declaration is not planted.** Each pool project's GitOps repository (`gke-agentic/<project>-infra`, `gitops_repo_for_project()` in `hack/ci-deploy.sh`) needs an OKF note under `knowledge/` whose `declares:` frontmatter carries `{check: no-pdb, namespace: seeded-reliability, object: Deployment/checkout-gateway}` — the harness reads the frontmatter, not the prose — committed by an account with write access there; the robot account that drafted the case has none. **The declaration would silence five active cases.** `checkout-gateway`'s missing budget is the finding `reliability-pdb-probe`, `obtainability-remediation-proposal`, `obtainability-pdb-semantics`, `obtainability-fleet-exposure-sweep` and the nightly `obtainability-planted-pdb` all grade, so a declaration covering it turns every one of them red on every run. The case therefore needs a fixture of its own before the declaration can exist: a second multi-replica workload, in a namespace of its own, planted as a new role in `bench/tf/fleet/fixtures.json` per [`docs/designs/bench-fleet-catalog.md`](../../docs/designs/bench-fleet-catalog.md), with the declaration written against that workload. When the role lands, the case's `fixtures:`, prompt and safeguards move to it, and the `no-pdb-workload` placeholder in the file goes.
 
+## Multi-project scope
+
+`scope-second-project-denied` is parked (a `FIXTURE_NOT_READY` entry, #1865) until the evaluation
+fleet has a second project per pool project, declared in the harness install's `spec.scope.projects`
+with the agent's service account denied the listing. Phase 1 of the scope (#1846) ships the
+mechanism it grades: a project the install was told to manage and cannot list is reported as
+`denied`, never folded into a clean fleet. A second case for the `ok` variant, where the sweep covers
+the second project's cluster through its Cluster Agent profile, is written once the fixture exists.
+
 ## The two cross-cutting failure cases
 
 Not domains; failures every domain has to survive (strategy §4.2, last two table rows). Their shape is a parameterization of the ten above:

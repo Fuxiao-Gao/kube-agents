@@ -30,9 +30,10 @@
 # validator's FIXTURE_NOT_READY allowlist with the issue that plants it, and
 # today that is obtainability-declared-intent-no-finding (#1341, needs a
 # second multi-replica workload as a role of its own plus a declaration
-# seeded in each pool project's *-infra repository) and vcs-history-only-fact
+# seeded in each pool project's *-infra repository), vcs-history-only-fact
 # (#1253, needs the git-access-ab/r200 branch pushed to every pool
-# project's GitOps repository).
+# project's GitOps repository) and scope-second-project-denied (#1865, needs
+# a second GCP project in scope per pool project).
 #
 # BUDGET, priced the way EVAL_REPETITIONS' comment in the script prices the
 # presubmit. The twenty-six-case matrix of 2026-09-09 priced at ~532-552min
