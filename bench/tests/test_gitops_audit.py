@@ -61,3 +61,36 @@ def test_record_without_worker_entries():
     assert report["worker_entries"] == 0
     assert report["fix_submitted_at"] is None
     assert report["cluster_reads_before_fix"] == 0
+
+
+def test_reads_are_invocations_not_mentions():
+    record = {
+        "trajectory": [
+            # A wrapper around kubectl, defined and then used: one read.
+            _worker("terminal", {"command": 'KC=/p/k.yaml\nk() { kubectl --kubeconfig "$KC" "$@"; }\necho "=== pods"; k get pods -n storefront'}, 100, agent="cluster-x"),
+            # The same through a variable holding the command: one read.
+            _worker("terminal", {"command": 'K="kubectl --kubeconfig=$KC -n payments"\n$K get rs -o wide'}, 101, agent="cluster-x"),
+            # The preflight script run, and the same script only read: one read.
+            _worker("terminal", {"command": "HERMES_HOME=/p bash /opt/data/scripts/cluster_preflight.sh --json"}, 102, agent="cluster-x"),
+            _worker("terminal", {"command": "head -60 /opt/data/scripts/cluster_preflight.sh"}, 103, agent="cluster-x"),
+            # Environment reads and kubeconfig bookkeeping are not cluster reads.
+            _worker("terminal", {"command": "printenv GKE_PROJECT_ID GKE_LOCATION GKE_CLUSTER_NAME"}, 104),
+            _worker("terminal", {"command": "export KUBECONFIG=/p/k.yaml; kubectl config current-context"}, 105, agent="cluster-x"),
+            # A read the sandbox refused ran nothing.
+            {**_worker("terminal", {"command": "export KUBECONFIG=/p/k.yaml; bash /opt/data/scripts/cluster_preflight.sh"}, 105.5, agent="cluster-x"),
+             "status": "error", "result": '{"output": "", "exit_code": -1, "error": "BLOCKED: Security scan", "status": "blocked"}'},
+            # Prose that quotes kubectl: a PR body, a card result, a tool description.
+            _worker("write_file", {"path": "/tmp/pr.md", "content": "Ran `$ kubectl get deploy` and saw 0/2"}, 106),
+            _worker("kanban_complete", {"summary": "kubectl get deploy shows shelfview at 0 replicas"}, 107, agent="cluster-x"),
+            _worker("tool_describe", {"name": "mcp__gke__get_k8s_resource"}, 108, agent="cluster-x"),
+            # MCP cluster tools, named and with the name clipped: two reads.
+            _worker("tool_call", {"name": "mcp__gke__list_k8s_events", "arguments": {"parent": "projects/p/locations/l/clusters/c"}}, 109, agent="cluster-x"),
+            _worker("tool_call", {"arguments": {"resourceType": "pod", "parent": "projects/p/locations/l/clusters/c"}}, 110, agent="cluster-x"),
+            _worker("tool_call", {"name": "mcp__developer_knowledge__answer_query", "arguments": {"query": "kubectl get"}}, 111, agent="cluster-x"),
+            _worker("terminal", {"command": 'python3 "$S/submit_suggestion.py" submit --handle h'}, 120),
+            {"name": "gitops_fix_cycle", "args": {}, "result": {"outcome": "merged", "merged_at": "2026-09-18T00:00:00Z"}, "status": "harness"},
+        ]
+    }
+    report = gitops_audit.audit(record)
+    assert report["cluster_reads_before_fix"] == 5
+
