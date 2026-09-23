@@ -28,9 +28,13 @@ Three phases, each bounded:
    ``no_pr`` outcome. The lower bound on creation time matters: a rerun that
    reuses a cluster name reuses the run branch, and the previous run's merged
    PR is still listed against it.
-2. **Merge**: the PR merges, or its check concludes failure, or it is closed
-   unmerged. Failure or close is ``pr_rejected``; the cluster stays broken and
-   the verifiers grade it that way, which is the point.
+2. **Merge**: the PR merges, or the repository's merge check (the check runs
+   ``GITOPS_MERGE_CHECK`` names; other checks on the head are ignored)
+   concludes failure, or it is closed unmerged. Failure or close is
+   ``pr_rejected`` unless a later PR against the run branch exists, in which
+   case the wait moves to that one and records the first as superseded;
+   otherwise the cluster stays broken and the verifiers grade it that way,
+   which is the point.
 3. **Sync**: the Argo Application reports ``Synced`` at the run branch's
    current head and ``Healthy``. The head is re-read each poll because it can
    move after the merge (Argo tracks the branch, not the merge commit);
@@ -59,6 +63,9 @@ Env:
   GITOPS_ARGO_CONTEXT    kube context of the task cluster (default: current)
   GITOPS_PR_TIMEOUT / GITOPS_MERGE_TIMEOUT / GITOPS_SYNC_TIMEOUT   seconds
   GITOPS_POLL_INTERVAL   seconds between polls (default 15)
+  GITOPS_MERGE_CHECK     comma-separated check-run names whose failure means the
+                         repository rejected the PR (default ``check``, the job the
+                         pilot repositories' merge-on-green workflow runs)
   BENCH_GITHUB_TOKEN or GITHUB_TOKEN, else GITOPS_TOKEN_FILE   GitHub read token
 """
 
@@ -96,8 +103,14 @@ KUBECTL_TIMEOUT_S = 60
 
 GITHUB_API = "https://api.github.com"
 GITHUB_HEADERS = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-# Check-run conclusions that mean the repository's check said no.
-REJECTING_CONCLUSIONS = frozenset({"failure", "cancelled", "timed_out", "action_required"})
+# Check-run conclusions that mean the repository's merge check said no.
+# ``action_required`` is not one: GitHub reports it for a workflow run awaiting
+# approval, which resolves to a merge once approved.
+REJECTING_CONCLUSIONS = frozenset({"failure", "cancelled", "timed_out"})
+# The check run whose failure is a rejection, unless GITOPS_MERGE_CHECK says
+# otherwise: the ``check`` job of the pilot repositories' merge-on-green
+# workflow (bench/tf/prebuilt/*/repo/.github/workflows/gitops-check.yaml).
+DEFAULT_MERGE_CHECK = "check"
 
 TRAJECTORY_ENTRY_NAME = "gitops_fix_cycle"
 
@@ -200,6 +213,7 @@ def await_fix_cycle(
     pr_timeout = _seconds(env, "GITOPS_PR_TIMEOUT", DEFAULT_PR_TIMEOUT_S)
     merge_timeout = _seconds(env, "GITOPS_MERGE_TIMEOUT", DEFAULT_MERGE_TIMEOUT_S)
     sync_timeout = _seconds(env, "GITOPS_SYNC_TIMEOUT", DEFAULT_SYNC_TIMEOUT_S)
+    merge_checks = {n.strip() for n in (env.get("GITOPS_MERGE_CHECK") or DEFAULT_MERGE_CHECK).split(",") if n.strip()}
 
     headers = dict(GITHUB_HEADERS)
     token = _github_token(env)
@@ -246,25 +260,56 @@ def await_fix_cycle(
     pulls_url = f"{api}/pulls?" + urllib.parse.urlencode(
         {"base": branch, "state": "all", "sort": "created", "direction": "desc"}
     )
+    rejected: list[int] = []
+
+    def newest_pr(pulls: Any) -> dict[str, Any] | None:
+        """The newest PR of this run against the branch, skipping rejected ones."""
+        for candidate in pulls or []:
+            created = candidate.get("created_at", "")
+            if since is not None and created and _parse_github_time(created) < since:
+                continue
+            if int(candidate.get("number", 0)) in rejected:
+                continue
+            return candidate
+        return None
+
+    def adopt(candidate: dict[str, Any]) -> int:
+        number = int(candidate["number"])
+        record.update(
+            pr_number=number, pr_url=candidate.get("html_url", ""), head_sha=candidate.get("head", {}).get("sha", "")
+        )
+        _log.info("gitops: PR #%d found against %s", number, branch)
+        return number
+
     pr: dict[str, Any] | None = None
     deadline = clock() + pr_timeout
     while True:
-        pulls = attempt("listing pull requests", lambda: fetch_json(pulls_url, headers))
-        if pulls:
-            for candidate in pulls:
-                created = candidate.get("created_at", "")
-                if since is not None and created and _parse_github_time(created) < since:
-                    continue
-                pr = candidate
-                break
+        pr = newest_pr(attempt("listing pull requests", lambda: fetch_json(pulls_url, headers)))
         if pr is not None:
             break
         if not wait(deadline):
             _log.warning("gitops: no PR against %s within %.0fs", branch, pr_timeout)
             return finish(OUTCOME_NO_PR)
-    number = int(pr["number"])
-    record.update(pr_number=number, pr_url=pr.get("html_url", ""), head_sha=pr.get("head", {}).get("sha", ""))
-    _log.info("gitops: PR #%d found against %s", number, branch)
+    number = adopt(pr)
+
+    def superseded(reason: str) -> bool:
+        """Move to a later PR of this run if one exists; else the rejection stands.
+
+        The agent can close a PR the check failed and open another (or open a
+        second one before the first is judged); the later one is the answer the
+        cluster will receive, so ending the wait at the first one's rejection
+        would hand the verifiers a cluster the merge and sync are about to
+        change under them. The first is kept on the record as superseded.
+        """
+        nonlocal number
+        rejected.append(number)
+        later = newest_pr(attempt("listing pull requests", lambda: fetch_json(pulls_url, headers)))
+        if later is None:
+            return False
+        record.setdefault("superseded", []).append({"pr_number": number, "reason": reason})
+        _log.warning("gitops: PR #%d %s; PR #%d supersedes it", number, reason, int(later["number"]))
+        number = adopt(later)
+        return True
 
     # -- 2. merged, or rejected -----------------------------------------
     merge_sha = ""
@@ -277,6 +322,8 @@ def await_fix_cycle(
                 record.update(merged_at=detail["merged_at"], merge_sha=merge_sha)
                 break
             if detail.get("state") == "closed":
+                if superseded("closed without merge"):
+                    continue
                 return finish(OUTCOME_PR_REJECTED, reason="closed without merge")
             head_sha = detail.get("head", {}).get("sha", "")
             if head_sha:
@@ -289,11 +336,16 @@ def await_fix_cycle(
                     failed = [
                         c.get("name", "")
                         for c in checks.get("check_runs", [])
-                        if c.get("status") == "completed" and c.get("conclusion") in REJECTING_CONCLUSIONS
+                        if c.get("name", "") in merge_checks
+                        and c.get("status") == "completed"
+                        and c.get("conclusion") in REJECTING_CONCLUSIONS
                     ]
                     if failed:
+                        reason = f"check failed: {', '.join(failed)}"
                         _log.warning("gitops: PR #%d rejected by checks %s", number, failed)
-                        return finish(OUTCOME_PR_REJECTED, reason=f"check failed: {', '.join(failed)}")
+                        if superseded(reason):
+                            continue
+                        return finish(OUTCOME_PR_REJECTED, reason=reason)
         if not wait(deadline):
             _log.warning("gitops: PR #%d neither merged nor rejected within %.0fs", number, merge_timeout)
             return finish(OUTCOME_MERGE_TIMEOUT)
