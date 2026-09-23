@@ -160,6 +160,40 @@ def test_pr_rejected_by_failed_check() -> None:
     assert calls == [], "a rejected PR must never wait on Argo"
 
 
+def test_a_failing_check_that_is_not_the_merge_check_does_not_reject() -> None:
+    lint = {"name": "lint", "status": "completed", "conclusion": "failure"}
+    gh = FakeGitHub(pulls=[[_pr()]], details=[_pr(), _pr(merged=True)], checks=[{"check_runs": [lint]}])
+    _, record, _ = _run(ENV, gh, [_app("Synced", MERGE_SHA, "Healthy")])
+    assert record["outcome"] == "merged"
+    assert "superseded" not in record
+
+
+def test_action_required_is_not_a_rejection() -> None:
+    waiting = {"name": "check", "status": "completed", "conclusion": "action_required"}
+    gh = FakeGitHub(pulls=[[_pr()]], details=[_pr(), _pr(merged=True)], checks=[{"check_runs": [waiting]}])
+    _, record, _ = _run(ENV, gh, [_app("Synced", MERGE_SHA, "Healthy")])
+    assert record["outcome"] == "merged"
+
+
+def test_the_merge_check_names_come_from_the_environment() -> None:
+    green = {"name": "merge-on-green", "status": "completed", "conclusion": "failure"}
+    gh = FakeGitHub(pulls=[[_pr()]], details=[_pr()], checks=[{"check_runs": [green]}])
+    _, record, _ = _run({**ENV, "GITOPS_MERGE_CHECK": "merge-on-green, docs"}, gh, [_app("Synced", MERGE_SHA, "Healthy")])
+    assert record["outcome"] == "pr_rejected"
+    assert record["reason"] == "check failed: merge-on-green"
+
+
+def test_a_rejected_pr_is_superseded_by_a_later_one() -> None:
+    first_closed = _pr(25, closed=True)
+    second = _pr(26, merged=True, created_at="2026-09-10T21:10:00Z")
+    gh = FakeGitHub(pulls=[[_pr(25)], [second, first_closed]], details=[first_closed, second])
+    _, record, _ = _run(ENV, gh, [_app("Synced", MERGE_SHA, "Healthy")])
+    assert record["outcome"] == "merged"
+    assert record["pr_number"] == 26
+    assert record["pr_url"].endswith("/pull/26")
+    assert record["superseded"] == [{"pr_number": 25, "reason": "closed without merge"}]
+
+
 def test_pr_closed_unmerged_is_rejected() -> None:
     gh = FakeGitHub(pulls=[[_pr()]], details=[_pr(closed=True)])
     _, record, _ = _run(ENV, gh, [])
