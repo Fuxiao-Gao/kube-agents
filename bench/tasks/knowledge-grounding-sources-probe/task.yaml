@@ -67,8 +67,8 @@
 # the core kube-agents journeys the presubmit gate exists for, so it earns
 # its record in the nightly's full catalog. #1765 gave it a temporary
 # presubmit seat to measure the answer_query safeguard on that pull
-# request's build, reverted before merge (the incident-triage-oom-event-probe
-# precedent). Cost: one delegation round trip
+# request's builds (2102459327938826240 and 2102768495748976640), reverted
+# before merge (the incident-triage-oom-event-probe precedent). Cost: one delegation round trip
 # plus one knowledge lookup; measured 166-1602s across six repetitions
 # (median ~600s), so unit_cost_hint in hack/ci-eval-pr.sh carries an entry
 # for it. No tofu, no fleet read.
