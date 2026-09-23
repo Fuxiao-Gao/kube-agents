@@ -6,7 +6,7 @@
   ],
   "delegated_to_cluster_agent": true,
   "fix_submitted_at": "2026-09-18T18:40:31.979785+00:00",
-  "cluster_reads_before_fix": 14,
+  "cluster_reads_before_fix": 10,
   "repo_lookups_before_fix": 0,
   "repo_lookups": [],
   "gitops_outcome": "merged",

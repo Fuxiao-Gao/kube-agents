@@ -7,8 +7,11 @@ entries #1746 records (each tagged with ``agent``, ``task``, ``session``,
 values a handoff states per run:
 
 - ``cluster_reads_before_fix``: worker calls that read the task cluster
-  (kubectl / MCP cluster tools / Cluster Agent delegation) before the fix was
-  submitted;
+  before the fix was submitted: a terminal command that invokes kubectl (by
+  name or through a wrapper the command defined) with a read verb or runs the
+  Cluster Agent's preflight, an MCP cluster tool call, or a Cluster Agent
+  delegation. Prose that mentions kubectl (a PR body, a card result) and reads
+  of the worker's own environment are not counted;
 - ``repo_lookups_before_fix``: worker calls that could have shown another run's
   work before the fix: pull-request listing or viewing, foreign card views,
   session or memory search;
@@ -27,11 +30,28 @@ import sys
 from datetime import datetime, timezone
 
 GITOPS_ENTRY_NAME = "gitops_fix_cycle"
-#: Worker call names or argument fragments that read a cluster.
-CLUSTER_READ_RE = re.compile(
-    r"kubectl\b[^\n|;&]*?\s(get|describe|logs|top|events|explain|rollout\s+history|api-resources)\b"
-    r"|cluster_preflight|mcp__gke|mcp__k8s|mcp__kubernetes|gke_|k8s_|kubernetes_",
-    re.IGNORECASE,
+#: A terminal command reads the cluster when a segment of it (split on newlines,
+#: `;`, `&&`, `||` and `|`) invokes kubectl -- by name, or through a wrapper the
+#: command itself defined around it -- with one of these verbs, or runs the
+#: Cluster Agent's preflight script. Prose that quotes `kubectl get`, a PR body,
+#: a card result, `printenv GKE_*` or `head` over a script's source are not
+#: reads and do not count; neither does `kubectl config`, which reads a file.
+KUBECTL_VERB_RE = re.compile(r"\b(get|describe|logs|top|events|explain|rollout\s+history|api-resources|cluster-info|auth\s+can-i|wait)\b")
+#: `k() { kubectl ...; }`, `alias k=kubectl ...`, `K="kubectl ..."`: the name is a wrapper.
+WRAPPER_DEF_RE = re.compile(
+    r"(?:function\s+)?\b([A-Za-z_]\w*)\s*\(\)\s*\{\s*kubectl\b"
+    r"|\balias\s+([A-Za-z_]\w*)=['\"]?kubectl\b"
+    r"|\b([A-Za-z_]\w*)=['\"]kubectl\b"
+)
+SEGMENT_SPLIT_RE = re.compile(r"\n|;|&&|\|\||\|")
+LEADING_ASSIGNMENTS_RE = re.compile(r"^(?:[A-Za-z_]\w*=\S*\s+)+")
+INTERPRETERS = frozenset({"bash", "sh", "python3", "python", "uv"})
+PREFLIGHT_RE = re.compile(r"cluster_preflight\.(?:sh|py)$")
+#: The MCP cluster tools, by tool name (`tool_call` carries it in its arguments).
+MCP_CLUSTER_TOOL_RE = re.compile(r"^mcp__(?:gke|k8s|kubernetes)__", re.IGNORECASE)
+#: Entries that carry text about the cluster without touching it.
+NEVER_A_READ = frozenset(
+    {"tool_describe", "write_file", "read_file", "search_files", "patch", "kanban_complete", "kanban_heartbeat", "skill_view", "skill_manage"}
 )
 #: Delegating to a Cluster Agent counts as a cluster read by proxy.
 DELEGATION_RE = re.compile(r"kanban_create|delegate", re.IGNORECASE)
@@ -49,6 +69,77 @@ OWN_CARD_RE = re.compile(r'"task_id":\s*"([^"]+)"')
 #: `prepare`, `list` and `fetch` verbs and viewing the skill are not), or a
 #: direct `gh pr create` / `git push`.
 FIX_SUBMIT_RE = re.compile(r"submit_suggestion\.py[\\\"']*\s+submit\b(?!\s*--help)|gh\s+pr\s+create|git\s+push", re.IGNORECASE)
+
+
+def _args(entry: dict) -> dict:
+    args = entry.get("args")
+    if isinstance(args, dict):
+        return args
+    if isinstance(args, str):
+        try:
+            parsed = json.loads(args)
+        except ValueError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _terminal_reads_cluster(command: str) -> bool:
+    wrappers = {name for m in WRAPPER_DEF_RE.finditer(command) for name in m.groups() if name}
+    for raw in SEGMENT_SPLIT_RE.split(command):
+        segment = LEADING_ASSIGNMENTS_RE.sub("", raw.strip())
+        words = segment.split()
+        if not words:
+            continue
+        head = words[0].strip("(){}")
+        if head in INTERPRETERS:
+            script = words[1] if len(words) > 1 else ""
+            if PREFLIGHT_RE.search(script):
+                return True
+            continue
+        if PREFLIGHT_RE.search(head):
+            return True
+        if head.rsplit("/", 1)[-1] == "kubectl" or head.lstrip("$").strip("{}") in wrappers:
+            if KUBECTL_VERB_RE.search(segment):
+                return True
+    return False
+
+
+def _blocked(entry: dict) -> bool:
+    """A call the sandbox's command policy or security scan refused ran nothing.
+
+    Only a refusal is excluded: a read that ran and failed (a denied verb, a
+    missing metrics API) still reached the cluster and still counts.
+    """
+    result = entry.get("result")
+    if isinstance(result, str) and result.startswith("{"):
+        try:
+            result = json.loads(result)
+        except ValueError:
+            return False
+    return isinstance(result, dict) and result.get("status") == "blocked"
+
+
+def reads_cluster(entry: dict) -> bool:
+    """Whether one worker entry read the task cluster."""
+    name = entry.get("name") or ""
+    if name in NEVER_A_READ or _blocked(entry):
+        return False
+    if DELEGATION_RE.search(name):
+        return True
+    args = _args(entry)
+    if name == "terminal":
+        command = args.get("command")
+        return isinstance(command, str) and _terminal_reads_cluster(command)
+    tool = name
+    if name == "tool_call":
+        tool = str(args.get("name") or "")
+        arguments = args.get("arguments")
+        if not tool and isinstance(arguments, dict) and "resourceType" in arguments and "/clusters/" in str(arguments.get("parent", "")):
+            # The record clipped the tool name; the arguments are the GKE MCP shape.
+            return True
+    return bool(MCP_CLUSTER_TOOL_RE.match(tool))
+
 
 def _text(entry: dict) -> str:
     args = entry.get("args")
@@ -84,7 +175,7 @@ def audit(record: dict) -> dict:
         at = _epoch(e.get("at"))
         return fix_at is None or at is None or at <= fix_at
 
-    cluster_reads = [e for e in workers if before_fix(e) and (CLUSTER_READ_RE.search(_text(e)) or DELEGATION_RE.search(e.get("name", "")))]
+    cluster_reads = [e for e in workers if before_fix(e) and reads_cluster(e)]
     own_cards = {e.get("task") for e in workers if e.get("task")}
     own_branch = str(outcome.get("run_branch") or "")
 
