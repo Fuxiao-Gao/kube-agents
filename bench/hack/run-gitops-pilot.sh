@@ -258,7 +258,7 @@ echo "==> result row model: ${AGENT_MODEL} (LiteLLM alias ${AGENT_MODEL_ALIAS})"
 # its managed repository, and wait for Ready. Then prove the stores are empty
 # before the card is created; a non-empty store is a refusal, not a warning.
 agent_stores_report() {
-  ONBOARDING_CARD_PREFIX="${ONBOARDING_CARD_PREFIX}" "${K[@]}" exec -i deploy/platform-agent-gateway -c platform-agent -- env ONBOARDING_CARD_PREFIX="${ONBOARDING_CARD_PREFIX}" python3 - <<'STORES'
+  "${K[@]}" exec -i deploy/platform-agent-gateway -c platform-agent -- env ONBOARDING_CARD_PREFIX="${ONBOARDING_CARD_PREFIX}" python3 - <<'STORES'
 import json, os, sqlite3
 def rows(db, table):
     if not os.path.exists(db): return 0
