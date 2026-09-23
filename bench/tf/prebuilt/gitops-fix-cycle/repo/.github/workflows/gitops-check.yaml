@@ -9,7 +9,7 @@ name: GitOps run-branch check
 on:
   pull_request:
     branches:
-      - 'run/**'
+      - "run/**"
 
 permissions:
   contents: write
