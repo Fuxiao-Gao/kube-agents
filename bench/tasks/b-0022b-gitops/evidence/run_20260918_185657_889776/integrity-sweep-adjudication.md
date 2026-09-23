@@ -12,9 +12,19 @@ Info-level (JSON only): C06 skill-file markers in commands (the worker
 invoking its own skills' scripts), C07 no live secrets, sandbox evidence
 unknown.
 
-Isolation audit (`audit.json`): 8 cluster reads before the fix was submitted
-at 19:18:28Z; 1 repository lookup before it, an unscoped
+Isolation audit (`audit.json`): 14 cluster reads before the fix was submitted
+at 19:18:28Z (the first committed audit said 8: its matcher missed every
+read the Cluster Agent made through its `k()` wrapper around kubectl and
+counted prose that quoted `kubectl` and calls the sandbox blocked instead;
+it now counts invocations that ran); 1 repository lookup before it, an unscoped
 `gh pr list --state open` on the run's own repository at 19:13Z, which on a
 per-run repository can only list this run's own pull requests (the earlier
 task's PR #1 was merged and not open). Three `kanban_show` calls were of the
 Cluster Agent card this run delegated the RCA to.
+
+Addresses in `results.json` are mapped one-to-one into the RFC 5737 documentation
+ranges for the case sanitizer, which refuses any other literal: pod IPs `10.20.0.n` ->
+`192.0.2.n` and `10.20.1.n` -> `203.0.113.n`, the control-plane endpoint and the four
+ClusterIPs (`34.x.y.z`) -> `198.51.100.z`, distinct last octets throughout. Nothing else
+in the record was edited. (The first committed copy kept only the last octet, which
+made two pods share `192.0.2.14`; this mapping replaces it.)
