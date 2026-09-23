@@ -109,7 +109,7 @@ GITHUB_HEADERS = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version
 REJECTING_CONCLUSIONS = frozenset({"failure", "cancelled", "timed_out"})
 # The check run whose failure is a rejection, unless GITOPS_MERGE_CHECK says
 # otherwise: the ``check`` job of the pilot repositories' merge-on-green
-# workflow (bench/tf/prebuilt/*/repo/.github/workflows/gitops-check.yaml).
+# workflow.
 DEFAULT_MERGE_CHECK = "check"
 
 TRAJECTORY_ENTRY_NAME = "gitops_fix_cycle"
@@ -301,7 +301,7 @@ def await_fix_cycle(
         would hand the verifiers a cluster the merge and sync are about to
         change under them. The first is kept on the record as superseded.
         """
-        nonlocal number
+        nonlocal number, deadline
         rejected.append(number)
         later = newest_pr(attempt("listing pull requests", lambda: fetch_json(pulls_url, headers)))
         if later is None:
@@ -309,6 +309,8 @@ def await_fix_cycle(
         record.setdefault("superseded", []).append({"pr_number": number, "reason": reason})
         _log.warning("gitops: PR #%d %s; PR #%d supersedes it", number, reason, int(later["number"]))
         number = adopt(later)
+        # The later PR gets the whole merge window, not what the first left of it.
+        deadline = clock() + merge_timeout
         return True
 
     # -- 2. merged, or rejected -----------------------------------------
@@ -377,9 +379,12 @@ def await_fix_cycle(
             record.update(
                 sync_status=sync.get("status", ""), synced_revision=sync.get("revision", ""), health=health.get("status", "")
             )
-        at_head = bool(head) and sync.get("revision") == head
+        # While the branch endpoint is failing, the merge commit stands in for
+        # the head: Argo Synced there is the fix landing, not a stale answer.
+        expected = head or merge_sha
+        at_head = bool(expected) and sync.get("revision") == expected
         if sync.get("status") == "Synced" and at_head and health.get("status") == "Healthy":
-            _log.info("gitops: application %s Synced at branch head %s and Healthy", app, head[:8])
+            _log.info("gitops: application %s Synced at branch head %s and Healthy", app, expected[:8])
             return finish(OUTCOME_MERGED)
         if not wait(deadline):
             _log.warning(

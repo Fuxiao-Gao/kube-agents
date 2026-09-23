@@ -22,6 +22,7 @@
 # Inputs (env, all optional):
 #   GCP_PROJECT_ID (fuxiaogao-gkedemos)  GCP_LOCATION (us-central1-a)
 #   AGENT_HOST_CONTEXT (gke_<project>_us-central1_platform-agent-host)
+#   AGENT_NAMESPACE (kubeagents-system)
 #   CLUSTER_NAME (gitops-pilot-<timestamp>; also seeds the run branch name)
 #   GITOPS_TOKEN_FILE (~/.config/gitops-pilot/github-token)
 #   GITOPS_REPO (the repository the committed prompt names; another one is
@@ -31,6 +32,11 @@
 #     devops-bench, e.g. `devops-bench @ git+https://github.com/pradeepvrd/devops-bench@<sha>`
 #   AGENT_MODEL (read from the install's LiteLLM config: the model behind
 #     `model-default`) the model id recorded on the result row
+#   JUDGE_API_KEY (read from the install's secret when unset)
+#   BENCH_VERIFY_TIMEOUT_SEC (120) per-entry cap of the post-run verification
+#     pass; BENCH_VERIFY_TOTAL_BUDGET_SEC is derived from it and the entry count
+#   BASE_BRANCH_MODE: only `default-branch` (env mode is gone; any other value
+#     is refused)
 #   BENCH_NO_TEARDOWN=true to keep the cluster and branch for inspection
 set -euo pipefail
 
@@ -61,7 +67,7 @@ RUN_BRANCH="run/${CLUSTER_NAME}/${TASK}"   # must match the stack's locals.run_b
 K=(kubectl --context "${AGENT_HOST_CONTEXT}" -n "${AGENT_NAMESPACE}")
 
 cd "$(dirname "$0")/.."
-[ -r "${GITOPS_TOKEN_FILE}" ] || { echo "token file ${GITOPS_TOKEN_FILE} missing (contents read/write on the GitOps repo)" >&2; exit 1; }
+[ -r "${GITOPS_TOKEN_FILE}" ] || { echo "token file ${GITOPS_TOKEN_FILE} missing (contents read/write and administration on the GitOps repository: the run makes its branch the repository's default)" >&2; exit 1; }
 [ "${#CLUSTER_NAME}" -le 40 ] || { echo "CLUSTER_NAME ${CLUSTER_NAME} exceeds GKE's 40 chars" >&2; exit 1; }
 
 RENDERED_TASKS=""
@@ -227,6 +233,10 @@ export TF_VAR_gitops_run_branch="${RUN_BRANCH}" TF_VAR_gitops_token_file="${GITO
 export TF_VAR_agent_host_context="${AGENT_HOST_CONTEXT}" TF_VAR_agent_namespace="${AGENT_NAMESPACE}"
 [ -n "${GITOPS_REPO:-}" ] && export TF_VAR_gitops_repo="${GITOPS_REPO}"
 export GITOPS_RUN_BRANCH="${RUN_BRANCH}" GITOPS_TOKEN_FILE
+# The harness prefers BENCH_GITHUB_TOKEN or GITHUB_TOKEN over the file; hand it
+# the token the stack uses, so an ambient GITHUB_TOKEN for another account
+# cannot make it poll the private repository as a stranger.
+BENCH_GITHUB_TOKEN="$(tr -d '\r\n' < "${GITOPS_TOKEN_FILE}")"; export BENCH_GITHUB_TOKEN
 export GITOPS_ARGO_CONTEXT="gke_${GCP_PROJECT_ID}_${GCP_LOCATION}_${CLUSTER_NAME}"
 # tofu fetches the kind module over https; a global insteadOf to ssh breaks it.
 export GIT_CONFIG_GLOBAL=/dev/null

@@ -194,6 +194,29 @@ def test_a_rejected_pr_is_superseded_by_a_later_one() -> None:
     assert record["superseded"] == [{"pr_number": 25, "reason": "closed without merge"}]
 
 
+def test_a_superseding_pr_gets_the_whole_merge_window() -> None:
+    first, first_closed = _pr(25), _pr(25, closed=True)
+    second, second_merged = _pr(26, created_at="2026-09-10T21:10:00Z"), _pr(26, merged=True, created_at="2026-09-10T21:10:00Z")
+    # 10s polls, 60s merge window: the first PR closes at t=30; the second merges at
+    # its fifth poll, t=70, past the first PR's deadline and inside its own.
+    gh = FakeGitHub(
+        pulls=[[first], [second, first_closed]],
+        details=[first, first, first, first_closed, second, second, second, second, second_merged],
+        checks=[{"check_runs": [{"status": "queued"}]}],
+    )
+    _, record, _ = _run(ENV, gh, [_app("Synced", MERGE_SHA, "Healthy")])
+    assert record["outcome"] == "merged"
+    assert record["pr_number"] == 26
+
+
+def test_sync_at_the_merge_commit_counts_while_the_branch_endpoint_fails() -> None:
+    gh = FakeGitHub(pulls=[[_pr()]], details=[_pr(merged=True)], heads=[OSError("502")])
+    _, record, _ = _run(ENV, gh, [_app("Synced", MERGE_SHA, "Healthy")])
+    assert record["outcome"] == "merged"
+    assert record["poll_errors"] >= 1
+    assert "branch_head" not in record
+
+
 def test_pr_closed_unmerged_is_rejected() -> None:
     gh = FakeGitHub(pulls=[[_pr()]], details=[_pr(closed=True)])
     _, record, _ = _run(ENV, gh, [])

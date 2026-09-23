@@ -107,8 +107,17 @@ case "${ACTION}" in
     ;;
   delete)
     if [ "${GITOPS_SWITCH_DEFAULT_BRANCH:-false}" = "true" ]; then
-      # GitHub refuses to delete the default branch: restore it first.
-      set_default_branch "${GITOPS_RESTORE_DEFAULT_BRANCH:-main}"
+      # GitHub refuses to delete the default branch: restore it first, but
+      # only when this run's branch is the default. A run that create refused
+      # (the default already on another run's branch) still reaches this on
+      # its destroy, and restoring then would pull the default out from under
+      # the run in flight.
+      current="$(current_default_branch || true)"
+      if [ "${current}" = "${GITOPS_RUN_BRANCH}" ]; then
+        set_default_branch "${GITOPS_RESTORE_DEFAULT_BRANCH:-main}"
+      else
+        echo "    default branch is '${current}', not this run's; leaving it"
+      fi
     fi
     echo "==> run-branch: deleting ${slug} ${GITOPS_RUN_BRANCH}"
     code="$(api -X DELETE "${GITHUB_API}/repos/${slug}/git/refs/heads/${GITOPS_RUN_BRANCH}")"
