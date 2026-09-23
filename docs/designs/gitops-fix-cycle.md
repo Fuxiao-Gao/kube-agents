@@ -166,13 +166,14 @@ devops-bench accepts hold), PlatformAgent env patch with a landed-check, tokens 
 install's Secret, `AGENT_MODEL` resolved from the install's LiteLLM config so the result
 row names the model behind the agent, `TF_VAR_*` for the stack, `GITOPS_*` for the
 harness, `--no-sync` so `uv run` does not undo a pin, and the cleanup of the env on exit.
-The run record (`manifest.json`, `results.json`, `rows.json`) of the run on the current
-configuration, run 16 (`run_20260915_203122_413219`), is kept under
+Run records (`manifest.json`, `results.json`, `rows.json`) are kept under
 `bench/tasks/b-0011-gitops/evidence/<run id>/`, the layout devops-bench PR #244 uses for its
-own evidence; `rows.json` is the artifact the devops-bench leaderboard ingests. Earlier runs
-are summarised in the Findings below and in gke-labs/kube-agents#1307's comments; their
-records are not in the tree (run 11 has none: its results directory was removed by hand
-during teardown; run 14 failed in the seed).
+own evidence; `rows.json` is the artifact the devops-bench leaderboard ingests. Only the
+isolated campaign runs (gke-labs/kube-agents#1773: one repository per run, the agent's state
+reset before each task-run) are kept there. The shared-install runs 1 to 20 are summarised
+in the Findings below and in gke-labs/kube-agents#1307's comments; their records are not in
+the tree (run 11 has none: its results directory was removed by hand during teardown; run 14
+failed in the seed).
 
 ## How the PR is found and what "done" means
 
