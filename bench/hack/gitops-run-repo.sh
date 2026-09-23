@@ -28,7 +28,8 @@
 #
 # Env: GITOPS_ORG (gke-agentic), GITOPS_TOKEN_FILE (~/.config/gitops-pilot/
 #   github-token; must be an org admin's token: repository creation and the
-#   installation edit need it), AGENT_HOST_CONTEXT, AGENT_NAMESPACE,
+#   installation edit need it), GCP_PROJECT_ID (fuxiaogao-gkedemos; only the
+#   AGENT_HOST_CONTEXT default reads it), AGENT_HOST_CONTEXT, AGENT_NAMESPACE,
 #   GITOPS_APP_INSTALLATION_ID (the minter App's installation on the org).
 set -euo pipefail
 

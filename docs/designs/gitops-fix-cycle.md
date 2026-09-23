@@ -1,6 +1,6 @@
 # The GitOps fix cycle for bench cases (Integration Spec v1)
 
-Status: pilot, written from the code that ran on 2026-09-10 and 2026-09-15 (gke-labs/kube-agents#1307).
+Status: pilot, written from the code that ran from 2026-09-10 to 2026-09-18 (gke-labs/kube-agents#1307; the isolated campaign is gke-labs/kube-agents#1773).
 Scope: two devops-bench tasks, `b-0011` and `b-0022b`, each on a per-run GKE cluster,
 against one GitOps repository on GitHub, through one parameterised stack. Everything here
 exists and was exercised end to end at least once; the "Findings" section says which parts
@@ -129,7 +129,8 @@ bases. The staged history's commit messages are the shape a build pipeline write
 not a title. Repositories are archived after the campaign, not deleted, so handoff links
 keep resolving. The agent side of the same isolation is the wrapper's
 `AGENT_STATE_RESET`, which re-creates the `PlatformAgent` on fresh volumes with the run's
-repository as its managed repository and refuses to run unless its stores are empty.
+repository as its managed repository and refuses to run unless its stores are empty,
+the first-boot discovery card and its inventory work excepted.
 
 ## What the stack installs (`bench/tf/prebuilt/gitops-fix-cycle`)
 
@@ -138,7 +139,8 @@ One stack serves every task on the cycle. `gitops_task` (set by the case's
 seed assertions in `scripts/seed/<task>.sh`, the broken-base commit, the repository path
 `tasks/<task>`, the run branch and the Argo Application's name. Inputs beyond the usual
 cluster variables: `gitops_task`, `gitops_repo`, `gitops_task_path` and
-`gitops_broken_base_sha` (empty = the task's defaults), `gitops_run_branch` (empty =
+`gitops_broken_base_sha` (empty = the task's defaults), `gitops_history_parent_sha`
+(empty = the task's pinned parent; a per-run repository's root), `gitops_run_branch` (empty =
 derived), `gitops_token_file`, `argocd_version`, `agent_host_context`/`agent_namespace`
 (onboarding, below), and the pilot-only
 `gitops_switch_default_branch`/`gitops_restore_default_branch`.
