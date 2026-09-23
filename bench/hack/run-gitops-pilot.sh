@@ -11,24 +11,22 @@
 #      when set. If the installed devops-bench accepts `mode: hold`, the case
 #      is run from a rendered copy with its five safeguards restored to hold
 #      (all seven checks scored); otherwise the committed case runs as is.
-#   2. Tells the agent which branch its PR must target. Default
-#      (BASE_BRANCH_MODE=default-branch): the stack switches the repository's
-#      default branch to the run branch for the run and restores it on destroy.
-#      BASE_BRANCH_MODE=env sets GITOPS_BASE_BRANCH on the PlatformAgent's
-#      spec.deployment.env instead, waits for the rollout, and checks the value
-#      reached the pod; it needs an operator whose sandbox env allowlist carries
-#      that variable (this change adds it; no release has it yet).
+#   2. Makes the run branch the repository's default branch for the run (the
+#      stack switches it and restores it on destroy); the agent's
+#      submit-suggestion re-asks the remote for its default before each PR, so
+#      that is the branch its PR targets.
 #   3. Reads PLATFORM_AGENT_TOKEN and the judge key from the install's secret.
 #   4. Runs `devops-bench ./tasks/b-0011-gitops --agent-type kubeagents` with
 #      the stack and harness pointed at the same run branch.
-#   5. On exit (env mode), removes GITOPS_BASE_BRANCH from the PlatformAgent.
 #
 # Inputs (env, all optional):
 #   GCP_PROJECT_ID (fuxiaogao-gkedemos)  GCP_LOCATION (us-central1-a)
 #   AGENT_HOST_CONTEXT (gke_<project>_us-central1_platform-agent-host)
 #   CLUSTER_NAME (gitops-pilot-<timestamp>; also seeds the run branch name)
 #   GITOPS_TOKEN_FILE (~/.config/gitops-pilot/github-token)
-#   GITOPS_REPO (stack default)   JUDGE_MODEL (gemini-3.1-pro-preview)
+#   GITOPS_REPO (the repository the committed prompt names; another one is
+#     rendered into the task copy and handed to the stack and the harness)
+#   JUDGE_MODEL (gemini-3.1-pro-preview)
 #   DEVOPS_BENCH_PIN (empty: the repository's pin) a pip requirement for another
 #     devops-bench, e.g. `devops-bench @ git+https://github.com/pradeepvrd/devops-bench@<sha>`
 #   AGENT_MODEL (read from the install's LiteLLM config: the model behind
@@ -39,13 +37,6 @@ set -euo pipefail
 # Per-entry cap for a converging entry in the post-run verification pass
 # (devops-bench's own default for BENCH_VERIFY_TIMEOUT_SEC).
 readonly VERIFY_TIMEOUT_DEFAULT_SEC=120
-# How long to wait for the gateway to roll after the PlatformAgent env patch.
-# The agent pod's data volume is ReadWriteOnce, so the replacement pod waits
-# for the old one to release it, then cold-starts the agent (plugin and skill
-# sync, MCP discovery). Five minutes was not always enough (run 3,
-# 2026-09-10) and neither was ten (run 10, 2026-09-15: the startup probe was
-# still failing at 10 min); fifteen covers the observed worst case with margin.
-readonly GATEWAY_ROLLOUT_TIMEOUT=900s
 # The LiteLLM ConfigMap is `litellm-config` on the chart and `litellm-config-<hash>`
 # on the kustomize path, hence a prefix match on the name.
 readonly LITELLM_CONFIGMAP_NAME_PREFIX="litellm-config"
@@ -53,6 +44,9 @@ readonly LITELLM_CONFIGMAP_NAME_PREFIX="litellm-config"
 # result row's `model` field should carry (the leaderboard keys setups by it).
 readonly AGENT_MODEL_ALIAS="model-default"
 readonly RENDERED_TASKS_TEMPLATE="b-0011-gitops-hold.XXXXXX"
+# The repository the committed case names in its prompt; a run on another
+# repository (GITOPS_REPO) has the URL rendered into its task copy.
+readonly DEFAULT_GITOPS_REPO="https://github.com/gke-agentic/fuxiao-gkedemo-infra"
 
 : "${GCP_PROJECT_ID:=fuxiaogao-gkedemos}"
 : "${GCP_LOCATION:=us-central1-a}"
@@ -64,29 +58,15 @@ readonly RENDERED_TASKS_TEMPLATE="b-0011-gitops-hold.XXXXXX"
 
 TASK="b-0011"
 RUN_BRANCH="run/${CLUSTER_NAME}/${TASK}"   # must match the stack's locals.run_branch
-CR="platformagents.kubeagents.x-k8s.io/platform-agent"
 K=(kubectl --context "${AGENT_HOST_CONTEXT}" -n "${AGENT_NAMESPACE}")
 
 cd "$(dirname "$0")/.."
 [ -r "${GITOPS_TOKEN_FILE}" ] || { echo "token file ${GITOPS_TOKEN_FILE} missing (contents read/write on the GitOps repo)" >&2; exit 1; }
 [ "${#CLUSTER_NAME}" -le 40 ] || { echo "CLUSTER_NAME ${CLUSTER_NAME} exceeds GKE's 40 chars" >&2; exit 1; }
 
-# Keep whatever else is in spec.deployment.env; only our variable changes.
-set_agent_env() {
-  local value="$1" env_json
-  env_json="$("${K[@]}" get "${CR}" -o json | jq -c --arg v "${value}" '
-    ((.spec.deployment.env // []) | map(select(.name != "GITOPS_BASE_BRANCH")))
-    + (if $v == "" then [] else [{name: "GITOPS_BASE_BRANCH", value: $v}] end)')"
-  "${K[@]}" patch "${CR}" --type merge -p "{\"spec\":{\"deployment\":{\"env\":${env_json}}}}" >/dev/null
-}
 RENDERED_TASKS=""
-AGENT_ENV_SET=""
 on_exit() {
-  [ -n "${RENDERED_TASKS}" ] && rm -rf "${RENDERED_TASKS}"
-  if [ -n "${AGENT_ENV_SET}" ]; then
-    echo "==> clearing GITOPS_BASE_BRANCH on ${CR}"
-    set_agent_env "" || true
-  fi
+  if [ -n "${RENDERED_TASKS}" ]; then rm -rf "${RENDERED_TASKS}"; fi
 }
 trap on_exit EXIT
 
@@ -129,17 +109,33 @@ entries, errors = parse_entries(probe)
 print("yes" if entries and not errors else "no")
 PY
 )"
-if [ "${HOLD_SUPPORTED}" = "yes" ]; then
+render_task_copy() {
+  [ -n "${RENDERED_TASKS}" ] && return 0
   RENDERED_TASKS="$(mktemp -d "${TMPDIR:-/tmp}/${RENDERED_TASKS_TEMPLATE}")"
   mkdir -p "${RENDERED_TASKS}/${TASK}-gitops"
+  cp "${TASK_SOURCE}/task.yaml" "${RENDERED_TASKS}/${TASK}-gitops/task.yaml"
+  TASK_SOURCE="${RENDERED_TASKS}/${TASK}-gitops"
+}
+# 1a. repository ------------------------------------------------------------
+# The committed prompt names the default repository, and the prompt is the one
+# place the agent learns it from. A run on another repository (GITOPS_REPO)
+# has the URL rendered into the task copy, so the agent, the stack and the
+# harness all see the same repository.
+if [ -n "${GITOPS_REPO:-}" ] && [ "${GITOPS_REPO}" != "${DEFAULT_GITOPS_REPO}" ]; then
+  render_task_copy
+  sed -i.bak "s|${DEFAULT_GITOPS_REPO}|${GITOPS_REPO}|" "${TASK_SOURCE}/task.yaml" && rm -f "${TASK_SOURCE}/task.yaml.bak"
+  grep -q "${GITOPS_REPO} under" "${TASK_SOURCE}/task.yaml" || { echo "prompt render failed: ${GITOPS_REPO} not in ${TASK_SOURCE}/task.yaml" >&2; exit 1; }
+  echo "==> repository ${GITOPS_REPO}; prompt rendered"
+fi
+
+if [ "${HOLD_SUPPORTED}" = "yes" ]; then
+  render_task_copy
   # Only the safeguards are `assert` in the committed case; the objectives are
   # `converge`, so a plain substitution flips exactly the safeguards. Proved
   # below rather than assumed: the run must not proceed printing "hold" while
   # scoring assert because a `mode:` line grew a comment or an objective
   # became assert.
-  sed 's/^\(  *\)mode: assert$/\1mode: hold/' "${TASK_SOURCE}/task.yaml" \
-    > "${RENDERED_TASKS}/${TASK}-gitops/task.yaml"
-  TASK_SOURCE="${RENDERED_TASKS}/${TASK}-gitops"
+  sed -i.bak 's/^\(  *\)mode: assert$/\1mode: hold/' "${TASK_SOURCE}/task.yaml" && rm -f "${TASK_SOURCE}/task.yaml.bak"
   safeguard_count="$(grep -c -E '^ *role: safeguard$' "${TASK_SOURCE}/task.yaml")"
   hold_count="$(grep -c -E '^ *mode: hold$' "${TASK_SOURCE}/task.yaml")"
   [ "${safeguard_count}" -gt 0 ] && [ "${hold_count}" = "${safeguard_count}" ] \
@@ -194,41 +190,25 @@ export AGENT_MODEL
 echo "==> result row model: ${AGENT_MODEL} (LiteLLM alias ${AGENT_MODEL_ALIAS})"
 
 # 2. agent base branch ------------------------------------------------------
-# Two ways to make the agent's PR target the run branch (decision 3 in the
-# pilot notes):
-#   env             set GITOPS_BASE_BRANCH on the PlatformAgent. Needs an
-#                   operator whose sandbox env allowlist carries that variable
-#                   (this change adds it; no release has it yet). Runs 1 to 13
-#                   used it on an install at release 0.4.0 plus that one line.
-#   default-branch  the stack makes the run branch the repository's default
-#                   for the run and restores it on destroy; the agent re-asks
-#                   the remote for its default before each PR. Runs 14 onward
-#                   used it, on release 0.5.0 with the stock operator. One run
-#                   at a time (the stack refuses to switch when the default
-#                   already points at a run/** branch), and
-#                   BENCH_NO_TEARDOWN=true leaves the repository's default on
-#                   the run branch until the destroy is run by hand. Pilot-only.
-: "${BASE_BRANCH_MODE:=default-branch}"
-
-case "${BASE_BRANCH_MODE}" in
-  default-branch)
-    echo "==> base branch via repository default (stack switches it for the run)"
-    export TF_VAR_gitops_switch_default_branch=true
-    ;;
-  env)
-    echo "==> setting GITOPS_BASE_BRANCH=${RUN_BRANCH} on ${CR}"
-    set_agent_env "${RUN_BRANCH}"
-    AGENT_ENV_SET=1
-    "${K[@]}" rollout status deploy/platform-agent-gateway --timeout="${GATEWAY_ROLLOUT_TIMEOUT}" >/dev/null
-    landed="$("${K[@]}" get deploy platform-agent-gateway -o json \
-      | jq -r '.spec.template.spec.containers[] | select(.name=="platform-agent") | .env[]? | select(.name=="GITOPS_BASE_BRANCH") | .value')"
-    if [ "${landed}" != "${RUN_BRANCH}" ]; then
-      echo "GITOPS_BASE_BRANCH did not reach the agent pod (got '${landed}'). The operator on ${AGENT_HOST_CONTEXT} lacks the #1307 allowlist change." >&2
-      exit 1
-    fi
-    ;;
-  *) echo "BASE_BRANCH_MODE must be default-branch or env" >&2; exit 1 ;;
+# The stack makes the run branch the repository's default branch for the run
+# and restores it on destroy; the agent's submit-suggestion re-asks the remote
+# for its default before each PR (decision 3 in the pilot notes). One run at a
+# time (the stack refuses to switch when the default already points at a
+# run/** branch), and BENCH_NO_TEARDOWN=true leaves the repository's default on
+# the run branch until the destroy is run by hand. Pilot-only: the per-run
+# base is the credential broker's to enforce (#1498; its direct-push half
+# landed as #1669, the base-branch half is #1848). Runs 1 to 13 set
+# GITOPS_BASE_BRANCH on the PlatformAgent instead, on a 0.4.0 install whose
+# operator copied it into the agent container; on the shell-sandbox layout
+# every command runs in platform-agent-shell-0, whose environment does not
+# take spec.deployment.env, so the variable never reaches the process that
+# opens the PR, and that mode is gone.
+case "${BASE_BRANCH_MODE:-default-branch}" in
+  default-branch) ;;
+  *) echo "BASE_BRANCH_MODE=${BASE_BRANCH_MODE} is not offered: the run branch becomes the repository's default for the run (see the comment above)" >&2; exit 1 ;;
 esac
+echo "==> base branch via repository default (stack switches it for the run)"
+export TF_VAR_gitops_switch_default_branch=true
 
 # 3. tokens -----------------------------------------------------------------
 PLATFORM_AGENT_TOKEN="$("${K[@]}" get secret platform-agent-secrets -o jsonpath='{.data.API_SERVER_KEY}' | base64 -d)"
