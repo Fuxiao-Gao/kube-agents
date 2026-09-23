@@ -65,9 +65,12 @@ REPO_LOOKUP_RE = re.compile(
 PR_LOOKUP_RE = re.compile(r"gh\s+pr\s+(list|view)|gh\s+api\s+\S*pulls|gh\s+search", re.IGNORECASE)
 #: A worker viewing its own card is how it reads its assignment, not a lookup.
 OWN_CARD_RE = re.compile(r'"task_id":\s*"([^"]+)"')
+#: How much of a repository lookup the report quotes.
+LOOKUP_PREVIEW_CHARS = 160
 #: The call that submits the fix: submit-suggestion's `submit` verb (its
 #: `prepare`, `list` and `fetch` verbs and viewing the skill are not), or a
-#: direct `gh pr create` / `git push`.
+#: direct `gh pr create` / `git push`. Matched against terminal commands only:
+#: a PR body or a heartbeat note that mentions a push is not the push.
 FIX_SUBMIT_RE = re.compile(r"submit_suggestion\.py[\\\"']*\s+submit\b(?!\s*--help)|gh\s+pr\s+create|git\s+push", re.IGNORECASE)
 
 
@@ -77,7 +80,7 @@ def _args(entry: dict) -> dict:
         return args
     if isinstance(args, str):
         try:
-            parsed = json.loads(args)
+            parsed = json.loads(args, strict=False)  # a recorded command may carry a raw newline
         except ValueError:
             return {}
         return parsed if isinstance(parsed, dict) else {}
@@ -165,7 +168,8 @@ def audit(record: dict) -> dict:
 
     fix_at = None
     for e in workers:
-        if FIX_SUBMIT_RE.search(_text(e)):
+        command = _args(e).get("command") if e.get("name") == "terminal" else None
+        if isinstance(command, str) and FIX_SUBMIT_RE.search(command):
             fix_at = _epoch(e.get("at"))
             break
     if fix_at is None:
@@ -205,7 +209,7 @@ def audit(record: dict) -> dict:
         "fix_submitted_at": datetime.fromtimestamp(fix_at, timezone.utc).isoformat() if fix_at else None,
         "cluster_reads_before_fix": len(cluster_reads),
         "repo_lookups_before_fix": len(repo_lookups),
-        "repo_lookups": [_text(e)[:160] for e in repo_lookups],
+        "repo_lookups": [_text(e)[:LOOKUP_PREVIEW_CHARS] for e in repo_lookups],
         "gitops_outcome": outcome.get("outcome"),
         "pr_url": outcome.get("pr_url"),
     }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.machinery
 import importlib.util
 import pathlib
 
@@ -42,6 +43,22 @@ def test_counts_reads_and_lookups_before_the_fix_only():
     assert report["repo_lookups_before_fix"] == 2
     assert report["repo_lookups"] == ['terminal {"command": "gh pr list --repo o/r"}', 'kanban_show {"task_id": "t_other"}']
     assert report["gitops_outcome"] == "merged"
+
+
+def test_the_fix_time_is_a_terminal_submit_not_prose_about_one():
+    record = {
+        "trajectory": [
+            _worker("terminal", {"command": "kubectl get pods"}, 100, agent="cluster-x"),
+            _worker("write_file", {"path": "/tmp/notes.md", "content": "next: git push the fix and gh pr create"}, 110),
+            _worker("kanban_heartbeat", {"note": "about to git push"}, 115),
+            _worker("terminal", {"command": "kubectl get rs"}, 120, agent="cluster-x"),
+            _worker("terminal", {"command": 'python3 "$S/submit_suggestion.py" submit --handle h'}, 130),
+            {"name": "gitops_fix_cycle", "args": {}, "result": {"outcome": "merged", "merged_at": "2026-09-18T00:00:00Z"}, "status": "harness"},
+        ]
+    }
+    report = gitops_audit.audit(record)
+    assert report["fix_submitted_at"] == "1970-01-01T00:02:10+00:00"
+    assert report["cluster_reads_before_fix"] == 2
 
 
 def test_falls_back_to_the_merge_time_without_a_submit_call():
