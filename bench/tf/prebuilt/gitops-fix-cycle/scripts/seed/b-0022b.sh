@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Seeded-condition assertions for b-0022b, sourced by setup.sh after the
 # Application reports Synced. wait_for, EXPECT, WAIT_TIMEOUT and kubectl's
 # context come from the caller.
@@ -27,4 +28,5 @@ EXPECT=3 wait_for "aislefeed readyReplicas" "${WAIT_TIMEOUT}" \
   kubectl -n storefront get deploy aislefeed -o jsonpath='{.status.readyReplicas}'
 EXPECT='{"app":"shelfview"}' wait_for "shelfview Service selector" "${WAIT_TIMEOUT}" \
   kubectl -n storefront get service shelfview -o jsonpath='{.spec.selector}'
+# shellcheck disable=SC2034  # read by setup.sh, which sources this file
 SEED_SUMMARY="storefront: shelfview 0 replicas, price-refresh suspended, search-api 0/2 (probe port 9099); storelookup 3/3, aislefeed 3/3"

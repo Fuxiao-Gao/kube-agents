@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Seeded-condition assertions for b-0011, sourced by setup.sh after the
 # Application reports Synced. wait_for, EXPECT, WAIT_TIMEOUT and kubectl's
 # context come from the caller.
@@ -23,4 +24,5 @@ wait_for "quota-denied checkout pod event" "${WAIT_TIMEOUT}" \
   bash -c "kubectl -n payments get events --field-selector reason=FailedCreate -o name | head -1"
 wait_for "metrics API returns pod data" "${WAIT_TIMEOUT}" \
   bash -c "kubectl top pods -n payments --no-headers 2>/dev/null | head -1"
+# shellcheck disable=SC2034  # read by setup.sh, which sources this file
 SEED_SUMMARY="payments: checkout 3/4 ready (quota-bound at 256Mi, one 64Mi pod left from the healthy rollout), pricer 2/2"

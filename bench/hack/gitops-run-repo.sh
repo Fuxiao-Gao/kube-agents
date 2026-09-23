@@ -42,8 +42,8 @@ set -euo pipefail
 # selected repositories, so every new repository must be added to it.
 : "${GITOPS_APP_INSTALLATION_ID:=153292524}"
 
-readonly GITHUB_API="https://api.github.com"
-readonly TEMPLATE_DIR="$(cd "$(dirname "$0")/.." && pwd)/tf/prebuilt/gitops-fix-cycle/repo"
+TEMPLATE_DIR="$(cd "$(dirname "$0")/.." && pwd)/tf/prebuilt/gitops-fix-cycle/repo"
+readonly TEMPLATE_DIR
 readonly ROOT_COMMIT_MESSAGE="Initial import of the platform manifests"
 readonly ROOT_AUTHOR_NAME="platform-team"
 readonly ROOT_AUTHOR_EMAIL="platform-team@users.noreply.github.com"
