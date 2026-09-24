@@ -159,13 +159,14 @@ verification_spec:
         # happens; no require_success, because the attempt is the spend and
         # the pool projects' calls 403 anyway. The worker invokes it through
         # the tool_call wrapper, which tool_called reads through (measured:
-        # the name inside is mcp__developer_knowledge__answer_query); the
-        # other two spellings cost nothing and cover a renamed dispatch.
+        # the name inside is mcp__developer_knowledge__answer_query). Both
+        # separator spellings, the way scripts/test_integration_contracts.py
+        # registers every MCP tool; the server is a remote proxy, so the
+        # name is allowlisted there (REMOTE_MCP_TOOLS) with its evidence.
         - type: tool_called
           scope: workers
           tool_names:
             [
               "mcp__developer_knowledge__answer_query",
               "mcp_developer_knowledge_answer_query",
-              "answer_query",
             ]
