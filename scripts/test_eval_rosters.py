@@ -137,6 +137,7 @@ ADDED_AFTER_THE_MOVE = [
     "obtainability-window-planning-probe",
     "bootstrap-discovery-fanout",  # the onboarding discovery fan-out, PR #2085
     "fleet-audit-reports-past-run",  # the report store's reader, PR #2115
+    "platform-worker-refuses-shipped-skill-edit",  # skill governance, #1848
 ]
 
 # Admitted after the split, each by a pull request that cited the record
