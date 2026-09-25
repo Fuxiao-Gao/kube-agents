@@ -34,23 +34,32 @@ readonly EVAL_ALERT_DAILY_LIMIT_WARNING="0"
 # that has not measured its own worker footprint, and the operator renders a
 # different cap only when the CR carries spec.harness.tuning.maxInProgress.
 # The eval fans its units out at EVAL_TASK_PARALLELISM (4 on a pull request,
-# 8 on the nightly since oss-test-infra#2707), and every unit delegates one
-# platform card, so on the image default most lanes queue behind two slots:
-# a queued card waits out the cards ahead of it and then runs its own 10-45
-# minutes, past the 2700-3000s delegation ceiling with no worker at fault,
-# while the dispatcher logs the same "ready queue non-empty ... 0 workers
-# spawned" warning a wedged worker produces (#1879, #1880; the residual
-# after their fixes is what this bounds). Eight covers both lane counts and
-# is the ceiling upstream Hermes puts on the cap it derives for an unpinned
-# board (DERIVED_MAX_IN_PROGRESS_CEILING in hermes_cli/kanban_db_dispatch.py).
-# The cap bounds demand rather than creating it: with eight lanes at most
-# eight coordinator cards, plus the children a fan-out spawns, are live at
-# once, and the gateway's 8Gi memory limit (resolveResources in
-# k8s-operator/internal/controller/manifest_helpers.go) was sized with a
-# worker at a few hundred MiB over a 1.8GiB idle set. Set on this install
-# only, so the production default stays where the CRD reference argues it
-# should. tests/test_ci_deploy_kanban_cap.py pins the flag, the floor under
-# the lane counts, and the chart rendering the value onto the CR.
+# 8 on the nightly since oss-test-infra#2707), and nearly every unit's
+# opening turn delegates one platform card, so on the image default most
+# lanes queue behind two slots: a queued card waits out the cards ahead of
+# it and then runs its own 10-45 minutes, past the 2700-3000s delegation
+# ceiling with no worker at fault, while the dispatcher logs the same "ready
+# queue non-empty ... 0 workers spawned" warning a wedged worker produces
+# (#1879, #1880; the residual after their fixes is what this bounds). Eight
+# covers both lane counts and is the ceiling upstream Hermes puts on the cap
+# it derives for an unpinned board (DERIVED_MAX_IN_PROGRESS_CEILING in
+# hermes_cli/kanban_db_dispatch.py).
+#
+# What the cap does and does not bound. It bounds ACTIVE workers; a
+# coordinator waiting on the children it fanned out gives its slot back but
+# stays resident (deploy/docker/patches/kanban_scheduling.py, Part 4), so the
+# process count is cap plus waiting coordinators. At upstream's 512 MiB
+# budget per worker (MEMORY_GUARD_MB_PER_WORKER) over the gateway's 1.8GiB
+# idle set, eight active workers are ~6GiB, and the worst case -- every
+# nightly lane fanning out at once -- is ~10GiB against the 8Gi limit
+# resolveResources (k8s-operator/internal/controller/manifest_helpers.go)
+# sized for five workers. The image default has the same shape at a smaller
+# excursion (two active plus the same waiters). The backstop is upstream's
+# memory-pressure check in the dispatch tick, and the first runs measure the
+# working set rather than assume it. Set on this install only, so the
+# production default stays where the CRD reference argues it should.
+# tests/test_ci_deploy_kanban_cap.py pins the flag, the floor under the lane
+# counts, and the chart rendering the value onto the CR.
 readonly EVAL_KANBAN_MAX_IN_PROGRESS="8"
 
 # The release step 5 installs, and — for the poisoned-record guard (#1172) —

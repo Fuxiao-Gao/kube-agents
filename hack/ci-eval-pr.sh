@@ -1516,8 +1516,8 @@ PRESUBMIT_CASE_NAMES="$(for ENTRY in "${TASKS[@]}"; do basename "$(dirname "${EN
 # seat on that record; measured cost, presubmit redundancy or grading
 # something outside the core journeys keep a case there for good. The file's
 # header carries the budget arithmetic against the periodic's 480m deadline
-# at EVAL_TASK_PARALLELISM=6 (#1491; oss-test-infra#2707, open, moves it to
-# 8), and that is the copy to keep current. Since 2026-09-22 (#1023) the
+# at EVAL_TASK_PARALLELISM=8 (6 from #1491 until oss-test-infra#2707, merged
+# 2026-09-25), and that is the copy to keep current. Since 2026-09-22 (#1023) the
 # presubmit file is the blocking roster and nothing else, so this file is
 # also where every held-out case lives, with its hold-out reason.
 NIGHTLY_ENTRIES="$(roster_entries "${NIGHTLY_CASES_FILE}")"
