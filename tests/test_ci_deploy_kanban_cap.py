@@ -18,8 +18,10 @@ fails validation at ``helm upgrade``), the chart template that renders
 ``platformAgent.harness.tuning`` onto the CR, and the operator writing
 ``kanban.max_in_progress`` into the default profile's overlay, which the operator's
 own ``TestMaxInProgressReachesTheDefaultOverlay`` covers. One test per hop this
-repository can see from Python, plus the floor: a cap below either lane count
-recreates the queue the flag exists to remove.
+repository can see from Python, plus the two bounds: a cap below the pull
+request's lane count recreates the queue the flag exists to remove, and a cap
+above the worker count the gateway's memory limit was sized for trades that
+queue for a worker the OOM killer takes, which strands its card the same way.
 """
 
 import pathlib
@@ -36,11 +38,15 @@ _CHART = _REPO_ROOT / "charts" / "kube-agents"
 _CAP_FLAG = '--set "platformAgent.harness.tuning.maxInProgress=${EVAL_KANBAN_MAX_IN_PROGRESS}"'
 _CAP_AS_STRING = '--set-string "platformAgent.harness.tuning.maxInProgress'
 _CAP_CONSTANT_RE = re.compile(r'^readonly EVAL_KANBAN_MAX_IN_PROGRESS="(\d+)"$', re.MULTILINE)
-# The presubmit's lane count is the script's own default; the nightly's is set in
-# the Prow job (oss-test-infra#2707, merged 2026-09-25), which this repository
-# cannot read, so it is pinned here beside the reason it matters.
+# The presubmit's lane count is the script's own default. The ceiling is the
+# worker count the gateway container's memory limit was sized for
+# (resolveResources in k8s-operator/internal/controller/manifest_helpers.go:
+# 8Gi for five concurrent workers over a 1.8GiB idle set); raising the cap
+# past it belongs in the same change as raising that limit for the eval
+# install, once the working set at five has been measured (#2032). The nightly
+# runs eight lanes (oss-test-infra#2707) and queues three deep until then.
 _PRESUBMIT_LANES_RE = re.compile(r'^EVAL_TASK_PARALLELISM="\$\{EVAL_TASK_PARALLELISM:-(\d+)\}"$', re.MULTILINE)
-_NIGHTLY_LANES = 8
+_WORKERS_THE_MEMORY_LIMIT_FITS = 5
 
 
 def _cap() -> int:
@@ -66,20 +72,26 @@ class CiDeployKanbanCapTest(unittest.TestCase):
             "would fail validation at helm upgrade.",
         )
 
-    def test_the_cap_covers_both_lane_counts(self) -> None:
+    def test_the_cap_covers_the_presubmit_lanes_and_stays_inside_the_memory_sizing(self) -> None:
         match = _PRESUBMIT_LANES_RE.search(_CI_EVAL.read_text())
         assert match, "hack/ci-eval-pr.sh no longer declares the EVAL_TASK_PARALLELISM default"
         presubmit_lanes = int(match.group(1))
         cap = _cap()
-        for tier, lanes in (("presubmit", presubmit_lanes), ("nightly", _NIGHTLY_LANES)):
-            with self.subTest(tier=tier):
-                self.assertGreaterEqual(
-                    cap,
-                    lanes,
-                    f"EVAL_KANBAN_MAX_IN_PROGRESS={cap} is below the {tier}'s {lanes} "
-                    "lanes: every lane delegates one card, so the lanes over the cap "
-                    "queue and run out the delegation ceiling.",
-                )
+        self.assertGreaterEqual(
+            cap,
+            presubmit_lanes,
+            f"EVAL_KANBAN_MAX_IN_PROGRESS={cap} is below the presubmit's {presubmit_lanes} "
+            "lanes: nearly every lane delegates one card, so the lanes over the cap "
+            "queue and run out the delegation ceiling.",
+        )
+        self.assertLessEqual(
+            cap,
+            _WORKERS_THE_MEMORY_LIMIT_FITS,
+            f"EVAL_KANBAN_MAX_IN_PROGRESS={cap} is above the {_WORKERS_THE_MEMORY_LIMIT_FITS} "
+            "workers the gateway's memory limit was sized for: raise that limit for "
+            "the eval install in the same change, or a worker the OOM killer takes "
+            "strands its card exactly like the queue the cap removes.",
+        )
 
 
 class HelmRendersTheCapTest(unittest.TestCase):

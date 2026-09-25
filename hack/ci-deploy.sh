@@ -41,29 +41,29 @@ readonly EVAL_ALERT_DAILY_LIMIT_WARNING="0"
 # ceiling with no worker at fault, while the dispatcher logs the same "ready
 # queue non-empty ... 0 workers spawned" warning a wedged worker produces
 # (#1879, #1880). This bounds the queueing share of what remained after
-# their fixes; the same nightly also had workers wedged for a whole
+# their fixes (#2032); the same nightly also had workers wedged for a whole
 # delegation by the v2026.9.14 base's approval-regex hang on large terminal
-# commands (traced on #2013), a separate holder of the same slots that the
-# Hermes bump removes. Eight covers both lane counts and is the ceiling
-# upstream Hermes puts on the cap it derives for an unpinned board
-# (DERIVED_MAX_IN_PROGRESS_CEILING in hermes_cli/kanban_db_dispatch.py).
+# commands, a separate holder of the same slots that the Hermes bump removes.
 #
-# What the cap does and does not bound. It bounds ACTIVE workers; a
-# coordinator waiting on the children it fanned out gives its slot back but
-# stays resident (deploy/docker/patches/kanban_scheduling.py, Part 4), so the
-# process count is cap plus waiting coordinators. At upstream's 512 MiB
-# budget per worker (MEMORY_GUARD_MB_PER_WORKER) over the gateway's 1.8GiB
-# idle set, eight active workers are ~6GiB, and the worst case -- every
-# nightly lane fanning out at once -- is ~10GiB against the 8Gi limit
-# resolveResources (k8s-operator/internal/controller/manifest_helpers.go)
-# sized for five workers. The image default has the same shape at a smaller
-# excursion (two active plus the same waiters). The backstop is upstream's
-# memory-pressure check in the dispatch tick, and the first runs measure the
-# working set rather than assume it. Set on this install only, so the
-# production default stays where the CRD reference argues it should.
-# tests/test_ci_deploy_kanban_cap.py pins the flag, the floor under the lane
-# counts, and the chart rendering the value onto the CR.
-readonly EVAL_KANBAN_MAX_IN_PROGRESS="8"
+# Five, not the lane count. The cap bounds ACTIVE workers, and a coordinator
+# waiting on the children it fanned out gives its slot back but stays
+# resident (deploy/docker/patches/kanban_scheduling.py, Part 4), so the
+# process count is the cap plus the waiting coordinators. The gateway
+# container's 8Gi memory limit (resolveResources in
+# k8s-operator/internal/controller/manifest_helpers.go) was sized for five
+# concurrent workers over a 1.8GiB idle set, and a worker the cgroup OOM
+# killer takes strands its card with no restart and no event: the same shape
+# as the queue this removes, indistinguishable from it in the run record. So
+# the cap stops where the sizing stops: five covers the pull request's four
+# lanes with one slot for a fan-out child, and the nightly's eight lanes
+# still queue three deep until the working set at five is measured and the
+# eval install's memory limit is raised together with the cap (the CR patch
+# hack/kind-up.sh makes after helm is the shape; #2032 carries the
+# measurement). Set on this install only, so the production default stays
+# where the CRD reference argues it should. tests/test_ci_deploy_kanban_cap.py
+# pins the flag, the floor under the pull request's lanes, the ceiling the
+# memory limit was sized for, and the chart rendering the value onto the CR.
+readonly EVAL_KANBAN_MAX_IN_PROGRESS="5"
 
 # The release step 5 installs, and — for the poisoned-record guard (#1172) —
 # the label pair Helm stamps on every release-record Secret it writes
