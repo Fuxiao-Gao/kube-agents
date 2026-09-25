@@ -205,8 +205,9 @@ Add `--delete <path>` (repeatable) to remove a file the repository has.
 `--base-sha` is what makes the broker refuse rather than overwrite when somebody
 else changed one of these same files while you were working; without it the last
 writer wins. Drop it only when you are deliberately replacing whatever is there.
-If `submit` answers `workspace.unknown-handle`, the broker dropped a handle that
-went unused for 30 minutes; re-run Step 1's `prepare` and submit against the
+If `submit` fails with `no such workspace; open one first`, the broker dropped a
+handle that went unused for 30 minutes (it reclaims idle handles whenever any
+session opens a workspace); re-run Step 1's `prepare` and submit against the
 handle it prints.
 
 **Directory mode** — the `workspace` and the `lease`, which the script checks is

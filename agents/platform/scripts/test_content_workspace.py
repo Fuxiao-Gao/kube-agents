@@ -1080,7 +1080,7 @@ class IdleReapTest(unittest.TestCase):
             store = self.store()
         self.assertEqual([], list(store.tree_root.iterdir()))
         self.assertEqual({}, store._workspaces)
-        self.assertIn("held 2 tree(s) from a previous process", captured.output[0])
+        self.assertIn("held 2 entry(ies) from a previous process; removed 2", captured.output[0])
         self.assertNotIn(str(root), captured.output[0])
 
         # Paired: a workspace opened after construction stays on disk, and a
@@ -1089,6 +1089,29 @@ class IdleReapTest(unittest.TestCase):
         self.assertEqual([workspace.handle], [p.name for p in store.tree_root.iterdir()])
         with self.assertNoLogs("credential-proxy", level="WARNING"):
             ContentWorkspaceStore(self.base / "trees2", self.agent, RecordingRunner())
+
+    def test_the_sweep_unlinks_a_link_or_file_at_the_root_rather_than_walking_it(self):
+        """`open` creates directories, so anything else at the root is not a tree it left.
+
+        `_remove_tree` follows a symlink at its root into the target, so a link
+        handed to it had its target emptied while the link stayed, and a plain
+        file survived; the log line said "removed" either way.
+        """
+        root = self.base / "trees"
+        root.mkdir()
+        outside = self.base / "outside"
+        (outside / "sub").mkdir(parents=True)
+        (outside / "keep").write_text("kept\n")
+        (outside / "sub" / "keep").write_text("kept\n")
+        (root / "link").symlink_to(outside)
+        (root / "file").write_text("not a tree\n")
+        (root / ("d" * 32) / "repo").mkdir(parents=True)
+        with self.assertLogs("credential-proxy", level="WARNING") as captured:
+            store = self.store()
+        self.assertEqual([], list(store.tree_root.iterdir()))
+        self.assertTrue((outside / "keep").exists(), "the link's target was emptied")
+        self.assertTrue((outside / "sub" / "keep").exists(), "the link's target was walked")
+        self.assertIn("held 3 entry(ies) from a previous process; removed 3", captured.output[0])
 
 
 class ErrorRedactionTest(unittest.TestCase):

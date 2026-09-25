@@ -688,13 +688,29 @@ class ContentWorkspaceStore:
         # removes its own tree when a clone fails, so what this finds is the
         # container crash-restart, where the emptyDir outlives the process that
         # filled it. Removed rather than left to count against the ceiling.
-        orphans = list(self.tree_root.iterdir())
-        for entry in orphans:
-            _remove_tree(entry)
-        if orphans:
+        # `open` creates directories and nothing else, so a symlink or a plain
+        # file here is not a tree it left; unlinked as itself rather than
+        # handed to `_remove_tree`, whose walk follows a link at its root into
+        # the target and would empty a directory elsewhere while the link
+        # stayed. Counted after the fact, because `_remove_tree` ignores what
+        # it cannot remove and the log line should not say otherwise.
+        held = removed = 0
+        for entry in list(self.tree_root.iterdir()):
+            held += 1
+            if entry.is_dir() and not entry.is_symlink():
+                _remove_tree(entry)
+            else:
+                try:
+                    entry.unlink()
+                except OSError:
+                    pass
+            if not (entry.is_symlink() or entry.exists()):
+                removed += 1
+        if held:
             LOGGER.warning(
-                "content workspace root held %d tree(s) from a previous process; removed",
-                len(orphans),
+                "content workspace root held %d entry(ies) from a previous process; removed %d",
+                held,
+                removed,
             )
         self._runner = runner
         # Injected for the tests; `time.monotonic` rather than the wall clock
