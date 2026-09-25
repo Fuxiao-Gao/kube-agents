@@ -403,3 +403,7 @@
 
 # A simple case that can run on kind.
 ./tasks/chat-routing-own-cluster-namespaces/task.yaml
+
+# Skill governance: a platform worker asked to edit a shipped skill declines and
+# reports it (#1848). Read-only, transcript-graded, one delegation round trip.
+./tasks/platform-worker-refuses-shipped-skill-edit/task.yaml

@@ -1234,6 +1234,11 @@ RUN /opt/hermes/.venv/bin/python3 /tmp/kanban-guardrail-exit/apply_state_db_sync
 # that chain past Docker's layer-depth ceiling ("max depth exceeded" on build
 # f9f1747c, 2026-08-07). The guarantees are unchanged — same appliers,
 # same grep guards, same behavioural verifies — only the layer count differs.
+# skill_manage_image_owned rides here for the same reason: it gates
+# tools/skill_manager_tool.py::skill_manage, and the file tools' write guard in
+# agent/file_safety.py, so a skill the image ships cannot be rewritten from
+# inside the agent by either writer (gke-labs/kube-agents#1848). See the module
+# docstring in deploy/docker/patches/skill_manage_image_owned.py.
 COPY deploy/docker/patches/kanban_wake_nudge.py \
      deploy/docker/patches/apply_kanban_wake_nudge.py \
      deploy/docker/patches/verify_kanban_wake_nudge.py \
@@ -1256,6 +1261,9 @@ COPY deploy/docker/patches/kanban_wake_nudge.py \
      deploy/docker/patches/credential_redaction.py \
      deploy/docker/patches/apply_credential_redaction.py \
      deploy/docker/patches/verify_credential_redaction.py \
+     deploy/docker/patches/skill_manage_image_owned.py \
+     deploy/docker/patches/apply_skill_manage_image_owned.py \
+     deploy/docker/patches/verify_skill_manage_image_owned.py \
      deploy/docker/patches/patchlib.py \
      /tmp/latency-patches/
 # `install -m 0644`, not `cp`, for the first line. `cp` gives a newly created
@@ -1266,7 +1274,7 @@ COPY deploy/docker/patches/kanban_wake_nudge.py \
 # cannot read the result. Same failure agentplugins/lib/plugin_image.sh:798
 # stages against for the plugin image, same cause.
 #
-# The other five land in /opt/hermes/tools and /opt/hermes/gateway, which the
+# The other six land in /opt/hermes/tools and /opt/hermes/gateway, which the
 # `platform` stage normalizes; /opt/hermes/hermes_cli is the one patch
 # destination no loop walks, so it is stated here at the write site.
 RUN install -m 0644 /tmp/latency-patches/kanban_wake_nudge.py /opt/hermes/hermes_cli/kanban_wake_nudge.py && \
@@ -1306,6 +1314,13 @@ RUN install -m 0644 /tmp/latency-patches/kanban_wake_nudge.py /opt/hermes/hermes
     test "$(grep -c '_kube_agents_register_patterns()' /opt/hermes/agent/redact.py)" = "1" && \
     test "$(grep -c '_kube_agents_redact_tool_argument' /opt/hermes/agent/display.py)" = "2" && \
     test "$(grep -c '_kube_agents_install_transcript_redaction()' /opt/hermes/hermes_cli/main.py)" = "1" && \
+    cp /tmp/latency-patches/skill_manage_image_owned.py /opt/hermes/tools/skill_manage_image_owned.py && \
+    /opt/hermes/.venv/bin/python3 /tmp/latency-patches/apply_skill_manage_image_owned.py /opt/hermes && \
+    test "$(grep -c 'from tools.skill_manage_image_owned import image_owned_batch_refusal, image_owned_refusal' /opt/hermes/tools/skill_manager_tool.py)" = "1" && \
+    test "$(grep -c 'image_owned_batch_refusal(operations, name or None)' /opt/hermes/tools/skill_manager_tool.py)" = "1" && \
+    grep -q 'return tool_error(_image_owned, success=False)' /opt/hermes/tools/skill_manager_tool.py && \
+    test "$(grep -c 'from tools.skill_manage_image_owned import image_managed_tree' /opt/hermes/agent/file_safety.py)" = "2" && \
+    grep -q 'return "image_managed"' /opt/hermes/agent/file_safety.py && \
     cd /opt/hermes && \
     /opt/hermes/.venv/bin/python3 /tmp/latency-patches/verify_kanban_wake_nudge.py && \
     /opt/hermes/.venv/bin/python3 /tmp/latency-patches/verify_kanban_auto_subscribe.py && \
@@ -1314,6 +1329,7 @@ RUN install -m 0644 /tmp/latency-patches/kanban_wake_nudge.py /opt/hermes/hermes
     /opt/hermes/.venv/bin/python3 /tmp/latency-patches/verify_kanban_event_routing.py && \
     /opt/hermes/.venv/bin/python3 /tmp/latency-patches/verify_kanban_children_settled.py && \
     /opt/hermes/.venv/bin/python3 /tmp/latency-patches/verify_credential_redaction.py && \
+    /opt/hermes/.venv/bin/python3 /tmp/latency-patches/verify_skill_manage_image_owned.py && \
     rm -rf /tmp/latency-patches
 
 
@@ -1899,7 +1915,8 @@ RUN set -eu; \
             || { echo "manifest for $d has $(wc -l < "$d/skills_manifest.sha256") entries, expected $n" >&2; exit 1; }; \
         chmod 644 "$d/skills_manifest.sha256"; \
     done; \
-    chown -R root:root /opt/hermes/skills /opt/platform-template /opt/cluster-template /opt/chat-template /opt/a2a-template /opt/defaults/scripts
+    chown -R root:root /opt/hermes/skills /opt/platform-template /opt/cluster-template /opt/chat-template /opt/a2a-template /opt/defaults/scripts; \
+    cd /opt/hermes && /opt/hermes/.venv/bin/python3 -m tools.skill_manage_image_owned --check-roots
 
 # Guard: nothing that carries a cluster credential may come back into this image.
 #

@@ -103,6 +103,7 @@ ADDED_AFTER_THE_SPLIT = [
 # Appended at the tail of the nightly file.
 ADDED_AT_THE_TAIL = [
     "chat-routing-own-cluster-namespaces",
+    "platform-worker-refuses-shipped-skill-edit",  # skill governance, #1848
 ]
 MOVED_TO_NIGHTLY = [
     "cluster-agent-pending-replicas-capped-pool",
