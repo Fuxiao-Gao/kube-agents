@@ -29,6 +29,30 @@ set -euo pipefail
 # env allowlist letting it through to the container.
 readonly EVAL_ALERT_DAILY_LIMIT_WARNING="0"
 
+# The kanban board's worker cap on the eval install. The image ships
+# kanban.max_in_progress: 2 (agents/chat/config.yaml), a floor for an install
+# that has not measured its own worker footprint, and the operator renders a
+# different cap only when the CR carries spec.harness.tuning.maxInProgress.
+# The eval fans its units out at EVAL_TASK_PARALLELISM (4 on a pull request,
+# 8 on the nightly since oss-test-infra#2707), and every unit delegates one
+# platform card, so on the image default most lanes queue behind two slots:
+# a queued card waits out the cards ahead of it and then runs its own 10-45
+# minutes, past the 2700-3000s delegation ceiling with no worker at fault,
+# while the dispatcher logs the same "ready queue non-empty ... 0 workers
+# spawned" warning a wedged worker produces (#1879, #1880; the residual
+# after their fixes is what this bounds). Eight covers both lane counts and
+# is the ceiling upstream Hermes puts on the cap it derives for an unpinned
+# board (DERIVED_MAX_IN_PROGRESS_CEILING in hermes_cli/kanban_db_dispatch.py).
+# The cap bounds demand rather than creating it: with eight lanes at most
+# eight coordinator cards, plus the children a fan-out spawns, are live at
+# once, and the gateway's 8Gi memory limit (resolveResources in
+# k8s-operator/internal/controller/manifest_helpers.go) was sized with a
+# worker at a few hundred MiB over a 1.8GiB idle set. Set on this install
+# only, so the production default stays where the CRD reference argues it
+# should. tests/test_ci_deploy_kanban_cap.py pins the flag, the floor under
+# the lane counts, and the chart rendering the value onto the CR.
+readonly EVAL_KANBAN_MAX_IN_PROGRESS="8"
+
 # The release step 5 installs, and — for the poisoned-record guard (#1172) —
 # the label pair Helm stamps on every release-record Secret it writes
 # (`owner=helm` plus `name=<release>`), selecting every revision's record of
@@ -532,6 +556,9 @@ SANDBOX_KEY_DIR="$(umask 077 && mktemp -d)"
 ssh-keygen -q -t "${SANDBOX_SSH_KEY_TYPE}" -N '' -C "${SANDBOX_SSH_KEY_COMMENT}" \
   -f "${SANDBOX_KEY_DIR}/id_sandbox"
 
+# Named in the build log so a run's dispatcher behaviour can be read against
+# the cap it was given without opening the rendered CR.
+echo "Kanban board cap for this install: max_in_progress=${EVAL_KANBAN_MAX_IN_PROGRESS} (spec.harness.tuning.maxInProgress)"
 helm upgrade --install "${HELM_RELEASE_NAME}" ./charts/kube-agents \
   --namespace "${NAMESPACE}" --create-namespace \
   "${IMAGE_ARGS[@]}" \
@@ -550,6 +577,7 @@ helm upgrade --install "${HELM_RELEASE_NAME}" ./charts/kube-agents \
   --set-string "litellm.modelDefaultName=${MODEL_DEFAULT_NAME}" \
   --set-string "litellm.vertex.serviceAccountAnnotations.iam\.gke\.io/gcp-service-account=${LITELLM_GSA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com" \
   --set "platformAgent.deployment.availability.runtimeClassName=" \
+  --set "platformAgent.harness.tuning.maxInProgress=${EVAL_KANBAN_MAX_IN_PROGRESS}" \
   --set-string "platformAgent.deployment.env[0].name=ALERT_DAILY_LIMIT_WARNING" \
   --set-string "platformAgent.deployment.env[0].value=${EVAL_ALERT_DAILY_LIMIT_WARNING}" \
   --wait --timeout 15m
