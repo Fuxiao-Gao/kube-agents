@@ -69,11 +69,13 @@
 # Forty-four cases, ~1011-1031min serial. The
 # periodic runs at 00:00 UTC -- 8 PM EDT, after the working day's presubmit
 # herd -- with a 480m deadline, EVAL_TASK_PARALLELISM=8 (6 from #1491 until
-# oss-test-infra#2707, 2026-09-25) and EVAL_REPETITIONS at its default 3. At the ~1.15x the presubmit realised on
-# whole-job wall clock at parallelism 4 under daytime quota contention that
-# would be ~879-897min, over the deadline; 480m holds only if the nightly,
-# alone on the model quota at that hour and two lanes wider, realises ~1.9x
-# or better. Night one (2026-09-16, build 2100374258805903360, #1491)
+# oss-test-infra#2707, 2026-09-25; the arithmetic that follows was done at
+# six) and EVAL_REPETITIONS at its default 3. At the ~1.15x the presubmit
+# realised on whole-job wall clock at parallelism 4 under daytime quota
+# contention that would be ~879-897min, over the deadline; 480m holds only
+# if the nightly, alone on the model quota at that hour and two lanes
+# wider, realises ~1.9x or better. Night one (2026-09-16, build
+# 2100374258805903360, #1491)
 # realised 5.57x on the thirty-nine-case matrix and used 71% of the budget,
 # so the five additions are priced inside its headroom. The first nights after this change measure it:
 # record the wall clock and any truncation on #1491, and if the deadline

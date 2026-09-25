@@ -40,10 +40,13 @@ readonly EVAL_ALERT_DAILY_LIMIT_WARNING="0"
 # it and then runs its own 10-45 minutes, past the 2700-3000s delegation
 # ceiling with no worker at fault, while the dispatcher logs the same "ready
 # queue non-empty ... 0 workers spawned" warning a wedged worker produces
-# (#1879, #1880; the residual after their fixes is what this bounds). Eight
-# covers both lane counts and is the ceiling upstream Hermes puts on the cap
-# it derives for an unpinned board (DERIVED_MAX_IN_PROGRESS_CEILING in
-# hermes_cli/kanban_db_dispatch.py).
+# (#1879, #1880). This bounds the queueing share of what remained after
+# their fixes; the same nightly also had workers wedged for a whole
+# delegation by the v2026.9.14 base's approval-regex hang on large terminal
+# commands (traced on #2013), a separate holder of the same slots that the
+# Hermes bump removes. Eight covers both lane counts and is the ceiling
+# upstream Hermes puts on the cap it derives for an unpinned board
+# (DERIVED_MAX_IN_PROGRESS_CEILING in hermes_cli/kanban_db_dispatch.py).
 #
 # What the cap does and does not bound. It bounds ACTIVE workers; a
 # coordinator waiting on the children it fanned out gives its slot back but
