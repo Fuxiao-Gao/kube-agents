@@ -162,9 +162,30 @@ RUN /opt/hermes/.venv/bin/python3 -c "import pathlib; p = pathlib.Path('/opt/her
 # channel-directory resolution and fail. A bare thread name "spaces/<id>/threads/<id>" (no colon) is the
 # space before "/threads/" plus the whole name as the thread, the shape the adapter's thread ids take.
 # Exact-count guarded like the step above.
+#
+# Anchor the launchctl approval pattern -- a second edit in this layer, because the agent-base -> platform
+# chain sits within a few layers of the budget scripts/check_image_layers.py gates. v2026.9.14's
+# tools/approval_detection.py opens the "stop/restart hermes launchd service" rule with two unanchored
+# whole-input lookaheads, so re.search retries them at every position of a command that does not match,
+# once per normalised variant the detector generates for the command (one per word whose deobfuscation
+# differs: a handful for a plain command, hundreds for a findings heredoc). The time grows roughly with the
+# cube of the command's length and the scan holds the GIL, so the worker stalls whole: no heartbeat, no
+# tool result. Timed on v2026.9.14 at 3.5 s for 4.7 KB and 23 s for 8.9 KB, and in nightly build
+# 2103273400171499520 every terminal call of 16 KB or more hung or timed out at the tool executor's 420 s
+# guard (kube-agents #2013; upstream agent/tool_executor.py, _DEFAULT_CONCURRENT_TOOL_TIMEOUT_S). A
+# JSON-bodied heredoc of the fleet-audit findings' shape reproduces it (5 s at 4.6 KB and 33 s at 8.7 KB
+# unanchored; 0.3 s, 1.0 s and 13.5 s at 32 KB anchored), which is how a fleet-audit worker that has
+# finished its checks hangs on the one call that writes them. Upstream anchored the rule with \A in
+# ea870b4d3e, shipped from v2026.9.21 (on v2026.9.24 a 32 KB command checks in 0.24 s); this carries the
+# one edit until the base moves, and the count guard fails the build the day the base already has it. The
+# last line is upstream's regression test for the fix: the anchored rule answers a 100 KB non-matching
+# input in microseconds and the unanchored one in tens of seconds, so a 5 s bound tells the two apart.
 RUN /opt/hermes/.venv/bin/python3 -c "import pathlib; p = pathlib.Path('/opt/hermes/tools/send_message_targets.py'); c = p.read_text(); t = '    parser = _PLATFORM_PARSERS.get(platform_name)\n'; r = '    if platform_name == \"google_chat\":\n        parts = target_ref.split(\":\", 1)\n        if len(parts) == 2 and parts[0].startswith(\"spaces/\"):\n            return parts[0].strip(), parts[1].strip(), True\n        elif target_ref.startswith(\"spaces/\") and \"/threads/\" in target_ref:\n            return target_ref.split(\"/threads/\", 1)[0].strip(), target_ref.strip(), True\n        elif target_ref.startswith(\"spaces/\"):\n            return target_ref.strip(), None, True\n' + t; p.write_text(c.replace(t, r)) if c.count(t) == 1 else exit(1)" && \
     grep -qF 'if platform_name == "google_chat":' /opt/hermes/tools/send_message_targets.py && \
-    grep -qF 'target_ref.split("/threads/", 1)[0]' /opt/hermes/tools/send_message_targets.py
+    grep -qF 'target_ref.split("/threads/", 1)[0]' /opt/hermes/tools/send_message_targets.py && \
+    /opt/hermes/.venv/bin/python3 -c "import pathlib; p = pathlib.Path('/opt/hermes/tools/approval_detection.py'); c = p.read_text(); t = r\"(r'(?=[\s\S]*\blaunchctl\"; r = r\"(r'\A(?=[\s\S]*\blaunchctl\"; p.write_text(c.replace(t, r)) if c.count(t) == 1 else exit(1)" && \
+    grep -qF "(r'\A(?=[\s\S]*\blaunchctl" /opt/hermes/tools/approval_detection.py && \
+    cd /opt/hermes && timeout 5 /opt/hermes/.venv/bin/python3 -c "from tools.approval_detection import DANGEROUS_PATTERNS_COMPILED as P; r = [rx for rx, d in P if d == 'stop/restart hermes launchd service (kills running agents)']; assert len(r) == 1 and r[0].search('x' * 100000) is None"
 
 # A dependency-free text utility, copied in on its own and ahead of both of its
 # callers. tools/cron_run_scope.py imports it a few layers below for a different
