@@ -1718,8 +1718,8 @@ PRESUBMIT_CASE_NAMES="$(for ENTRY in "${TASKS[@]}"; do basename "$(dirname "${EN
 # 2026-09-25), and that is the copy to keep current. Since 2026-09-22 (#1023) the
 # presubmit file is the blocking roster and nothing else, so this file is
 # where a held-out case lives, with its hold-out reason, unless a coverage
-# tracker seats it in the presubmit file held out (#2013/#2016; the
-# presubmit file's last section).
+# tracker seats it in the presubmit file held out (#2013; the presubmit
+# file's last section).
 NIGHTLY_ENTRIES="$(roster_entries "${NIGHTLY_CASES_FILE}")"
 NIGHTLY_TASKS=()
 while IFS= read -r ENTRY; do
