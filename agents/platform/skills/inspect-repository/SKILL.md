@@ -56,6 +56,9 @@ python3 ./skills/inspect-repository/scripts/inspect_repository.py close --handle
 
 The handle survives between turns; the shell does not. Keep it, and **close it
 when you are done** — an open handle holds a clone on the broker's volume.
+A handle no subcommand has used for 30 minutes is dropped by the broker, since
+a session that dies holding one never closes it; a subcommand on it then
+answers `workspace.unknown-handle`, and the remedy is a fresh `open`.
 `open` also prints `sha`, the commit the workspace was cloned at; a report
 that has to say which commit it read (the fleet-audit declared-intent record
 names each repository as `owner/name@sha`) takes it from there, since there
