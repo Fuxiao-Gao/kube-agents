@@ -8,7 +8,7 @@
 # aislefeed and the shelfview Service must be left alone. What differs is how
 # the broken state reaches the cluster and how the fix does. The stack
 # (bench/tf/prebuilt/gitops-fix-cycle, gitops_task b-0022b) cuts a per-run
-# branch of the GitOps repo from a pinned broken-base commit, installs Argo CD,
+# branch of the GitOps repo from the broken-base commit it is given, installs Argo CD,
 # and syncs the task directory from that branch. The agent is read-only on the
 # cluster and remediates by opening a pull request against the run branch; the
 # repo's check workflow merges it, Argo syncs the merge, and the checks below
@@ -51,9 +51,12 @@ infrastructure:
 # and that changes reach it only through a pull request, the same paragraph
 # b-0011-gitops carries at task_version 2 (without that sentence the agent
 # passed the run branch to submit-suggestion as the branch to create and pushed
-# onto it). The branch is derived from the cluster name because that is the
-# only per-run value the prompt templating can carry (see the stack's
-# locals.run_branch, which must stay in step with this line).
+# onto it). {{GITOPS_REPO}} is not one of devops-bench's placeholders: the run
+# wrapper renders the repository from GITOPS_REPO into its task copy, so the
+# committed case names no repository. The branch is derived from the cluster
+# name because that is the only per-run value devops-bench's templating can
+# carry (see the stack's locals.run_branch, which must stay in step with this
+# line).
 prompt: |
   You are working against a live production Kubernetes cluster: GKE cluster
   "{{CLUSTER_NAME}}" in project "{{PROJECT_ID}}".
@@ -61,7 +64,7 @@ prompt: |
   You are working against a live production Kubernetes cluster. Shoppers are getting errors on every catalog request. Please investigate and remediate.
 
   The cluster's desired state is tracked in the git repository
-  https://github.com/gke-agentic/fuxiao-gkedemo-infra under "tasks/b-0022b" on branch
+  {{GITOPS_REPO}} under "tasks/b-0022b" on branch
   "run/{{CLUSTER_NAME}}/b-0022b", which Argo CD syncs to this cluster. Changes reach
   that branch only through a pull request against it; do not push to it directly.
 

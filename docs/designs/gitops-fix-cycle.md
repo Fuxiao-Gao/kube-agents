@@ -20,7 +20,8 @@ existing `verification_spec` grades the result unchanged.
 
 The cycle, per run:
 
-1. A per-run branch of the GitOps repository is cut from a pinned "broken base" commit.
+1. A per-run branch of the GitOps repository is built on a "broken base" commit the stack is
+   given.
 2. The task cluster is created; Argo CD is installed and one Application tracks the task's
    directory on the run branch with automated sync, prune and self-heal. The cluster is
    broken because the repo says so.
@@ -55,8 +56,8 @@ request 64Mi -> 256Mi, image `:1.0` -> `:1.0.0`, replicas 2 -> 4). For b-0022b t
 faults are already declarative in the manifests (shelfview scaled to 0, the CronJob
 suspended, the probe port wrong), so the rule only adds the gating wave and refuses to
 render if any fault is missing. The repo therefore cannot drift from the stack without a
-diff showing it. Broken-base commits: b-0011 `a48b227c`, b-0022b `0099372f`, recorded in
-the stack's `locals.broken_base_sha`.
+diff showing it. The broken-base commit is an input of the stack (`gitops_broken_base_sha`),
+never recorded in it: it is a commit in the caller's repository.
 
 Two Argo annotations are part of the rendered b-0011 base and are load-bearing (the
 b-0022b base carries only the gating wave):
@@ -69,8 +70,9 @@ b-0022b base carries only the gating wave):
   ingress class and a ClusterIP backend, so GKE never programs it; without the exclusion
   the Application stays Progressing forever and the completion signal never fires.
 
-The broken base is a commit SHA recorded in the stack (`locals.broken_base_sha`, per task;
-`gitops_broken_base_sha` overrides it). The
+The broken base is a commit SHA the stack is given (`gitops_broken_base_sha`; the wrapper
+passes `GITOPS_BROKEN_BASE_SHA`, or the repository's default-branch head for a per-run
+repository). The
 repository's default branch holds it; no run writes the default branch's content (the
 pilot-only default-branch mode below moves the default-branch pointer, not its content).
 
@@ -82,7 +84,7 @@ read "revision 1, one ReplicaSet, never fit" and raised the quota. So for b-0011
 branch is built in stages (`render-broken-base.sh <task> <manifests> <out> <stage>`;
 `run-branch.sh create` and `advance`), each a commit created through the git data API
 with the broken base's tree and the task directory re-rendered: `healthy` (the manifests
-as shipped, parent `locals.history_parent_sha`, the repository commit from before the
+as shipped, parent `gitops_history_parent_sha`, a repository commit from before the
 task directory existed), `inflated` (memory 256Mi), `broken` (all three mutations; its
 tree is byte-identical to the broken base's). The branch starts at `healthy`; setup waits
 for the Application to be Healthy, advances the ref to `broken`, refreshes Argo and waits
@@ -94,7 +96,7 @@ since Argo applies the broken head in one sync. b-0022b has no history to tell a
 at its broken base as before.
 
 Onboarding facts about the pilot repository: rulesets and branch protection are not
-available on private repositories under the `gke-agentic` org's free plan, and deploy keys
+available on private repositories under an organisation on GitHub's free plan, and deploy keys
 are disabled org-wide. Both shaped the design below.
 
 ## Branch naming and lifecycle
@@ -123,8 +125,8 @@ config, and prints the root commit; the wrapper (`GITOPS_REPO`) renders that rep
 into the prompt copy and passes the root as the stack's broken base and, for b-0011, the
 staged history's parent. `run-branch.sh create` then commits the broken render on the root
 for a task without staged history, so the branch is root -> broken for b-0022b and root ->
-healthy -> inflated -> broken for b-0011, with `tasks/<task>` trees identical to the pinned
-bases. The staged history's commit messages are the shape a build pipeline writes
+healthy -> inflated -> broken for b-0011, with `tasks/<task>` trees identical to the
+rendered bases. The staged history's commit messages are the shape a build pipeline writes
 (`payments: update checkout deployment`); the clue is the diff and the rollout history,
 not a title. Repositories are archived after the campaign, not deleted, so handoff links
 keep resolving. The agent side of the same isolation is the wrapper's
@@ -138,10 +140,10 @@ One stack serves every task on the cycle. `gitops_task` (set by the case's
 `infrastructure.variables`) selects the healthy manifests under `manifests/<task>/`, the
 seed assertions in `scripts/seed/<task>.sh`, the broken-base commit, the repository path
 `tasks/<task>`, the run branch and the Argo Application's name. Inputs beyond the usual
-cluster variables: `gitops_task`, `gitops_repo`, `gitops_task_path` and
-`gitops_broken_base_sha` (empty = the task's defaults), `gitops_history_parent_sha`
-(empty = the task's pinned parent; a per-run repository's root), `gitops_run_branch` (empty =
-derived), `gitops_token_file`, `argocd_version`, `agent_host_context`/`agent_namespace`
+cluster variables: `gitops_task`; `gitops_repo` and `gitops_broken_base_sha` (required, no
+defaults: a repository of yours and a commit in it); `gitops_task_path` (empty =
+`tasks/<task>`); `gitops_history_parent_sha` (empty = no staged history; a per-run repository
+passes its root); `gitops_run_branch` (empty = derived); `gitops_token_file`, `argocd_version`, `agent_host_context`/`agent_namespace`
 (onboarding, below), and the pilot-only
 `gitops_switch_default_branch`/`gitops_restore_default_branch`.
 

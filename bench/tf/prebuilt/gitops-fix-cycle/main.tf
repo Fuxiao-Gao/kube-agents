@@ -64,24 +64,17 @@ locals {
     "build-id"    = var.prow_build_id != "" ? var.prow_build_id : "local"
     "pull-number" = var.prow_pull_number != "" ? var.prow_pull_number : "none"
   }
-  # Per-task facts. The broken-base commit is what render-broken-base.sh
-  # produced for the task, committed to gitops_repo under tasks/<task>/;
-  # record a new one here when the render changes.
-  broken_base_sha = {
-    "b-0011"  = "a48b227c54f76ee0a1c92a85ddf4d4eab8c4174c"
-    "b-0022b" = "0099372f696fb34c83728d24d8de18466b8df168"
-  }
-  # Tasks whose run branch carries history (render-broken-base.sh stages,
-  # run-branch.sh create/advance): the healthy commit's parent is the
-  # repository commit from before the task directory existed, so the branch's
-  # log starts with the stack's arrival and never shows the broken state
-  # before the healthy one. Tasks absent here start at the broken base.
-  history_parent_sha = {
-    "b-0011" = "16f61ed4cf7fa5a7784123acc9999fa2db041f67"
-  }
+  # The base commit and the staged history's parent are inputs, never
+  # recorded here: both are commits in the caller's repository. The wrapper
+  # passes the repository's default-branch head for a per-run repository
+  # (run-branch.sh commits the broken render on it) or the commit that
+  # already carries the task's broken base; a task with staged history
+  # (render-broken-base.sh stages, run-branch.sh create/advance) builds its
+  # healthy commit on the parent, so the branch's log never shows the broken
+  # state before the healthy one. An empty parent starts at the base.
   task_path      = var.gitops_task_path != "" ? var.gitops_task_path : "tasks/${var.gitops_task}"
-  base_sha       = var.gitops_broken_base_sha != "" ? var.gitops_broken_base_sha : local.broken_base_sha[var.gitops_task]
-  history_parent = var.gitops_history_parent_sha != "" ? var.gitops_history_parent_sha : lookup(local.history_parent_sha, var.gitops_task, "")
+  base_sha       = var.gitops_broken_base_sha
+  history_parent = var.gitops_history_parent_sha
   manifests_dir  = "${path.module}/manifests/${var.gitops_task}"
   # The task prompt names this branch via {{CLUSTER_NAME}}, so the default
   # must stay in step with bench/tasks/<task>-gitops/task.yaml.

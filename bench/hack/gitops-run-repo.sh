@@ -26,22 +26,30 @@
 #                     AGENT_STATE_RESET does that before calling it).
 #   archive <name>    mark the repository read-only and drop its minter entry.
 #
-# Env: GITOPS_ORG (gke-agentic), GITOPS_TOKEN_FILE (~/.config/gitops-pilot/
-#   github-token; must be an org admin's token: repository creation and the
-#   installation edit need it), GCP_PROJECT_ID (fuxiaogao-gkedemos; only the
-#   AGENT_HOST_CONTEXT default reads it), AGENT_HOST_CONTEXT, AGENT_NAMESPACE,
-#   GITOPS_APP_INSTALLATION_ID (the minter App's installation on the org).
+# Env. Required, with no defaults, because each names an install or an
+# organisation of yours:
+#   AGENT_HOST_CONTEXT          kubectl context of the cluster running the
+#                               platform agent (every action)
+#   GITOPS_ORG                  GitHub organisation the repositories live in
+#                               (minter-mount, create, archive; `check` takes
+#                               an owner/name and needs it only for a bare name)
+#   GITOPS_APP_INSTALLATION_ID  installation id, on that organisation, of the
+#                               GitHub App the install's minter signs for; an
+#                               installation on selected repositories needs
+#                               every new repository added to it (create)
+# Optional:
+#   GITOPS_TOKEN_FILE (~/.config/gitops-pilot/github-token; must be an org
+#     admin's token: repository creation and the installation edit need it)
+#   AGENT_NAMESPACE (kubeagents-system)
+#   GITOPS_RUN_REPO_PREFIX (kube-agents-eval): the prefix every repository this
+#     script creates or archives must carry, the guard against writing to any
+#     other repository of the organisation
 set -euo pipefail
 
-: "${GITOPS_ORG:=gke-agentic}"
+: "${AGENT_HOST_CONTEXT:?set AGENT_HOST_CONTEXT to the kubectl context of the cluster running the platform agent}"
 : "${GITOPS_TOKEN_FILE:=${HOME}/.config/gitops-pilot/github-token}"
-: "${GCP_PROJECT_ID:=fuxiaogao-gkedemos}"
-: "${AGENT_HOST_CONTEXT:=gke_${GCP_PROJECT_ID}_us-central1_platform-agent-host}"
 : "${AGENT_NAMESPACE:=kubeagents-system}"
-# Installation of the `kube-agents-demo` GitHub App (the one the pilot
-# install's minter signs for) on the gke-agentic org. It is installed on
-# selected repositories, so every new repository must be added to it.
-: "${GITOPS_APP_INSTALLATION_ID:=153292524}"
+: "${GITOPS_RUN_REPO_PREFIX:=kube-agents-eval}"
 
 TEMPLATE_DIR="$(cd "$(dirname "$0")/.." && pwd)/tf/prebuilt/gitops-fix-cycle/repo"
 readonly TEMPLATE_DIR
@@ -61,7 +69,7 @@ readonly PLATFORM_AGENT_CR="platformagents.kubeagents.x-k8s.io/platform-agent"
 readonly GSA_ANNOTATION="iam.gke.io/gcp-service-account"
 readonly SHELL_POD="platform-agent-shell-0"
 readonly REFRESH_SCRIPT="/opt/data/scripts/github_token_refresh.py"
-readonly REPO_NAME_PATTERN='^kage-eval-[a-z0-9-]+$'
+readonly REPO_NAME_PATTERN="^${GITOPS_RUN_REPO_PREFIX}-[a-z0-9-]+\$"
 
 ACTION="${1:?usage: $0 minter-mount | create <name> | check <name> | archive <name>}"
 NAME="${2:-}"
@@ -76,10 +84,21 @@ gh_api() { GH_TOKEN="$(token)" gh api -H "Accept: application/vnd.github+json" "
 need_name() {
   [ -n "${NAME}" ] || die "${ACTION} needs a repository name"
 }
-# create and archive write to the org; only campaign-named repositories.
+need_org() {
+  [ -n "${GITOPS_ORG:-}" ] || die "${ACTION} needs GITOPS_ORG, the GitHub organisation the repositories live in"
+}
+# create and archive write to the org; only repositories carrying the prefix.
 need_campaign_name() {
   need_name
-  [[ "${NAME}" =~ ${REPO_NAME_PATTERN} ]] || die "refusing '${NAME}': campaign repositories are named kage-eval-<...>"
+  need_org
+  [[ "${NAME}" =~ ${REPO_NAME_PATTERN} ]] || die "refusing '${NAME}': repositories this script creates or archives are named ${GITOPS_RUN_REPO_PREFIX}-<...> (GITOPS_RUN_REPO_PREFIX)"
+}
+# check takes owner/name, or a bare name under GITOPS_ORG.
+repo_slug() {
+  case "${NAME}" in
+    */*) echo "${NAME}" ;;
+    *) need_org; echo "${GITOPS_ORG}/${NAME}" ;;
+  esac
 }
 
 # --- minter ----------------------------------------------------------------
@@ -141,6 +160,7 @@ minter_restart() {
 
 case "${ACTION}" in
   minter-mount)
+    need_org
     # Converges the minter to one directory mount of the ConfigMap at
     # /etc/minty/<org>/ (keys <repo>.yaml). Re-keys <org>-<repo>.yaml entries,
     # replaces the whole mount list through a JSON patch (a strategic merge
@@ -175,6 +195,7 @@ print(json.dumps([{"op": "replace", "path": "/spec/template/spec/containers/0/vo
     ;;
 
   create)
+    : "${GITOPS_APP_INSTALLATION_ID:?set GITOPS_APP_INSTALLATION_ID to the installation id of the GitHub App the minter signs for}"
     need_campaign_name
     minter_mounts_dir || die "the minter mounts one file by subPath; run '$0 minter-mount' once first"
     [ -d "${TEMPLATE_DIR}/.github/workflows" ] || die "template ${TEMPLATE_DIR} missing"
@@ -217,8 +238,9 @@ print(json.dumps([{"op": "replace", "path": "/spec/template/spec/containers/0/vo
 
   check)
     need_name
-    log "==> minting a token for ${GITOPS_ORG}/${NAME} from ${SHELL_POD} (credential proxy -> minter -> GitHub)"
-    "${K[@]}" exec "${SHELL_POD}" -- python3 "${REFRESH_SCRIPT}" "${GITOPS_ORG}/${NAME}" >&2
+    slug="$(repo_slug)"
+    log "==> minting a token for ${slug} from ${SHELL_POD} (credential proxy -> minter -> GitHub)"
+    "${K[@]}" exec "${SHELL_POD}" -- python3 "${REFRESH_SCRIPT}" "${slug}" >&2
     log "    ok"
     ;;
 
