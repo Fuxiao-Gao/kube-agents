@@ -83,8 +83,9 @@ already names them. The check workflow deletes them on merge.
 
 ## What the stack installs (`bench/tf/prebuilt/b-0011-gitops`)
 
-Inputs beyond the usual cluster variables: `gitops_repo`, `gitops_task_path`,
-`gitops_broken_base_sha`, `gitops_run_branch` (empty = derived), `gitops_token_file`,
+Inputs beyond the usual cluster variables: `gitops_repo` and `gitops_broken_base_sha`
+(required, no defaults: they name a repository of yours and a commit in it), `gitops_task_path`,
+`gitops_run_branch` (empty = derived), `gitops_token_file`,
 `argocd_version`, `agent_host_context`/`agent_namespace` (onboarding, below), and the
 pilot-only `gitops_switch_default_branch`/`gitops_restore_default_branch`.
 
@@ -162,8 +163,8 @@ Both modes were advisory from the agent's point of view: in run 7 a session ran
 The run wrapper `bench/hack/run-gitops-pilot.sh` wires all of this for a laptop run:
 venv (optionally another devops-bench through `DEVOPS_BENCH_PIN`, with the case rendered
 to `mode: hold` and the verification budget sized to the entry count when that
-devops-bench accepts hold), the repository URL rendered into the task copy when
-`GITOPS_REPO` is not the committed default, the stack asked to make the run branch the
+devops-bench accepts hold), the repository URL from `GITOPS_REPO` rendered into the task
+copy over the prompt's `{{GITOPS_REPO}}` placeholder, the stack asked to make the run branch the
 repository's default for the run, tokens from the install's Secret, `AGENT_MODEL` resolved
 from the install's LiteLLM config so the result row names the model behind the agent,
 `TF_VAR_*` for the stack, `GITOPS_*` for the harness, `--no-sync` so `uv run` does not

@@ -57,7 +57,7 @@ Active only when ``GITOPS_RUN_BRANCH`` is set; every other case is untouched.
 
 Env:
   GITOPS_RUN_BRANCH      per-run branch the PR must target (required to activate)
-  GITOPS_REPO            https URL of the GitOps repository
+  GITOPS_REPO            https URL of the GitOps repository (required with GITOPS_RUN_BRANCH)
   GITOPS_ARGO_APP        Application name (default ``b-0011``)
   GITOPS_ARGO_NAMESPACE  Application namespace (default ``argocd``)
   GITOPS_ARGO_CONTEXT    kube context of the task cluster (default: current)
@@ -90,7 +90,6 @@ from kube_agents_bench.verifiers import LEDGER_TOKEN_ENV_VARS
 
 _log = logging.getLogger(__name__)
 
-DEFAULT_REPO = "https://github.com/gke-agentic/fuxiao-gkedemo-infra"
 DEFAULT_APP = "b-0011"
 DEFAULT_APP_NAMESPACE = "argocd"
 
@@ -204,7 +203,9 @@ def await_fix_cycle(
     fetch_json = fetch_json or _default_fetch_json
     run_kubectl = run_kubectl or _default_run_kubectl
 
-    repo = env.get("GITOPS_REPO") or DEFAULT_REPO
+    repo = env.get("GITOPS_REPO", "")
+    if not repo:
+        raise ValueError("GITOPS_RUN_BRANCH is set but GITOPS_REPO is not: the wait needs the repository the run branch lives in")
     slug = repo_slug(repo)
     app = env.get("GITOPS_ARGO_APP") or DEFAULT_APP
     app_ns = env.get("GITOPS_ARGO_NAMESPACE") or DEFAULT_APP_NAMESPACE

@@ -165,8 +165,9 @@ KNOWN_UNREGISTERED = {
 FIXTURE_NOT_READY = {
     "b-0011-gitops": (
         "#1307: the GitOps fix-cycle pilot; needs a leaderboard GitOps repository "
-        "and its credentials in the pool projects (the stack defaults name a "
-        "personal pilot repository), so no CI tier can run it yet; run it locally "
+        "and its credentials in the pool projects (the case takes the repository, "
+        "the project and the agent host as inputs and CI has none to give), so "
+        "no CI tier can run it yet; run it locally "
         "with bench/hack/run-gitops-pilot.sh"
     ),
     "scope-second-project-denied": (
