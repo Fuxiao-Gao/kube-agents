@@ -31,8 +31,7 @@ not run on one either: the eval crew decided that the presubmit runs the blockin
 ([#1023](https://github.com/gke-labs/kube-agents/issues/1023)), so `presubmit-cases.txt` holds
 the roster's twelve cases plus, since 2026-09-25, one documented exception: a held-out seat a
 coverage tracker puts in the presubmit file without a roster line
-([#2013](https://github.com/gke-labs/kube-agents/issues/2013) for the compliance canary;
-[#2016](https://github.com/gke-labs/kube-agents/issues/2016) reuses it for pdb-remediation-pr).
+([#2013](https://github.com/gke-labs/kube-agents/issues/2013) for the compliance canary).
 Such a seat runs on every pull request, cannot red one on a graded failure under the default
 `roster` mode below (a switch to `record` mode would let the record admit it), and earns its
 record at presubmit volume; `scripts/test_eval_rosters.py` pins the set (`HELD_OUT_IN_PRESUBMIT`)

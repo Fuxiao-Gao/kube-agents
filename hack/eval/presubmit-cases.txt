@@ -1,6 +1,6 @@
 # The presubmit eval matrix: what every pull request runs -- since 2026-09-22
 # the blocking roster, plus the held-out seats the last section names (one
-# per coverage tracker, #2013/#2016).
+# per coverage tracker, #2013).
 #
 # One `./tasks/<id>/task.yaml` path per line, relative to bench/. `#` starts
 # a comment, blank lines are skipped. hack/ci-eval-pr.sh reads this file at
@@ -149,7 +149,7 @@
 
 # ── Held out: seated here without a roster line ──────────────────────────────
 # The documented exception to the 2026-09-22 rule above, one case per
-# coverage tracker (#2013 fleet-audits; #2016 remediation reuses it). A case
+# coverage tracker (one today: #2013, fleet-audits). A case
 # in this section runs on every pull request and, under the default
 # EVAL_ADMISSION_MODE=roster, CANNOT red one on a graded failure: it is not
 # in blocking-roster.txt, so rung 4 (collapse) and rung 6 (judged
@@ -161,7 +161,11 @@
 # up into the list above. Its line leaves nightly-cases.txt (the nightly
 # runs both files). scripts/test_eval_rosters.py pins the set as
 # HELD_OUT_IN_PRESUBMIT; roster ⊆ presubmit still holds, presubmit == roster
-# holds less exactly this section.
+# holds less exactly this section. A seat added or withdrawn here moves the
+# case counts in this file's BUDGET line, nightly-cases.txt's header,
+# docs/eval-gate-roster.md, docs/designs/testing-strategy.md and
+# docs/ci-health.md; SLOW_MIN_TASKS in scripts/eval_dashboard/health.py
+# reads this file.
 
 # The audit-machinery canary (fleet-audits), #2013 step 2, seated 2026-09-25.
 # Demoted from the roster 2026-09-02 (#1171, closed 2026-09-08; the bar now

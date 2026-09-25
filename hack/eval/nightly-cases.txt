@@ -21,7 +21,7 @@
 # the presubmit runs the blocking roster and nothing else, so this file is
 # where a held-out case lives unless a coverage tracker seats it held out in
 # the presubmit file instead (the exception section at the foot of
-# presubmit-cases.txt, #2013/#2016): the seven cases the presubmit had been
+# presubmit-cases.txt, #2013): the seven cases the presubmit had been
 # running without letting them block moved here that day, each with its
 # hold-out reason as the # line above it (the last section of this file;
 # six remain there). This is
@@ -94,8 +94,8 @@
 # 120 serial minutes, at their measured presubmit medians (the canary's is
 # 1002s, p90 2074s, over 903 repetitions 2026-09-04 to 09-15) nearer 150.
 # 2026-09-25: the canary returned to the presubmit file held out (#2013), so
-# this file's share is thirty-one cases (93 units) of the forty-four-case,
-# 132-unit matrix the two 2026-09-23 additions made it; the nightly runs
+# this file's share is thirty-three cases (99 units) of the forty-six-case,
+# 138-unit matrix the 2026-09-23 and 09-25 additions made it; the nightly runs
 # both files, so its matrix and its price do not change.
 # Whether the worst night fits is a question about the whole matrix, and the
 # six measured nights (2026-09-16 to 09-21, oss-test-infra#2707's table)
