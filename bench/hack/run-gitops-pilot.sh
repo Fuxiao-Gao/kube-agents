@@ -40,10 +40,9 @@
 #   CLUSTER_NAME (gitops-pilot-<timestamp>; also seeds the run branch name)
 #   GITOPS_TOKEN_FILE (~/.config/gitops-pilot/github-token)
 #   JUDGE_MODEL (gemini-3.1-pro-preview)
-#   GITOPS_REPO_ROOT_SHA (main's head in GITOPS_REPO) the commit the run branch
-#     is built on when GITOPS_REPO is set: a per-run repository's root
-#     (gke-labs/kube-agents#1773); it becomes the stack's broken base and, for
-#     b-0011, the staged history's parent
+#   GITOPS_REPO_ROOT_SHA (read from GITOPS_REPO when unset) the default-branch
+#     head of the repository, used as the base and b-0011's history parent
+#     only while GITOPS_BROKEN_BASE_SHA is unset (a per-run repository)
 #   AGENT_STATE_RESET=true re-create the PlatformAgent on fresh volumes (with
 #     GITOPS_REPO as its managed repository and the event watcher off unless
 #     AGENT_EVENT_WATCHER=true) before the run, then refuse to run unless its
@@ -349,17 +348,14 @@ if [ "${AGENT_STATE_RESET:-false}" = "true" ]; then
   reset_agent_state
   assert_fresh_agent
 fi
-# The credential proxy refuses repositories the install does not manage, so a
-# run on another repository proves the mint before the cluster exists: after
-# the reset, once the re-applied PlatformAgent names the run's repository, or
-# right away when there was no reset (a PlatformAgent still naming the
-# previous repository fails here, not at the agent's first push an hour in).
-if [ -n "${GITOPS_REPO:-}" ] && [ "${GITOPS_REPO}" != "${DEFAULT_GITOPS_REPO}" ]; then
-  # Relative to the bench directory (the cd above), not to this file: a
-  # run executes a frozen copy of this script from results/ so that an
-  # edit during the run cannot reach it.
-  ./hack/gitops-run-repo.sh check "$(basename "${GITOPS_REPO%.git}")"
-fi
+# The credential proxy refuses repositories the install does not manage, so
+# the run proves the mint for GITOPS_REPO before the cluster exists: after the
+# reset, once the re-applied PlatformAgent names the run's repository, or right
+# away when there was no reset (a PlatformAgent naming another repository fails
+# here, not at the agent's first push an hour in). Relative to the bench
+# directory (the cd above), not to this file: a run executes a frozen copy of
+# this script from results/ so that an edit during the run cannot reach it.
+./hack/gitops-run-repo.sh check "${slug}"
 
 # 2. agent base branch ------------------------------------------------------
 # The stack makes the run branch the repository's default branch for the run
@@ -424,7 +420,7 @@ uv run --no-sync devops-bench "${TASK_SOURCE}" --agent-type kubeagents "$@" || r
 run_dir="$(ls -td "${RESULTS_DIR}"/run_* 2>/dev/null | head -1 || true)"
 if [ -n "${run_dir}" ] && [ -n "$(find "${run_dir}" -newer "${TASK_SOURCE}/task.yaml" -name results.json | head -1)" ]; then
   export STAMP_TASK="${TASK}" STAMP_CLUSTER="${CLUSTER_NAME}" STAMP_BRANCH="${RUN_BRANCH}" \
-    STAMP_REPO="${GITOPS_REPO:-${DEFAULT_GITOPS_REPO}}" STAMP_ROOT="${GITOPS_REPO_ROOT_SHA:-}" \
+    STAMP_REPO="${GITOPS_REPO}" STAMP_ROOT="${GITOPS_BROKEN_BASE_SHA}" \
     STAMP_MODEL="${AGENT_MODEL}" STAMP_JUDGE="${JUDGE_MODEL}" STAMP_PIN="${DEVOPS_BENCH_PIN:-repository pin}" \
     STAMP_RESET="${AGENT_STATE_RESET:-false}" STAMP_CONTEXT="${AGENT_HOST_CONTEXT}" STAMP_NAMESPACE="${AGENT_NAMESPACE}"
   python3 - "${run_dir}/${STAMP_FILE}" <<'STAMP'
@@ -460,7 +456,7 @@ if [ -n "${run_dir}" ] && [ -n "${INTEGRITY_SWEEP_SCRIPT:-}" ] && [ -f "${run_di
 fi
 if [ "${BENCH_NO_TEARDOWN:-false}" != "true" ]; then
   gh_token="$(tr -d '\r\n' < "${GITOPS_TOKEN_FILE}")"
-  repo_slug="${GITOPS_REPO:-${DEFAULT_GITOPS_REPO}}"; repo_slug="${repo_slug#https://github.com/}"; repo_slug="${repo_slug%.git}"
+  repo_slug="${slug}"
   if GH_TOKEN="${gh_token}" gh api "repos/${repo_slug}/git/refs/heads/${RUN_BRANCH}" >/dev/null 2>&1; then
     echo "WARN leak: run branch ${RUN_BRANCH} still exists in ${repo_slug}" >&2
   fi

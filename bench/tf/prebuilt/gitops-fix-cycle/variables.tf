@@ -108,13 +108,12 @@ variable "gitops_task_path" {
 
 variable "gitops_broken_base_sha" {
   type        = string
-  description = "Commit in gitops_repo that the per-run branch is cut from. Empty means the task's recorded commit in main.tf (rendered by scripts/render-broken-base.sh; see gke-labs/kube-agents#1307)."
-  default     = ""
+  description = "Commit in gitops_repo that the per-run branch is built on: one that already carries the task's broken base under gitops_task_path (scripts/render-broken-base.sh output), or a per-run repository's root, on which run-branch.sh commits the broken render. No default: it is a commit in your repository (gke-labs/kube-agents#1307, #1773)."
 }
 
 variable "gitops_history_parent_sha" {
   type        = string
-  description = "Commit the staged history's healthy commit is built on (b-0011). Empty means the task's recorded commit in main.tf; a per-run repository passes its root commit (gke-labs/kube-agents#1773)."
+  description = "Commit the staged history's healthy commit is built on (b-0011; scripts/run-branch.sh create/advance). Empty means no staged history: the branch starts at gitops_broken_base_sha. A per-run repository passes its root commit."
   default     = ""
 }
 

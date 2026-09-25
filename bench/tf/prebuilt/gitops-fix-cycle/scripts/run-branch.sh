@@ -164,7 +164,7 @@ commit_stage() {
 }
 
 # Whether the base commit already carries the task directory (the shared
-# pilot repository's pinned broken base does; a per-run repository's root
+# repository that already holds the rendered base does; a per-run repository's root
 # commit does not).
 base_has_task_path() {
   local code

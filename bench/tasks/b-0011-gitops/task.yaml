@@ -5,7 +5,7 @@
 # inflated to 256Mi, the payments quota strands two of its four replicas. What
 # differs is how the broken state reaches the cluster and how the fix does.
 # The stack (bench/tf/prebuilt/gitops-fix-cycle, gitops_task b-0011) cuts a per-run branch of the
-# GitOps repo from a pinned broken-base commit, installs Argo CD, and syncs the
+# GitOps repo from the broken-base commit it is given, installs Argo CD, and syncs the
 # task directory from that branch. The agent is read-only on the cluster and
 # remediates by opening a pull request against the run branch; the repo's
 # check workflow merges it, Argo syncs the merge, and the checks below grade
