@@ -290,6 +290,53 @@ print(json.dumps({
     "profiles": entries("/opt/data/profiles")}))
 STORES
 }
+# The image-managed files the agent runs on: the platform profile's skills,
+# scripts, SOPs and persona in the gateway pod (what skill_manage edits and what
+# reaches the prompt) and the same trees in the shell pod (what the worker's
+# commands execute). Hashed before the card is created and again after the run,
+# so a run in which the agent rewrote its own tooling is visible on the record
+# (#1848: a worker patched submit-suggestion's SKILL.md mid-run through
+# skill_manage, and nothing on the row said so). A flag, not a gate: the
+# campaign rule decides what a changed tree does to the row.
+IMAGE_MANAGED_ROOTS="/opt/data/profiles/platform/skills /opt/data/profiles/platform/scripts /opt/data/profiles/platform/governance /opt/data/profiles/platform/cron /opt/data/profiles/platform/SOUL.md /opt/data/profiles/platform/AGENTS.md /opt/data/profiles/platform/CAPABILITIES.md /opt/data/scripts"
+image_managed_tree_report() {
+  # $1: kubectl exec target (deploy/... or pod/...), $2: container name.
+  # Prints {"<path>": "<sha256>"} for every regular file under the roots;
+  # a root that does not exist in that pod contributes nothing.
+  "${K[@]}" exec -i "$1" -c "$2" -- env IMAGE_MANAGED_ROOTS="${IMAGE_MANAGED_ROOTS}" python3 - <<'TREE'
+import hashlib, json, os
+out = {}
+for root in os.environ["IMAGE_MANAGED_ROOTS"].split():
+    if os.path.isfile(root):
+        files = [root]
+    elif os.path.isdir(root):
+        files = [os.path.join(d, f) for d, _, names in os.walk(root) for f in names]
+    else:
+        continue
+    for path in sorted(files):
+        if os.path.islink(path) or not os.path.isfile(path):
+            continue
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(65536), b""):
+                h.update(chunk)
+        out[path] = h.hexdigest()
+print(json.dumps(out, sort_keys=True))
+TREE
+}
+image_managed_snapshot() {
+  # $1: file to write. One object per pod; a pod that cannot be reached is
+  # recorded as null rather than as an empty tree, so "nothing changed" and
+  # "could not look" stay distinguishable on the record.
+  python3 - "$1" \
+    "$(image_managed_tree_report deploy/platform-agent-gateway platform-agent 2>/dev/null || echo null)" \
+    "$(image_managed_tree_report pod/"${SHELL_STATEFULSET}"-0 shell 2>/dev/null || echo null)" <<'SNAP'
+import json, sys
+snap = {"gateway": json.loads(sys.argv[2] or "null"), "shell": json.loads(sys.argv[3] or "null")}
+json.dump(snap, open(sys.argv[1], "w"))
+print("==> image-managed files hashed:", {k: (len(v) if v else v) for k, v in snap.items()})
+SNAP
+}
 assert_fresh_agent() {
   AGENT_STORES="$(ONBOARDING_CARD_PREFIX="${ONBOARDING_CARD_PREFIX}" agent_stores_report)"
   export AGENT_STORES
@@ -412,6 +459,11 @@ echo "==> devops-bench ${TASK_SOURCE} (cluster ${CLUSTER_NAME}, argo context ${G
 # --no-sync: a plain `uv run` re-syncs the venv from the lockfile first, which
 # silently puts the upstream devops-bench pin back and drops `mode: hold`
 # support (run 1 verified only 2 of 7 checks for exactly this reason).
+# Hashed immediately before the run so the comparison after it sees only what
+# the run did; the same file is read by the stamp step below.
+IMAGE_MANAGED_BEFORE="$(mktemp "${TMPDIR:-/tmp}/image-managed-before.XXXXXX")"
+image_managed_snapshot "${IMAGE_MANAGED_BEFORE}"
+
 rc=0
 uv run --no-sync devops-bench "${TASK_SOURCE}" --agent-type kubeagents "$@" || rc=$?
 
@@ -425,9 +477,32 @@ if [ -n "${run_dir}" ] && [ -n "$(find "${run_dir}" -newer "${TASK_SOURCE}/task.
     STAMP_REPO="${GITOPS_REPO:-${DEFAULT_GITOPS_REPO}}" STAMP_ROOT="${GITOPS_REPO_ROOT_SHA:-}" \
     STAMP_MODEL="${AGENT_MODEL}" STAMP_JUDGE="${JUDGE_MODEL}" STAMP_PIN="${DEVOPS_BENCH_PIN:-repository pin}" \
     STAMP_RESET="${AGENT_STATE_RESET:-false}" STAMP_CONTEXT="${AGENT_HOST_CONTEXT}" STAMP_NAMESPACE="${AGENT_NAMESPACE}"
+  IMAGE_MANAGED_AFTER="$(mktemp "${TMPDIR:-/tmp}/image-managed-after.XXXXXX")"
+  image_managed_snapshot "${IMAGE_MANAGED_AFTER}"
+  export IMAGE_MANAGED_BEFORE IMAGE_MANAGED_AFTER
   python3 - "${run_dir}/${STAMP_FILE}" <<'STAMP'
 import json, os, subprocess, sys
 e = os.environ
+def tree_drift():
+    """Per pod: files the run changed, added or removed under the image-managed roots."""
+    try:
+        before = json.load(open(e["IMAGE_MANAGED_BEFORE"]))
+        after = json.load(open(e["IMAGE_MANAGED_AFTER"]))
+    except (KeyError, OSError, ValueError) as exc:
+        return {"error": f"snapshot unreadable: {exc}"}
+    drift = {}
+    for pod in ("gateway", "shell"):
+        b, a = before.get(pod), after.get(pod)
+        if b is None or a is None:
+            drift[pod] = None  # could not look on one side; not a clean bill
+            continue
+        drift[pod] = {
+            "files": len(b),
+            "changed": sorted(p for p in b if p in a and a[p] != b[p]),
+            "added": sorted(p for p in a if p not in b),
+            "removed": sorted(p for p in b if p not in a),
+        }
+    return drift
 K = ["kubectl", "--context", e["STAMP_CONTEXT"], "-n", e["STAMP_NAMESPACE"]]
 def sh(*a): return subprocess.run(a, capture_output=True, text=True).stdout.strip()
 stamp = {
@@ -439,9 +514,18 @@ stamp = {
   "kube_agents_commit": sh("git", "rev-parse", "HEAD"),
   "agent_state_reset": e["STAMP_RESET"],
   "agent_stores_before_run": json.loads(e.get("AGENT_STORES") or "null"),
+  "image_managed_files": tree_drift(),
 }
 json.dump(stamp, open(sys.argv[1], "w"), indent=2)
 print("==> stamp written to", sys.argv[1])
+for pod, d in stamp["image_managed_files"].items():
+    if pod == "error":
+        print(f"WARN image-managed files: {d}", file=sys.stderr)
+    elif d is None:
+        print(f"WARN image-managed files: {pod} pod could not be hashed on both sides; the row cannot show its tooling was untouched", file=sys.stderr)
+    elif d["changed"] or d["added"] or d["removed"]:
+        print(f"WARN image-managed files changed during the run in the {pod} pod: "
+              f"changed={d['changed']} added={d['added']} removed={d['removed']}", file=sys.stderr)
 STAMP
 fi
 # The sweep walks roots for run_*/results.json (real directories, not
