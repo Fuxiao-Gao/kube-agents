@@ -39,10 +39,12 @@ infrastructure:
 
 # The middle paragraph is devops-bench b-0011's prompt, unchanged. The first
 # names the cluster and project; the last names where the desired state lives,
-# the way tasks/gcp/multi-region-failover already does. The branch is derived
-# from the cluster name because that is the only per-run value the prompt
-# templating can carry (see the stack's locals.run_branch, which must stay in
-# step with this line). task_version 2 added the last sentence: with the
+# the way tasks/gcp/multi-region-failover already does. {{GITOPS_REPO}} is not
+# one of devops-bench's placeholders: the run wrapper renders the repository
+# from GITOPS_REPO into its task copy, so the committed case names no
+# repository. The branch is derived from the cluster name because that is the
+# only per-run value devops-bench's templating can carry (see the stack's
+# locals.run_branch, which must stay in step with this line). task_version 2 added the last sentence: with the
 # branch named and nothing said about how changes reach it, the agent passed
 # it to submit-suggestion as the branch to create and pushed its commit onto
 # it (runs 13 and 15, 2026-09-15), which is what a protected base would refuse.
@@ -53,7 +55,7 @@ prompt: |
   Checkout has been stuck at only part of its usual instance count since this morning's build update, and on-call is on it now. New instances keep failing to start. Please investigate and remediate.
 
   The cluster's desired state is tracked in the git repository
-  https://github.com/gke-agentic/fuxiao-gkedemo-infra under "tasks/b-0011" on branch
+  {{GITOPS_REPO}} under "tasks/b-0011" on branch
   "run/{{CLUSTER_NAME}}/b-0011", which Argo CD syncs to this cluster. Changes reach
   that branch only through a pull request against it; do not push to it directly.
 

@@ -83,8 +83,7 @@ variable "namespace" {
 
 variable "gitops_repo" {
   type        = string
-  description = "HTTPS URL of the leaderboard GitOps repository Argo CD syncs from and the agent opens PRs against."
-  default     = "https://github.com/gke-agentic/fuxiao-gkedemo-infra"
+  description = "HTTPS URL of the GitOps repository Argo CD syncs from and the agent opens PRs against. No default: it names a repository of yours."
 }
 
 variable "gitops_task_path" {
@@ -95,8 +94,7 @@ variable "gitops_task_path" {
 
 variable "gitops_broken_base_sha" {
   type        = string
-  description = "Commit in gitops_repo that the per-run branch is cut from. Rendered by scripts/render-broken-base.sh; see the plan in gke-labs/kube-agents#1307."
-  default     = "a48b227c54f76ee0a1c92a85ddf4d4eab8c4174c"
+  description = "Commit in gitops_repo that the per-run branch is cut from: the task's broken base as scripts/render-broken-base.sh renders it, committed under gitops_task_path. No default: it is a commit in your repository (see gke-labs/kube-agents#1307)."
 }
 
 variable "gitops_run_branch" {

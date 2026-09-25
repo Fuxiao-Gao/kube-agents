@@ -19,14 +19,21 @@
 #   4. Runs `devops-bench ./tasks/b-0011-gitops --agent-type kubeagents` with
 #      the stack and harness pointed at the same run branch.
 #
-# Inputs (env, all optional):
-#   GCP_PROJECT_ID (fuxiaogao-gkedemos)  GCP_LOCATION (us-central1-a)
-#   AGENT_HOST_CONTEXT (gke_<project>_us-central1_platform-agent-host)
-#   AGENT_NAMESPACE (kubeagents-system)
+# Inputs (env). Required, with no defaults, because each names an install
+# or a repository of yours:
+#   GCP_PROJECT_ID          project the run's task cluster is created in
+#   AGENT_HOST_CONTEXT      kubectl context of the cluster running the
+#                           platform agent
+#   GITOPS_REPO             https URL of the GitOps repository; rendered into
+#                           the task prompt in place of {{GITOPS_REPO}} and
+#                           handed to the stack and the harness
+#   GITOPS_BROKEN_BASE_SHA  commit in GITOPS_REPO that carries the task's
+#                           broken base under tasks/b-0011 (the output of the
+#                           stack's render-broken-base.sh, committed there)
+# Optional:
+#   GCP_LOCATION (us-central1-a)  AGENT_NAMESPACE (kubeagents-system)
 #   CLUSTER_NAME (gitops-pilot-<timestamp>; also seeds the run branch name)
 #   GITOPS_TOKEN_FILE (~/.config/gitops-pilot/github-token)
-#   GITOPS_REPO (the repository the committed prompt names; another one is
-#     rendered into the task copy and handed to the stack and the harness)
 #   JUDGE_MODEL (gemini-3.1-pro-preview)
 #   DEVOPS_BENCH_PIN (empty: the repository's pin) a pip requirement for another
 #     devops-bench, e.g. `devops-bench @ git+https://github.com/pradeepvrd/devops-bench@<sha>`
@@ -50,13 +57,15 @@ readonly LITELLM_CONFIGMAP_NAME_PREFIX="litellm-config"
 # result row's `model` field should carry (the leaderboard keys setups by it).
 readonly AGENT_MODEL_ALIAS="model-default"
 readonly RENDERED_TASKS_TEMPLATE="b-0011-gitops-hold.XXXXXX"
-# The repository the committed case names in its prompt; a run on another
-# repository (GITOPS_REPO) has the URL rendered into its task copy.
-readonly DEFAULT_GITOPS_REPO="https://github.com/gke-agentic/fuxiao-gkedemo-infra"
+# What the committed prompt carries where the repository URL goes; the wrapper
+# renders GITOPS_REPO over it (devops-bench renders only its own placeholders).
+readonly PROMPT_REPO_PLACEHOLDER="{{GITOPS_REPO}}"
 
-: "${GCP_PROJECT_ID:=fuxiaogao-gkedemos}"
+: "${GCP_PROJECT_ID:?set GCP_PROJECT_ID to the project that hosts the task cluster of a run}"
+: "${AGENT_HOST_CONTEXT:?set AGENT_HOST_CONTEXT to the kubectl context of the cluster running the platform agent}"
+: "${GITOPS_REPO:?set GITOPS_REPO to the https URL of the GitOps repository}"
+: "${GITOPS_BROKEN_BASE_SHA:?set GITOPS_BROKEN_BASE_SHA to the commit in GITOPS_REPO that carries the broken base of the task}"
 : "${GCP_LOCATION:=us-central1-a}"
-: "${AGENT_HOST_CONTEXT:=gke_${GCP_PROJECT_ID}_us-central1_platform-agent-host}"
 : "${AGENT_NAMESPACE:=kubeagents-system}"
 : "${CLUSTER_NAME:=gitops-pilot-$(date +%Y%m%d-%H%M%S)}"
 : "${GITOPS_TOKEN_FILE:=${HOME}/.config/gitops-pilot/github-token}"
@@ -123,16 +132,14 @@ render_task_copy() {
   TASK_SOURCE="${RENDERED_TASKS}/${TASK}-gitops"
 }
 # 1a. repository ------------------------------------------------------------
-# The committed prompt names the default repository, and the prompt is the one
-# place the agent learns it from. A run on another repository (GITOPS_REPO)
-# has the URL rendered into the task copy, so the agent, the stack and the
+# The prompt is the one place the agent learns the repository from, and the
+# committed case names none: it carries the placeholder, and the wrapper
+# renders GITOPS_REPO into the task copy, so the agent, the stack and the
 # harness all see the same repository.
-if [ -n "${GITOPS_REPO:-}" ] && [ "${GITOPS_REPO}" != "${DEFAULT_GITOPS_REPO}" ]; then
-  render_task_copy
-  sed -i.bak "s|${DEFAULT_GITOPS_REPO}|${GITOPS_REPO}|" "${TASK_SOURCE}/task.yaml" && rm -f "${TASK_SOURCE}/task.yaml.bak"
-  grep -q "${GITOPS_REPO} under" "${TASK_SOURCE}/task.yaml" || { echo "prompt render failed: ${GITOPS_REPO} not in ${TASK_SOURCE}/task.yaml" >&2; exit 1; }
-  echo "==> repository ${GITOPS_REPO}; prompt rendered"
-fi
+render_task_copy
+sed -i.bak "s|${PROMPT_REPO_PLACEHOLDER}|${GITOPS_REPO}|" "${TASK_SOURCE}/task.yaml" && rm -f "${TASK_SOURCE}/task.yaml.bak"
+grep -q "${GITOPS_REPO} under" "${TASK_SOURCE}/task.yaml" || { echo "prompt render failed: ${GITOPS_REPO} not in ${TASK_SOURCE}/task.yaml" >&2; exit 1; }
+echo "==> repository ${GITOPS_REPO}; prompt rendered"
 
 if [ "${HOLD_SUPPORTED}" = "yes" ]; then
   render_task_copy
@@ -231,8 +238,8 @@ export TF_VAR_gitops_run_branch="${RUN_BRANCH}" TF_VAR_gitops_token_file="${GITO
 # (see the stack's agent_host_context variable for why this cannot wait for
 # the hourly reconcile).
 export TF_VAR_agent_host_context="${AGENT_HOST_CONTEXT}" TF_VAR_agent_namespace="${AGENT_NAMESPACE}"
-[ -n "${GITOPS_REPO:-}" ] && export TF_VAR_gitops_repo="${GITOPS_REPO}"
-export GITOPS_RUN_BRANCH="${RUN_BRANCH}" GITOPS_TOKEN_FILE
+export TF_VAR_gitops_repo="${GITOPS_REPO}" TF_VAR_gitops_broken_base_sha="${GITOPS_BROKEN_BASE_SHA}"
+export GITOPS_REPO GITOPS_RUN_BRANCH="${RUN_BRANCH}" GITOPS_TOKEN_FILE
 # The harness prefers BENCH_GITHUB_TOKEN or GITHUB_TOKEN over the file; hand it
 # the token the stack uses, so an ambient GITHUB_TOKEN for another account
 # cannot make it poll the private repository as a stranger.

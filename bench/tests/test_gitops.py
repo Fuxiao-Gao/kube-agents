@@ -106,6 +106,13 @@ def test_noop_without_run_branch() -> None:
     assert "gitops" not in result.metadata
 
 
+def test_a_run_branch_without_a_repository_is_an_error_not_a_default() -> None:
+    env = {k: v for k, v in ENV.items() if k != "GITOPS_REPO"}
+    result = AgentResult(output="ack", trajectory=[], errors=[], metadata={})
+    with pytest.raises(ValueError, match="GITOPS_REPO"):
+        gitops.await_fix_cycle(result, env=env, fetch_json=lambda *_: pytest.fail("no HTTP expected"))
+
+
 def test_merged_then_synced_and_healthy() -> None:
     gh = FakeGitHub(pulls=[[_pr()]], details=[_pr(), _pr(merged=True)], checks=[{"check_runs": [{"status": "in_progress"}]}])
     kubectl = [_app("OutOfSync", "old", "Progressing"), _app("Synced", MERGE_SHA, "Progressing"), _app("Synced", MERGE_SHA, "Healthy")]
