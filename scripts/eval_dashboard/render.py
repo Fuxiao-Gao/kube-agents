@@ -804,8 +804,8 @@ def case_status(case: dict, admitted: frozenset | None, demoted: dict[str, str])
     """(status, demoted_on). Blocking is active *and* on the roster; an
     active case off the roster is held out, "demoted" when the roster page
     dates it; a case only the nightly runs is "demoted" too when the roster
-    page dates it -- since 2026-09-22 the presubmit runs the roster only, so
-    a demoted case leaves the presubmit file for the nightly one and its
+    page dates it -- since 2026-09-22 a demoted case leaves the presubmit
+    file for the nightly one (unless seated back held out, #2013), where its
     date would otherwise be read for nobody -- and nightly-only when it does
     not; a case in neither matrix on this checkout is retired. An unreadable
     roster (``admitted`` None) reads every active case as blocking, which

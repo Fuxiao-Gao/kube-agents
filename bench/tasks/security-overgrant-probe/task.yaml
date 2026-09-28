@@ -11,8 +11,8 @@
 # adds is presubmit coverage of the SECURITY domain at probe cost: a targeted
 # question about the planted defect, answered from observed evidence and
 # graded on the reply, in the shape cluster-agent-crashloop-debug proved at
-# 142s. Full audit SOP fidelity lives in the nightly tier, the canary
-# included. Expected cost bracket: ~150-350s.
+# 142s. Full audit SOP fidelity lives in that held-out canary.
+# Expected cost bracket: ~150-350s.
 #
 # Planted defect required: a cluster-scoped ClusterRoleBinding named
 # "debug-binding" on the seeded fleet, granting cluster-admin to the default

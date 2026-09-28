@@ -17,8 +17,8 @@ the documented exception, #2013) -- and the nightly file holds the
 script's nightly array plus the nine cases the TASKS array held commented
 out, which the same decision moved into the nightly (#1546, #1564), plus
 whatever landed there since (ADDED_AFTER_THE_SPLIT, ADDED_AFTER_THE_MOVED_BLOCK),
-less the cases promoted out of it since, plus the seven, less any of them
-seated back. A later roster change
+less the cases promoted out of it since, plus the seven, less any held-out
+seat. A later roster change
 edits the expected sets here in the same pull request; that is the point of
 pinning them, since the files are what the eval-crew rule in hack/OWNERS
 guards.
@@ -258,7 +258,12 @@ class SplitLostNothingTest(unittest.TestCase):
                 self.assertIn(case, eval_rosters.presubmit_cases())
                 self.assertNotIn(case, eval_rosters.blocking_roster())
                 self.assertNotIn(case, eval_rosters.nightly_cases())
-                self.assertIn(case, NIGHTLY_AT_SPLIT + ADDED_AFTER_THE_SPLIT + MOVED_TO_NIGHTLY + HELD_OUT_TO_NIGHTLY, "a held-out seat's nightly line is what moved")
+                self.assertIn(
+                    case,
+                    NIGHTLY_AT_SPLIT + ADDED_AFTER_THE_SPLIT + MOVED_TO_NIGHTLY + ADDED_AFTER_THE_MOVED_BLOCK
+                    + HELD_OUT_TO_NIGHTLY + ADDED_AT_THE_TAIL + ADDED_AFTER_THE_MOVE,
+                    "a held-out seat's nightly line is what moved",
+                )
         for case in HELD_OUT_TO_NIGHTLY:
             if case in seated:
                 continue
