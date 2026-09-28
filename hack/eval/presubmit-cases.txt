@@ -69,7 +69,7 @@
 # proved at 142s. The one full audit kept here as the machinery canary
 # (compliance-rbac-overgrant, under the fleet-audits domain) ran on every
 # pull request from 2026-08-25 until 2026-09-22 without ever being admitted,
-# was a nightly case 2026-09-22 to 2026-09-25 and is seated held out below
+# was a nightly case 2026-09-22 to 2026-09-28 and is seated held out below
 # since (#2013); fleet-audits stays on the docs/designs/domains.yaml
 # allowlist until its roster line lands. The comment above EVAL_REPETITIONS
 # in the script carries the measured history of that budget; recount the
@@ -167,9 +167,9 @@
 # docs/ci-health.md; SLOW_MIN_TASKS in scripts/eval_dashboard/health.py
 # reads this file.
 
-# The audit-machinery canary (fleet-audits), #2013 step 2, seated 2026-09-25.
+# The audit-machinery canary (fleet-audits), #2013 step 2, seated 2026-09-28.
 # Demoted from the roster 2026-09-02 (#1171, closed 2026-09-08; the bar now
-# lives on #2013 step 3), nightly 2026-09-22 to 2026-09-25. The one presubmit
+# lives on #2013 step 3), nightly 2026-09-22 to 2026-09-28. The one presubmit
 # case that writes to GitHub: the minted token, the cloned *-infra
 # workspace, the ledger write. 1002s median / 2074s p90 over 903 presubmit
 # repetitions 2026-09-04 to 09-15, the 3000s delegation ceiling, priced in
@@ -183,7 +183,7 @@
 #   security-overgrant-remediation-proposal, obtainability-pdb-semantics,
 #   obtainability-fleet-exposure-sweep, obtainability-healthy-namespace-silence,
 #   rca-remediation-pr, compliance-rbac-overgrant (back here held out
-#   2026-09-25, #2013) and cluster-agent-healthy-workload-no-finding, each
+#   2026-09-28, #2013) and cluster-agent-healthy-workload-no-finding, each
 #   with its hold-out reason as the # line above it there;
 #   gpu-stress-test-diagnosis and
 #   autoops-warning-event-triage, 2026-09-03 (tofu wall clock, #1218/#1202);

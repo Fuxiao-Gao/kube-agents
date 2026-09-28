@@ -1956,7 +1956,7 @@ export DETERMINISTIC_CORRECTNESS_FLOOR="${DETERMINISTIC_CORRECTNESS_FLOOR:-1.0}"
 # new one, and until they have, this note is the projection rather than the
 # record. Still no Prow deadline change: the matrix shrank.
 #
-# 2026-09-25: the compliance canary is back in the presubmit file, held out
+# 2026-09-28: the compliance canary is back in the presubmit file, held out
 # (#2013 step 2): THIRTEEN tasks, 39 units, against the same 360m deadline.
 # What arrived is three units at 1002s median / 2074s p90 (903 presubmit
 # repetitions, 2026-09-04 to 09-15), 3000s at the delegation ceiling,
@@ -2228,7 +2228,7 @@ unit_cost_hint() {
     upgrades-master-behind-offered-elsewhere) echo 900 ;;
     obtainability-planted-orphan-service) echo 900 ;;
     fleet-cost-idle-pool) echo 900 ;;
-    # Presubmit again since 2026-09-25, held out (#2013 step 2); nightly-only
+    # Presubmit again since 2026-09-28, held out (#2013 step 2); nightly-only
     # 2026-09-22 to then (#1023; held out on #1171, closed 2026-09-08, the
     # bar now on #2013 step 3). The canary measured 1002s median, 2074s p90,
     # over 903 presubmit repetitions 2026-09-04 to 09-15; priced at that

@@ -166,7 +166,7 @@ HELD_OUT_TO_NIGHTLY = [
     "obtainability-fleet-exposure-sweep",  # #1049, never admitted
     "obtainability-healthy-namespace-silence",  # #1049, never admitted
     "rca-remediation-pr",  # demoted 2026-09-02, #1189
-    "compliance-rbac-overgrant",  # demoted 2026-09-02, #1171; seated back in the presubmit 2026-09-25 (HELD_OUT_IN_PRESUBMIT)
+    "compliance-rbac-overgrant",  # demoted 2026-09-02, #1171; seated back in the presubmit 2026-09-28 (HELD_OUT_IN_PRESUBMIT)
     "cluster-agent-healthy-workload-no-finding",  # held out on #1010
 ]
 
@@ -182,7 +182,7 @@ HELD_OUT_TO_NIGHTLY = [
 # blocking-roster.txt. roster <= presubmit holds; presubmit == roster holds
 # less exactly this list.
 HELD_OUT_IN_PRESUBMIT = [
-    ("compliance-rbac-overgrant", "agent-kanban-smoke"),  # #2013 step 2, seated 2026-09-25; the roster line is step 4
+    ("compliance-rbac-overgrant", "agent-kanban-smoke"),  # #2013 step 2, seated 2026-09-28; the roster line is step 4
 ]
 
 

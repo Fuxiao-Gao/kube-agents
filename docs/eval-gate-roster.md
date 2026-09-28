@@ -29,7 +29,7 @@ partial window for it (`collecting`), that evidence feeds both. A case not named
 red a pull request on a graded failure, whatever its record says — and since 2026-09-22 it does
 not run on one either: the eval crew decided that the presubmit runs the blocking roster only
 ([#1023](https://github.com/gke-labs/kube-agents/issues/1023)), so `presubmit-cases.txt` holds
-the roster's twelve cases plus, since 2026-09-25, one documented exception: a held-out seat a
+the roster's twelve cases plus, since 2026-09-28, one documented exception: a held-out seat a
 coverage tracker puts in the presubmit file without a roster line
 ([#2013](https://github.com/gke-labs/kube-agents/issues/2013) for the compliance canary).
 Such a seat runs on every pull request, cannot red one on a graded failure under the default
@@ -104,9 +104,10 @@ with a filed issue naming the exit condition:
   "access limitations", skipping check 2.4 (the cluster-admin-binding check this case
   grades), and some runs publish no ledger at all — so the collapse is the environment's,
   not the diff's. 413 of 677 graded presubmit repetitions 2026-09-15 to 09-22. Nightly
-  2026-09-22 to 2026-09-25; since 2026-09-25 seated held out in `presubmit-cases.txt`
-  ([#2013](https://github.com/gke-labs/kube-agents/issues/2013) step 2) after the fix for the
-  credential-proxy workspace leak (#2011) and the dispatcher-stall residual landed. It runs on
+  2026-09-22 to 2026-09-28; since 2026-09-28 seated held out in `presubmit-cases.txt`
+  ([#2013](https://github.com/gke-labs/kube-agents/issues/2013) step 2) after the fixes for the
+  dispatcher-stall residual (#2032, by #2022) and the credential-proxy workspace leak (#2011,
+  by #2069) landed. It runs on
   every pull request, cannot red one on rungs 4 or 6, and does red one on rungs 1–3 like every
   case. The Cases page's pill still reads demoted 09-02 (dated from this bullet) until the
   roster line. Enters the roster when #2013 step 3 holds: three clean days at ≥ 90 % of graded
@@ -234,7 +235,7 @@ reads admission. Those classes signal a broken case or install, not flake, and t
 on that side rather than on the roster.
 
 Since 2026-09-22 those rungs reach only the cases the presubmit runs: the roster's twelve and,
-since 2026-09-25, the held-out compliance canary. That seat puts one GitHub-writing case back on
+since 2026-09-28, the held-out compliance canary. That seat puts one GitHub-writing case back on
 every pull request (the minted token, the cloned `*-infra` workspace, the ledger write, the
 `ledger_issue_contains` verifier), so a change that breaks that path is seen on the pull request
 that introduces it again: an erroring verifier or an empty record is a rung-1–3 red for every
