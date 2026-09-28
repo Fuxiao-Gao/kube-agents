@@ -164,6 +164,9 @@ Layout). Read the file that covers what you are writing before you write it.
   literal is the expected value.
   [`.agents/rules/core_engineering.md`](.agents/rules/core_engineering.md) gives the form per
   language and why no linter enforces it yet.
+- **Name it for what it holds.** CodeQL reads `secret` or `trusted` in a name as a credential: a
+  directory so named is a false alert, a real key under a bland name a missed one.
+  [`.agents/rules/core_engineering.md`](.agents/rules/core_engineering.md) has the word lists.
 
 ## Documentation Guidelines
 
