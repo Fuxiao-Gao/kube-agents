@@ -192,6 +192,14 @@ if [ -z "${GITOPS_BROKEN_BASE_SHA:-}" ]; then
   GITOPS_BROKEN_BASE_SHA="${GITOPS_REPO_ROOT_SHA}"
   if [ "${TASK}" = "${STAGED_HISTORY_TASK}" ]; then : "${GITOPS_HISTORY_PARENT_SHA:=${GITOPS_REPO_ROOT_SHA}}"; fi
 fi
+# A task with staged history has one seeding, the staged one (its seed asserts
+# the state only that history produces, and its task_version names it), so a
+# broken base given without the history's parent is refused here rather than
+# at SEED FAIL forty minutes in.
+if [ "${TASK}" = "${STAGED_HISTORY_TASK}" ] && [ -z "${GITOPS_HISTORY_PARENT_SHA:-}" ]; then
+  echo "${TASK} runs on its staged history: set GITOPS_HISTORY_PARENT_SHA (the commit the healthy commit is built on) alongside GITOPS_BROKEN_BASE_SHA" >&2
+  exit 1
+fi
 export TF_VAR_gitops_broken_base_sha="${GITOPS_BROKEN_BASE_SHA}"
 if [ -n "${GITOPS_HISTORY_PARENT_SHA:-}" ]; then export TF_VAR_gitops_history_parent_sha="${GITOPS_HISTORY_PARENT_SHA}"; fi
 render_task_copy

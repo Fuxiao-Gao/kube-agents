@@ -142,8 +142,9 @@ seed assertions in `scripts/seed/<task>.sh`, the broken-base commit, the reposit
 `tasks/<task>`, the run branch and the Argo Application's name. Inputs beyond the usual
 cluster variables: `gitops_task`; `gitops_repo` and `gitops_broken_base_sha` (required, no
 defaults: a repository of yours and a commit in it); `gitops_task_path` (empty =
-`tasks/<task>`); `gitops_history_parent_sha` (empty = no staged history; a per-run repository
-passes its root); `gitops_run_branch` (empty = derived); `gitops_token_file`, `argocd_version`, `agent_host_context`/`agent_namespace`
+`tasks/<task>`); `gitops_history_parent_sha` (required for b-0011, whose task_version 3 names the staged
+history as its seeding; other tasks start at the base; a per-run repository passes its
+root); `gitops_run_branch` (empty = derived); `gitops_token_file`, `argocd_version`, `agent_host_context`/`agent_namespace`
 (onboarding, below), and the pilot-only
 `gitops_switch_default_branch`/`gitops_restore_default_branch`.
 

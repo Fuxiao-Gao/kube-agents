@@ -72,6 +72,10 @@ locals {
   # (render-broken-base.sh stages, run-branch.sh create/advance) builds its
   # healthy commit on the parent, so the branch's log never shows the broken
   # state before the healthy one. An empty parent starts at the base.
+  # Tasks whose only seeding is the staged history (render-broken-base.sh
+  # stages): their seed asserts the state that history produces and their
+  # task_version names it, so the parent is required, not optional.
+  staged_history_tasks = ["b-0011"]
   task_path      = var.gitops_task_path != "" ? var.gitops_task_path : "tasks/${var.gitops_task}"
   base_sha       = var.gitops_broken_base_sha
   history_parent = var.gitops_history_parent_sha
@@ -103,6 +107,12 @@ module "cluster" {
 # Per-run branch in the GitOps repo. Destroy-time provisioners may only read
 # self.triggers, so every input the delete needs is a trigger.
 resource "null_resource" "run_branch" {
+  lifecycle {
+    precondition {
+      condition     = !contains(local.staged_history_tasks, var.gitops_task) || var.gitops_history_parent_sha != ""
+      error_message = "gitops_history_parent_sha is required for ${var.gitops_task}: its seeding is the staged history, and a branch cut at the broken base alone fails the seed."
+    }
+  }
   triggers = {
     repo            = var.gitops_repo
     branch          = local.run_branch

@@ -113,7 +113,7 @@ variable "gitops_broken_base_sha" {
 
 variable "gitops_history_parent_sha" {
   type        = string
-  description = "Commit the staged history's healthy commit is built on (b-0011; scripts/run-branch.sh create/advance). Empty means no staged history: the branch starts at gitops_broken_base_sha. A per-run repository passes its root commit."
+  description = "Commit the staged history's healthy commit is built on (scripts/run-branch.sh create/advance). Required for the tasks main.tf lists as staged (b-0011), whose seeding is that history; other tasks start at gitops_broken_base_sha. A per-run repository passes its root commit."
   default     = ""
 }
 
