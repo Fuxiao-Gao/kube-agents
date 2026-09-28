@@ -105,9 +105,9 @@ with a filed issue naming the exit condition:
   grades), and some runs publish no ledger at all — so the collapse is the environment's,
   not the diff's. 413 of 677 graded presubmit repetitions 2026-09-15 to 09-22. Nightly
   2026-09-22 to 2026-09-28; since 2026-09-28 seated held out in `presubmit-cases.txt`
-  ([#2013](https://github.com/gke-labs/kube-agents/issues/2013) step 2) after the fixes for the
-  dispatcher-stall residual (#2032, by #2022) and the credential-proxy workspace leak (#2011,
-  by #2069) landed. It runs on
+  ([#2013](https://github.com/gke-labs/kube-agents/issues/2013) step 2) after the eval install's
+  kanban cap (#2022, for the dispatcher-stall residual #2032) and the credential-proxy
+  workspace-leak fix (#2069, for #2011) landed. It runs on
   every pull request, cannot red one on rungs 4 or 6, and does red one on rungs 1–3 like every
   case. The Cases page's pill still reads demoted 09-02 (dated from this bullet) until the
   roster line. Enters the roster when #2013 step 3 holds: three clean days at ≥ 90 % of graded

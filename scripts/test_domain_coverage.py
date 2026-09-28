@@ -17,8 +17,8 @@ allowlist is the tier-2 progress metric of the testing implementation plan.
 Covered means able to red every pull request: a task counts toward its domain
 only when its spec is non-empty AND its name is on hack/eval/blocking-roster.txt
 (a subset of the presubmit file by construction). A nightly case, or a
-presubmit seat held out of the roster, blocks nothing and leaves its domain
-uncovered. Without this distinction the allowlist would have emptied the day
+presubmit seat held out of the roster, cannot red a pull request on a graded
+failure and leaves its domain uncovered. Without this distinction the allowlist would have emptied the day
 the specs were written, ten scenarios before any of them ran.
 """
 

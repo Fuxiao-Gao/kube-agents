@@ -315,7 +315,7 @@ later pull request that moves its line to the presubmit file, adds its name to
 blocking roster and nothing else, and `scripts/test_eval_rosters.py` pins the two files as
 equal less the held-out seats, `HELD_OUT_IN_PRESUBMIT`: the one exception, a coverage tracker
 may first seat its candidate in the presubmit file without a roster line, to earn its record at
-presubmit volume; it blocks nothing there) and cites that record — never the pull request that makes it pass. Cases that stay in the nightly for good are
+presubmit volume; it cannot red a pull request on quality there, only on rungs 1–3) and cites that record — never the pull request that makes it pass. Cases that stay in the nightly for good are
 the ones kept out of the presubmit for cost, because a cheaper probe holds their presubmit
 seat, or because what they grade is not one of the core journeys the presubmit gate is
 for; the core journeys are the `journey:` rows of `docs/designs/domains.yaml`, and a case

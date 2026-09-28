@@ -125,7 +125,7 @@ A merged case runs every night, and on a pull request only once it is admitted: 
 2026-09-22 the presubmit runs the blocking roster and nothing else, so a presubmit seat is a
 roster seat; the one in-between state is the held-out seat a coverage tracker may take in the
 presubmit file (`presubmit-cases.txt`'s last section), which runs on pull requests without
-blocking until its roster line lands.
+blocking on a graded failure until its roster line lands.
 Admitted means named in `hack/eval/blocking-roster.txt` (the default of `BOOTSTRAP_ADMITTED`
 in `hack/ci-eval-pr.sh`) with the case's line in `hack/eval/presubmit-cases.txt`, where an
 admitted case can red a pull request on a graded failure. The evidence

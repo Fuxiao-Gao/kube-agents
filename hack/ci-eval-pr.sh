@@ -2233,7 +2233,7 @@ unit_cost_hint() {
     # bar now on #2013 step 3). The canary measured 1002s median, 2074s p90,
     # over 903 presubmit repetitions 2026-09-04 to 09-15; priced at that
     # median, the way capacity (540) and the incident probe (700) are, so it
-    # launches first in each repetition round. Its three repetitions
+    # launches first in each presubmit repetition round. Its three repetitions
     # serialize on the task lock, so ~50min at the median and ~104min at p90
     # is the chain a presubmit carries for it.
     compliance-rbac-overgrant) echo 1000 ;;
