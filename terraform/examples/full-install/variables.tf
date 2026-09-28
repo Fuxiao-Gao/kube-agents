@@ -177,10 +177,20 @@ variable "scope" {
     runs. `exclude.projects` takes project IDs or shell-style globs;
     `exclude.clusters` names single clusters by the full triple, because a
     cluster name is unique only within a project and location. Neither
-    exclusion changes IAM. Folders and organisations are not inputs yet.
+    exclusion changes IAM. `folders` and `organizations` are numeric Resource
+    Manager IDs: each is bound on the container itself with the same allowlist
+    plus roles/cloudasset.viewer, so every project beneath it inherits the
+    grant and a project created under a declared folder later is discovered
+    and readable with no change here; declaring one also enables
+    cloudasset.googleapis.com in project_id, which the reconcile's container
+    search calls. An organisation binding reaches every project in the
+    organisation; the design recommends folders until the scoped service
+    account pool grants authority.
   EOT
   type = object({
-    projects = optional(list(string), [])
+    projects      = optional(list(string), [])
+    folders       = optional(list(string), [])
+    organizations = optional(list(string), [])
     exclude = optional(object({
       projects = optional(list(string), [])
       clusters = optional(list(object({

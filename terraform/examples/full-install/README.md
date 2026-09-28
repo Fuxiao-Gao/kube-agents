@@ -488,7 +488,7 @@ equivalent set exists). Deliberately no admin list is pre-staged in
 `terraform.tfvars.example` — widening access should be an explicit, reviewed
 choice.
 
-### Projects in scope (`scope`)
+### Projects, folders and organisations in scope (`scope`)
 
 `scope` is the `PlatformAgent`'s `spec.scope`, declared once and reaching both halves of the
 install from this one value: the `kube-agents-iam` module binds its read allowlist (the read
@@ -500,7 +500,8 @@ drops projects (their read roles are revoked and their Cluster Agent profiles re
 reconcile's next two clean runs), and a missing block would declare nothing. `exclude.projects`
 takes project IDs or shell-style globs, `exclude.clusters` the full `project_id`, `location`,
 `cluster_name` triple; neither changes IAM. Through the installer the value comes from
-`SCOPE_PROJECTS`, `SCOPE_EXCLUDE_PROJECTS` and `SCOPE_EXCLUDE_CLUSTERS` in `install.env`
+`SCOPE_PROJECTS`, `SCOPE_FOLDERS`, `SCOPE_ORGANIZATIONS`, `SCOPE_EXCLUDE_PROJECTS` and
+`SCOPE_EXCLUDE_CLUSTERS` in `install.env`
 ([`scripts/installer/README.md`](../../../scripts/installer/README.md), which also says how to
 forget the bindings of a project that became unreachable). If the running `PlatformAgent` already
 declares `spec.scope` by hand, copy it into `scope` before the first apply of a composition that
@@ -514,8 +515,20 @@ as `upgrade.sh` does, or a `spec.scope` the served schema does not know is prune
 release record then carrying it, never re-sent. The identity running the apply needs
 to set IAM policy in each project named. The release's dependency on the module orders creation,
 not IAM propagation: a first install's one-shot inventory sweep may name a scoped project as
-`denied`, and the hourly reconcile creates its profiles once the grant has propagated. Folders and
-organisations are not inputs yet.
+`denied`, and the hourly reconcile creates its profiles once the grant has propagated.
+
+`scope.folders` and `scope.organizations` take numeric Resource Manager IDs. Each is bound on the
+container itself with the same allowlist plus `roles/cloudasset.viewer`, so every project beneath
+it inherits the grant and the reconcile resolves its members with one Cloud Asset Inventory search;
+a project created under a declared folder after the apply is discovered and readable with no
+change here. Declaring one adds `cloudasset.googleapis.com` to the APIs the composition enables in
+`project_id`; an install that names explicit projects alone never enables it. The identity running
+the apply needs `resourcemanager.folders.setIamPolicy` on each folder or
+`resourcemanager.organizations.setIamPolicy` on the organisation, which the installer front doors
+check before the apply and the composition run directly does not. An organisation binding reaches
+every project in the organisation; the design recommends folders until the scoped service account
+pool grants authority ([`docs/designs/multi-project-scope.md`](../../../docs/designs/multi-project-scope.md)
+§9).
 
 ### Backups
 

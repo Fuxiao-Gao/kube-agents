@@ -21,6 +21,14 @@ locals {
     "chat.googleapis.com",
     "gsuiteaddons.googleapis.com",
   ] : []
+  # Only when a folder or organisation is declared: the reconcile resolves a
+  # container's members with one Cloud Asset Inventory search, and an install
+  # that names explicit projects alone never calls the API and must not fail
+  # under an organisation policy that forbids it
+  # (docs/designs/multi-project-scope.md §4).
+  scope_apis = length(var.scope.folders) + length(var.scope.organizations) > 0 ? [
+    "cloudasset.googleapis.com",
+  ] : []
 
   use_vertex     = var.model_provider == "vertex_ai"
   vertex_project = var.vertex_project_id != "" ? var.vertex_project_id : var.project_id
@@ -45,7 +53,7 @@ locals {
   github_org        = length(local.github_repo_parts) == 2 ? local.github_repo_parts[0] : ""
   github_repo_name  = length(local.github_repo_parts) == 2 ? local.github_repo_parts[1] : ""
 
-  required_apis = toset(concat(local.base_apis, local.pubsub_apis, local.chat_apis))
+  required_apis = toset(concat(local.base_apis, local.pubsub_apis, local.chat_apis, local.scope_apis))
 
   # The agent's GCP IAM permission-set bundle, kept verbatim so the two install
   # paths hand the agent the same authority. Kubernetes RBAC is read-only
@@ -667,7 +675,9 @@ resource "helm_release" "kube_agents" {
       # removing the last scoped project here has to reach the CR as an
       # emptied block, never as a missing one.
       scope = {
-        projects = var.scope.projects
+        projects      = var.scope.projects
+        folders       = var.scope.folders
+        organizations = var.scope.organizations
         exclude = {
           projects = var.scope.exclude.projects
           clusters = [

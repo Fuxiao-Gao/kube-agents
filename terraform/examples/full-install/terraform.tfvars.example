@@ -150,16 +150,21 @@ api_server_key = "REPLACE_WITH_A_STRONG_RANDOM_KEY"
 # means naming the roles, so that the grant is explicit and reviewed.
 # permission_set = "read-only"
 
-# Multi-project scope: the projects beyond project_id whose GKE clusters get a
-# Cluster Agent, and what to leave unmanaged. The IAM module binds the read
-# roles in each listed project and the chart renders the same object into the
-# PlatformAgent CR. Omit the block, or leave the lists empty, for the
-# management project alone. A PlatformAgent that already declares spec.scope
-# by hand: copy it here before the first apply, which renders the block for
-# the first time and replaces the live lists with these. Folders and
-# organisations are not inputs yet.
+# Multi-project scope: the projects, folders and organisations beyond
+# project_id whose GKE clusters get a Cluster Agent, and what to leave
+# unmanaged. The IAM module binds the read roles in each listed project, and
+# the read roles plus roles/cloudasset.viewer on each folder and organisation
+# (numeric IDs; every project beneath inherits the grant), and the chart
+# renders the same object into the PlatformAgent CR. A folder or organisation
+# also enables cloudasset.googleapis.com in project_id. Omit the block, or
+# leave the lists empty, for the management project alone. A PlatformAgent
+# that already declares spec.scope by hand: copy it here before the first
+# apply, which renders the block for the first time and replaces the live
+# lists with these. An organisation is wide: prefer folders.
 # scope = {
-#   projects = ["payments-prod", "payments-staging"]
+#   projects      = ["payments-prod", "payments-staging"]
+#   folders       = ["123456789012"]
+#   organizations = []
 #   exclude = {
 #     projects = ["*-sandbox"]
 #     clusters = [

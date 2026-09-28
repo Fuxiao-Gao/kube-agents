@@ -124,3 +124,18 @@ output "scope_roles" {
   description = "The roles every scope project carries: the IAM module's read allowlist intersected with the roles the host project got."
   value       = module.kube_agents_iam.scope_roles
 }
+
+output "scope_folders" {
+  description = "The folders scope.folders named and the IAM module bound scope_container_roles on."
+  value       = module.kube_agents_iam.scope_folders
+}
+
+output "scope_organizations" {
+  description = "The organisations scope.organizations named and the IAM module bound scope_container_roles on."
+  value       = module.kube_agents_iam.scope_organizations
+}
+
+output "scope_container_roles" {
+  description = "The roles every folder and organisation in scope carries: scope_roles plus roles/cloudasset.viewer for the reconcile's container search."
+  value       = module.kube_agents_iam.scope_container_roles
+}
