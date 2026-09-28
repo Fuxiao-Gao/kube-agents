@@ -16,6 +16,7 @@ import os
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
@@ -980,10 +981,68 @@ class IdleReapTest(unittest.TestCase):
         self.assertEqual(b"kind: A\n", store.read(active.handle, "a.yaml"))
         self.assertEqual({active.handle, newcomer.handle}, set(store._workspaces))
 
-        # Exactly at the bound is not past it.
-        self.clock.advance(self.IDLE - 2)
+        # Exactly at the bound is not past it. The `read` above stamped
+        # `active` at the current reading, so this is idle == IDLE.
+        self.clock.advance(self.IDLE)
         store.open("acme/fleet")
         self.assertIn(active.handle, store._workspaces)
+
+    def test_a_verb_waiting_on_the_lock_is_not_reaped_by_an_open_that_wins_it(self):
+        """Idle is measured from when a verb arrives, not from when it gets the lock.
+
+        The lock is held across clones, fetches and pushes, so a verb can wait
+        behind it for minutes. Stamped only once it held the lock, a verb that
+        arrived inside the bound lost its workspace to an `open` that took the
+        lock first and resolved to NoSuchHandle -- for a `push`, after `commit`
+        had landed the work in the tree being removed. A bare `get` is the
+        other waiter: `require_managed_workspace` resolves the handle through
+        it ahead of the `commit` and `push` routes.
+        """
+        for name, call, expected in (
+            ("read", lambda store, handle: store.read(handle, "a.yaml"), lambda _: b"kind: A\n"),
+            ("get", lambda store, handle: store.get(handle), lambda workspace: workspace),
+        ):
+            with self.subTest(waiter=name):
+                store = self.store()
+                waited = store.open("acme/fleet", caller="t_waited")
+                waited.tree.mkdir(parents=True, exist_ok=True)
+                (waited.tree / "a.yaml").write_bytes(b"kind: A\n")
+                untouched = store.open("acme/fleet", caller="t_untouched")
+                self.clock.advance(self.IDLE - 5)
+
+                outcome = []
+                # Held here as another verb's clone would hold it. Reentrant,
+                # so the `open` below runs on this thread while the waiter
+                # waits.
+                with store._lock:
+                    waiter = threading.Thread(
+                        target=lambda: outcome.append(
+                            self.attempt(call, store, waited.handle)
+                        ),
+                        daemon=True,
+                    )
+                    waiter.start()
+                    deadline = time.monotonic() + 5
+                    while waited.last_used != self.clock.now and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    # The clone runs on past the bound, then a new `open` wins
+                    # the lock ahead of the waiter.
+                    self.clock.advance(300)
+                    store.open("acme/other", caller="t_new")
+                    self.assertIn(waited.handle, store._workspaces)
+                    # Paired: the same age with nothing waiting on it is reaped
+                    # by the same `open`, so the survivor is down to the
+                    # arrival stamp.
+                    self.assertNotIn(untouched.handle, store._workspaces)
+                waiter.join(timeout=10)
+                self.assertEqual([expected(waited)], outcome)
+
+    @staticmethod
+    def attempt(verb, *args):
+        try:
+            return verb(*args)
+        except NoSuchHandle as error:
+            return error
 
     def test_below_the_idle_bound_the_cap_still_refuses_and_says_why(self):
         store = self.store()

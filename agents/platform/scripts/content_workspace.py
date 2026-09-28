@@ -622,8 +622,9 @@ class Workspace:
     # a full store can be read back to the sessions that filled it -- and not
     # an ownership check, for the same reason the handle is not one.
     caller: str = ""
-    # Readings of the store's clock, in seconds. `last_used` moves on every
-    # verb that resolves the handle and is what `_reap_idle` measures against;
+    # Readings of the store's clock, in seconds. `last_used` moves when a verb
+    # naming the handle arrives and again when it resolves the handle, and is
+    # what `_reap_idle` measures against;
     # `opened_at` only ever reports an age.
     opened_at: float = 0.0
     last_used: float = 0.0
@@ -765,8 +766,8 @@ class ContentWorkspaceStore:
         # and any one of them can die holding a handle, which is why `open`
         # reaps idle entries under this same lock. What the coarse lock buys
         # is that a reap can never observe a workspace mid-verb, so "idle"
-        # means "no verb since", exactly. A per-workspace lock would still
-        # need this one to guard the dict it lives in.
+        # means "no verb has arrived since" (see `_arrive`). A per-workspace
+        # lock would still need this one to guard the dict it lives in.
         self._lock = threading.RLock()
 
     # -- git -------------------------------------------------------------
@@ -1086,25 +1087,49 @@ class ContentWorkspaceStore:
     def get(self, handle: object) -> Workspace:
         if not isinstance(handle, str) or not _HANDLE_RE.match(handle):
             raise NoSuchHandle("handle is not a workspace handle")
+        # For a caller that reaches `get` without holding the lock:
+        # `require_managed_workspace` resolves the handle here ahead of
+        # `commit` and `push`, and would otherwise wait unstamped.
+        self._arrive(handle)
         with self._lock:
             workspace = self._workspaces.get(handle)
-            # Every verb resolves its handle here, so this one stamp is what
-            # `_reap_idle` measures against. Inside the lock: stamped after
-            # it, a concurrent `open` could reap between the lookup and the
-            # stamp and the verb would run on a tree that is gone.
+            # Every verb resolves its handle here, after `_arrive` stamped it
+            # on the way in; this stamp covers the time the verb spent waiting
+            # for the lock. Inside the lock: stamped after it, a concurrent
+            # `open` could reap between the lookup and the stamp and the verb
+            # would run on a tree that is gone.
             if workspace is not None:
                 workspace.last_used = self._clock()
         if workspace is None:
             raise NoSuchHandle("no such workspace; open one first")
         return workspace
 
+    def _arrive(self, handle: object) -> None:
+        """Stamp `last_used` as a verb arrives, before it waits for the lock.
+
+        The lock is held across clones, fetches and pushes, each for up to the
+        executor's timeout, so a verb can wait behind it for minutes, and
+        longer behind several holders in turn. Stamped only by `get`, a
+        verb that arrived inside the idle bound but was still waiting when an
+        `open` took the lock and ran `_reap_idle` would find its workspace
+        gone -- a `push` waiting behind a clone losing the commit that
+        `commit` had already landed. Outside the lock on purpose: a verb that
+        arrives while a reap is running is reaped or not, as if it had arrived
+        just after or just before.
+        """
+        workspace = self._workspaces.get(handle) if isinstance(handle, str) else None
+        if workspace is not None:
+            workspace.last_used = self._clock()
+
     def _reap_idle(self, now: float) -> None:
         """Drop every workspace no verb has touched within the idle bound.
 
-        Called by `open` with the lock held, which is what makes "idle" exact:
-        every verb holds the same lock and stamps `last_used` through `get`,
-        so nothing this sees is mid-verb and nothing it drops was about to be
-        used. The lock stays held across the removal, which walks each reaped
+        Called by `open` with the lock held. Every verb stamps `last_used` in
+        `_arrive` before it waits for the lock and again in `get` once it holds
+        it, so nothing this sees is mid-verb, and a verb waiting for the lock
+        is dropped only if it arrived longer ago than the bound -- a wait that
+        long needs several lock holders in a row, and `RLock` hands off in no
+        defined order. The lock stays held across the removal, which walks each reaped
         clone with `rglob` -- up to `max_workspaces` of them, each up to
         `max_clone_bytes` -- so the `open` that reaps can hold every other
         verb for that long. Accepted: the alternative is a store that answers
@@ -1133,6 +1158,7 @@ class ContentWorkspaceStore:
             )
 
     def close(self, handle: str) -> None:
+        self._arrive(handle)
         with self._lock:
             workspace = self.get(handle)
             self._workspaces.pop(workspace.handle, None)
@@ -1142,6 +1168,7 @@ class ContentWorkspaceStore:
 
     def read(self, handle: str, path: str) -> bytes:
         """The content of one file in the checkout. A read returns bytes, never a path."""
+        self._arrive(handle)
         with self._lock:
             workspace = self.get(handle)
             relative = repo_relative(path)
@@ -1181,6 +1208,7 @@ class ContentWorkspaceStore:
                 f"{len(paths)} paths is over the {max_entries()}-path limit for "
                 "one request"
             )
+        self._arrive(handle)
         with self._lock:
             workspace = self.get(handle)
             wanted = [repo_relative(entry) for entry in paths]
@@ -1247,6 +1275,7 @@ class ContentWorkspaceStore:
         complete — a caller that cannot tell the difference goes on to `read`
         paths it invented.
         """
+        self._arrive(handle)
         with self._lock:
             workspace = self.get(handle)
             under = repo_relative(prefix).parts if prefix else ()
@@ -1314,6 +1343,7 @@ class ContentWorkspaceStore:
             raise ContentWorkspaceError(
                 "pattern must not contain control characters"
             )
+        self._arrive(handle)
         with self._lock:
             workspace = self.get(handle)
             # -I skips binary files, -n numbers the lines, -z puts a NUL after
@@ -1372,6 +1402,7 @@ class ContentWorkspaceStore:
         expected_branch_sha: str | None = None,
     ) -> dict:
         """Apply the payload on a fresh branch off the base, and commit it."""
+        self._arrive(handle)
         with self._lock:
             workspace = self.get(handle)
             if workspace.shallow:
@@ -1581,6 +1612,7 @@ class ContentWorkspaceStore:
         the remote-tracking ref onto whatever landed in the meantime and the
         lease then compares that value against itself.
         """
+        self._arrive(handle)
         with self._lock:
             workspace = self.get(handle)
             branch = check_branch(branch, base_branch=self.base_branch)
