@@ -45,12 +45,6 @@ def check(label: str, actual: object, expected: object) -> None:
         print(f"  ok   {label}")
 
 
-def _first_skill(root: Path) -> str | None:
-    for skill_md in sorted(root.glob("*/SKILL.md")):
-        return skill_md.parent.name
-    return None
-
-
 def _make_template(root: Path, *names: str) -> None:
     for name in names:
         (root / name).mkdir(parents=True)

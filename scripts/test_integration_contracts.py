@@ -90,8 +90,9 @@ class SpecToolRegistryTest(unittest.TestCase):
     """Every tool name in a verification spec exists in a live registry."""
 
     # Hermes-image built-in tools this repository references but does not
-    # define: the kanban pool. Evidence of each lives in the image patches
-    # (deploy/docker/patches/*kanban*); a name added here needs the same.
+    # define: the kanban pool, and the skill writer the image gates. Evidence
+    # of each lives in the image patches that touch them
+    # (HERMES_BUILTIN_EVIDENCE); a name added here needs the same.
     HERMES_BUILTIN_TOOLS = {
         "kanban_create",
         "kanban_list",
@@ -99,7 +100,9 @@ class SpecToolRegistryTest(unittest.TestCase):
         "kanban_complete",
         "kanban_block",
         "kanban_heartbeat",
+        "skill_manage",
     }
+    HERMES_BUILTIN_EVIDENCE = ("*kanban*", "*skill_manage_image_owned*")
 
     # Tools behind a remote MCP proxy (`/opt/mcp-remote/dist/proxy.js <url>`),
     # as (server alias, tool): nothing in this repository can enumerate them,
@@ -259,7 +262,9 @@ class SpecToolRegistryTest(unittest.TestCase):
     def test_the_builtin_allowlist_still_has_evidence_in_the_image_patches(self):
         patches = REPO_ROOT / "deploy" / "docker" / "patches"
         corpus = "\n".join(
-            p.read_text(errors="replace") for p in patches.glob("*kanban*")
+            p.read_text(errors="replace")
+            for pattern in self.HERMES_BUILTIN_EVIDENCE
+            for p in patches.glob(pattern)
         )
         for name in sorted(self.HERMES_BUILTIN_TOOLS):
             root = name.removeprefix("kanban_")

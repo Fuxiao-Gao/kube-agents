@@ -93,9 +93,11 @@ PROFILES_DIR = "profiles"
 #: The file whose presence makes a directory a skill.
 SKILL_FILE = "SKILL.md"
 #: The profile names this gate knows: the entrypoint homes the platform profile
-#: at ``profiles/platform`` and every Cluster Agent at ``profiles/cluster-<name>``.
+#: at ``profiles/platform``, every Cluster Agent at ``profiles/cluster-<name>``,
+#: and the default (Planning Agent) profile at the home itself.
 PLATFORM_PROFILE = "platform"
 CLUSTER_PROFILE_PREFIX = "cluster-"
+DEFAULT_PROFILE = "default"
 #: The flag ``python3 -m tools.skill_manage_image_owned`` takes in the
 #: ``platform`` build stage; ``deploy/docker/Dockerfile`` spells it too.
 CHECK_ROOTS_FLAG = "--check-roots"
@@ -130,7 +132,7 @@ def profile_for_home(home: Path) -> str:
     re-points a worker's ``HERMES_HOME`` at the latter. That layout is the
     only per-process record of the profile, so it is what is read here.
     """
-    return home.name if home.parent.name == PROFILES_DIR else "default"
+    return home.name if home.parent.name == PROFILES_DIR else DEFAULT_PROFILE
 
 
 def image_skill_roots(profile: str) -> tuple[str, ...]:
@@ -384,7 +386,7 @@ def check_roots(argv: Optional[list[str]] = None) -> int:
                 continue
             if image_shipped_skill(skills[0], profile) != root:
                 problems.append(f"{root}: {skills[0]} does not answer as shipped for {profile}")
-            if profile == PLATFORM_PROFILE and image_shipped_skill(skills[0], "default") is not None:
+            if profile == PLATFORM_PROFILE and image_shipped_skill(skills[0], DEFAULT_PROFILE) is not None:
                 problems.append(f"{root}: {skills[0]} answers as shipped for the default profile")
             print(f"  ok   {root}: {len(skills)} skill(s), {skills[0]} shipped for {profile}")
     if problems:
