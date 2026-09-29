@@ -2344,6 +2344,11 @@ unit_cost_hint() {
     # a plant that blocks on a card appearing, then an agent turn that waits on
     # that card finishing. A wrong hint costs packing, not correctness.
     gitops-drift-out-of-band-triage) echo 900 ;;
+    # Tofu too: the plant waits for the cron job to file the sweep and for the
+    # sweep's worker to file its cards and end its run (up to the stack's
+    # run_wait, 900s), and the agent turn is a board read. 340-520s a
+    # repetition on 2026-09-28.
+    bootstrap-discovery-fanout) echo 600 ;;
     # The nightly-only full audits: 600-1300s a repetition on 2026-08-26,
     # planted-pdb's 962s the one clean measurement. Priced with the 900 band
     # so a nightly run launches them first. fleet-cost-idle-pool joined the
