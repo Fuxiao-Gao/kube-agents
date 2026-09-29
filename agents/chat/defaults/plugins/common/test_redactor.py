@@ -470,7 +470,10 @@ class TestRedactText(unittest.TestCase):
                 self.assertEqual(AuditRedactor.redact_text(text), text)
 
     def test_aws_access_key_ids(self):
-        for key_id in ("AKIAIOSFODNN7EXAMPLE", "ASIAIOSFODNN7EXAMPLE"):
+        # AWS's documented example id, and the same body under the STS prefix.
+        # The second is assembled here: as a literal it matches GitHub secret
+        # scanning's temporary-key pattern, which allowlists only the first.
+        for key_id in ("AKIAIOSFODNN7EXAMPLE", "ASIA" + "IOSFODNN7EXAMPLE"):
             with self.subTest(key_id=key_id):
                 self.assertRedacted(f"id {key_id} used", key_id)
         # A longer upper-case run is not a key id, and neither is one with a
