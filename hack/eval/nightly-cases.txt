@@ -104,9 +104,9 @@
 # thirty (90), +21 units: at their hints (178s, 200s x4, 700s x2) about
 # 120 serial minutes, at their measured presubmit medians (the canary's is
 # 1002s, p90 2074s, over 903 repetitions 2026-09-04 to 09-15) nearer 150.
-# 2026-09-28: the canary returned to the presubmit file held out (#2013), so
+# 2026-09-29: the canary returned to the presubmit file held out (#2013), so
 # this file's share is thirty-eight cases (114 units) of the fifty-one-case,
-# 153-unit matrix the additions through 2026-09-28 made it; the nightly runs
+# 153-unit matrix the additions through 2026-09-29 made it; the nightly runs
 # both files, so its matrix and its price do not change.
 # Whether the worst night fits is a question about the whole matrix, and the
 # six measured nights (2026-09-16 to 09-21, oss-test-infra#2707's table)
@@ -385,7 +385,7 @@
 # The seven cases the presubmit ran without letting them block, when the
 # eval crew decided the presubmit runs the blocking roster and nothing else.
 # Six remain here; compliance-rbac-overgrant went back to the presubmit file
-# held out on 2026-09-28 (#2013), the documented exception. None was
+# held out on 2026-09-29 (#2013), the documented exception. None was
 # admitted; each # line is the hold-out reason as it stood that day, with
 # the case's presubmit record from #1626's merge to the move (graded
 # repetitions in the dashboard's data.json, 2026-09-15 to 09-22, 734 runs)

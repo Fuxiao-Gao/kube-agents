@@ -5,7 +5,7 @@
 # presubmit again, held out, as the fleet-audits machinery canary
 # (compliance-rbac-overgrant, 606s measured clean on 2026-08-26; a presubmit
 # case until 2026-09-22, when the presubmit became the blocking roster only,
-# nightly until 2026-09-28) — it grades the same planted
+# nightly until 2026-09-29) — it grades the same planted
 # over-grant through the ledger, so this probe is not the only eye on the
 # fixture. What the probe
 # adds is presubmit coverage of the SECURITY domain at probe cost: a targeted

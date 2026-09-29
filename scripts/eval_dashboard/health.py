@@ -370,7 +370,7 @@ RECOVERY_GREEN_RUNS = 3
 # The rule: the median wall clock of the newest SLOW_RUNS full runs -- a
 # concluded run of at least SLOW_MIN_TASKS cases (one fewer than the
 # presubmit file lists, read from hack/eval/presubmit-cases.txt: 12 for the
-# thirteen the presubmit runs since 2026-09-28 (twelve on the roster plus the
+# thirteen the presubmit runs since 2026-09-29 (twelve on the roster plus the
 # held-out canary, #2013; twelve from 2026-09-22, when it became the
 # blocking roster only, #1023, having run 18-19 before); a run Prow cut short
 # at its ceiling recorded fewer and is not one; the floor was a literal 15

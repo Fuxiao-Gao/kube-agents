@@ -81,7 +81,7 @@ set -euo pipefail
 # The tier exported to ci-eval-pr.sh, and so which matrix this lane grades:
 # `presubmit` is the merge-blocking set in eval/presubmit-cases.txt plus its
 # held-out seats, `nightly` appends eval/nightly-cases.txt. Counted from those
-# files rather than stated here, because both move: on 2026-09-28 they are 13
+# files rather than stated here, because both move: on 2026-09-29 they are 13
 # (twelve on the roster and the held-out compliance canary, #2013) and 38, so
 # 51 cases, and at three repetitions 39 units against 153.
 #

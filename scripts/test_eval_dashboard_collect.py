@@ -1219,7 +1219,7 @@ class TestNightlySource(_MergeBase):
         self.assertTrue(cases["reliability-pdb-probe"]["nightly_active"], "TASKS is in the nightly too")
         self.assertFalse(cases["obtainability-planted-pdb"]["active"])
         self.assertTrue(cases["obtainability-planted-pdb"]["nightly_active"], "a nightly-cases.txt entry")
-        # Seated held out in the presubmit since 2026-09-28 (#2013 step 2): it runs on
+        # Seated held out in the presubmit since 2026-09-29 (#2013 step 2): it runs on
         # every pull request without a roster line, and the nightly runs the presubmit file.
         self.assertTrue(cases["compliance-rbac-overgrant"]["active"])
         self.assertTrue(cases["compliance-rbac-overgrant"]["nightly_active"], "a presubmit case is a nightly case too")
@@ -1284,7 +1284,7 @@ class TestRepoDerivedFacts(unittest.TestCase):
         active = collect.active_task_names()
         self.assertIn("reliability-pdb-probe", active)
         self.assertIn("incident-triage-oom-event-probe", active)  # a roster seat since 2026-09-22
-        self.assertIn("compliance-rbac-overgrant", active)  # held out in the presubmit since 2026-09-28 (#2013), off the roster
+        self.assertIn("compliance-rbac-overgrant", active)  # held out in the presubmit since 2026-09-29 (#2013), off the roster
         self.assertNotIn("pdb-remediation-pr", active)  # nightly only; its 2026-09-22 promotion was withdrawn
         self.assertNotIn("obtainability-planted-pdb", active)  # nightly only
         self.assertNotIn("stockout-pinned-pool", active)
