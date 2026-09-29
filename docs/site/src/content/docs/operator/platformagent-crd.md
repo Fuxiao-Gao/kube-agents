@@ -26,7 +26,7 @@ spec:
   security: { ... } # service account + Workload Identity
   telemetry: { ... } # OTLP collector endpoint (optional)
   networkPolicy: { ... } # generated egress NetworkPolicy (optional)
-  integration: { ... } # Google Chat, Slack, GitHub
+  integration: { ... } # Google Chat, Slack, Teams, GitHub
   scope: { ... } # projects beyond the management project, and exclusions (optional)
   mode: today # unsupported dev toggle for the A2A stack (optional)
 ```
@@ -648,6 +648,7 @@ Enables external integrations. Only the enabled ones need to be present.
 
 - **`googleChat`** — `enabled` (default `false`), `projectId`, `topicName`, `subscriptionName`, `allowedUsers`, `homeChannel`, and `mode` (`default` or `debug`, default `default`). When `enabled`, `projectId`, `topicName`, and `subscriptionName` are required (enforced by a CEL validation rule). Populated by the installer when Google Chat is enabled.
 - **`slack`** — `enabled` (default `false`), `botTokenSecretRef` and `appTokenSecretRef` (Secret refs, required when enabled), `allowedUsers`, `homeChannel`, and `homeChannelName`. Populated by the installer when Slack is enabled.
+- **`teams`** — `enabled` (default `false`), `appIdSecretRef` and `appPasswordSecretRef` (Secret refs, required when enabled), `tenantId`, `allowedUsers`, `allowAllUsers`, `homeChannel`, `homeChannelName`, and `adaptiveCards` (default `true`). Set when the Microsoft Teams integration is enabled.
 - **`github`** — `org` (optional target GitHub organization/user, up to 39 characters) and `gitRepo` (optional target GitOps repository URL or `owner/repo` shorthand, up to 2048 characters). Supports HTTPS/HTTP (`https://`, `http://`), SCP-style SSH (`git@github.com:owner/repo`), SSH/Git protocols (`ssh://`, `git://`), and bare `owner/repo` shorthand. Rejects non-GitHub hosts and URLs containing whitespace or invalid syntax at admission (`failurePolicy: Fail`). If an invalid URL or organization is encountered during reconciliation, GitOps is disabled in config and a `Degraded` condition (`Reason: InvalidGitRepoURL`) is surfaced on the resource status. On reconcile, `gitRepo` is appended to the `gitops-state` ConfigMap (`managed_repos`) if absent; removing a repository configured via `gitRepo` requires clearing or updating `spec.integration.github.gitRepo` on the CR in addition to editing the ConfigMap. Populated by the installer when a GitOps repository is connected. The same ConfigMap accepts a hand-added `context_repos` key in the same JSON shape (`[{"type": "github", "url": "https://github.com/<owner>/<name>"}]`), naming repositories the agent reads for declared intent — a Terraform repository an audit consults before it reports a posture as a finding — and never writes to. An entry may add `"ref": "<branch>"` to read a branch other than the remote's default; a `ref` is kept when it is made of letters, digits, `.`, `_`, `/`, `-` and, after the first character, `@`, and passes git's branch-name rules (no `..`, `@{`, `//` or `.lock` component, no leading `-`); any other, an empty string, a JSON `null` or a value that is not a string (a number, a boolean) included, is refused with a warning naming it, and the declared-intent search skips that repository rather than reading its default branch in the pin's place, so the ledger names it as not searched until the entry is corrected (omit the key to read the default branch); a `ref` on an entry naming the GitOps repository itself is ignored, because the audit reads that repository at the branch it publishes against. Only `github` entries with a GitHub URL are read; any other entry is skipped with a warning naming the key. The operator does not seed that key: it is not populated from the CR, there is no CR field for it, and reconciles leave it in place. The operator does read it: each same-organization entry gets a read-only (`contents: read`) token minter policy, so a private context repository is readable through the credential broker's content-mode clone, provided the GitHub App is installed on it — see [Read-only tokens for context repositories](/kube-agents/deploy/token-minter/#read-only-tokens-for-context-repositories). Nothing that writes consults the key: a context repository stays refused by the broker's `commit` and `push`.
 
 :::caution[Upgrade note: non-GitHub repository rejection]
@@ -679,6 +680,25 @@ The operator writes observed state to the `status` subresource:
 | `networkPolicy.metadataDaemonIP`       | string   | The post-NAT daemon IP in rule 3, empty when suppressed.                                                                                        |
 | `networkPolicy.metadataDaemonPort`     | int32    | The post-NAT daemon port in rule 3, resolved from live DaemonSet or default (`988`).                                                            |
 | `networkPolicy.metadataDaemonIPSource` | string   | Which rung answered: `Annotation`, `Spec`, `OperatorEnv`, `Discovered`, `Default`, or `Suppressed`.                                             |
+| `usage.activeInterfaces`               | []string | The interfaces the spec enables, sorted; see below.                                                                                             |
+| `usage.sessionsTotal`                  | int64    | Declared; nothing writes it yet.                                                                                                                |
+| `usage.eventsIngestedTotal`            | int64    | Declared; nothing writes it yet.                                                                                                                |
+| `usage.toolExecutionsTotal`            | int64    | Declared; nothing writes it yet.                                                                                                                |
+| `usage.remediationsProposedTotal`      | int64    | Declared; nothing writes it yet.                                                                                                                |
+| `usage.remediationsAppliedTotal`       | int64    | Declared; nothing writes it yet.                                                                                                                |
+| `usage.lastActiveTime`                 | time     | Declared; nothing writes it yet.                                                                                                                |
+
+`usage.activeInterfaces` is `dashboard` unless `harness.hermes.dashboardEnabled` is `false`, plus
+`googlechat`, `slack` and `teams` for each `integration` entry with `enabled: true`. It is resolved
+from the spec on every reconcile and written by the Ready status update when it changes; a pass that
+parks the CR `Degraded` before that update leaves the previous value, so read it alongside the Ready
+condition. On an install whose served CRD predates the field, the API server drops it from every
+write; the operator notices from the write's echo, stops treating the missing field as a change for
+five minutes at a time, and lands it once this release's CRD is applied: within five minutes on a
+quiet install, at once when the Ready status update next writes for any other reason. The other
+status writers carry the field through as they read it, so a pass that ends `Degraded` lands
+nothing new. The counters and `usage.lastActiveTime` are declared in the schema and absent from
+every status until something writes them.
 
 These condition types appear in `conditions`; only `Ready` is always present:
 

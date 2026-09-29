@@ -61,9 +61,15 @@ import (
 
 const (
 	platformAgentFinalizer = "kubeagents.x-k8s.io/finalizer"
-	minIPv4CIDRPrefix      = 12
-	minIPv6CIDRPrefix      = 48
-	maxCIDRsPerAnnotation  = 50
+	// usageStatusReprobeInterval is how long a CR stays marked as served by a
+	// CRD without status.usage before the Ready writer probes again (see
+	// prunedUsageStatus). The RBAC self-check's cadence, for the same reason:
+	// the condition changes when someone applies something, not on a schedule,
+	// and one status write per interval is a cost nobody notices.
+	usageStatusReprobeInterval = 5 * time.Minute
+	minIPv4CIDRPrefix          = 12
+	minIPv6CIDRPrefix          = 48
+	maxCIDRsPerAnnotation      = 50
 
 	// The two keys of the <agent>-gitops-state ConfigMap the minter policy is
 	// synced from: managed_repos renders write policies, context_repos read-only
@@ -253,6 +259,25 @@ type PlatformAgentReconciler struct {
 	client.Client
 	Scheme          *runtime.Scheme
 	DiscoveryClient discovery.DiscoveryInterface
+
+	// prunedUsageStatus records, per CR, when the served CRD was last seen to
+	// drop status.usage on a write: the operator is running ahead of its CRD.
+	// While the record is fresh the Ready writer stops gating on
+	// status.usage.activeInterfaces, because a field the schema prunes reads
+	// back absent on every pass and would otherwise cost a status write per
+	// reconcile — the loop the observedGeneration witness was moved for. After
+	// usageStatusReprobeInterval the record expires and the next pass writes
+	// once: that lands the field if the CRD has been applied since, and records
+	// the pruning again if not. So an applied CRD shows up within one interval
+	// on a quiet install, at once when the Ready writer next writes for any
+	// other reason (the other status writers carry the field through as read,
+	// so a Degraded pass lands nothing new), and a skewed install costs one
+	// status write and one log line per interval. The steady-state
+	// requeue is capped at the interval while a record is held
+	// (usageStatusRequeue), so the probe is scheduled rather than left to the
+	// next event. Keyed by ObjectKey, value time.Time; cleared by any write
+	// whose echo carries the field, and when the CR is deleted.
+	prunedUsageStatus sync.Map
 
 	// APIReader reads straight from the API server, bypassing the manager's cache.
 	// Collector discovery looks at Services in namespaces this operator otherwise never
@@ -829,7 +854,24 @@ func (r *PlatformAgentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if otlpSource == otlpSourceDefault || otlpSource == otlpSourceNone {
 		requeueAfter = min(requeueAfter, otelRediscoverAfter)
 	}
+	// A served CRD without status.usage is fixed by someone applying the CRD,
+	// which triggers no reconcile of its own, so while the pruning record is
+	// held the probe is scheduled at its interval rather than left to the next
+	// event — the same pairing rbacDegraded has above. Without this the record
+	// would expire and sit until the fifteen-minute requeue.
+	requeueAfter = min(requeueAfter, r.usageStatusRequeue(instance))
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+// usageStatusRequeue is how soon the steady-state requeue has to fire for the
+// pruned-status probe: the interval while a record is held for this CR. With no
+// record it returns the secret re-read's interval, the ceiling the caller
+// already applies, so the min it feeds leaves the caller's value alone.
+func (r *PlatformAgentReconciler) usageStatusRequeue(agent *agentv1alpha1.PlatformAgent) time.Duration {
+	if r.usageStatusPruned(agent) {
+		return usageStatusReprobeInterval
+	}
+	return secretEnvReprobeInterval
 }
 
 // pluginStatusNeedsRecheck reports whether plugin status is still provisional.
@@ -929,6 +971,7 @@ func (r *PlatformAgentReconciler) handleDeletion(ctx context.Context, agent *age
 		}
 
 		// Resource is deleted. Safe to remove finalizer and update.
+		r.forgetUsageStatus(agent)
 		controllerutil.RemoveFinalizer(agent, platformAgentFinalizer)
 		if err := r.Update(ctx, agent); err != nil {
 			return ctrl.Result{}, err
@@ -3005,6 +3048,10 @@ func (r *PlatformAgentReconciler) updateStatusReady(ctx context.Context, agent *
 	degradedUnchanged := (degradedStatus == metav1.ConditionFalse && existingDegradedCond == nil) || rbacDegradedPreserved ||
 		(degradedStatus == metav1.ConditionTrue && existingDegradedCond != nil && existingDegradedCond.Status == metav1.ConditionTrue && existingDegradedCond.Reason == degradedReason && existingDegradedCond.Message == condMsg)
 
+	// From the spec alone, so it is resolved here rather than passed in like the
+	// telemetry and policy results, which take a discovery to produce.
+	newActiveInterfaces := resolveActiveInterfaces(agent)
+
 	// Check if anything actually changed. The generation is in the list so that
 	// a spec edit which changes nothing derived here still gets one write:
 	// without it the status would keep describing the previous generation and
@@ -3024,6 +3071,7 @@ func (r *PlatformAgentReconciler) updateStatusReady(ctx context.Context, agent *
 		agent.Status.Telemetry.OTLPEndpoint == otlpEndpoint &&
 		agent.Status.Telemetry.OTLPEndpointSource == otlpSource &&
 		networkPolicyStatusUnchanged(agent.Status.NetworkPolicy, netpolProfile) &&
+		(r.usageStatusPruned(agent) || slices.Equal(agent.Status.Usage.ActiveInterfaces, newActiveInterfaces)) &&
 		degradedUnchanged &&
 		eventWatcherUnchanged &&
 		hostPathDroppedUnchanged &&
@@ -3050,6 +3098,10 @@ func (r *PlatformAgentReconciler) updateStatusReady(ctx context.Context, agent *
 	agent.Status.NetworkPolicy.MetadataDaemonIP = netpolProfile.MetadataDaemonIP
 	agent.Status.NetworkPolicy.MetadataDaemonPort = netpolProfile.MetadataDaemonPort
 	agent.Status.NetworkPolicy.MetadataDaemonIPSource = netpolProfile.MetadataDaemonSource
+	// The one usage field this writer owns. The counters beside it are carried
+	// through as read: Update sends the whole status, so leaving them alone
+	// here is what keeps them intact once something does write them.
+	agent.Status.Usage.ActiveInterfaces = newActiveInterfaces
 
 	now := metav1.Now()
 	agent.Status.LastReconcileTime = &now
@@ -3099,7 +3151,58 @@ func (r *PlatformAgentReconciler) updateStatusReady(ctx context.Context, agent *
 	setA2AGatewayCondition(agent, a2aGatewayDark, now)
 	setBusProvisionedCondition(agent, busProvisionedWanted, a2a.jobName, now)
 
-	return newPhase, r.Status().Update(ctx, agent)
+	if err := r.Status().Update(ctx, agent); err != nil {
+		return newPhase, err
+	}
+	r.noteUsageStatusEcho(ctx, agent, newActiveInterfaces)
+	return newPhase, nil
+}
+
+// usageStatusPruned reports whether the served CRD has been seen to drop
+// status.usage for this CR within the last usageStatusReprobeInterval (see
+// prunedUsageStatus on the reconciler). A stale record reads false, which is
+// what makes the next pass probe.
+func (r *PlatformAgentReconciler) usageStatusPruned(agent *agentv1alpha1.PlatformAgent) bool {
+	recorded, pruned := r.prunedUsageStatus.Load(client.ObjectKeyFromObject(agent))
+	if !pruned {
+		return false
+	}
+	return time.Since(recorded.(time.Time)) < usageStatusReprobeInterval
+}
+
+// noteUsageStatusEcho reads the server's copy of the status back after a
+// write. controller-runtime decodes the response into agent through a decoder
+// that zeroes the target first (apiutil's target-zeroing decoder), so a
+// status.usage the served CRD does not know comes back empty although a
+// non-empty list was just written — a merging decoder would leave the written
+// list in place and this check would never fire. That emptiness is the
+// pruning, recorded with the time so the gate skips the field until the next
+// probe, and logged once per record. An echo that carries the field clears the
+// record. A resolved list that is itself empty says nothing either way and is
+// left alone: nil and empty compare equal in the gate, so it cannot loop.
+func (r *PlatformAgentReconciler) noteUsageStatusEcho(ctx context.Context, agent *agentv1alpha1.PlatformAgent, written []string) {
+	key := client.ObjectKeyFromObject(agent)
+	if len(written) == 0 {
+		return
+	}
+	if len(agent.Status.Usage.ActiveInterfaces) == 0 {
+		// Said once per record, not once per write: a status write for any
+		// other reason while the record is fresh re-records silently.
+		fresh := r.usageStatusPruned(agent)
+		r.prunedUsageStatus.Store(key, time.Now())
+		if !fresh {
+			logf.FromContext(ctx).Info("the served CRD has no status.usage; apply this release's CRD to get status.usage.activeInterfaces, which is probed again after the interval",
+				"platformagent", key.String(), "reprobeAfter", usageStatusReprobeInterval.String())
+		}
+		return
+	}
+	r.prunedUsageStatus.Delete(key)
+}
+
+// forgetUsageStatus drops the CR's pruning record when the CR goes away, so the
+// map does not keep an entry per deleted name for the life of the process.
+func (r *PlatformAgentReconciler) forgetUsageStatus(agent *agentv1alpha1.PlatformAgent) {
+	r.prunedUsageStatus.Delete(client.ObjectKeyFromObject(agent))
 }
 
 // hostPathDroppedConditionCurrent reports whether the VolumesDropped condition
