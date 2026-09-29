@@ -790,7 +790,10 @@ report_partial_verdict() {
 # cut-off night keeps (#1491). collect_gateway_log follows for the same reason
 # collect_bench_results runs on green: a green nightly whose repetitions ran to
 # the delegation ceiling used to leave no gateway log to say whether the worker
-# was starved by 429s or a stuck dispatcher.
+# was starved by 429s or a stuck dispatcher. collect_agent_pod_diagnostics
+# follows it: a pod replaced mid-run starts a fresh gateway log, and the
+# pod and event watch it stops, the previous containers and the restart
+# record are what say why.
 #
 # `set +e` is load-bearing, not tidying. errexit stays in force inside an EXIT
 # trap, so on any failing exit the `(exit "${exit_code}")` below returns
@@ -810,6 +813,7 @@ profile_and_dump_on_exit() {
   collect_bench_results
   report_partial_verdict
   collect_gateway_log
+  collect_agent_pod_diagnostics
   profile_report "${exit_code}"
   (exit "${exit_code}")
   dump_prow_artifacts_on_failure
@@ -977,6 +981,9 @@ export BENCH_AGENT_TYPE="cli"
 export AGENT_TARGET="kubeagents"
 export BENCH_PARALLEL="false"
 export AGENT_CLUSTER_CONTEXT="gke_${PROJECT_ID}_${REGION}_${HOST_CLUSTER_NAME}"
+# From here to the EXIT trap, a replaced agent pod or restarted container is
+# on record however early it happens (collect_agent_pod_diagnostics).
+start_agent_pod_watch
 export AGENT_SERVICE_NAME="platform-agent"
 export AGENT_NAMESPACE="${TARGET_NAMESPACE}"
 # The harness's default delegation wait (1800s) sits INSIDE the compliance
