@@ -191,6 +191,7 @@ identifier appears, add its source here.
 | Shared agent defaults (`approvals.*`, `security.*`) | `deploy/shared/defaults/config.yaml` and `renderConfigYAML()` in `k8s-operator/internal/controller/platformagent_manifests.go` |
 | Image defaults and override env vars (`PLATFORM_AGENT_IMAGE` et al.) | `k8s-operator/internal/controller/manifest_helpers.go` |
 | The `status.usage.activeInterfaces` vocabulary (`dashboard`, `googlechat`, `slack`, `teams`) and how each is resolved from the spec | `resolveActiveInterfaces` and the `interface*` constants in `k8s-operator/internal/controller/manifest_helpers.go` |
+| The event watcher's metrics port, its container-port name and `EVENT_WATCHER_METRICS_PORT`; the chart's `PodMonitoring` for the gateway pod | `eventWatcherMetricsPort`, `eventWatcherMetricsPortName` and `eventWatcherMetricsPortEnv` in `k8s-operator/internal/controller/platformagent_manifests.go`; `charts/kube-agents/templates/platform-agent-monitoring.yaml`, held to the operator's port by `tests/test_chart_platform_agent_monitoring.py` |
 | OTLP endpoint default, discovery candidates, and `otlpEndpointSource` values | `k8s-operator/internal/controller/telemetry.go` |
 | The `secret-env-hash` pod-template annotation and its re-read interval | `k8s-operator/internal/controller/platformagent_secret_hash.go` |
 | DNS/metadata-daemon defaults, the `dnsClusterIPsSource` / `metadataDaemonIPSource` values, and the `additionalEgress` prefix floors (`/12`, `/48`) | `k8s-operator/internal/controller/netpolprofile.go` and `platformagent_controller.go` |
