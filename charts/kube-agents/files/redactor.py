@@ -503,8 +503,6 @@ class AuditRedactor:
     @classmethod
     def _mask_env_value_yaml(cls, match: "re.Match[str]") -> str:
         raw = match.group("value").rstrip()
-        if BLOCK_SCALAR_PATTERN.match(raw):
-            return match.group(0)
         start = match.start("value")
         if len(raw) > 1 and raw[0] in YAML_QUOTES and raw[-1] == raw[0]:
             return cls._mask_env_span(match, start + 1, start + len(raw) - 1)
