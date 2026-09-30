@@ -1512,26 +1512,65 @@ func filterValidAgentPlugins(agentPlugins []*agentv1alpha1.AgentPlugin) []*agent
 	return valid
 }
 
+// gitopsRefusalWithholdsManaged reports whether a refused gitops repository is
+// keeping accepted managed ones out of managed_repos, as the seed below does.
+func gitopsRefusalWithholdsManaged(resolved *agentv1alpha1.ResolvedIntegration) bool {
+	return resolved != nil && resolved.GitOps() != nil &&
+		len(resolved.Accepted(agentv1alpha1.RepositoryRoleGitOps)) == 0 &&
+		len(resolved.Accepted(agentv1alpha1.RepositoryRoleManaged)) > 0
+}
+
 // buildGitopsStateConfigMap generates the ConfigMap manifest containing runtime state (e.g. repos)
 func buildGitopsStateConfigMap(agent *agentv1alpha1.PlatformAgent) *corev1.ConfigMap {
 	data := map[string]string{}
 
-	// Extract primary repository from CR Spec if provided
-	if agent.Spec.Integration != nil && agent.Spec.Integration.GitHub != nil {
-		gitRepo := strings.TrimSpace(agent.Spec.Integration.GitHub.GitRepo)
-		org := strings.TrimSpace(agent.Spec.Integration.GitHub.Org)
-		if gitRepo != "" && gitRepo != "None" {
-			if err := agentv1alpha1.ValidateGitRepoURLWithOrg(gitRepo, org); err == nil {
-				if cleanedURL, err := agentv1alpha1.CleanRepoURLWithOrg(gitRepo, org); err == nil {
-					entries := []agentv1alpha1.ManagedRepoEntry{
-						{Type: "github", URL: cleanedURL},
+	// Seed the declared repositories from the CR spec: the GitOps repository and
+	// the managed ones into managed_repos, GitOps first, and the context ones
+	// into context_repos. Each entry's `type` is its forge's provider, which is
+	// how the discriminator reaches the agent — written down rather than
+	// inferred from the URL's text. Only entries Problems accepts are seeded:
+	// with the webhook off, nothing else stops a refused one reaching the
+	// agent and the minter. The token refresh mints for the first
+	// managed_repos entry when no repository is named, so while a declared
+	// gitops repository is refused no managed one is seeded either: it would
+	// take that place.
+	if agent.Spec.Integration != nil {
+		resolved, err := agent.Spec.Integration.ResolveGit()
+		if err != nil {
+			manifestsLog.Info("Skipping initial configmap seed due to conflicting git integration", "error", err)
+		} else {
+			seedEntries := func(repos []*agentv1alpha1.ResolvedRepository) []agentv1alpha1.ManagedRepoEntry {
+				var entries []agentv1alpha1.ManagedRepoEntry
+				for _, repo := range repos {
+					entry, err := repo.ManagedRepoEntry()
+					if err != nil {
+						// By field, not value: a clone URL can carry a token.
+						manifestsLog.Info("Skipping initial configmap seed of an unparseable or invalid repository",
+							"index", repo.Index, "forge", repo.ForgeName, "role", repo.Role)
+						continue
 					}
-					if jsonBytes, err := json.Marshal(entries); err == nil {
-						data["managed_repos"] = string(jsonBytes)
-					}
+					entries = append(entries, entry)
+				}
+				return entries
+			}
+			managed := seedEntries(resolved.Accepted(agentv1alpha1.RepositoryRoleGitOps))
+			if len(managed) == 0 && resolved.GitOps() != nil {
+				if gitopsRefusalWithholdsManaged(resolved) {
+					manifestsLog.Info("Skipping initial configmap seed of the managed repositories: the gitops repository is refused")
 				}
 			} else {
-				manifestsLog.Info("Skipping initial configmap seed due to unparseable or invalid GitRepo", "raw", gitRepo, "error", err)
+				managed = append(managed, seedEntries(resolved.Accepted(agentv1alpha1.RepositoryRoleManaged))...)
+			}
+			for key, entries := range map[string][]agentv1alpha1.ManagedRepoEntry{
+				gitopsStateManagedReposKey: managed,
+				gitopsStateContextReposKey: seedEntries(resolved.Accepted(agentv1alpha1.RepositoryRoleContext)),
+			} {
+				if len(entries) == 0 {
+					continue
+				}
+				if jsonBytes, err := json.Marshal(entries); err == nil {
+					data[key] = string(jsonBytes)
+				}
 			}
 		}
 	}
@@ -1547,6 +1586,24 @@ func buildGitopsStateConfigMap(agent *agentv1alpha1.PlatformAgent) *corev1.Confi
 		},
 		Data: data,
 	}
+}
+
+// seededGitOpsEntry is the managed_repos entry the CR's GitOps repository
+// seeds, or nil when it declares none or declares an invalid one.
+func seededGitOpsEntry(agent *agentv1alpha1.PlatformAgent) *agentv1alpha1.ManagedRepoEntry {
+	if agent.Spec.Integration == nil {
+		return nil
+	}
+	resolved, err := agent.Spec.Integration.ResolveGit()
+	if err != nil {
+		return nil
+	}
+	for _, repo := range resolved.Accepted(agentv1alpha1.RepositoryRoleGitOps) {
+		if entry, err := repo.ManagedRepoEntry(); err == nil {
+			return &entry
+		}
+	}
+	return nil
 }
 
 // renderConfigYAML builds the MANAGED config the pod runs under.
@@ -2144,6 +2201,9 @@ type renderOptions struct {
 	// otlpEndpoint because empty already means the managed collector, and the two
 	// outcomes need opposite manifests.
 	otlpDisabled bool
+	// heldGitHubOrg is the GITHUB_ORG the live gateway carries, set only while
+	// the declaration cannot name the organisation (see heldGitHubOrg).
+	heldGitHubOrg string
 }
 
 // lastWinsEnv drops every entry a later entry of the same name supersedes, keeping the
@@ -2621,22 +2681,24 @@ func buildPodTemplateSpec(agent *agentv1alpha1.PlatformAgent, configHash, fluent
 				})
 			}
 		}
-		if github := integration.GitHub; github != nil {
-			org := strings.TrimSpace(github.Org)
-			if org == "" && github.GitRepo != "" {
-				if cleaned, err := agentv1alpha1.CleanRepoSlug(github.GitRepo); err == nil {
-					parts := strings.SplitN(cleaned, "/", 2)
-					if len(parts) == 2 {
-						org = parts[0]
-					}
-				}
-			}
-			if org != "" {
-				envVars = append(envVars, corev1.EnvVar{
-					Name:  "GITHUB_ORG",
-					Value: org,
-				})
-			}
+		// GITHUB_ORG still names GitHub because that is what the agent reads it
+		// as; docs/designs/version-control-support.md §2 renames the vocabulary,
+		// and doing it here would rename a variable the pod's scripts still spell
+		// the old way. Until then it names the primary GitHub forge's namespace,
+		// and is unset when no GitHub forge is declared. While the declaration
+		// cannot name it, the pod keeps the one it has, as the minter does.
+		org := ""
+		if resolved, err := integration.ResolveGit(); err == nil {
+			org = resolved.PrimaryNamespace(agentv1alpha1.GitProviderGitHub)
+		}
+		if org == "" {
+			org = opts.heldGitHubOrg
+		}
+		if org != "" {
+			envVars = append(envVars, corev1.EnvVar{
+				Name:  "GITHUB_ORG",
+				Value: org,
+			})
 		}
 		if teams := integration.Teams; teams != nil && teams.Enabled != nil && *teams.Enabled {
 			allowAll := false
@@ -5340,6 +5402,10 @@ func isFQDNNetworkPolicyEnabled(agent *agentv1alpha1.PlatformAgent) bool {
 
 // buildFQDNNetworkPolicy generates the companion FQDNNetworkPolicy (networking.gke.io/v1alpha1)
 // for GKE Dataplane V2 clusters when enable-fqdn-network-policy annotation is set.
+//
+// It selects the gateway pod only. The credential broker, which is the pod that
+// actually calls the forge, is not covered by it; how the broker's egress should
+// be narrowed is an open question in docs/designs/version-control-support.md.
 func buildFQDNNetworkPolicy(agent *agentv1alpha1.PlatformAgent) *unstructured.Unstructured {
 	patterns := []string{
 		// Google APIs & GCP Services (Vertex AI, GKE, Cloud Logging/Monitoring, Workload Identity)
@@ -5367,10 +5433,17 @@ func buildFQDNNetworkPolicy(agent *agentv1alpha1.PlatformAgent) *unstructured.Un
 		"*.gcr.io",
 		"pkg.dev",
 		"*.pkg.dev",
-		// GitOps & Source Control
-		"github.com",
-		"*.github.com",
-		"*.githubusercontent.com",
+	}
+	// GitOps & Source Control: derived from the forge declaration, so a forge
+	// at a customer-chosen hostname is reachable without a literal here. Kept
+	// in its old position in the list, so an upgrade re-renders a GitHub
+	// install's policy byte for byte.
+	var integration *agentv1alpha1.IntegrationSpec
+	if agent != nil && agent.Spec.Integration != nil {
+		integration = &agent.Spec.Integration.IntegrationSpec
+	}
+	patterns = append(patterns, agentv1alpha1.ForgeEgressPatterns(integration)...)
+	patterns = append(patterns,
 		// Chat Integrations
 		"slack.com",
 		"*.slack.com",
@@ -5380,7 +5453,7 @@ func buildFQDNNetworkPolicy(agent *agentv1alpha1.PlatformAgent) *unstructured.Un
 		"*.login.microsoftonline.com",
 		"botframework.com",
 		"*.botframework.com",
-	}
+	)
 
 	matches := make([]interface{}, 0, len(patterns))
 	for _, p := range patterns {

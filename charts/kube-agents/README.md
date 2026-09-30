@@ -466,9 +466,29 @@ Use `telemetry.otlpEndpoint` instead when you do have a collector to point at.
   `tenantId`, and user authorization is configured via `allowedUsers` (or
   `allowAllUsers: true`). Supports Microsoft Adaptive Cards v1.5 with markdown
   fallback.
-- **GitHub** — `platformAgent.integration.github.org` sets the GitHub
-  Organization where the GitHub App is installed, and optional
-  `platformAgent.integration.github.gitRepo` sets the initial GitOps repository.
+- **Git forges and repositories** — `platformAgent.integration.forges` lists
+  the forges the agent talks to (`name`, `provider`, optional `host`,
+  `namespace` and `credentialsRef`), and
+  `platformAgent.integration.repositories` the repositories on them (`forge`,
+  `repository`, optional `namespace`, and `role`: `gitops` for the one the
+  agent publishes to, `managed` for others it may change, `context` for
+  read-only reference). `provider` defaults to `github`, the only one
+  registered today, and `credentialsRef` is ignored for it. A GitHub forge's
+  `host` must be a GitHub spelling (`github.com`, `www.github.com`,
+  `ssh.github.com`), and a repository must name a declared forge.
+  `platformAgent.integration.github.org` / `.gitRepo` remain as a deprecated
+  alias for one GitHub forge and its gitops repository — set the lists or the
+  alias, not both. The alias is still what `install.sh` and the
+  `full-install` Terraform composition write. One GitHub forge with no
+  `credentialsRef` and at most one repository, the gitops one, with no
+  namespace of its own, renders as `github`, whichever key set it, because
+  `helm upgrade` does not update CRDs — provided the forge declares a
+  namespace or the repository, and the repository is one the operator would
+  accept for GitHub (`name`, `owner/name`, or an `http(s)://`, `ssh://` or `git://` URL, a schemeless host or an scp remote on `github.com`, `www.github.com` or `ssh.github.com`, with no port, naming `owner/name`). Anything else renders as the lists, and on a live
+  install the render fails unless the installed CRD has them — apply
+  `charts/kube-agents/crds/` first. Enabling `githubMinter` when forges are
+  declared and none is GitHub fails the render, since minty issues GitHub App
+  tokens only.
   GitOps repositories can also be registered in the ConfigMap by cluster administrators.
 
 Chat, Slack, and Teams each need a one-time manual registration that no install

@@ -181,6 +181,15 @@ type ScopeClusterRef struct {
 }
 
 // PlatformAgentIntegrationSpec extends common IntegrationSpec with platform-specific connections.
+//
+// The rules below are the schema half of the forge declaration's checks: the
+// two spellings are exclusive, and a repository names a declared forge. The
+// webhook refuses the same CRs, but the chart ships it off and its default
+// failurePolicy is Ignore, and a CR the schema admitted would reach the
+// reconciler, which seeds only the entries it accepts and reports the rest as
+// Degraded long after the apply that introduced them succeeded.
+// +kubebuilder:validation:XValidation:rule="!(has(self.github) && (has(self.forges) || has(self.repositories)))",message="set integration.forges and integration.repositories, or integration.github, not both; integration.github is a deprecated alias for one forge with provider github"
+// +kubebuilder:validation:XValidation:rule="!has(self.repositories) || self.repositories.all(r, has(self.forges) && self.forges.exists(f, f.name == r.forge))",message="every integration.repositories entry must name a forge declared in integration.forges"
 type PlatformAgentIntegrationSpec struct {
 	IntegrationSpec `json:",inline"`
 
