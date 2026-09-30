@@ -1698,10 +1698,11 @@ volume on every start, before sshd is exec'd.
 
 The sync replaces rather than merges. Copying over the top leaves a skill deleted from
 the image, or a script renamed in it, sitting on the volume for as long as the PVC
-lives and looking current. That makes the trees image-owned: the model can edit a
-script it is debugging and the edit is gone at the next restart, which is the same
-contract the agent pod's force-sync gives. Model-written files belong in
-`/opt/data/scratch` and `/opt/data/gitops`, which the sync does not touch.
+lives and looking current. That makes the trees image-owned, and they are not the
+model's to change: the personas forbid it, because an edit made anyway is run by every
+later session in the pod until the next restart. To debug a script, copy it to
+`/opt/data/scratch` and run the copy. Model-written files belong in `/opt/data/scratch`
+and `/opt/data/gitops`, which the sync does not touch.
 
 Extending Hermes' sync to cover governance and scripts was the alternative, and it
 keeps one mechanism instead of two. It was rejected before the measurement above and
