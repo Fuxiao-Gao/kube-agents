@@ -6284,6 +6284,8 @@ class DomainScopedFlagsTest(unittest.TestCase):
         "--scope-projects": ("PARAM_SCOPE_PROJECTS", "payments-prod,payments-staging"),
         "--scope-folders": ("PARAM_SCOPE_FOLDERS", "123456789012"),
         "--scope-organizations": ("PARAM_SCOPE_ORGANIZATIONS", "987654321098"),
+        "--scope-shared-vpc-hosts": ("PARAM_SCOPE_SHARED_VPC_HOSTS", "shared-net-host"),
+        "--scope-metrics-scopes": ("PARAM_SCOPE_METRICS_SCOPES", "observability-hub"),
         "--scope-exclude-projects": ("PARAM_SCOPE_EXCLUDE_PROJECTS", "*-sandbox"),
         "--scope-exclude-clusters": ("PARAM_SCOPE_EXCLUDE_CLUSTERS", "payments-staging/us-central1/scratch"),
     }
@@ -7394,7 +7396,7 @@ class ScopeKeysAreRecordedAndWarnedTest(unittest.TestCase):
             cwd=str(_REPO_ROOT),
         )
 
-    def test_a_first_install_records_the_five_keys_even_when_empty(self):
+    def test_a_first_install_records_the_seven_keys_even_when_empty(self):
         with tempfile.TemporaryDirectory() as tmp:
             dest = pathlib.Path(tmp) / "new.install.env"
             loaded = pathlib.Path(tmp) / "loaded.install.env"
@@ -7403,7 +7405,7 @@ class ScopeKeysAreRecordedAndWarnedTest(unittest.TestCase):
             # Exported after the load, as main() exports the flags' values: the
             # loader drops an inherited key once an install.env exists.
             proc = self._run(
-                'export SCOPE_PROJECTS="payments-prod payments-staging" SCOPE_FOLDERS="123456789012" SCOPE_ORGANIZATIONS="" SCOPE_EXCLUDE_PROJECTS="" SCOPE_EXCLUDE_CLUSTERS=""\n'
+                'export SCOPE_PROJECTS="payments-prod payments-staging" SCOPE_FOLDERS="123456789012" SCOPE_ORGANIZATIONS="" SCOPE_SHARED_VPC_HOSTS="shared-net-host" SCOPE_METRICS_SCOPES="" SCOPE_EXCLUDE_PROJECTS="" SCOPE_EXCLUDE_CLUSTERS=""\n'
                 f'bootstrap_install_env_file "{dest}" some-tag >/dev/null\ncat "{dest}"',
                 env={"KUBE_AGENTS_INSTALL_ENV": str(loaded)},
             )
@@ -7411,6 +7413,8 @@ class ScopeKeysAreRecordedAndWarnedTest(unittest.TestCase):
             self.assertRegex(proc.stdout, re.compile(r"^SCOPE_PROJECTS=payments-prod\\ payments-staging$", re.MULTILINE))
             self.assertRegex(proc.stdout, re.compile(r"^SCOPE_FOLDERS=123456789012$", re.MULTILINE))
             self.assertRegex(proc.stdout, re.compile(r"^SCOPE_ORGANIZATIONS=''$", re.MULTILINE))
+            self.assertRegex(proc.stdout, re.compile(r"^SCOPE_SHARED_VPC_HOSTS=shared-net-host$", re.MULTILINE))
+            self.assertRegex(proc.stdout, re.compile(r"^SCOPE_METRICS_SCOPES=''$", re.MULTILINE))
             self.assertRegex(proc.stdout, re.compile(r"^SCOPE_EXCLUDE_PROJECTS=''$", re.MULTILINE))
             self.assertRegex(proc.stdout, re.compile(r"^SCOPE_EXCLUDE_CLUSTERS=''$", re.MULTILINE))
 
@@ -7420,8 +7424,10 @@ class ScopeKeysAreRecordedAndWarnedTest(unittest.TestCase):
         # record it is dropped again by the next run. A file that carries the
         # key sets it; a first install (no file) keeps the environment.
         probe = ('echo "P=${PARAM_SCOPE_PROJECTS:-unset} F=${PARAM_SCOPE_FOLDERS:-unset} O=${PARAM_SCOPE_ORGANIZATIONS:-unset} '
+                 'H=${PARAM_SCOPE_SHARED_VPC_HOSTS:-unset} M=${PARAM_SCOPE_METRICS_SCOPES:-unset} '
                  'X=${PARAM_SCOPE_EXCLUDE_PROJECTS:-unset} C=${PARAM_SCOPE_EXCLUDE_CLUSTERS:-unset}"')
         stray = {"SCOPE_PROJECTS": "stray-project", "SCOPE_FOLDERS": "111", "SCOPE_ORGANIZATIONS": "222",
+                 "SCOPE_SHARED_VPC_HOSTS": "stray-host", "SCOPE_METRICS_SCOPES": "stray-scope",
                  "SCOPE_EXCLUDE_PROJECTS": "*-stray", "SCOPE_EXCLUDE_CLUSTERS": "s/l/c"}
         with tempfile.TemporaryDirectory() as tmp:
             env_file = pathlib.Path(tmp) / "install.env"
@@ -7432,14 +7438,14 @@ class ScopeKeysAreRecordedAndWarnedTest(unittest.TestCase):
                 capture_output=True, text=True, cwd=str(_REPO_ROOT),
                 env=get_isolated_test_env(overrides={"KUBE_AGENTS_INSTALL_ENV": str(env_file), **stray}),
             )
-            self.assertIn("P=unset F=unset O=unset X=unset C=unset", proc.stdout, proc.stderr)
+            self.assertIn("P=unset F=unset O=unset H=unset M=unset X=unset C=unset", proc.stdout, proc.stderr)
             env_file.write_text("PROJECT_ID=p\nSCOPE_PROJECTS=from-the-file\n")
             proc = subprocess.run(
                 ["bash", "-c", f'KUBE_AGENTS_SOURCE_ONLY=true source "{_INSTALL_SH}"\n{probe}'],
                 capture_output=True, text=True, cwd=str(_REPO_ROOT),
                 env=get_isolated_test_env(overrides={"KUBE_AGENTS_INSTALL_ENV": str(env_file), **stray}),
             )
-            self.assertIn("P=from-the-file F=unset O=unset X=unset C=unset", proc.stdout, proc.stderr)
+            self.assertIn("P=from-the-file F=unset O=unset H=unset M=unset X=unset C=unset", proc.stdout, proc.stderr)
         # No file: a first install seeds from the environment and records it.
         with tempfile.TemporaryDirectory() as tmp:
             script_copy = pathlib.Path(tmp) / "install.sh"
@@ -7449,7 +7455,7 @@ class ScopeKeysAreRecordedAndWarnedTest(unittest.TestCase):
                 capture_output=True, text=True, cwd=tmp,
                 env=get_isolated_test_env(overrides={"HOME": tmp, **stray}),
             )
-            self.assertIn("P=stray-project F=111 O=222 X=*-stray C=s/l/c", proc.stdout, proc.stderr)
+            self.assertIn("P=stray-project F=111 O=222 H=stray-host M=stray-scope X=*-stray C=s/l/c", proc.stdout, proc.stderr)
 
     def test_a_flag_that_disagrees_with_the_recorded_file_warns_and_names_the_line(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -7529,6 +7535,8 @@ class ScopeKeysAreRecordedAndWarnedTest(unittest.TestCase):
         for flag, key in (("--scope-projects", "SCOPE_PROJECTS"),
                           ("--scope-folders", "SCOPE_FOLDERS"),
                           ("--scope-organizations", "SCOPE_ORGANIZATIONS"),
+                          ("--scope-shared-vpc-hosts", "SCOPE_SHARED_VPC_HOSTS"),
+                          ("--scope-metrics-scopes", "SCOPE_METRICS_SCOPES"),
                           ("--scope-exclude-projects", "SCOPE_EXCLUDE_PROJECTS"),
                           ("--scope-exclude-clusters", "SCOPE_EXCLUDE_CLUSTERS")):
             for value in ("", ",", " ", " , "):
@@ -7551,6 +7559,7 @@ class ScopeKeysAreRecordedAndWarnedTest(unittest.TestCase):
         )
         help_text = proc.stdout + proc.stderr
         for flag in ("--scope-projects=IDS", "--scope-folders=IDS", "--scope-organizations=IDS",
+                     "--scope-shared-vpc-hosts=IDS", "--scope-metrics-scopes=IDS",
                      "--scope-exclude-projects=IDS", "--scope-exclude-clusters=TRIPLES"):
             with self.subTest(flag=flag):
                 self.assertIn(flag, help_text)
@@ -7639,6 +7648,62 @@ class ScopeCheckWiringTest(unittest.TestCase):
         self.assertLess(preflight, crds)
         self.assertLess(crds, apply)
 
+    def test_the_selector_apis_are_enabled_where_the_apply_is_about_to_run(self):
+        # The plan-time resolution of a Shared VPC host or Metrics Scope reads
+        # three APIs the apply is what enables, so a first install enables
+        # them first: after the generate-only route has left, before the
+        # apply; and in the menu's re-apply, after the checks, before the CRDs.
+        handoff = self.text.index('print_generate_only_handoff "$repo_dir" "$project_id" "$cluster_name" "$region" "$tfvars_file"')
+        step12 = self.text.index('print_step "12. Applying the Install (Terraform + Helm)"')
+        enable = self.text.index('enable_scope_selector_apis "$project_id"')
+        apply = self.text.index('run_lifecycle_apply "$repo_dir" "$provisioning_log"')
+        self.assertLess(handoff, step12)
+        self.assertLess(step12, enable)
+        self.assertLess(enable, apply)
+        menu_check = self.text.index('        check_scope_container_access || exit 1\n        enable_scope_selector_apis "$PROJECT_ID"\n        apply_crd_upgrades "$repo_dir"')
+        self.assertLess(menu_check, handoff)
+
+    def test_the_dry_run_skips_its_plan_while_a_selector_api_is_off(self):
+        # A dry run enables nothing, so with a selector declared and one of
+        # the three APIs off its plan would be refused for a reason the real
+        # run, which enables them prior to apply, does not have: it skips the
+        # plan with the command instead, beside the other known-postcondition
+        # skips, and a listing that failed lets the plan speak.
+        branch = self.text.index('elif [[ "${SCOPE_SHARED_VPC_HOSTS:-}${SCOPE_METRICS_SCOPES:-}" == *[![:space:],]* ]] \\\n        && missing_apis="$(scope_selector_apis_missing "$project_id")" && [ -n "$missing_apis" ]; then')
+        node_pools = self.text.index('elif ! is_existing_cluster_node_pools_satisfied "$project_id" "$cluster_name" "$region"; then')
+        plan = self.text.index('print_info "Previewing the resources a real run would create (terraform plan)..."')
+        self.assertLess(node_pools, branch)
+        self.assertLess(branch, plan)
+        self.assertIn('print_warning "Dry-run: skipping terraform plan because ${missing_apis// /, } is not enabled in project', self.text[branch:plan])
+        self.assertIn('gcloud services enable ${missing_apis} --project=${project_id}', self.text[branch:plan])
+
+    def test_the_generate_only_handoff_names_the_selector_apis_only_when_a_selector_is_declared(self):
+        cmd_template = """
+{source}
+PROJECT_ID="test-proj"
+CLUSTER_NAME="test-cluster"
+INSTALL_ENV_FILE="/tmp/test/install.env"
+export SCOPE_METRICS_SCOPES="{scope}"
+print_generate_only_handoff "/tmp/test-repo" "test-proj" "test-cluster" "us-central1" "/tmp/test-repo/terraform/examples/full-install/terraform.tfvars"
+"""
+        # A Metrics Scope alone: the two APIs its reads use, not the Compute API a host's would.
+        line = "gcloud services enable cloudresourcemanager.googleapis.com monitoring.googleapis.com --project=test-proj"
+        with tempfile.TemporaryDirectory() as tmp:
+            empty = pathlib.Path(tmp) / "install.env"
+            empty.write_text("")
+            def run(scope):
+                setup = f'KUBE_AGENTS_SOURCE_ONLY=true source "{_INSTALL_SH}"\n' + cmd_template.format(source=_SOURCE_INSTALLER_COMMON, scope=scope)
+                return _run_installer_bash(setup, get_isolated_test_env(overrides={"KUBE_AGENTS_INSTALL_ENV": str(empty)}), cwd=_REPO_ROOT)
+            proc = run("observability-hub")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn(line, proc.stdout)
+            self.assertIn("enable them first, or the plan is refused", proc.stdout)
+            # Above the apply it has to precede, for an operator pasting top to bottom.
+            self.assertLess(proc.stdout.index(line), proc.stdout.index("./lifecycle.sh apply"))
+            proc = run("")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn(line, proc.stdout)
+
     def test_the_menu_refuses_a_scope_flag(self):
         proc = subprocess.run(
             ["bash", "-c", f'KUBE_AGENTS_SOURCE_ONLY=true source "{_INSTALL_SH}"\nparse_args --menu --scope-projects=p\necho "PASSED=$SCOPE_FLAG_PASSED"'],
@@ -7658,7 +7723,7 @@ class ScopeCheckWiringTest(unittest.TestCase):
         self.assertIn("The live-scope check does not run here", self.text)
         handoff = self.text[self.text.index("The live-scope check does not run here"):]
         handoff = handoff[:handoff.index("3. Out-of-Terraform post-apply steps")]
-        for phrase in ("SCOPE_PROJECTS, SCOPE_FOLDERS,", "SCOPE_ORGANIZATIONS and the two exclusions",
+        for phrase in ("SCOPE_PROJECTS, SCOPE_FOLDERS,", "SCOPE_ORGANIZATIONS, SCOPE_SHARED_VPC_HOSTS, SCOPE_METRICS_SCOPES and the two exclusions",
                        "the reconcile", "retires what it drops", "record it first", "preflight above does not refuse on this route"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, handoff)
