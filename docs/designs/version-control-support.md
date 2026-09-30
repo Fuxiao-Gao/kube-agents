@@ -2404,13 +2404,18 @@ that question.
 read of a large upstream repository, and there is no shallow option to make it
 cheaper.
 
-Throttling is legible to the agent and not to an operator.
+Throttling is legible to the agent and only partly to an operator.
 [Where the error contract splits](#where-the-error-contract-splits) puts the
-counters on the broker, but there is no Python metrics surface in this
-repository for them to join — the only convention that exists belongs to a
-single Go binary — so what they are called and what scrapes them is settled
-elsewhere, and until it is, an install approaching its token quota is visible in
-the broker's logs and nowhere else. The refusal is also thinner than it could
+counters on the broker, which now has a metrics surface for them to join: the
+`kubeagents_*` families the credential-proxy Pod serves and the chart's
+`<name>-credential-proxy-monitoring` scrapes
+([Concepts → Observability](../site/src/content/docs/concepts/observability.md)).
+The per-provider throttle counters that section assigns to the broker have not
+been added to it, so until they are, an install approaching its token quota is
+visible in the broker's logs and, by status code alone, as `429`s under
+`endpoint="/v1/vcs"` in `kubeagents_credential_proxy_requests_total`, the route
+family every forge verb travels (`/v1/forge` reaches only the credential
+refresh, which spends no quota). The refusal is also thinner than it could
 be: `FORGE_UNAVAILABLE` tells a caller the same call may work later without
 telling it when, and the `Retry-After` and `RateLimit-*` values both forges
 return are read to classify the failure and then dropped rather than carried

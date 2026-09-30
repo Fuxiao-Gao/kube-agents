@@ -392,18 +392,22 @@ of applying the port-443 check. The site's telemetry page is canonical for this
 rule as well as for the full precedence
 ladder and discovery rules: [Deploy → Telemetry](https://gke-labs.github.io/kube-agents/deploy/telemetry/#pointing-at-your-own-collector).
 
-`platformAgent.podMonitoring` renders a `PodMonitoring` for the gateway pod, so
-GKE Managed Prometheus scrapes the event watcher's `k8s_event_watcher_*` metrics
-from the `agent-api-auth` sidecar's port 9095. The operator's gateway
-NetworkPolicy admits the collector on that port either way; the value only
-decides whether a scrape is configured. It is a tri-state: `null`, the default,
-renders it when the cluster serves the `PodMonitoring` API and nothing
-elsewhere, so an install off GKE, or on a GKE cluster with Managed Prometheus
-turned off, upgrades without setting anything; `true` renders it regardless and
-fails at apply time where the CRD is absent, the caveat `litellm.podMonitoring`
-carries; `false` never renders it. `helm template` alone has no cluster to ask:
-pass `--api-versions monitoring.googleapis.com/v1/PodMonitoring` to see the
-default render.
+`platformAgent.podMonitoring` renders a `PodMonitoring` for each of the agent's
+pods that serves metrics: the gateway pod, so GKE Managed Prometheus scrapes the
+event watcher's `k8s_event_watcher_*` metrics from the `agent-api-auth` sidecar's
+port 9095, and the credential-proxy pod, so it scrapes the broker's `kubeagents_*`
+tool-invocation and request metrics from its metrics-only port 8766. The
+operator's policies on both pods admit the collector's namespace, `gke-gmp-system`,
+on those ports either way; the value only decides whether a scrape is configured.
+It is a tri-state: `null`,
+the default, renders them when the cluster serves the `PodMonitoring` API and
+nothing elsewhere, so an install off GKE, or on a GKE cluster with Managed
+Prometheus turned off, upgrades without setting anything; `true` renders them
+regardless and fails at apply time where the CRD is absent, the caveat
+`litellm.podMonitoring` carries; `false` never renders them. `helm template`
+alone has no cluster to ask: pass
+`--api-versions monitoring.googleapis.com/v1/PodMonitoring` to see the default
+render.
 
 ### Turning telemetry off
 
