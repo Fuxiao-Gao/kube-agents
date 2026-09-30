@@ -30,14 +30,18 @@ documentation and governance playbooks around them.
    validated candidate that passes the full E2E matrix to `staging_YYMMDDHHMM_<short_sha>`. The
    promotion has a second gate in front of it: the nightly first pushes
    `evalcand_YYMMDDHHMM_<short_sha>`, which triggers the release-candidate eval on Prow, and only a
-   GREEN verdict there produces the staging tag. That staging tag is what a GA release is gated on —
+   GREEN verdict there produces the staging tag. That staging tag is what a GA release from `main` is gated on —
    see `scripts/release/README.md`.
 4. **GA release pipeline creates stamped release child commit.** When promoting a staging-promoted
    candidate, `release-publish.yml` creates a single-parent child commit on detached HEAD
-   (baking `BAKED_RELEASE_VERSION` into installer scripts, and stamping SemVer release versions into Helm `Chart.yaml` and Terraform defaults), tags it `MAJOR.MINOR.PATCH` (`X.Y.Z`), then pushes it to the branch `release/X.Y.Z`,
-   and orchestrates clean image promotion and chart publication. The branch is what makes the
-   commit belong to the repository rather than to its tag alone, and there is one per release
-   because each release stamps a fresh child of a `main` commit. Because the GA tag points at this
+   (baking `BAKED_RELEASE_VERSION` into installer scripts, and stamping SemVer release versions into Helm `Chart.yaml` and Terraform defaults), tags it `MAJOR.MINOR.PATCH` (`X.Y.Z`) and pushes the tag and the release line `release/X.Y`
+   together in one atomic push, and orchestrates clean image promotion and chart publication. The
+   line's first release creates it at the stamped commit; a later patch is stamped from the line's
+   head and fast-forwards it, so every release commit stays reachable from a branch and nothing is
+   force-pushed. Patches are cut from the line
+   (fixes cherry-picked onto it, `rc_*_validated` on its head, a dispatch naming the line), and
+   once a line exists `main` bumps at least MINOR; the base of every version bump and release-notes
+   range is found by ancestry, not by number. Because the GA tag points at this
    stamped child commit outside `main`, `git log main` does not show the release commit and
    `git describe --tags` on `main` does not resolve to the GA tag (which is why `default_image_tag`
    matches numeric SemVer tags explicitly). Git tag resolution for Terraform module consumption
