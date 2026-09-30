@@ -248,6 +248,12 @@ KNOWN_NO_DOMAIN = {
         "journey -- a proposed fix landing as a pull request -- and this case "
         "proposes no fix"
     ),
+    "vcs-spent-branch-reuse": (
+        "a second proposal opened under a branch name whose first proposal "
+        "was closed, graded on the branch the pull request came from; like "
+        "vcs-review-feedback-read-back it proposes no fix, and "
+        "rca-remediation-pr owns the remediation journey"
+    ),
     "gpu-stress-test-diagnosis": (
         "a chat-prompted post-incident RCA, not the event-fired autoops triage "
         "that incident-triage names; no domains.yaml row describes it"

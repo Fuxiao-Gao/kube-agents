@@ -2418,6 +2418,9 @@ unit_cost_hint() {
     # (710/710/735/1325s, 2026-09-23): the platform worker fans out to every
     # Cluster Agent profile in the fleet before the payments-api one reports.
     cluster-agent-delegation-profile-lookup) echo 720 ;;
+    # Two prepare/submit rounds and a close. Measured on `dev-1918-69fd3893`:
+    # 587-1512s a repetition, 937s the middle one.
+    vcs-spent-branch-reuse) echo 1000 ;;
     *) echo 200 ;;
   esac
 }

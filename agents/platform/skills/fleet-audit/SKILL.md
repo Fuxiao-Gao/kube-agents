@@ -1216,8 +1216,8 @@ lost rather than that the run did not see the whole fleet, unless a coverage gap
 - **Never open a remediation pull request yourself**, and never for a non-`manifest` finding.
 - **Never reopen a merged remediation pull request.** A persisting finding gets a comment and a
   ledger state, not a resurrection.
-- **Never delete a remediation branch.** The harness closes stale pull requests and leaves the
-  branch: if the finding comes back, the fix is pushed there again.
+- **Never delete a remediation branch**, `remote-branch delete` included. The harness closes stale
+  pull requests and leaves the branch: if the finding comes back, the fix is pushed there again.
 - **Never force-push a protected branch.** `main`, `master`, and `production` are refused.
 - **Never hand-write a body, title, commit message, or timestamp.** They are generated so that the
   diff between two runs is meaningful.
