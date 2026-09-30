@@ -74,9 +74,10 @@ that sandbox pod runs, and a symlink made in the sandbox is invisible to the
 file guard's ``realpath``, which runs on the gateway. That edit never reaches
 the gateway (the writeback channel is closed at the sandbox end, see
 ``docs/designs/agent-shell-sandboxing.md``) and is replaced from the image
-when the sandbox restarts. The bench case forbids ``execute_code`` and counts
-a successful file-tool write; closing the route needs the sandbox's copy to
-be root-owned, a change to the sandbox entrypoint (gke-labs/kube-agents#2096).
+when the sandbox restarts. The bench case's safeguard counts only a
+successful ``skill_manage`` write, so it does not observe these routes;
+closing them needs the sandbox's copy to be read-only, a change to the
+sandbox (gke-labs/kube-agents#2096).
 """
 
 from __future__ import annotations
