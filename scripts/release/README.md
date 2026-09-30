@@ -449,10 +449,11 @@ line; a patch is validated by the RC pipeline and released by hand.
    create, push or delete a line — the bot because the tagger pushes a freshly stamped commit,
    which has had no checks run. Both are repository settings, not files in this tree; if a
    backport pull request shows no required checks or merges without them, that is where to
-   look. A checkout of a line between stamps
-   carries the previous release's `BAKED_RELEASE_VERSION`, so `install.sh` from a backport
-   checkout refuses rather than asks for a version: pass `--image-tag <sha>` of the backport's
-   images, as for any `main` commit.
+   look. A checkout of a line between stamps carries the previous release's
+   `BAKED_RELEASE_VERSION`; run from it, with the release's tag and full history fetched,
+   `install.sh` recognises the shape and defaults to the checkout's own commit, as on `main`,
+   and `upgrade.sh` asks for `--image-tag`. `--image-tag <sha>` of the backport's images works
+   from anywhere, as for any `main` commit.
 2. **Validate the line's head.**
 
    ```bash
