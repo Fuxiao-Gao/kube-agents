@@ -1214,9 +1214,13 @@ fi
 # is otherwise frozen at whatever version first created the PVC — a helper script
 # fixed months ago is still the broken one on every upgraded cluster.
 #
-# Skills are wholly image-owned (nothing writes runtime state under them; the
-# cluster overlay list in cluster_agent_profile.py:OVERLAY_ITEMS treats them the
-# same way), so this is a whole-directory REPLACE rather than a copy-over: a
+# Skills are wholly image-owned (nothing durable lives under them: the cluster
+# overlay list in cluster_agent_profile.py:OVERLAY_ITEMS treats them the same
+# way, the image's skill_manage gate refuses a write that would touch a shipped
+# skill and its file tools refuse any write under the tree --
+# deploy/docker/patches/skill_manage_image_owned.py -- and a skill the
+# agent authors under a new name is discarded by this replace, deliberately),
+# so this is a whole-directory REPLACE rather than a copy-over: a
 # skill deleted from the image has to actually disappear, or a retired procedure
 # stays loadable forever. That is also why this still runs for the platform
 # profile even though step 2.6 just listed `skills` in its --items: the
