@@ -561,7 +561,12 @@ Four states that look like somebody else's problem and are not:
 one decision this repository automates — it declines to request a reviewer for a draft, for a title
 carrying an ignored keyword, when someone is already requested, when an `OWNERS` approver for one of
 the changed files has submitted `APPROVED`, and when a human other than the author has submitted
-`CHANGES_REQUESTED` — each person's latest verdict, as GitHub counts them. An approval from outside
+`CHANGES_REQUESTED` — each person's latest verdict, as GitHub counts them. An account
+`.github/auto_request_review.yml` lists under `options.robot_accounts` is no person to either rule: a
+robot that reviews under a user account re-reviews every push and files its follow-ups as
+`COMMENTED`, so a `CHANGES_REQUESTED` it once filed would otherwise stand for the life of the pull
+request and the check-run path would never request a human, and a review request outstanding to it
+is answered by the robot and cleared, so it counts as nobody asked. An approval from outside
 `OWNERS` is not a hand-off: it cannot produce the `approved` label, so it counts no more than a
 comment. Of these reasons, `/request-review` skips the verdict check alone (it also bypasses the
 `AI Review` gate, per `AGENTS.md`) — a person has already read the pull request and asked — and when
