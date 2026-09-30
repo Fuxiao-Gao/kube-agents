@@ -18,6 +18,9 @@ export DEFAULT_INITIAL_VERSION="0.1.0"
 # The shape of a GA release tag: pure numeric X.Y.Z, no 'v' prefix. One
 # definition, so the validator and the two tag lookups below cannot drift apart.
 readonly GA_TAG_SHAPE_REGEX='^[0-9]+\.[0-9]+\.[0-9]+$'
+# The subject the GA tagger gives the stamped release commit; the version
+# follows. What is_valid_stamped_or_direct_release_commit recognises.
+readonly RELEASE_STAMP_SUBJECT_PREFIX="chore(release): stamp release version"
 
 # The branch each GA release commit is pushed to, alongside its tag:
 # `release/<X.Y.Z>`. One branch per release rather than per line, because every
@@ -29,6 +32,11 @@ readonly RELEASE_BRANCH_PREFIX="release/"
 # The full ref a branch lives under, for the lookups and refspecs that must not
 # be satisfied by a tag of the same name.
 readonly GIT_BRANCH_REF_PREFIX="refs/heads/"
+# The branch every nightly and eval candidate is cut from, the remote-tracking
+# ref a full clone keeps for it, and the ref a bare `git fetch` leaves behind.
+readonly RELEASE_MAIN_BRANCH="main"
+readonly RELEASE_MAIN_TRACKING_REF="refs/remotes/origin/main"
+readonly GIT_FETCH_HEAD_REF="FETCH_HEAD"
 
 # The registry the docker-free existence probe below knows how to query, and the
 # manifest media types that probe must accept. Omitting the OCI types gets a
@@ -36,6 +44,9 @@ readonly GIT_BRANCH_REF_PREFIX="refs/heads/"
 # 404 that reads as a missing image rather than as a wrong header.
 export GHCR_REGISTRY_HOST="ghcr.io"
 export GHCR_MANIFEST_ACCEPT="application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json"
+# The two registry answers ghcr_image_status tells apart; anything else is an error.
+readonly HTTP_STATUS_OK="200"
+readonly HTTP_STATUS_NOT_FOUND="404"
 
 # Declarative registry of all required release container images
 export REQUIRED_RELEASE_IMAGES=(
@@ -295,9 +306,103 @@ get_previous_ga_tag() {
   echo "${previous}"
 }
 
-# Finds the latest validated release candidate tag (rc_*_validated)
+# The ref that stands for `main` in this checkout. In CI it is the release
+# repository's `main`, fetched now: a checkout whose origin is a fork, or whose
+# remote-tracking ref is stale, must not answer with an old main, so a fetch
+# that fails is an error there rather than a fall-through to the tracking ref.
+# A shallow CI checkout is unshallowed first and refused if that fails, since
+# past a shallow boundary every ancestry test reads "no", which would drop every
+# candidate but the tip. Off CI nothing is fetched: the tracking ref or a local
+# `main` answers, with a note that it is only as fresh as the last fetch, and a
+# shallow checkout resolves nothing. Prints the ref, or nothing.
+release_main_ref() {
+  local shallow
+  shallow="$(git rev-parse --is-shallow-repository 2>/dev/null || echo false)"
+  if is_ci_pipeline; then
+    if [ "${shallow}" = "true" ]; then
+      git fetch --unshallow "$(release_repo_url)" >/dev/null 2>&1 || true
+      if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = "true" ]; then
+        echo "❌ ERROR: This checkout is shallow, and ancestry against main cannot be read past its boundary." >&2
+        return 1
+      fi
+    fi
+    # The full ref, so a tag that happens to be named `main` cannot answer for
+    # the branch: a bare `main` refspec resolves tags before heads.
+    if ! git fetch "$(release_repo_url)" "${GIT_BRANCH_REF_PREFIX}${RELEASE_MAIN_BRANCH}" >/dev/null 2>&1; then
+      echo "❌ ERROR: Could not fetch ${RELEASE_MAIN_BRANCH} from $(release_repo_url); not falling back to a tracking ref that may be stale." >&2
+      return 1
+    fi
+    echo "${GIT_FETCH_HEAD_REF}"
+    return 0
+  fi
+  if [ "${shallow}" = "true" ]; then
+    return 1
+  fi
+  local ref
+  for ref in "${RELEASE_MAIN_TRACKING_REF}" "${GIT_BRANCH_REF_PREFIX}${RELEASE_MAIN_BRANCH}"; do
+    if git rev-parse --verify --quiet "${ref}" >/dev/null 2>&1; then
+      echo "ℹ️ Filtering candidates against ${ref}, which is as fresh as this checkout's last fetch." >&2
+      echo "${ref}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Lists the tags matching a glob whose commit is on main, newest by name first,
+# which for the rc_ families is newest by timestamp. The candidate pickers below
+# sort tags by name, and a release line's RC tags share the namespace: without
+# this the first `rc_` tag cut on `release/<X.Y>` would be the newest of all,
+# and the nightly promotion and the Prow eval would both adopt a line commit
+# as main's candidate. In CI a `main` that cannot be read is an error rather
+# than a guess; off CI the list passes through unfiltered with a warning, so a
+# hand run in a partial checkout still answers.
+# Arguments: $1 = tag glob
+list_tags_on_main() {
+  local glob="${1:-}"
+
+  if [ -z "${glob}" ]; then
+    echo "❌ ERROR: a tag glob is required for list_tags_on_main." >&2
+    return 1
+  fi
+
+  local main_ref
+  if ! main_ref="$(release_main_ref)"; then
+    if is_ci_pipeline; then
+      echo "❌ ERROR: Could not resolve main in this checkout; refusing to pick a candidate without it." >&2
+      return 1
+    fi
+    echo "⚠️ Warning: main cannot be read reliably here (missing, or a shallow checkout); not filtering candidates to it." >&2
+    git tag -l --sort=-v:refname "${glob}" 2>/dev/null || true
+    return 0
+  fi
+  # A tag that does not peel to a commit is passed through rather than dropped:
+  # `--merged` cannot place it, and the caller's own resolution then fails
+  # loudly, which is what a broken tag graph owes rather than a quiet
+  # "no candidate" that stays green until somebody deletes the tag.
+  local all_tags on_main tag
+  all_tags="$(git tag -l --sort=-v:refname "${glob}" 2>/dev/null || true)"
+  on_main="$(git tag -l --sort=-v:refname --merged "${main_ref}" "${glob}" 2>/dev/null || true)"
+  while IFS= read -r tag; do
+    [ -n "${tag}" ] || continue
+    if grep -Fxq "${tag}" <<<"${on_main}"; then
+      echo "${tag}"
+    elif ! git rev-parse --verify --quiet "refs/tags/${tag}^{commit}" >/dev/null 2>&1; then
+      echo "${tag}"
+    fi
+  done <<<"${all_tags}"
+}
+
+# Finds the latest validated release candidate tag (rc_*_validated) on main.
+# A release line's validation is the gate for that line's own patch release,
+# never a nightly candidate: see list_tags_on_main.
 get_latest_validated_rc_tag() {
-  git tag -l --sort=-v:refname 'rc_*_validated' 2>/dev/null | grep -E '^rc_.*_validated$' | head -n 1 || echo ""
+  local on_main validated
+  on_main="$(list_tags_on_main 'rc_*_validated')" || return 1
+  # Materialised before `head`: under pipefail, `head` closing the pipe after
+  # the first line would end the producer with SIGPIPE and read as a failure.
+  validated="$(grep -E '^rc_.*_validated$' <<<"${on_main}" || true)"
+  head -n 1 <<<"${validated}"
 }
 
 # Reads the commits between the last GA tag and a candidate, into
@@ -487,6 +592,62 @@ registry_image_exists() {
     -H "Authorization: Bearer ${token}" \
     -H "Accept: ${GHCR_MANIFEST_ACCEPT}" \
     "https://${GHCR_REGISTRY_HOST}/v2/${repo}/manifests/${reference}" >/dev/null 2>&1
+}
+
+# Whether a GHCR image is there, with the answer the boolean probe above
+# cannot give: `present`, `absent` (the registry said 404) or `error` (the
+# registry could not be asked, or answered anything else). A caller deciding
+# whether to overwrite a tag needs the third answer; a probe failure read as
+# "absent" is a rebuild over manifests that were validated. Always exits 0 and
+# prints one word; the registry is asked over its API, never through docker,
+# whose `manifest inspect` exits 1 for a missing image and an outage alike.
+# Arguments: $1 = image reference under GHCR_REGISTRY_HOST
+ghcr_image_status() {
+  local img="${1:-}"
+
+  case "${img}" in
+    "${GHCR_REGISTRY_HOST}"/*) ;;
+    *)
+      echo "error"
+      return 0
+      ;;
+  esac
+
+  local path="${img#"${GHCR_REGISTRY_HOST}"/}"
+  local last_segment="${path##*/}"
+  local repo reference
+  if [ "${path}" != "${path#*@}" ]; then
+    repo="${path%%@*}"
+    reference="${path#*@}"
+  elif [ "${last_segment}" != "${last_segment%:*}" ]; then
+    repo="${path%:*}"
+    reference="${path##*:}"
+  else
+    repo="${path}"
+    reference="latest"
+  fi
+
+  local token
+  token="$(curl -fsSL "https://${GHCR_REGISTRY_HOST}/token?scope=repository:${repo}:pull&service=${GHCR_REGISTRY_HOST}" 2>/dev/null |
+    sed -n 's/.*"token":"\([^"]*\)".*/\1/p')"
+  if [ -z "${token}" ]; then
+    echo "error"
+    return 0
+  fi
+
+  local http_code
+  if ! http_code="$(curl -sS -o /dev/null -I -w '%{http_code}' \
+    -H "Authorization: Bearer ${token}" \
+    -H "Accept: ${GHCR_MANIFEST_ACCEPT}" \
+    "https://${GHCR_REGISTRY_HOST}/v2/${repo}/manifests/${reference}" 2>/dev/null)"; then
+    echo "error"
+    return 0
+  fi
+  case "${http_code}" in
+    "${HTTP_STATUS_OK}") echo "present" ;;
+    "${HTTP_STATUS_NOT_FOUND}") echo "absent" ;;
+    *) echo "error" ;;
+  esac
 }
 
 # Checks if all required candidate container images exist in GHCR for a specific commit SHA
@@ -696,8 +857,8 @@ staging_tag_for_rc() {
 # guarantee the shape makes it look like.
 export STAGING_TAG_SHAPE_REGEX='^staging_[0-9]{10}_[0-9a-f]{7}$'
 
-# Finds the newest shape-valid staging promotion tag anywhere in the repository.
-# Empty output means nothing has been promoted to staging.
+# Finds the newest shape-valid staging promotion tag on main. Empty output
+# means nothing has been promoted to staging.
 #
 # `--sort=-v:refname` orders by the timestamp immediately after the prefix, which
 # is why staging_tag_for_rc puts it there. The list is materialised before it is
@@ -705,9 +866,13 @@ export STAGING_TAG_SHAPE_REGEX='^staging_[0-9]{10}_[0-9a-f]{7}$'
 # closing the pipe early makes grep exit 141, which a trailing `|| echo ""` then
 # turns into "nothing has passed the gate" — a skipped release, silently, once
 # the tag list outgrows a pipe buffer.
+# On main, like the rc_ pickers (list_tags_on_main): the GA gate, the publish
+# auto-resolve, the version calculator and the staging deploy all read this,
+# and a staging_ tag a hand-dispatched promotion left on a release-line commit
+# must not become main's release candidate.
 get_latest_staging_tag() {
   local tags
-  tags="$(git tag -l --sort=-v:refname "${STAGING_TAG_PREFIX}*" 2>/dev/null || true)"
+  tags="$(list_tags_on_main "${STAGING_TAG_PREFIX}*")" || return 1
   grep -m1 -E "${STAGING_TAG_SHAPE_REGEX}" <<<"${tags}" || true
 }
 
@@ -1326,7 +1491,7 @@ is_valid_stamped_or_direct_release_commit() {
 
   local commit_subject
   commit_subject="$(git log -1 --format=%s "${tag_commit}" 2>/dev/null || echo "")"
-  local expected_subject="chore(release): stamp release version ${version}"
+  local expected_subject="${RELEASE_STAMP_SUBJECT_PREFIX} ${version}"
   if [ "${commit_subject}" != "${expected_subject}" ]; then
     echo "⚠️ Tag commit ${tag_commit:0:7} subject '${commit_subject}' does not match expected stamped subject '${expected_subject}'." >&2
     return 1
@@ -1409,7 +1574,7 @@ create_stamped_release_commit() {
     echo "📝 Stamping release version '${version}' in release tag commit..." >&2
     setup_git_bot_user
     git -C "${repo_dir}" add "${modified_files[@]}"
-    git -C "${repo_dir}" commit -m "chore(release): stamp release version ${version}" >/dev/null
+    git -C "${repo_dir}" commit -m "${RELEASE_STAMP_SUBJECT_PREFIX} ${version}" >/dev/null
     git -C "${repo_dir}" rev-parse HEAD
   else
     echo "${target_sha}"

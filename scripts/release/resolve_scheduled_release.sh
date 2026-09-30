@@ -147,7 +147,14 @@ LATEST_GA_TAG="$(get_latest_ga_tag)"
 # "which candidate has been promoted" is how this gate and
 # verify_release_eligibility.sh drift apart, and they have to agree or the
 # resolver waves through a commit the publish job then refuses with exit 1.
-GATE_TAG="$(get_latest_staging_tag)"
+# The picker reads main from the release repository in CI and fails when it
+# cannot; that failure has to leave through emit_and_exit like every other, or
+# the outputs the gate job declares are empty for the reader asking why.
+if ! GATE_TAG="$(get_latest_staging_tag)"; then
+  ERRORED="true"
+  SKIP_REASON="Could not read the tag graph against main — see the log."
+  emit_and_exit
+fi
 if [ -z "${GATE_TAG}" ]; then
   SKIP_REASON="No candidate has passed the gate — no 'staging_<ts>_<sha>' tag exists."
   emit_and_exit

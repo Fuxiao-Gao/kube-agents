@@ -17,14 +17,14 @@ older release's checkout, and what they leave as it is.
 
 Every commit and build progresses through six distinct lifecycle tiers:
 
-| Tier                       | Format                                | Trigger                       | Purpose and guarantees                                                                                                                                   |
-| :------------------------- | :------------------------------------ | :---------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Candidate Build**        | `<COMMIT_SHA>` (bare 40-char SHA)     | Push to `main` branch         | Developer build in GHCR; container images built once.                                                                                                    |
-| **Release Candidate (RC)** | `rc_YYMMDDHHMM_<SHORT_SHA>`           | 3-hour cron / manual dispatch | Candidate build selected for live cluster testing.                                                                                                       |
-| **RC Validated**           | `rc_YYMMDDHHMM_<SHORT_SHA>_validated` | Successful GKE E2E suite      | Quality gate: proof that `install.sh` succeeded on a real GKE cluster.                                                                                   |
-| **Eval Candidate**         | `evalcand_YYMMDDHHMM_<SHORT_SHA>`     | Successful nightly matrix     | Nomination, not a promotion: starts the agent eval against the candidate's images, over the same case matrix that gates a pull request. Deploys nothing. |
-| **Staging Promoted**       | `staging_YYMMDDHHMM_<SHORT_SHA>`      | Green eval on the nomination  | Quality gate for GA: the nightly E2E matrix and the agent eval both passed. Also the deploy trigger for the staging estate.                              |
-| **GA Stable**              | `X.Y.Z` (pure numeric SemVer)         | Weekly cron / manual dispatch | Official production release tagged on a stamped commit parented by the target commit (staging-promoted by default).                                      |
+| Tier                       | Format                                | Trigger                                       | Purpose and guarantees                                                                                                                                   |
+| :------------------------- | :------------------------------------ | :-------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Candidate Build**        | `<COMMIT_SHA>` (bare 40-char SHA)     | Push to `main` or to a `release/<X.Y>` branch | Developer build in GHCR; container images built once.                                                                                                    |
+| **Release Candidate (RC)** | `rc_YYMMDDHHMM_<SHORT_SHA>`           | 3-hour cron / manual dispatch                 | Candidate build selected for live cluster testing.                                                                                                       |
+| **RC Validated**           | `rc_YYMMDDHHMM_<SHORT_SHA>_validated` | Successful GKE E2E suite                      | Quality gate: proof that `install.sh` succeeded on a real GKE cluster.                                                                                   |
+| **Eval Candidate**         | `evalcand_YYMMDDHHMM_<SHORT_SHA>`     | Successful nightly matrix                     | Nomination, not a promotion: starts the agent eval against the candidate's images, over the same case matrix that gates a pull request. Deploys nothing. |
+| **Staging Promoted**       | `staging_YYMMDDHHMM_<SHORT_SHA>`      | Green eval on the nomination                  | Quality gate for GA: the nightly E2E matrix and the agent eval both passed. Also the deploy trigger for the staging estate.                              |
+| **GA Stable**              | `X.Y.Z` (pure numeric SemVer)         | Weekly cron / manual dispatch                 | Official production release tagged on a stamped commit parented by the target commit (staging-promoted by default).                                      |
 
 Only a staging-promoted commit is releasable. An `rc_*_validated` tag records the narrow
 three-hourly suite; the GA gate reads the `staging_<ts>_<sha>` tag, which the nightly pipeline
@@ -51,11 +51,11 @@ fails with it, and the tag has to be deleted by hand before the commit can be me
 The RC pipeline, the nightly staging promotion, and the GA release all run on schedules,
 with manual dispatches available for overrides and off-schedule releases.
 
-| Step                        | When it runs                                                                                                               |
-| :-------------------------- | :------------------------------------------------------------------------------------------------------------------------- |
-| RC selection and validation | Every three hours, at 17 minutes past. Dispatches nothing when the newest candidate has already been tried.                |
-| Staging promotion           | Daily at 02:17 UTC, against the newest validated candidate. One already nominated or promoted is re-tested, not re-tagged. |
-| GA release                  | Weekly on Fridays at 05:17 UTC, or when a maintainer dispatches it.                                                        |
+| Step                        | When it runs                                                                                                                         |
+| :-------------------------- | :----------------------------------------------------------------------------------------------------------------------------------- |
+| RC selection and validation | Every three hours, at 17 minutes past. Dispatches nothing when the newest candidate on `main` has already been tried.                |
+| Staging promotion           | Daily at 02:17 UTC, against the newest validated candidate on `main`. One already nominated or promoted is re-tested, not re-tagged. |
+| GA release                  | Weekly on Fridays at 05:17 UTC, or when a maintainer dispatches it.                                                                  |
 
 A staging promotion is not finished when its matrix goes green. The eval runs between the
 nomination and the tag and takes hours, so the `staging_*` tag can appear most of a working day
@@ -116,7 +116,7 @@ Maintainers do, on the Friday schedule above or by hand. An emergency hotfix can
 
 The release publish workflow enforces byte-for-byte fidelity with tested candidate binaries across seven layers:
 
-1. Container images are compiled only once on push to `main`. The release retags the existing `<TARGET_COMMIT>` manifests to numeric `X.Y.Z` in GHCR without rebuilding.
+1. Container images are compiled once, when a commit is pushed to `main` or merged onto a `release/<X.Y>` branch; on a release line a commit that already has images is never rebuilt, `:latest` moves only for `main`, and a push to a `release/X.Y.Z` branch builds nothing. The release retags the existing `<TARGET_COMMIT>` manifests to numeric `X.Y.Z` in GHCR without rebuilding.
 2. Promoted container images in GHCR are cryptographically signed using Keyless Cosign via GitHub Actions OIDC tokens.
 3. The Helm chart is packaged at version `X.Y.Z` (matching `appVersion`), pushed as an OCI package to `oci://ghcr.io/gke-labs/kube-agents/charts/kube-agents:X.Y.Z`, and its OCI manifest signed via Cosign.
 4. A single-parent release commit is created on detached HEAD with `BAKED_RELEASE_VERSION="X.Y.Z"` stamped into the root scripts (`install.sh`, `uninstall.sh`, `upgrade.sh`), the Helm chart version (`charts/kube-agents/Chart.yaml`) and the Terraform default image tags (`terraform/examples/full-install/variables.tf`, `terraform.tfvars.example`); the tag is placed on that stamped commit, which is then pushed to the branch `release/X.Y.Z`.
