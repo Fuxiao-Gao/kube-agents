@@ -93,10 +93,13 @@ canonical-home table in [`AGENTS.md`](../AGENTS.md) — do not duplicate a fact
 outside its home; link to it.
 
 The artifacts below are **generated, not hand-written** — regions inside
-hand-written documents (a region may be spliced into several pages), plus one
-whole file. `scripts/generate_docs.py` (run via `make docs-generate`) rewrites
-everything between the markers; everything outside them is hand-written. Never
-edit inside the markers — edit the source and regenerate.
+hand-written documents (a region may be spliced into several pages), one
+whole file, and the line-number pins inside the governance cron prompts.
+`scripts/generate_docs.py` (run via `make docs-generate`) rewrites everything
+between the markers and the whole file; `scripts/generate_sop_geography.py`
+(run first by the same target) rewrites the pins' digits and nothing else.
+Everything outside the markers and the pins is hand-written. Never edit inside
+the markers — edit the source and regenerate.
 
 <!-- prettier-ignore -->
 | Generated file or region | Block marker | Source of truth |
@@ -106,12 +109,14 @@ edit inside the markers — edit the source and regenerate.
 | `docs/site/src/content/docs/skills/index.mdx` | `{/* BEGIN GENERATED: skill-catalog */}` (MDX comment syntax) | `name`/`description` frontmatter of every `agents/platform/skills/*/SKILL.md` and `agents/cluster/skills/*/SKILL.md` |
 | `docs/site/src/content/docs/deploy/docker-images.md` | `<!-- BEGIN GENERATED: container-images -->` | `images.json` |
 | `docs/family-roster.txt` | whole file (`family-roster`) | The collapsed-family globs in this map's section 4, resolved against `git ls-files` |
+| `agents/platform/cron/jobs.json` — the SOP length and checks-section line range each governance prompt cites | none: `scripts/generate_sop_geography.py` rewrites the digits in place (`make docs-generate` runs it first) | The `agents/platform/governance/*_sop.md` each prompt names |
 
 CI enforcement: `make docs-check` runs the same checks as
 `.github/workflows/docs-check.yml` —
 
-- `docs-check-generated` — `scripts/generate_docs.py --check`; fails if a
-  generated region or file no longer matches its source. This is what catches a
+- `docs-check-generated` — `scripts/generate_sop_geography.py --check` and
+  `scripts/generate_docs.py --check`; fails if a generated region, file or
+  prompt line pin no longer matches its source. This is what catches a
   document deleted from inside a collapsed family row's glob (see section 5).
 - `docs-check-links` — `scripts/check_docs_links.py`; relative links must
   resolve to **git-tracked** targets, and a `docs/designs/…` or
