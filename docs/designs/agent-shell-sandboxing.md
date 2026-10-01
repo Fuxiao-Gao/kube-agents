@@ -766,12 +766,11 @@ and the tool refusing is what decides it. It costs
 less than the earlier paragraph priced a read-only tree at: entrypoint step
 2.6a replaces every specialist profile's `skills/` from the image on each
 start, so what `skill_manage` authors there was never durable. The sandbox's
-copy of the same trees is still writable by what runs in the sandbox (a shell
-command, `execute_code`, or a file tool writing through a symlink made there,
-which the gateway-side guard cannot see) for as long as that sandbox pod runs;
-that edit never reaches the gateway and is replaced from the image when the
-sandbox restarts. Leaving that copy root-owned would close it
-(gke-labs/kube-agents#2096).
+copy of the same trees is closed at the sandbox end instead: it is root-owned
+and mounted read-only, so what runs there (a shell command, `execute_code`, or
+a file tool writing through a symlink made there, which the gateway-side guard
+cannot see) cannot rewrite it either; see "The delivered trees are read-only
+mounts" below.
 
 Two things the sandbox-end closure does not close. Skills are not the only executable content under
 `~/.hermes`, so the guarantee rests on the directory being unwritable rather

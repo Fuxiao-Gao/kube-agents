@@ -221,13 +221,16 @@ def test_a_difference_is_reported_when_another_tree_is_also_uncomparable(kubectl
     assert _check().verify(0.0).status == "fail"
 
 
-def test_a_file_name_cannot_forge_the_scripts_own_lines(kubectl, pod):
-    """A name with a newline in it, laid out so that diff's `Only in` line for
+@pytest.mark.parametrize("brk", ["\n", "\r", "\x0b", "\x0c", "\x85", "\u2028"])
+def test_a_file_name_cannot_forge_the_scripts_own_lines(kubectl, pod, brk):
+    """A name holding a line break, laid out so that diff's `Only in` line for
     it would end with a line reading `end <tree> same`, must not close the
-    tree's block early and record the tree as unchanged."""
+    tree's block early. The in-pod sed prefixes per "\\n" only, so the other
+    breaks (and text mode's "\\r" translation) are the parser's to ignore: the
+    tree is a definite difference, never `same` and never `error`."""
     tree = pod / "opt/data/profiles/platform/skills"
     ref = pod / "opt/defaults/skills"
-    parts = ["a\nend "] + [c for c in str(tree).split("/") if c][:-1] + ["skills same\n"]
+    parts = [f"a{brk}end "] + [c for c in str(tree).split("/") if c][:-1] + [f"skills same{brk}"]
     for base in (ref, tree):
         base.joinpath(*parts).mkdir(parents=True)
     (tree.joinpath(*parts) / "planted.md").write_text("planted\n")

@@ -2969,29 +2969,35 @@ class SandboxTreeMatchesImageVerifier(BaseVerifier):
         where = f"{namespace}/{pod} container {_SANDBOX_CONTAINER}"
         raw: dict[str, Any] = {"pod": pod, "namespace": namespace}
         try:
+            # Bytes, then split on "\n" alone: the in-pod sed prefixes per "\n"
+            # line, and text mode or str.splitlines() would also break on "\r",
+            # "\x0b", "\x85" or "\u2028" in a file name, handing the parser a
+            # line sed never prefixed.
             proc = subprocess.run(
                 cmd,
                 capture_output=True,
-                text=True,
-                errors="replace",
                 timeout=single_call_timeout(timeout_sec),
                 check=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             return "error", f"could not exec into {where}: {exc}", raw
+        stdout = proc.stdout.decode("utf-8", errors="replace")
+        stderr = proc.stderr.decode("utf-8", errors="replace")
         if proc.returncode != 0:
             return (
                 "error",
                 f"kubectl exec into {where} exited {proc.returncode}: "
-                f"{proc.stderr.strip()[-_REASON_TAIL_CHARS:] or '(no stderr)'}",
+                f"{stderr.strip()[-_REASON_TAIL_CHARS:] or '(no stderr)'}",
                 raw,
             )
-        lines = proc.stdout.splitlines()
+        lines = stdout.split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
         if "done" not in lines:
             return (
                 "error",
                 f"the diff script in {where} stopped before its last line: "
-                f"{proc.stdout.strip()[-_REASON_TAIL_CHARS:] or '(no output)'}",
+                f"{stdout.strip()[-_REASON_TAIL_CHARS:] or '(no output)'}",
                 raw,
             )
 
@@ -3050,7 +3056,7 @@ class SandboxTreeMatchesImageVerifier(BaseVerifier):
             return (
                 "error",
                 f"the diff script in {where} reported {len(trees)} of {expected} "
-                f"trees: {proc.stdout.strip()[-_REASON_TAIL_CHARS:]}",
+                f"trees: {stdout.strip()[-_REASON_TAIL_CHARS:]}",
                 raw,
             )
 
