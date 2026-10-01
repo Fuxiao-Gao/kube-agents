@@ -1073,6 +1073,8 @@ class InstallerCommonTest(unittest.TestCase):
                 ("LITELLM_REDACTION_RULES", '{"name":"x","literal":"y"}', "must be a JSON array"),
                 ("LITELLM_REDACTION_RULES", '["x"]', "entry 0 is not an object"),
                 ("LITELLM_REDACTION_RULES", '[{"name":"x","literl":"y"}]', "unknown key(s) ['literl']"),
+                ("LITELLM_REDACTION_RULES", '[{"literal":"prod-eu-1"}]', "entry 0 has no name"),
+                ("LITELLM_REDACTION_RULES", "[{}]", "entry 0 has no name"),
                 ("LITELLM_REDACTION_RULES", '[{"name":"x","literal":7}]', "entry 0: literal must be a string"),
                 ("LITELLM_REDACTION_RULES", '[{"name":"x","literal":"\\ud800"}]', "entry 0: literal is not valid UTF-8 text"),
             ):

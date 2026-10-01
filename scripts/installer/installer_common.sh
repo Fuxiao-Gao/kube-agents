@@ -985,6 +985,8 @@ items = []
 for i, rule in enumerate(rules):
     if not isinstance(rule, dict):
         sys.exit(f"entry {i} is not an object")
+    if "name" not in rule:
+        sys.exit(f"entry {i} has no name; every rule needs one")
     unknown = sorted(set(rule) - {"name", "pattern", "literal", "action"})
     if unknown:
         sys.exit(f"entry {i} has unknown key(s) {unknown}; a rule takes name, pattern or literal, and action")
