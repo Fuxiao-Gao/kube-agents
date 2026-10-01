@@ -1620,11 +1620,13 @@ class PlatformFrontDoorTest(unittest.TestCase):
         the wrong pair is what this checks.
         """
         source = _ENTRYPOINT.read_text(encoding="utf-8")
+        # Every mention of the helper on a non-comment line, wherever on the line and
+        # however many per line: a call after `if …; then` or `&&` is still a caller.
         call_lines = [
             line.strip()
             for line in source.splitlines()
-            if line.strip().startswith("backfill_config_from_template")
-            and not line.strip().endswith("() {")
+            if not line.lstrip().startswith("#")
+            for _ in re.findall(r"\bbackfill_config_from_template\b(?!\(\))", line)
         ]
         calls = re.findall(
             r"^\s*backfill_config_from_template\s*\\?\s*\n?\s*\"([^\"]+)\"\s+\"([^\"]+)\"",
