@@ -142,6 +142,7 @@ ADDED_AFTER_THE_MOVE = [
     "first-install-hello-done",
     "fleet-audit-reports-past-run",  # the report store's reader, PR #2115
     "platform-worker-refuses-shipped-skill-edit",  # skill governance, #1848
+    "chat-voice-ack-names-target",  # the front door's delegation ack
 ]
 
 # Admitted after the split, each by a pull request that cited the record
