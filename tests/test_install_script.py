@@ -5074,6 +5074,18 @@ class LitellmRedactionPersistsThroughInstallEnvTest(unittest.TestCase):
                 self.assertIn(f"{flag}= was given an empty value", proc.stdout + proc.stderr)
                 self.assertIn(f"set {key}= (empty) in install.env", proc.stdout + proc.stderr)
 
+    def test_a_typed_ip_action_is_marked_so_main_checks_it_with_redaction_off(self):
+        proc = subprocess.run(
+            ["bash", "-c",
+             f'KUBE_AGENTS_SOURCE_ONLY=true source "{_INSTALL_SH}"\n'
+             "source scripts/installer/installer_common.sh\n"
+             'parse_args --litellm-redaction-ip-action=hash; echo "PASSED=$PARAM_LITELLM_REDACTION_IP_ACTION_PASSED"\n'
+             "validate_litellm_redaction_ip_action"],
+            capture_output=True, text=True, env=self._env({}), cwd=str(_REPO_ROOT),
+        )
+        self.assertIn("PASSED=true", proc.stdout)
+        self.assertNotEqual(proc.returncode, 0)
+
     def _bootstrap_over(self, tmp, recorded, script):
         existing = pathlib.Path(tmp) / "install.env"
         existing.write_text(recorded)
@@ -5120,14 +5132,19 @@ class LitellmRedactionPersistsThroughInstallEnvTest(unittest.TestCase):
         seed_line = 'local redaction_ip_action="${PARAM_LITELLM_REDACTION_IP_ACTION:-$DEFAULT_LITELLM_REDACTION_IP_ACTION}"'
         validate_line = "validate_litellm_redaction_ip_action || exit 1"
         export_lines = (
-            'export LITELLM_REDACTION_ENABLED="${PARAM_LITELLM_REDACTION_ENABLED:-$DEFAULT_LITELLM_REDACTION_ENABLED}"',
+            'export LITELLM_REDACTION_ENABLED="$redaction_enabled"',
             'export LITELLM_REDACTION_IP_ACTION="$redaction_ip_action"',
             'export LITELLM_REDACTION_IP_ALLOW_CIDRS="$PARAM_LITELLM_REDACTION_IP_ALLOW_CIDRS"',
         )
         rules_line = 'hcl_redaction_rules "$LITELLM_REDACTION_RULES" >/dev/null || exit 1'
-        for line in (seed_line, validate_line, rules_line, *export_lines):
+        toggle_line = 'if ! is_bool_spelling "$redaction_enabled"; then'
+        gate_line = 'if is_truthy "$redaction_enabled" || [ "${PARAM_LITELLM_REDACTION_IP_ACTION_PASSED:-false}" = "true" ]; then'
+        for line in (seed_line, validate_line, rules_line, toggle_line, gate_line, *export_lines):
             self.assertIn(line, text[main_start:], f"main() no longer carries: {line}")
-        self.assertLess(text.index(rules_line, main_start), text.index(export_lines[0], main_start))
+        # The early checks stop the run before the rest of the interview.
+        gitops_step = text.index('print_step "8. GitOps Infrastructure Repository Setup"', main_start)
+        for line in (toggle_line, gate_line, validate_line, rules_line):
+            self.assertLess(text.index(line, main_start), gitops_step, line)
         seed = text.index(seed_line, main_start)
         validated = text.index(validate_line, main_start)
         generator = text.index('write_tfvars_from_state "$tfvars_file" "$image_tag"', main_start)

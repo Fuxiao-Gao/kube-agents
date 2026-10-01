@@ -818,7 +818,7 @@ parse_args() {
         PARAM_LITELLM_REDACTION_ENABLED="$(flag_bool_value "$1")"
         validate_bool_flag_value "${1%%=*}" "$PARAM_LITELLM_REDACTION_ENABLED"; shift ;;
       --litellm-redaction-ip-action=*)
-        PARAM_LITELLM_REDACTION_IP_ACTION="${1#*=}"
+        PARAM_LITELLM_REDACTION_IP_ACTION="${1#*=}"; PARAM_LITELLM_REDACTION_IP_ACTION_PASSED="true"
         require_scope_flag_value "${1%%=*}" "$PARAM_LITELLM_REDACTION_IP_ACTION"; shift ;;
       --litellm-redaction-ip-allow-cidrs=*)
         PARAM_LITELLM_REDACTION_IP_ALLOW_CIDRS="${1#*=}"
@@ -3676,8 +3676,9 @@ validate_model_max_tokens() {
   fi
 }
 
-# --litellm-redaction-ip-action: refused here so the message names the flag;
-# the tfvars generator checks again for upgrade.sh and uninstall.sh. Needs
+# --litellm-redaction-ip-action: refused here so the message names the flag.
+# The tfvars generator checks again, while redaction is on, for upgrade.sh and
+# the menu, which regenerate from install.env without this interview. Needs
 # installer_common.sh sourced.
 validate_litellm_redaction_ip_action() {
   local value="${PARAM_LITELLM_REDACTION_IP_ACTION:-$DEFAULT_LITELLM_REDACTION_IP_ACTION}"
@@ -4953,14 +4954,21 @@ main() {
   local model_max_tokens="${PARAM_MODEL_MAX_TOKENS:-${MODEL_MAX_TOKENS:-}}"
   validate_model_max_tokens || exit 1
   local redaction_ip_action="${PARAM_LITELLM_REDACTION_IP_ACTION:-$DEFAULT_LITELLM_REDACTION_IP_ACTION}"
-  # Only while redaction is on, as in the generator: off, the IP action and the
-  # rules are inert. The rules have no flag and are checked here as well so a
-  # bad value stops the run before the interview rather than after it.
-  if is_truthy "${PARAM_LITELLM_REDACTION_ENABLED:-$DEFAULT_LITELLM_REDACTION_ENABLED}"; then
+  # Checked here as well as in the generator, so a bad value stops the run
+  # before the rest of the interview rather than after it. A misspelt toggle is
+  # refused rather than read as off. While redaction is off the recorded IP
+  # action and rules are inert, as in the generator; an IP action typed on this
+  # run is checked either way.
+  local redaction_enabled="${PARAM_LITELLM_REDACTION_ENABLED:-$DEFAULT_LITELLM_REDACTION_ENABLED}"
+  if ! is_bool_spelling "$redaction_enabled"; then
+    print_error "LITELLM_REDACTION_ENABLED='${redaction_enabled}' is neither true nor false. Fix it in install.env."
+    exit 1
+  fi
+  if is_truthy "$redaction_enabled" || [ "${PARAM_LITELLM_REDACTION_IP_ACTION_PASSED:-false}" = "true" ]; then
     validate_litellm_redaction_ip_action || exit 1
-    if [ -n "${LITELLM_REDACTION_RULES:-}" ]; then
-      hcl_redaction_rules "$LITELLM_REDACTION_RULES" >/dev/null || exit 1
-    fi
+  fi
+  if is_truthy "$redaction_enabled" && [ -n "${LITELLM_REDACTION_RULES:-}" ]; then
+    hcl_redaction_rules "$LITELLM_REDACTION_RULES" >/dev/null || exit 1
   fi
 
   # Vertex authenticates with Workload Identity rather than an API key, so these
@@ -5582,7 +5590,7 @@ main() {
   export MODEL_PROVIDER="$model_provider"
   export MODEL_DEFAULT_NAME="$model_default_name"
   export MODEL_MAX_TOKENS="$model_max_tokens"
-  export LITELLM_REDACTION_ENABLED="${PARAM_LITELLM_REDACTION_ENABLED:-$DEFAULT_LITELLM_REDACTION_ENABLED}"
+  export LITELLM_REDACTION_ENABLED="$redaction_enabled"
   export LITELLM_REDACTION_IP_ACTION="$redaction_ip_action"
   export LITELLM_REDACTION_IP_ALLOW_CIDRS="$PARAM_LITELLM_REDACTION_IP_ALLOW_CIDRS"
   export VERTEX_PROJECT_ID="$vertex_project_id"
