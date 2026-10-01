@@ -998,19 +998,20 @@ class InstallerCommonTest(unittest.TestCase):
     }
 
     def test_tfvars_carry_litellm_redaction(self):
-        # Always a full block, so the file states the setting either way; the
-        # composition renders nothing into the chart while enabled is false.
+        # Off writes the toggle alone: the other keys are inert, so a leftover
+        # value is neither read nor checked. The composition renders nothing
+        # into the chart while enabled is false.
         with tempfile.TemporaryDirectory() as out_dir:
             dest = pathlib.Path(out_dir) / "terraform.tfvars"
             for env, expected in (
+                ({}, "litellm_redaction = { enabled = false }\n"),
                 (
-                    {},
-                    "litellm_redaction = {\n"
-                    "  enabled     = false\n"
-                    '  ip_action   = "pseudonym"\n'
-                    "  allow_cidrs = []\n"
-                    "  rules       = []\n"
-                    "}\n",
+                    {
+                        "LITELLM_REDACTION_ENABLED": "off",
+                        "LITELLM_REDACTION_IP_ACTION": "hash",
+                        "LITELLM_REDACTION_RULES": "not json",
+                    },
+                    "litellm_redaction = { enabled = false }\n",
                 ),
                 (
                     {
@@ -1044,7 +1045,12 @@ class InstallerCommonTest(unittest.TestCase):
             dest = pathlib.Path(out_dir) / "terraform.tfvars"
             proc = self._run(
                 f'write_tfvars_from_state "{dest}"; echo "rc=$?"',
-                env={"API_SERVER_KEY": "k", **self._REDACTION_UNSET, "LITELLM_REDACTION_RULES": rules},
+                env={
+                    "API_SERVER_KEY": "k",
+                    **self._REDACTION_UNSET,
+                    "LITELLM_REDACTION_ENABLED": "true",
+                    "LITELLM_REDACTION_RULES": rules,
+                },
                 describe_stub="printf '\\n'; exit 0",
             )
             self.assertIn("rc=0", proc.stdout, proc.stderr)
@@ -1059,6 +1065,8 @@ class InstallerCommonTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as out_dir:
             dest = pathlib.Path(out_dir) / "terraform.tfvars"
             for key, value, message in (
+                ("LITELLM_REDACTION_ENABLED", "ture", "is neither true nor false"),
+                ("LITELLM_REDACTION_ENABLED", "enabled", "is neither true nor false"),
                 ("LITELLM_REDACTION_IP_ACTION", "hash", "is not one of mask, pseudonym, off"),
                 ("LITELLM_REDACTION_IP_ACTION", "OFF", "is not one of mask, pseudonym, off"),
                 ("LITELLM_REDACTION_RULES", "not json", "is not valid JSON"),
@@ -1066,11 +1074,17 @@ class InstallerCommonTest(unittest.TestCase):
                 ("LITELLM_REDACTION_RULES", '["x"]', "entry 0 is not an object"),
                 ("LITELLM_REDACTION_RULES", '[{"name":"x","literl":"y"}]', "unknown key(s) ['literl']"),
                 ("LITELLM_REDACTION_RULES", '[{"name":"x","literal":7}]', "entry 0: literal must be a string"),
+                ("LITELLM_REDACTION_RULES", '[{"name":"x","literal":"\\ud800"}]', "entry 0: literal is not valid UTF-8 text"),
             ):
                 with self.subTest(key=key, value=value):
                     proc = self._run(
                         f'rc=0; write_tfvars_from_state "{dest}" || rc=$?; echo "rc=$rc"',
-                        env={"API_SERVER_KEY": "k", **self._REDACTION_UNSET, key: value},
+                        env={
+                            "API_SERVER_KEY": "k",
+                            **self._REDACTION_UNSET,
+                            "LITELLM_REDACTION_ENABLED": "true",
+                            key: value,
+                        },
                         describe_stub="printf '\\n'; exit 0",
                     )
                     self.assertIn("rc=1", proc.stdout, proc.stderr)

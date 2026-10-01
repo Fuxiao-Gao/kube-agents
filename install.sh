@@ -775,7 +775,9 @@ validate_bool_flag_value() {
 # project" in silence: applied, an empty --scope-projects= would revoke the
 # scoped projects' roles and retire their profiles while install.env still
 # named them, and the next upgrade would add them back. Refused, like an empty
-# toggle; the file is where a scope is emptied on purpose.
+# toggle; the file is where a scope is emptied on purpose. The two gateway
+# redaction value flags take the same check: empty, they would replace the
+# recorded IP action or allowlist for one run without a word.
 require_scope_flag_value() {
   local flag="$1" value="${2:-}" key
   # A value that is nothing but separators (`,`, a space) renders the same
@@ -788,6 +790,8 @@ require_scope_flag_value() {
     --scope-shared-vpc-hosts) key="SCOPE_SHARED_VPC_HOSTS" ;;
     --scope-metrics-scopes) key="SCOPE_METRICS_SCOPES" ;;
     --scope-exclude-projects) key="SCOPE_EXCLUDE_PROJECTS" ;;
+    --litellm-redaction-ip-action) key="LITELLM_REDACTION_IP_ACTION" ;;
+    --litellm-redaction-ip-allow-cidrs) key="LITELLM_REDACTION_IP_ALLOW_CIDRS" ;;
     *) key="SCOPE_EXCLUDE_CLUSTERS" ;;
   esac
   print_error "${flag}= was given an empty value."
@@ -813,8 +817,12 @@ parse_args() {
       --litellm-redaction|--litellm-redaction=*)
         PARAM_LITELLM_REDACTION_ENABLED="$(flag_bool_value "$1")"
         validate_bool_flag_value "${1%%=*}" "$PARAM_LITELLM_REDACTION_ENABLED"; shift ;;
-      --litellm-redaction-ip-action=*) PARAM_LITELLM_REDACTION_IP_ACTION="${1#*=}"; shift ;;
-      --litellm-redaction-ip-allow-cidrs=*) PARAM_LITELLM_REDACTION_IP_ALLOW_CIDRS="${1#*=}"; shift ;;
+      --litellm-redaction-ip-action=*)
+        PARAM_LITELLM_REDACTION_IP_ACTION="${1#*=}"
+        require_scope_flag_value "${1%%=*}" "$PARAM_LITELLM_REDACTION_IP_ACTION"; shift ;;
+      --litellm-redaction-ip-allow-cidrs=*)
+        PARAM_LITELLM_REDACTION_IP_ALLOW_CIDRS="${1#*=}"
+        require_scope_flag_value "${1%%=*}" "$PARAM_LITELLM_REDACTION_IP_ALLOW_CIDRS"; shift ;;
       --vertex-project-id=*) PARAM_VERTEX_PROJECT_ID="${1#*=}"; shift ;;
       --vertex-location=*) PARAM_VERTEX_LOCATION="${1#*=}"; shift ;;
       --vertex-manage-serving-project=*) PARAM_VERTEX_MANAGE_SERVING_PROJECT="${1#*=}"; shift ;;
@@ -4945,7 +4953,15 @@ main() {
   local model_max_tokens="${PARAM_MODEL_MAX_TOKENS:-${MODEL_MAX_TOKENS:-}}"
   validate_model_max_tokens || exit 1
   local redaction_ip_action="${PARAM_LITELLM_REDACTION_IP_ACTION:-$DEFAULT_LITELLM_REDACTION_IP_ACTION}"
-  validate_litellm_redaction_ip_action || exit 1
+  # Only while redaction is on, as in the generator: off, the IP action and the
+  # rules are inert. The rules have no flag and are checked here as well so a
+  # bad value stops the run before the interview rather than after it.
+  if is_truthy "${PARAM_LITELLM_REDACTION_ENABLED:-$DEFAULT_LITELLM_REDACTION_ENABLED}"; then
+    validate_litellm_redaction_ip_action || exit 1
+    if [ -n "${LITELLM_REDACTION_RULES:-}" ]; then
+      hcl_redaction_rules "$LITELLM_REDACTION_RULES" >/dev/null || exit 1
+    fi
+  fi
 
   # Vertex authenticates with Workload Identity rather than an API key, so these
   # two are the only credentials it needs. The project defaults to the install

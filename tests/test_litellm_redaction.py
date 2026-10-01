@@ -515,6 +515,15 @@ class TestCompositionWiring(unittest.TestCase):
                 self.assertIn(chart_literal, self.chart)
                 self.assertIn(variable_literal, self.variable)
 
+    def test_every_validation_applies_only_while_enabled(self) -> None:
+        # The chart reads none of these while redaction is off, so a leftover
+        # value must not stop a plan, an upgrade or a destroy.
+        conditions = [line for line in self.variable.splitlines() if line.strip().startswith("condition")]
+        self.assertEqual(len(conditions), 5)
+        for line in conditions:
+            with self.subTest(line=line):
+                self.assertIn("condition     = !var.litellm_redaction.enabled || ", line)
+
     def test_redaction_reaches_the_chart_only_while_enabled_without_null_rule_keys(self) -> None:
         # Off, the litellm values must not change, or every existing install's
         # gateway rolls on upgrade; a null rule key fails the chart's checks.

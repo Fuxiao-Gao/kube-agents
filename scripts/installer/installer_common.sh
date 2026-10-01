@@ -420,6 +420,18 @@ is_truthy() {
   esac
 }
 
+# A spelling is_truthy reads as true, or one that plainly means false. For a
+# security toggle whose off state must not be reachable by a typo.
+is_bool_spelling() {
+  is_truthy "${1:-}" && return 0
+  local val="${1:-}"
+  val="${val//[[:space:]]/}"
+  case "$val" in
+    [Ff][Aa][Ll][Ss][Ee] | [Nn][Oo] | [Nn] | 0 | [Oo][Ff][Ff]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Checks if GKE databaseEncryption.state is a valid CMEK-encrypted state.
 #   - ENCRYPTED: Standard CMEK database encryption state in GKE
 #   - ALL_OBJECTS_ENCRYPTION_ENABLED: GKE 1.35+ Application-layer Secrets Encryption
@@ -979,6 +991,10 @@ for i, rule in enumerate(rules):
     for key, value in rule.items():
         if not isinstance(value, str):
             sys.exit(f"entry {i}: {key} must be a string")
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            sys.exit(f"entry {i}: {key} is not valid UTF-8 text (a lone \\u surrogate escape?)")
     items.append("{ " + ", ".join(f"{k} = {hcl(v)}" for k, v in rule.items()) + " }")
 print("[" + ", ".join(items) + "]")
 ' 2>&1)"; then
@@ -2852,15 +2868,25 @@ write_tfvars_from_state() {
   require_scope_cluster_triples "${SCOPE_EXCLUDE_CLUSTERS:-}" || return 1
   require_scope_container_ids "${SCOPE_FOLDERS:-}" "${SCOPE_ORGANIZATIONS:-}" || return 1
   # Checked here for the MODEL_MAX_TOKENS reason: upgrade.sh and uninstall.sh
-  # regenerate from install.env without install.sh's checks.
-  local redaction_ip_action="${LITELLM_REDACTION_IP_ACTION:-$DEFAULT_LITELLM_REDACTION_IP_ACTION}"
-  if ! is_valid_redaction_ip_action "$redaction_ip_action"; then
-    print_error "LITELLM_REDACTION_IP_ACTION='${redaction_ip_action}' is not one of mask, pseudonym, off. Fix it in install.env."
+  # regenerate from install.env without install.sh's checks. A misspelt toggle
+  # is refused rather than read as off, which would forward requests
+  # unredacted while the file says otherwise. While it is off the other three
+  # keys are inert, as they are in the chart, and are neither read nor checked.
+  local redaction_enabled="${LITELLM_REDACTION_ENABLED:-$DEFAULT_LITELLM_REDACTION_ENABLED}"
+  if ! is_bool_spelling "$redaction_enabled"; then
+    print_error "LITELLM_REDACTION_ENABLED='${redaction_enabled}' is neither true nor false. Fix it in install.env."
     return 1
   fi
-  local redaction_rules="[]"
-  if [ -n "${LITELLM_REDACTION_RULES:-}" ]; then
-    redaction_rules="$(hcl_redaction_rules "$LITELLM_REDACTION_RULES")" || return 1
+  local redaction_ip_action="" redaction_rules="[]"
+  if is_truthy "$redaction_enabled"; then
+    redaction_ip_action="${LITELLM_REDACTION_IP_ACTION:-$DEFAULT_LITELLM_REDACTION_IP_ACTION}"
+    if ! is_valid_redaction_ip_action "$redaction_ip_action"; then
+      print_error "LITELLM_REDACTION_IP_ACTION='${redaction_ip_action}' is not one of mask, pseudonym, off. Fix it in install.env."
+      return 1
+    fi
+    if [ -n "${LITELLM_REDACTION_RULES:-}" ]; then
+      redaction_rules="$(hcl_redaction_rules "$LITELLM_REDACTION_RULES")" || return 1
+    fi
   fi
 
   local old_umask
@@ -2917,12 +2943,16 @@ write_tfvars_from_state() {
     echo ""
     echo "# Gateway redaction (LITELLM_REDACTION_* in install.env). The composition"
     echo "# renders nothing into the chart while enabled is false."
-    echo "litellm_redaction = {"
-    echo "  enabled     = $(hcl_bool "${LITELLM_REDACTION_ENABLED:-$DEFAULT_LITELLM_REDACTION_ENABLED}")"
-    echo "  ip_action   = $(hcl_str "$redaction_ip_action")"
-    echo "  allow_cidrs = $(hcl_csv_list "${LITELLM_REDACTION_IP_ALLOW_CIDRS:-}")"
-    echo "  rules       = ${redaction_rules}"
-    echo "}"
+    if is_truthy "$redaction_enabled"; then
+      echo "litellm_redaction = {"
+      echo "  enabled     = true"
+      echo "  ip_action   = $(hcl_str "$redaction_ip_action")"
+      echo "  allow_cidrs = $(hcl_csv_list "${LITELLM_REDACTION_IP_ALLOW_CIDRS:-}")"
+      echo "  rules       = ${redaction_rules}"
+      echo "}"
+    else
+      echo "litellm_redaction = { enabled = false }"
+    fi
     echo ""
     if is_truthy "${PERSIST_SECRETS_ON_DISK:-$DEFAULT_PERSIST_SECRETS_ON_DISK}"; then
       echo "api_server_key    = $(hcl_str "${API_SERVER_KEY:-}")"

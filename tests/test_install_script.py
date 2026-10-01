@@ -5043,7 +5043,7 @@ class LitellmRedactionPersistsThroughInstallEnvTest(unittest.TestCase):
             self.assertIn("ON=[false] ACTION=[off]", out)
 
     def test_the_ip_action_validator_names_the_flag_and_refuses_anything_else(self):
-        for value, ok in (("pseudonym", True), ("mask", True), ("off", True), ("", True), ("hash", False), ("OFF", False)):
+        for value, ok in (("pseudonym", True), ("mask", True), ("off", True), ("hash", False), ("OFF", False)):
             with self.subTest(value=value):
                 proc = subprocess.run(
                     ["bash", "-c",
@@ -5057,6 +5057,22 @@ class LitellmRedactionPersistsThroughInstallEnvTest(unittest.TestCase):
                 else:
                     self.assertNotEqual(proc.returncode, 0)
                     self.assertIn("--litellm-redaction-ip-action must be one of", proc.stdout + proc.stderr)
+
+    def test_an_empty_value_flag_is_refused_rather_than_replacing_the_recorded_one(self):
+        for flag, key in (
+            ("--litellm-redaction-ip-action", "LITELLM_REDACTION_IP_ACTION"),
+            ("--litellm-redaction-ip-allow-cidrs", "LITELLM_REDACTION_IP_ALLOW_CIDRS"),
+        ):
+            with self.subTest(flag=flag):
+                proc = subprocess.run(
+                    ["bash", "-c",
+                     f'KUBE_AGENTS_SOURCE_ONLY=true source "{_INSTALL_SH}"\n'
+                     f'parse_args {flag}=; echo "PASSED"'],
+                    capture_output=True, text=True, env=self._env({key: "mask"}), cwd=str(_REPO_ROOT),
+                )
+                self.assertNotIn("PASSED", proc.stdout)
+                self.assertIn(f"{flag}= was given an empty value", proc.stdout + proc.stderr)
+                self.assertIn(f"set {key}= (empty) in install.env", proc.stdout + proc.stderr)
 
     def _bootstrap_over(self, tmp, recorded, script):
         existing = pathlib.Path(tmp) / "install.env"
@@ -5108,8 +5124,10 @@ class LitellmRedactionPersistsThroughInstallEnvTest(unittest.TestCase):
             'export LITELLM_REDACTION_IP_ACTION="$redaction_ip_action"',
             'export LITELLM_REDACTION_IP_ALLOW_CIDRS="$PARAM_LITELLM_REDACTION_IP_ALLOW_CIDRS"',
         )
-        for line in (seed_line, validate_line, *export_lines):
+        rules_line = 'hcl_redaction_rules "$LITELLM_REDACTION_RULES" >/dev/null || exit 1'
+        for line in (seed_line, validate_line, rules_line, *export_lines):
             self.assertIn(line, text[main_start:], f"main() no longer carries: {line}")
+        self.assertLess(text.index(rules_line, main_start), text.index(export_lines[0], main_start))
         seed = text.index(seed_line, main_start)
         validated = text.index(validate_line, main_start)
         generator = text.index('write_tfvars_from_state "$tfvars_file" "$image_tag"', main_start)

@@ -369,33 +369,35 @@ variable "litellm_redaction" {
   default  = {}
 
   # The same checks as the chart's templates/litellm.yaml, so a bad value fails
-  # the plan rather than the helm_release apply.
+  # the plan rather than the helm_release apply. Only while enabled: the chart
+  # reads none of these when redaction is off, and a leftover value must not
+  # stop an upgrade or a destroy.
   validation {
-    condition     = contains(["mask", "pseudonym", "off"], var.litellm_redaction.ip_action)
+    condition     = !var.litellm_redaction.enabled || contains(["mask", "pseudonym", "off"], var.litellm_redaction.ip_action)
     error_message = "litellm_redaction.ip_action must be one of mask, pseudonym, off."
   }
 
   validation {
     # Terraform reads 010.0.0.0/8 as 10.0.0.0/8; the redactor's ipaddress
     # refuses a leading-zero IPv4 octet and stops the gateway pod.
-    condition     = alltrue([for c in var.litellm_redaction.allow_cidrs : can(cidrhost(c, 0)) && (strcontains(c, ":") || !can(regex("(^|\\.)0[0-9]", c)))])
+    condition     = !var.litellm_redaction.enabled || alltrue([for c in var.litellm_redaction.allow_cidrs : can(cidrhost(c, 0)) && (strcontains(c, ":") || !can(regex("(^|\\.)0[0-9]", c)))])
     error_message = "litellm_redaction.allow_cidrs must hold networks in CIDR form, such as 127.0.0.0/8 or fd00::/8."
   }
 
   validation {
-    condition     = alltrue([for r in var.litellm_redaction.rules : can(regex("^[A-Za-z0-9][A-Za-z0-9_.-]*$", r.name))])
+    condition     = !var.litellm_redaction.enabled || alltrue([for r in var.litellm_redaction.rules : can(regex("^[A-Za-z0-9][A-Za-z0-9_.-]*$", r.name))])
     error_message = "Each litellm_redaction.rules name must start with a letter or digit and use only letters, digits, _ . -"
   }
 
   validation {
-    condition     = alltrue([for r in var.litellm_redaction.rules : (r.pattern == null) != (r.literal == null) && length(compact([r.pattern, r.literal])) == 1])
+    condition     = !var.litellm_redaction.enabled || alltrue([for r in var.litellm_redaction.rules : (r.pattern == null) != (r.literal == null) && length(compact([r.pattern, r.literal])) == 1])
     error_message = "Each litellm_redaction.rules entry needs exactly one of pattern or literal, and it must not be empty."
   }
 
   validation {
     # Only null means unset: coalesce would read "" as unset too, and the
     # redactor refuses an empty action at startup.
-    condition     = alltrue([for r in var.litellm_redaction.rules : contains(["mask", "pseudonym"], r.action == null ? "mask" : r.action)])
+    condition     = !var.litellm_redaction.enabled || alltrue([for r in var.litellm_redaction.rules : contains(["mask", "pseudonym"], r.action == null ? "mask" : r.action)])
     error_message = "Each litellm_redaction.rules action must be mask or pseudonym."
   }
 }
