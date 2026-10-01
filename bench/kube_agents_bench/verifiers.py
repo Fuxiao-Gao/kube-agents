@@ -48,10 +48,11 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from devops_bench.k8s import get_resource
 from devops_bench.verification.base import (
@@ -63,7 +64,7 @@ from devops_bench.verification.base import (
 )
 from devops_bench.verification.verifiers import ResourcePropertyVerifier
 
-from kube_agents_bench import discovery, github_writes, transcript
+from kube_agents_bench import discovery, github_writes, onboarding, transcript
 from kube_agents_bench.fleet import (
     ROLE_PATTERN,
     FleetRoleUnresolved,
@@ -72,7 +73,10 @@ from kube_agents_bench.fleet import (
 )
 
 __all__ = [
+    "BootstrapDeliveredVerifier",
     "BootstrapFanoutVerifier",
+    "BootstrapFindingsVerifier",
+    "BootstrapReportReadVerifier",
     "FleetResourcePropertyVerifier",
     "GitHubWritesVerifier",
     "LedgerIssueContainsVerifier",
@@ -93,6 +97,10 @@ _NO_WORKER_CALLS_REASON = (
     "the workers cannot observe its subject"
 )
 _FANOUT_READ_TIMEOUT_SEC = 60.0
+_ONBOARDING_READ_TIMEOUT_SEC = 60.0
+# The sandbox's report changes at most twice (written, then renamed), so at most
+# two of three sandbox re-reads can differ from the read before them.
+_REPORT_READ_ATTEMPTS = 3
 
 # Emphasis and code markers, dropped before matching. The agent answers in
 # Markdown, and a phrase spanning an emphasised word cannot match the raw
@@ -2484,3 +2492,201 @@ class FleetResourcePropertyVerifier(ResourcePropertyVerifier):
                 raw=raw,
             )
         return result
+
+
+class ExpectedFinding(BaseModel):
+    """One finding a ``bootstrap_findings`` check expects, by check id and object."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    check: str = Field(min_length=1)
+    object: str = Field(min_length=1)
+
+
+class _OnboardingPollVerifier(BaseVerifier):
+    """Polls :meth:`_check`, reading onboarding's files off the install.
+
+    A ``fail`` from an earlier poll outranks a final read that errors: a read
+    that could not reach a pod does not un-observe what an earlier one saw.
+    """
+
+    def verify(self, timeout_sec: float) -> VerificationResult:
+        read_timeout = min(single_call_timeout(timeout_sec), _ONBOARDING_READ_TIMEOUT_SEC)
+        # _poll_to_result reports the last poll even when it is an error; the
+        # latest fail stands in that case.
+        last_fail: tuple[str, dict[str, Any] | None] | None = None
+
+        def attempt() -> tuple[VerificationStatus, str, dict[str, Any] | None]:
+            nonlocal last_fail
+            status, reason, raw = self._check(read_timeout)
+            if status == "fail":
+                last_fail = (reason, raw)
+            return status, reason, raw
+
+        result = self._poll_to_result(attempt, timeout_sec)
+        if result.status == "error" and last_fail is not None:
+            reason, raw = last_fail
+            return VerificationResult(
+                success=False,
+                status="fail",
+                elapsed_time=result.elapsed_time,
+                reason=f"{reason} (the last read failed: {result.reason})",
+                name=self.name,
+                raw=raw,
+            )
+        return result
+
+    def _check(self, read_timeout: float) -> tuple[VerificationStatus, str, dict[str, Any] | None]:
+        raise NotImplementedError
+
+
+@VERIFIERS.register("bootstrap_findings")
+class BootstrapFindingsVerifier(_OnboardingPollVerifier):
+    """Checks the findings the onboarding prioritization stage extracted.
+
+    The prioritization card is filed by the discovery sweep's worker, not by
+    the conversation, and its worker runs ``inventory_findings.py extract``
+    through its terminal. This reads the file that writes,
+    ``INVENTORY.items.json``, off the shell sandbox's data volume
+    (:mod:`kube_agents_bench.onboarding`), where that terminal runs.
+
+    ``expected_findings``: the ``(check, object)`` pairs of the raw report's
+    findings block. Passes when the file's items carry exactly those pairs,
+    each as many times as listed.
+
+    An unreadable sandbox is ``status="error"``. No file, a file that is not
+    the extract's JSON, and a different set of findings are each a fail: the
+    stage did not run where the worker's terminal is, or did not run as the
+    SOP says.
+    """
+
+    type: Literal["bootstrap_findings"]
+    expected_findings: list[ExpectedFinding] = Field(min_length=1)
+
+    def _check(self, read_timeout: float) -> tuple[VerificationStatus, str, dict[str, Any] | None]:
+        state, text, why = onboarding.read_items(onboarding.sandbox_shell, read_timeout)
+        if state == "error":
+            return "error", why, None
+        if state == "absent":
+            return "fail", f"{why}: extract did not run where the card's worker has its terminal", None
+        where = onboarding.ITEMS_FILE
+        if len(text.encode()) > onboarding.MAX_ITEMS_BYTES:
+            return "fail", f"{where} is larger than {onboarding.MAX_ITEMS_BYTES} bytes", None
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as exc:
+            return "fail", f"{where} is not JSON: {exc}", None
+        items = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(items, list) or not all(isinstance(i, dict) for i in items):
+            return "fail", f"{where} has no list of items, so it is not what extract writes", None
+        found = Counter((str(i.get("check")), str(i.get("object"))) for i in items)
+        expected = Counter((f.check, f.object) for f in self.expected_findings)
+        raw = {"found": sorted(found.elements())}
+        missing = sorted((expected - found).elements())
+        extra = sorted((found - expected).elements())
+        if missing or extra:
+            parts = [f"{where} holds {len(items)} finding(s) for {len(self.expected_findings)} expected"]
+            if missing:
+                parts.append(f"missing {missing}")
+            if extra:
+                parts.append(f"not in the raw report's block {extra}")
+            return "fail", "; ".join(parts), raw
+        return "pass", f"{where} holds the {len(items)} expected finding(s)", raw
+
+
+@VERIFIERS.register("bootstrap_report_read")
+class BootstrapReportReadVerifier(_OnboardingPollVerifier):
+    """Checks that onboarding's delivery job read the ranked report off the sandbox.
+
+    The prioritization card's worker writes ``INVENTORY.md`` on the shell
+    sandbox; ``bootstrap_delivery.py`` runs in the agent pod, reads it from
+    there, claims the delivery by writing ``.bootstrap_completed`` on the agent
+    pod, and renames the sandbox's copy to ``INVENTORY.delivered.md``. Passes
+    when the marker is on the agent pod and the sandbox holds the renamed
+    report and not the original.
+
+    Whether the scheduler then kept the run's output is not checked here.
+    Either pod unreadable is ``status="error"``.
+    """
+
+    type: Literal["bootstrap_report_read"]
+
+    def _check(self, read_timeout: float) -> tuple[VerificationStatus, str, dict[str, Any] | None]:
+        # The two pods cannot be read at one instant. A report written and claimed
+        # between the reads, or claimed and renamed between them, reads as a state
+        # the job never occupies; a sandbox read that matches the one before the
+        # agent-pod read shows the sandbox did not change while the agent pod was read.
+        files = [onboarding.REPORT_FILE, onboarding.DELIVERED_FILE]
+        # The delivery job fails on a dangling report symlink, so it is a report here; a
+        # dangling marker stays unclaimed, since the job can neither stat it nor claim over it.
+        links = [onboarding.REPORT_FILE]
+        unreadable = f"{onboarding.sandbox_pod()} could not be read (kubectl exec failed or the command did not run)"
+        sandbox = onboarding.read_files(onboarding.sandbox_shell, files, read_timeout, links)
+        if sandbox is None:
+            return "error", unreadable, None
+        for _ in range(_REPORT_READ_ATTEMPTS):
+            agent = onboarding.read_files(onboarding.agent_shell, [onboarding.COMPLETED_MARKER], read_timeout)
+            if agent is None:
+                return "error", "the agent pod could not be read (kubectl exec failed or the command did not run)", None
+            before, sandbox = sandbox, onboarding.read_files(onboarding.sandbox_shell, files, read_timeout, links)
+            if sandbox is None:
+                return "error", unreadable, None
+            if sandbox == before:
+                break
+        claimed = agent[onboarding.COMPLETED_MARKER]
+        report = sandbox[onboarding.REPORT_FILE]
+        delivered = sandbox[onboarding.DELIVERED_FILE]
+        raw = {"claimed": claimed, "report": report, "delivered": delivered}
+        marker, pod = onboarding.COMPLETED_MARKER, onboarding.sandbox_pod()
+        if claimed and delivered and not report:
+            return "pass", f"the delivery job claimed the report ({marker}) and renamed {pod}'s INVENTORY.md to INVENTORY.delivered.md", raw
+        if not claimed and report:
+            return "fail", f"{pod} holds INVENTORY.md and there is no {marker}: the delivery job did not read the report off the sandbox", raw
+        if not claimed and not delivered:
+            return "fail", f"no INVENTORY.md on {pod}: the prioritization stage wrote no report, so there was nothing to deliver", raw
+        if not claimed:
+            return "fail", f"{pod} holds INVENTORY.delivered.md but there is no {marker}", raw
+        if report:
+            return "fail", f"{marker} exists but {pod} still holds INVENTORY.md: the delivery job did not archive the report it claimed", raw
+        return "fail", f"{marker} exists but {pod} holds neither INVENTORY.md nor INVENTORY.delivered.md", raw
+
+
+@VERIFIERS.register("bootstrap_delivered")
+class BootstrapDeliveredVerifier(_OnboardingPollVerifier):
+    """Checks that the scheduler kept the run that delivered the onboarding report.
+
+    ``bootstrap_delivery.py`` claims the report by writing
+    ``.bootstrap_completed`` and prints it; the scheduler posts what it prints
+    only if the run completes. A run whose job is removed while it runs is
+    recorded as failed and its output is discarded. This finds the delivery
+    job's run in the agent pod's ``cron/executions.db`` whose window holds the
+    marker's mtime, and passes when that run completed.
+
+    Where the output went is not checked: the bench stack delivers to
+    ``local``, which the scheduler records as ``suppressed``. The agent pod
+    unreadable, or a marker, cron store or run timestamp the read cannot use,
+    is ``status="error"``.
+    """
+
+    type: Literal["bootstrap_delivered"]
+
+    def _check(self, read_timeout: float) -> tuple[VerificationStatus, str, dict[str, Any] | None]:
+        read = onboarding.read_delivery_runs(onboarding.agent_shell, read_timeout)
+        if read is None:
+            return "error", "the agent pod's cron store could not be read (kubectl exec failed or the command did not run)", None
+        if read.get("error"):
+            return "error", f"the agent pod's claim marker or cron store could not be read: {read['error']}", read
+        marker, job = onboarding.COMPLETED_MARKER, onboarding.DELIVERY_JOB_ID
+        if read.get("marker") is None:
+            return "fail", f"there is no {marker}: the delivery job never claimed the report", read
+        claimed = datetime.fromtimestamp(read["marker"], timezone.utc).isoformat()
+        runs = read["runs"]
+        if not runs:
+            return "fail", f"no run of {job} in {onboarding.EXECUTIONS_DB} spans the claim at {claimed}", read
+        run = runs[0]
+        status = run.get("status")
+        if status == "completed":
+            return "pass", f"the {job} run that claimed the report at {claimed} completed", read
+        if status in ("claimed", "running"):
+            return "fail", f"the {job} run that claimed the report at {claimed} is still {status}", read
+        return "fail", f"the {job} run that claimed the report at {claimed} ended {status}: {run.get('error') or 'no error recorded'}", read

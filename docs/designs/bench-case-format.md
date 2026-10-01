@@ -187,12 +187,22 @@ purges it), and `worker_agents` (regular expressions every one of which must mat
 profile at least one delegated worker ran as, read from the tags the harness puts on the
 workers' trajectory entries).
 
-One reads the install under test, from the same file: `bootstrap_fanout` compares the
+Four read the install under test, all from the same file. `bootstrap_fanout` compares the
 cards the onboarding discovery sweep filed, read from the agent pod's board, against the
 Cluster Agent profiles on its disk. Its `require` is `one_card_per_cluster_agent` (exactly
 one card per ready profile with a cluster identity, keyed and assigned to it, and no cluster
 card for anything else) or `no_card_waits_on_the_sweep` (no cluster card has the sweep as a
 parent).
+
+`bootstrap_findings` reads the shell sandbox of the install under test:
+`INVENTORY.items.json`, which the onboarding prioritization stage's `inventory_findings.py
+extract` writes through the worker's terminal. It passes when those items carry exactly the
+`(check, object)` pairs listed in `expected_findings`. `bootstrap_report_read` reads the
+sandbox too, and passes when onboarding's delivery job has claimed the ranked report
+(`.bootstrap_completed` on the agent pod) and renamed the sandbox's `INVENTORY.md` to
+`INVENTORY.delivered.md`, which it does after reading it. `bootstrap_delivered` reads the
+agent pod's `cron/executions.db` instead and passes when the delivery job's run that claimed
+the report completed, which is the condition for the scheduler to post what it printed.
 
 Two limits are worth knowing before choosing one. `tool_called` defaults to
 `scope: router`, the delegating turn's calls only — the harness appends the delegated
