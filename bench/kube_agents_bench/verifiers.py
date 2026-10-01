@@ -399,6 +399,21 @@ LEDGER_AUDIT_IDS = frozenset(
 # LedgerIssueContainsVerifier's docstring for what it has to be.
 LEDGER_TOKEN_ENV_VARS = ("BENCH_GITHUB_TOKEN", "GITHUB_TOKEN")
 
+# When the first unit on the case's audit stream began, in epoch seconds, and
+# which audit that stream is; hack/ci-eval-pr.sh exports both for a case that
+# writes a ledger. Read only by PullRequestOpenedVerifier's
+# `accepts_stream_pull_request`.
+STREAM_STARTED_ENV_VAR = "EVAL_STREAM_STARTED_AT"
+STREAM_AUDIT_ENV_VAR = "EVAL_AUDIT_STREAM"
+STREAM_REPO_ENV_VAR = "EVAL_STREAM_REPO"
+
+# The head branch every remediation pull request a fleet audit opens sits on is
+# this, the audit id, a dash, then the fix's slug and digest
+# (agents/platform/skills/fleet-audit/scripts/audit_report.py,
+# `group_branch_for`). What ties a pull request older than the run to the
+# stream rather than to whichever case wrote it.
+REMEDIATION_BRANCH_PREFIX = "platform-agent/fix-"
+
 # The first line of the closing comment hack/ci_reset_audit_ledgers.py leaves
 # on a ledger it retires before a repetition (RESET_MARKER there;
 # scripts/test_ci_eval_ledger_reset.py pins the two literals equal). A closed
@@ -1374,9 +1389,31 @@ class LedgerIssueContainsVerifier(BaseVerifier):
         )
 
 
+def _stream_audit() -> str:
+    """The audit id of the case's stream, from STREAM_AUDIT_ENV_VAR; "" if unset."""
+    return os.environ.get(STREAM_AUDIT_ENV_VAR, "").strip()
+
+
+def _stream_repo() -> str:
+    """The ``owner/name`` the stream's pull requests land in, from STREAM_REPO_ENV_VAR, lowercased; "" if unset."""
+    return os.environ.get(STREAM_REPO_ENV_VAR, "").strip().lower()
+
+
+def _stream_started() -> datetime | None:
+    """When the case's audit stream first ran, from STREAM_STARTED_ENV_VAR; None if unset or unreadable."""
+    raw = os.environ.get(STREAM_STARTED_ENV_VAR, "").strip()
+    try:
+        stamp = float(raw)
+        return datetime.fromtimestamp(stamp, tz=timezone.utc) if stamp > 0 else None
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
 @VERIFIERS.register("pull_request_opened")
 class PullRequestOpenedVerifier(BaseVerifier):
-    """A remediation pull request THIS run opened, resolved through GitHub.
+    """A remediation pull request THIS run opened (or, with
+    ``accepts_stream_pull_request``, one an earlier run on its audit stream
+    opened), resolved through GitHub.
 
     WHY THIS EXISTS. The remediation cases used to grade on a
     ``report_contains`` over ``["github.com/", "/pull/"]``, which asks only
@@ -1404,6 +1441,31 @@ class PullRequestOpenedVerifier(BaseVerifier):
     asks that the branch carried a closed pull request created during this
     run, that the candidate does not contain that one's head revision, and
     that the report names that one too.
+
+    With ``accepts_stream_pull_request`` the two "since this run started"
+    clauses measure instead from when the first unit on the case's audit
+    stream began (``EVAL_STREAM_STARTED_AT``, which ``hack/ci-eval-pr.sh``
+    exports with the audit id in ``EVAL_AUDIT_STREAM``), so a pull request an
+    earlier unit on the stream opened passes when the reply names it -- and
+    only if its head branch is one that audit's ``finish`` names
+    (``platform-agent/fix-<audit>-``) and it is in the job's GitOps repository
+    (``EVAL_STREAM_REPO``; without it the window is not widened). The stamp bounds when; the branch is
+    what says the pull request is the stream's and not another case's in the
+    same repository. That is for a case whose later runs meet a pull
+    request an earlier run left open on the same branch, as a fleet audit's
+    remediation case does: ``finish`` names the branch after the files the
+    fix touches, so every
+    later run of the audit on the stream -- this case's later repetitions, or
+    another case auditing the same fleet -- finds the pull request open on it,
+    leaves it, and pushes nothing. The presubmit holds no credential to close
+    it between units (docs/ci-pool-projects.md 5.3), so without the option
+    only the first unit on the stream could pass. A leftover from before the
+    stream's first unit -- an earlier job on the pool project -- predates the
+    stamp and is still rejected. The branch ties the pull request to the
+    audit, not to this case's defect: another case on the same stream opens
+    on the same branch prefix, and a later repetition passes by naming the
+    one repetition 1 opened. Run through ``devops-bench`` directly, without
+    both variables, the clauses measure from the run as they otherwise do.
 
     WHICH ENDPOINT. ``/issues/{n}`` first: a pull request is an issue to that
     API, the response carries ``created_at``, and it is the endpoint the read
@@ -1440,6 +1502,11 @@ class PullRequestOpenedVerifier(BaseVerifier):
     # `/pulls?state=closed&head=` and `/pulls/{n}/commits`, so the credential
     # needs `pull_requests: read`.
     reuses_spent_branch: bool = False
+    # Measure "written since" and "head commit since" from the first unit on
+    # the case's audit stream rather than the run, so a later run of the audit
+    # passes on the pull request an earlier one opened and this one found
+    # already open. See the docstring.
+    accepts_stream_pull_request: bool = False
 
     def _spent_before(
         self,
@@ -1792,6 +1859,48 @@ class PullRequestOpenedVerifier(BaseVerifier):
             )
 
         started = datetime.fromtimestamp(snap.started_at, tz=timezone.utc)
+        # The floor every "since" clause below measures from: the run, or with
+        # accepts_stream_pull_request the stream's first unit, when the harness
+        # exported one.
+        since, since_what = started, "this run started"
+        stream_branch = ""
+        if self.accepts_stream_pull_request and not _stream_audit():
+            # The option does nothing off a stream, and a rejection that only
+            # said "before this run started" would hide that it was dropped.
+            since_what = (
+                "this run started (`accepts_stream_pull_request` is set, but "
+                f"{STREAM_AUDIT_ENV_VAR} is not: the harness puts a case on an "
+                "audit stream only through a `ledger_issue_contains` check with "
+                "an `audit` key)"
+            )
+        elif self.accepts_stream_pull_request and not _stream_repo():
+            # Without the job's repository a sibling job's pull request on the
+            # same audit's branch in another pool repository would pass.
+            since_what = (
+                "this run started (`accepts_stream_pull_request` is set and the "
+                f"case is on an audit stream, but {STREAM_REPO_ENV_VAR} is not: "
+                "without the job's GitOps repository the widened window cannot "
+                "tell this job's pull request from a sibling job's)"
+            )
+        elif self.accepts_stream_pull_request:
+            stream_started = _stream_started()
+            if stream_started is not None and stream_started < started:
+                since, since_what = stream_started, "this audit stream's first run began"
+                stream_branch = f"{REMEDIATION_BRANCH_PREFIX}{_stream_audit()}-"
+            elif stream_started is None:
+                since_what = (
+                    "this run started (`accepts_stream_pull_request` is set and the "
+                    f"case is on an audit stream, but {STREAM_STARTED_ENV_VAR} is "
+                    "missing or unreadable, so the window was not widened)"
+                )
+            else:
+                # Never narrowed below the run: a late stamp is a stale window
+                # file or a clock step, not a later start.
+                since_what = (
+                    "this run started (`accepts_stream_pull_request` is set, but "
+                    f"{STREAM_STARTED_ENV_VAR} ({stream_started.isoformat()}) is not "
+                    "before this run, so the window was not widened)"
+                )
         budget = single_call_timeout(timeout_sec)
         rejected: list[str] = []
         # A candidate the API cannot answer for only ends the check if nothing
@@ -1847,11 +1956,11 @@ class PullRequestOpenedVerifier(BaseVerifier):
             # the reason names both readings.
             updated = _parse_github_time(payload.get("updated_at"))
             touched = updated if updated and updated > created else created
-            age = (started - touched).total_seconds()
+            age = (since - touched).total_seconds()
             if age > self.max_clock_skew_sec:
                 rejected.append(
                     f"{slug}: last written at {touched.isoformat()}, {age:.0f}s "
-                    f"BEFORE this run started ({started.isoformat()}) — a leftover "
+                    f"BEFORE {since_what} ({since.isoformat()}) — a leftover "
                     "an earlier run opened, which this run either quoted or "
                     "resubmitted unchanged"
                 )
@@ -1874,13 +1983,38 @@ class PullRequestOpenedVerifier(BaseVerifier):
                     f"{slug}: changes no files, so it carries no proposed fix"
                 )
                 continue
-            if pushed and (started - pushed).total_seconds() > self.max_clock_skew_sec:
+            if pushed and (since - pushed).total_seconds() > self.max_clock_skew_sec:
                 rejected.append(
                     f"{slug}: its head commit dates from {pushed.isoformat()}, "
-                    f"before this run started ({started.isoformat()}) — this run "
+                    f"before {since_what} ({since.isoformat()}) — this run "
                     "wrote to a pull request an earlier one pushed the fix to"
                 )
                 continue
+            # Only the widened window needs the branch: a pull request this
+            # run wrote and pushed to is this run's whatever it is called.
+            skew = self.max_clock_skew_sec
+            if stream_branch and (
+                (started - touched).total_seconds() > skew
+                or (pushed and (started - pushed).total_seconds() > skew)
+            ):
+                if f"{owner}/{repo}".lower() != _stream_repo():
+                    rejected.append(
+                        f"{slug}: last written or pushed to before this run "
+                        f"started, in a repository other than this job's "
+                        f"({_stream_repo()}) — another job's pull request on "
+                        "the same audit stream, not this one's"
+                    )
+                    continue
+                head = str(((pull or payload).get("head") or {}).get("ref") or "")
+                if not head.startswith(stream_branch):
+                    rejected.append(
+                        f"{slug}: last written or pushed to before this run "
+                        f"started, on branch "
+                        f"{head or '(unreadable)'!r}, which is not one this audit "
+                        f"stream's `finish` names ({stream_branch}*) — another "
+                        "case's pull request, not the stream's"
+                    )
+                    continue
             if self.reuses_spent_branch:
                 try:
                     rejection, unevaluable = self._spent_before(
@@ -1897,10 +2031,19 @@ class PullRequestOpenedVerifier(BaseVerifier):
                 if rejection:
                     rejected.append(rejection)
                     continue
+            # Within the skew allowance a pull request a hair older than the
+            # run is still this run's; "an earlier repetition" only when the
+            # widened window is what admitted it.
+            during = (
+                "during this run"
+                if since == started or (started - touched).total_seconds() <= self.max_clock_skew_sec
+                else f"by an earlier run on this audit stream (found already open; "
+                f"{since_what} at {since.isoformat()})"
+            )
             return done(
                 True,
                 f"{slug} was {'opened' if touched == created else 'updated'} at "
-                f"{touched.isoformat()}, during this run, and carries "
+                f"{touched.isoformat()}, {during}, and carries "
                 f"{changed if changed is not None else 'an unreported number of'} "
                 "changed file(s)"
                 + (", on a branch this run's closed pull request had used"
@@ -1923,8 +2066,8 @@ class PullRequestOpenedVerifier(BaseVerifier):
             )
         return done(
             False,
-            "none of the pull request URLs the report names is one this run opened: "
-            + "; ".join(rejected),
+            "none of the pull request URLs the report names was opened or "
+            f"pushed to since {since_what}: " + "; ".join(rejected),
         )
 
 
