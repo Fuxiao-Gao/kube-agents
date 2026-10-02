@@ -4211,10 +4211,10 @@ func mergeCredentialProxyEnv(managed, custom []corev1.EnvVar) []corev1.EnvVar {
 		// turn the pin on for a repository and branch of its own choosing.
 		// It is only in `managed` when spec.integration.baseBranch is set, so
 		// on an install without one this line is the only thing reserving it.
-		// CREDENTIAL_PROXY_BASE_BRANCH is not listed: with baseBranch set it
-		// is managed, so the operator's value wins and the broker reads it
-		// ahead of GITOPS_BASE_BRANCH, which it then no longer reads. With no
-		// baseBranch, a spec.deployment.env CREDENTIAL_PROXY_BASE_BRANCH or
+		// CREDENTIAL_PROXY_BASE_BRANCH is not listed: with baseBranch set and
+		// a gitops repository accepted it is managed, so the operator's value wins and the broker reads it
+		// ahead of GITOPS_BASE_BRANCH, which it then no longer reads. Otherwise,
+		// a spec.deployment.env CREDENTIAL_PROXY_BASE_BRANCH or
 		// GITOPS_BASE_BRANCH passes through, and the broker reads it as a
 		// protected branch only.
 		credentialProxyBaseRepositoryEnv,

@@ -101,6 +101,9 @@ func TestIntegrationSchemaRulesEnvtest(t *testing.T) {
 		"base-lock":           {"main.lock", "may not end in"},
 		"base-trailing-slash": {"main/", "may not end in"},
 		"base-trailing-dot":   {"main.", "may not end in"},
+		"base-ref-under":      {"refs/heads/_release", "after refs/heads/"},
+		"base-ref-head":       {"refs/heads/HEAD", "after refs/heads/"},
+		"base-ref-empty":      {"refs/heads/", "may not end in"},
 	} {
 		refused[name] = struct {
 			integration agentv1alpha1.IntegrationSpec

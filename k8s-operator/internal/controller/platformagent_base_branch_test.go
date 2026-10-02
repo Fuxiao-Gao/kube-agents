@@ -168,8 +168,8 @@ func TestTheAgentAndTheSandboxGetNoBase(t *testing.T) {
 			// A spec.deployment.env CREDENTIAL_PROXY_BASE_BRANCH reaches
 			// agent-api-auth as any unreserved name does; what must not reach
 			// any container here is the operator's base or the repository.
-			if value, count := envValueCount(container.Env, "CREDENTIAL_PROXY_BASE_BRANCH"); count != 0 && value != "attacker" {
-				t.Errorf("%s container %q carries CREDENTIAL_PROXY_BASE_BRANCH=%q", pod, container.Name, value)
+			if value, count := envValueCount(container.Env, "CREDENTIAL_PROXY_BASE_BRANCH"); count > 1 || (count == 1 && value != "attacker") {
+				t.Errorf("%s container %q carries CREDENTIAL_PROXY_BASE_BRANCH %d time(s), last %q", pod, container.Name, count, value)
 			}
 			if value, count := envValueCount(container.Env, "CREDENTIAL_PROXY_BASE_REPOSITORY"); count != 0 {
 				t.Errorf("%s container %q carries CREDENTIAL_PROXY_BASE_REPOSITORY=%q", pod, container.Name, value)

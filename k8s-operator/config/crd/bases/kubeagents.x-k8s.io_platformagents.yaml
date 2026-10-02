@@ -9587,6 +9587,12 @@ spec:
                         - message: baseBranch may not be HEAD
                           rule: self != 'HEAD'
                         - message:
+                            baseBranch after refs/heads/ must start with a letter
+                            or digit and may not be HEAD
+                          rule:
+                            "!self.startsWith('refs/heads/') || (self.matches('^refs/heads/[A-Za-z0-9]')
+                            && self != 'refs/heads/HEAD')"
+                        - message:
                             "baseBranch must be a git branch name: no '..', '/.',
                             '//', '@{' or '.lock/'"
                           rule:

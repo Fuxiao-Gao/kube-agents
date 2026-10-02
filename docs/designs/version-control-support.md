@@ -575,7 +575,7 @@ the field pins nothing and the operator renders neither variable. With no
 `baseBranch` set, a `CREDENTIAL_PROXY_BASE_BRANCH` in `spec.deployment.env`, or
 failing that a `GITOPS_BASE_BRANCH`, still reaches the broker and joins the
 protected branches above, but pins no target, because nothing names its
-repository. Once `baseBranch` is set, the broker no longer reads
+repository. Once the operator renders the base, the broker no longer reads
 `GITOPS_BASE_BRANCH`. For the GitOps repository, matched by slug without regard
 to case, every door that chooses a target holds it to the base and compares
 branch names exactly: the base is accepted as `<base>` or `refs/heads/<base>`,
@@ -596,8 +596,9 @@ The command execution door refuses, as rule `github.pr-base`, a `gh pr create` o
 `gh pr new` that names the GitOps repository with a missing or different
 `--base`, one that names no repository (the broker cannot tell which one it
 targets), a `gh pr edit` that moves the base, and any `gh pr create`, `new` or
-`edit` that names a repository the install does not manage. It reads `-R` the
-way `gh` does, host and case included, and on `gh pr edit` it also reads a pull
+`edit` that names a repository the install does not manage. It reduces `-R` to
+`owner/name` the way `gh` does, dropping any host prefix rather than matching
+it and comparing names without regard to case, and on `gh pr edit` it also reads a pull
 request URL or `owner/name#number` given as the selector, because `gh` takes the
 repository from the selector over `-R`. Refusing
 unmanaged names also covers the old name of a renamed or transferred GitOps

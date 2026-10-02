@@ -2162,6 +2162,10 @@ class GhPullRequestBaseTest(unittest.TestCase):
              "--base", "main"],
             ["gh", "pr", "edit", "https://GitHub.com/Acme/Infra/pull/5/files", "--base", "main"],
             ["gh", "pr", "edit", "acme/infra#5", "-R", "acme/other", "--base", "main"],
+            # A selector after `--` is still the selector.
+            ["gh", "pr", "edit", "-R", "acme/other", "--base", "main", "--",
+             "https://github.com/acme/infra/pull/5"],
+            ["gh", "pr", "edit", "-R", "acme/other", "--base", "main", "--", "acme/infra#5"],
             # Any candidate being the pinned one is enough.
             ["gh", "pr", "edit", "https://github.com/acme/other/pull/5", "-R", "acme/infra",
              "--base", "main"],

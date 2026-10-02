@@ -3177,6 +3177,9 @@ def _gh_pr_arguments(arguments: list[str]) -> tuple[list[str], list[str], list[s
     tokens = iter(arguments)
     for token in tokens:
         if token == "--":
+            # gh reads everything after `--` as positional, so a pull request
+            # selector there is still the one the edit acts on.
+            words.extend(tokens)
             break
         if token.startswith("--"):
             name, sep, value = token.partition("=")
@@ -3253,9 +3256,9 @@ def gh_pr_base_violation(
     repository must target the base. Every repository a `gh pr create`, `new`
     or `edit` names -- each `-R`, and the repository in an edit's pull request
     URL or OWNER/REPO#NUMBER selector -- must reduce to `owner/name` the way gh
-    reduces it and must be one this install manages. A name gh would follow
-    somewhere else, such as a host prefix or a renamed repository's old name,
-    is refused rather than compared. An unreadable managed list refuses too.
+    reduces it and must be one this install manages. A host prefix is
+    dropped, not matched; a renamed repository's old name is refused because
+    it is not managed. An unreadable managed list refuses too.
 
     `gh pr create` (and its alias `new`) must name the repository with `-R` and
     the base with `--base`: with no `-R` the broker cannot tell which
