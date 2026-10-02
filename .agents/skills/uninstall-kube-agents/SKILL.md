@@ -38,6 +38,8 @@ at the script's own baked release when it has one, and from `main` when it does 
 unstamped copy is pointed at the release that was installed.
 
 `terraform` must be on `PATH` — the teardown engine, which this script never installs for you.
+On an install made onto a cluster it did not create, put `helm` on `PATH` too: without it the
+teardown only warns and leaves the releases to Terraform's Helm provider.
 See the site's [uninstall page](../../../docs/site/src/content/docs/install/uninstall.md).
 
 **No Terraform state anywhere** (none in GCS, none locally) means one of two things, and the
