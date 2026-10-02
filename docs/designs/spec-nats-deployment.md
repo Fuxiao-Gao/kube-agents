@@ -311,7 +311,20 @@ Layout:
   a pull-only principal may hold no task-subject subscribe at all, which is what the
   session grants do. The addressee token in the task subjects (payload spec
   0.4) is what makes these grants expressible - executor-granularity at connect time,
-  with per-task scoping the parked tightening under the authority work.
+  with per-task scoping the parked tightening under the authority work. **Amended
+  10/1:** "deny by default" holds per side, and only while that side has entries in
+  it. An empty allow list is nats-server's spelling of _unrestricted_, not of
+  _nothing_ (`buildPermissionsFromJwt` builds a side's permission object only when
+  that side's allow or deny list is non-empty, and the two sides are independent), so
+  a rendered entry that lost its publish list would grant the whole subject space on
+  that side while its subscribes stayed narrow. Neither side of a non-narrowed entry
+  may therefore be empty: in the callout identity map the operator refuses such a
+  render and the callout refuses it again at the mint, and in the static `nats.conf`
+  users - which have no validator - a side left empty beside a populated one renders
+  an explicit `deny = [">"]` rather than an absent key. A user with NEITHER side,
+  which is how `sys` ships, still gets no permissions block at all. A principal that
+  must not publish cannot be expressed by omission - there is no deny list in the map
+  - so it has to be left unrendered rather than rendered empty.
 - **Three task-subject classes, and the publish grants split along them** (9/9, payload
   spec 0.4). `…in` is the requester's, `…events` the executor's, and `…supervisor` the
   supervisor's - one writer class each, which is the whole point: a consumer derives the
