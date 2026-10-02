@@ -67,6 +67,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable
 
+import repo_ref
 import workspace_paths
 
 LOGGER = logging.getLogger("credential-proxy")
@@ -205,6 +206,18 @@ class Conflict(ContentWorkspaceError):
 class GitFailed(ContentWorkspaceError):
     status = 502
     code = "workspace.git-failed"
+
+
+class BaseBranchMissing(ContentWorkspaceError):
+    """The repository's pinned base is not a branch on its remote.
+
+    409 rather than the 502 a failed `rev-parse` would reach the caller as: the
+    configuration names a branch the remote does not have, and every retry
+    gets the same answer until one of the two changes.
+    """
+
+    status = 409
+    code = "workspace.base-branch-missing"
 
 
 def _limit(name: str, default: int) -> int:
@@ -647,6 +660,7 @@ class ContentWorkspaceStore:
         base_branch: str = "",
         credential_for: CredentialFor | None = None,
         clock: Callable[[], float] = time.monotonic,
+        base_repository: str = "",
     ) -> None:
         # Resolved, because `assert_disjoint_roots` resolves both sides and
         # `_redact` matches this value against paths git prints -- which git
@@ -674,6 +688,10 @@ class ContentWorkspaceStore:
             or os.environ.get("CREDENTIAL_PROXY_BASE_BRANCH", "").strip()
             or os.environ.get("GITOPS_BASE_BRANCH", "").strip()
         )
+        # The repository `base_branch` is the proposal base of. Together they
+        # make that branch the default base `open` gives the repository; see
+        # `repo_ref.pinned_base`.
+        self.base_repository = base_repository.strip()
         self._credential_for = credential_for
         # Monotonic, and injected so a test can drive the idle clock.
         self._clock = clock
@@ -963,6 +981,11 @@ class ContentWorkspaceStore:
         `branch`, because a single-branch clone cannot see whether the working
         branch exists on the remote and would answer from the base instead
         while reporting that it had looked.
+
+        With no `base` named, a repository with a pinned base opens on that
+        base rather than on the remote's default, since the base is the only
+        branch a proposal from this workspace will be accepted onto. A pinned
+        base the remote does not have is refused by name.
         """
         if not isinstance(repo, str) or not is_owner_name(repo):
             raise ContentWorkspaceError("repo must be owner/name")
@@ -982,6 +1005,13 @@ class ContentWorkspaceStore:
         # symmetric, and one day a caller will thread it somewhere unprefixed.
         if base is not None:
             base = check_branch_name(base)
+        pinned = None
+        if base is None:
+            pinned = repo_ref.pinned_base(repo, self.base_branch, self.base_repository)
+            if pinned is not None:
+                # Configuration rather than the caller's, but it reaches the
+                # same argv, so it takes the same check.
+                base = pinned = check_branch_name(pinned)
         caller = check_caller_label(caller)
         with self._lock:
             # Reclaim before counting: the entries a dead worker left are what
@@ -1064,6 +1094,13 @@ class ContentWorkspaceStore:
                     caller=caller,
                 )
                 workspace.default_branch = self._default_branch(workspace)
+                if pinned is not None and not self._remote_branch_exists(workspace, pinned):
+                    raise BaseBranchMissing(
+                        f"{repo} has no branch '{pinned}', the base branch this "
+                        "install is configured with; proposals onto this "
+                        "repository can only target that branch, so it has to "
+                        "exist on the remote first"
+                    )
                 workspace.base = base or workspace.default_branch
                 workspace.base_sha = self._sha(workspace, f"origin/{workspace.base}")
                 workspace.started_from = f"origin/{workspace.base}"

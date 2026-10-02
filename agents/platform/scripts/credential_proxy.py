@@ -366,6 +366,29 @@ FORGE_CLI_VOCABULARIES = {"gh": FORGE_CLI_SUBCOMMANDS}
 # The global flags a forge CLI takes a value for ahead of its subcommand, so
 # `gh -R owner/repo pr list` labels `pr` rather than the repository.
 FORGE_CLI_VALUE_FLAGS = {"gh": frozenset({"-R", "--repo"})}
+# What `gh_pr_base_violation` reads off a `gh pr` argv. The value-taking flags
+# are every one `gh pr create` and `gh pr edit` declare, so a value is never
+# read as a flag: `--title --base=main` is a title, and gh opens that pull
+# request on the default branch. A flag missing from these lists is read as one
+# that takes no value.
+GH_EXECUTABLE = "gh"
+GH_PR_COMMAND = "pr"
+GH_PR_CREATE_ACTIONS = frozenset({"create", "new"})
+GH_PR_EDIT_ACTION = "edit"
+GH_REPO_FLAGS = frozenset({"-R", "--repo"})
+GH_BASE_FLAGS = frozenset({"-B", "--base"})
+GH_REPO_SHORTHAND = "R"
+GH_BASE_SHORTHAND = "B"
+GH_PR_VALUE_FLAGS = frozenset(
+    {
+        "--add-assignee", "--add-label", "--add-project", "--add-reviewer",
+        "--assignee", "--attach", "--base", "--body", "--body-file", "--head",
+        "--label", "--milestone", "--project", "--recover", "--remove-assignee",
+        "--remove-label", "--remove-project", "--remove-reviewer", "--repo",
+        "--reviewer", "--template", "--title",
+    }
+)
+GH_PR_VALUE_SHORTHANDS = frozenset("aBbFHlmprRtT")
 
 # The broker's log is one JSON object per line (JsonLineFormatter): these are its
 # keys, Cloud Logging's names where it has one. A tool-execution audit record is
@@ -396,6 +419,7 @@ RULE_EXECUTABLE_ALLOWLIST = "executable.allowlist"
 RULE_GIT_ARGUMENT_REFUSED = "git.argument.refused"
 RULE_GIT_WORKSPACE_LEASE = "git.workspace.lease"
 RULE_SCOPED_SA_UNMAPPED_SCOPE = "gcp.scoped-sa.unmapped-scope"
+RULE_GITHUB_PR_BASE = "github.pr-base"
 LOG_LEVEL_ENV = "LOG_LEVEL"
 DEFAULT_LOG_LEVEL = "INFO"
 EXIT_STARTUP_FAILURE = 1
@@ -3128,6 +3152,105 @@ def git_argument_violation(argv: list[str]) -> str | None:
     return None
 
 
+def _gh_pr_arguments(arguments: list[str]) -> tuple[list[str], list[str], list[str]]:
+    """The bare words, `-R` values and `--base` values of a gh argv, in order.
+
+    Read the way gh's flag parser reads it: a value-taking flag consumes the
+    next token whatever it looks like, `--flag=value` and `-Fvalue` carry their
+    own, and a cluster of shorthands (`-dB main`) ends at the first letter that
+    takes a value. Every `-R` and `--base` is kept, not only the last, so the
+    caller can judge each one.
+    """
+    words: list[str] = []
+    repos: list[str] = []
+    bases: list[str] = []
+    tokens = iter(arguments)
+    for token in tokens:
+        if token == "--":
+            break
+        if token.startswith("--"):
+            name, sep, value = token.partition("=")
+            if name in GH_PR_VALUE_FLAGS and not sep:
+                value = next(tokens, "")
+            if name in GH_REPO_FLAGS:
+                repos.append(value)
+            elif name in GH_BASE_FLAGS:
+                bases.append(value)
+            continue
+        if token.startswith("-") and len(token) > 1:
+            for index, letter in enumerate(token[1:], start=1):
+                if letter not in GH_PR_VALUE_SHORTHANDS:
+                    continue
+                value = token[index + 1:]
+                value = value[1:] if value.startswith("=") else value
+                if not value:
+                    value = next(tokens, "")
+                if letter == GH_REPO_SHORTHAND:
+                    repos.append(value)
+                elif letter == GH_BASE_SHORTHAND:
+                    bases.append(value)
+                break
+            continue
+        words.append(token)
+    return words, repos, bases
+
+
+def gh_pr_base_violation(
+    argv: list[str], base_branch: str, base_repository: str
+) -> str | None:
+    """Why this `gh pr` argv may not run under a pinned base, or None.
+
+    With a base pinned for the GitOps repository, a pull request onto that
+    repository must target the base. `gh pr create` (and its alias `new`)
+    must name the repository with `-R` and the base with `--base`: with no
+    `-R` the broker cannot tell which repository the pull request lands on,
+    and with no `--base` gh picks the remote's default branch. `gh pr edit`
+    may not move a pull request to another base, on that repository or on one
+    it cannot see. Pull requests onto other repositories, every other `gh`
+    command, and an install that pins nothing are not this check's business.
+
+    The branch is compared exactly once a `refs/heads/` or `heads/` prefix is
+    gone, because git branch names are case-sensitive.
+    """
+    if not argv or Path(argv[0]).name != GH_EXECUTABLE:
+        return None
+    base = repo_ref.short_branch(base_branch or "")
+    pinned_repository = (base_repository or "").strip()
+    if not base or not pinned_repository:
+        return None
+    words, repos, bases = _gh_pr_arguments(argv[1:])
+    if len(words) < 2 or words[0] != GH_PR_COMMAND:
+        return None
+    action = words[1]
+    if action not in GH_PR_CREATE_ACTIONS and action != GH_PR_EDIT_ACTION:
+        return None
+    if repos and not any(
+        repo_ref.pinned_base(repo, base, pinned_repository) for repo in repos
+    ):
+        return None
+    configured = (
+        f"pull requests onto {pinned_repository} must target {base}, the base "
+        "branch this install is configured with"
+    )
+    off_base = [value for value in bases if repo_ref.short_branch(value) != base]
+    if action == GH_PR_EDIT_ACTION:
+        if not off_base:
+            return None
+        return (
+            f"`gh pr edit --base {off_base[0]}` is refused: {configured}. "
+            f"Pass --base {base} or leave the base alone."
+        )
+    if not repos:
+        return (
+            f"`gh pr {action}` without -R/--repo is refused: the broker cannot "
+            f"tell which repository it opens a pull request on, and {configured}. "
+            f"Name the repository with -R and pass --base {base}."
+        )
+    if not bases or off_base:
+        return f"`gh pr {action}` is refused: {configured}. Pass --base {base}."
+    return None
+
+
 GIT_BUILTIN_SUBCOMMANDS = (
     GIT_MUTATING_SUBCOMMANDS
     | frozenset(_GIT_REFUSED_SUBCOMMANDS.keys())
@@ -5063,7 +5186,9 @@ class CommandExecutor:
         return value[: self.max_output_bytes], True
 
 
-def build_workspace_store(executor: CommandExecutor, base_branch: str = ""):
+def build_workspace_store(
+    executor: CommandExecutor, base_branch: str = "", base_repository: str = ""
+):
     """The content-passing store, or None when the feature is off.
 
     Returning None rather than an inert object is deliberate: the handler tests
@@ -5091,12 +5216,15 @@ def build_workspace_store(executor: CommandExecutor, base_branch: str = ""):
         executor.execute_workspace_git,
         base_branch=base_branch,
         credential_for=lambda repository: read_credential_for(registry, repository),
+        base_repository=base_repository,
     )
     LOGGER.info("content workspace enabled root=%s", executor.content_workspace_root)
     return store
 
 
-def build_vcs_broker(executor: CommandExecutor, base_branch: str = ""):
+def build_vcs_broker(
+    executor: CommandExecutor, base_branch: str = "", base_repository: str = ""
+):
     """The version-control broker. Always built; there is no switch.
 
     Unlike the content workspace this has no off state. It is the forge-neutral
@@ -5120,6 +5248,7 @@ def build_vcs_broker(executor: CommandExecutor, base_branch: str = ""):
         cli_runner=executor.execute_forge_cli,
         refresh=executor.refresh_forge_credential,
         base_branch=base_branch,
+        base_repository=base_repository,
     )
     LOGGER.info(
         "version control enabled root=%s forges=%s",
@@ -5696,6 +5825,10 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
     # answers 503.
     api_relay: GoogleApiRelay | None = None
     base_branch: str = ""
+    # The GitOps repository `base_branch` is the pull request base of. Set
+    # together with it, the base is pinned for that repository; see
+    # `repo_ref.pinned_base`.
+    base_repository: str = ""
     # None unless CREDENTIAL_PROXY_CONTENT_WORKSPACE is on. While it is None the
     # /v1/workspace/* routes answer 404 — the same answer an older broker gives,
     # which is what lets a migrating client detect support by asking rather than
@@ -6045,6 +6178,27 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
                     "status": "blocked",
                     "code": "SECURITY_POLICY_BLOCKED",
                     "rule": RULE_GIT_ARGUMENT_REFUSED,
+                    "message": violation,
+                },
+            )
+            return
+
+        # The pinned base on the `gh` door, which can open a pull request with
+        # the installation token as well as `/v1/vcs/proposal-create` can.
+        # Argv-only, so beside the git argument check and before anything runs.
+        violation = gh_pr_base_violation(argv, self.base_branch, self.base_repository)
+        if violation is not None:
+            LOGGER.warning(
+                "gh pull request base refused request_id=%s", request_id,
+                extra=audit(AUDIT_STATUS_BLOCKED, rule=RULE_GITHUB_PR_BASE),
+            )
+            self.metrics.record_tool(tool_label, subcommand_label, TOOL_STATUS_BLOCKED)
+            self._json(
+                HTTPStatus.FORBIDDEN,
+                {
+                    "status": "blocked",
+                    "code": "SECURITY_POLICY_BLOCKED",
+                    "rule": RULE_GITHUB_PR_BASE,
                     "message": violation,
                 },
             )
@@ -7229,11 +7383,16 @@ def serve(args: argparse.Namespace) -> None:
         or os.getenv("CREDENTIAL_PROXY_BASE_BRANCH", "")
         or os.getenv("GITOPS_BASE_BRANCH", "")
     ).strip()
+    CredentialProxyHandler.base_repository = (getattr(args, "base_repository", "") or "").strip()
     CredentialProxyHandler.workspaces = build_workspace_store(
-        executor, base_branch=CredentialProxyHandler.base_branch
+        executor,
+        base_branch=CredentialProxyHandler.base_branch,
+        base_repository=CredentialProxyHandler.base_repository,
     )
     CredentialProxyHandler.vcs = build_vcs_broker(
-        executor, base_branch=CredentialProxyHandler.base_branch
+        executor,
+        base_branch=CredentialProxyHandler.base_branch,
+        base_repository=CredentialProxyHandler.base_repository,
     )
     CredentialProxyHandler.max_request_bytes = args.max_request_bytes
     CredentialProxyHandler.enforce_read_only = read_only_enforced()
@@ -7441,6 +7600,14 @@ def parse_args() -> argparse.Namespace:
             "CREDENTIAL_PROXY_BASE_BRANCH", os.getenv("GITOPS_BASE_BRANCH", "")
         ),
         help="Protected GitOps base branch that agents may not push to directly",
+    )
+    parser.add_argument(
+        "--base-repository",
+        default=os.getenv("CREDENTIAL_PROXY_BASE_REPOSITORY", ""),
+        help=(
+            "The GitOps repository (owner/name) whose pull requests must target "
+            "--base-branch; unset leaves every repository's own default in charge"
+        ),
     )
     return parser.parse_args()
 

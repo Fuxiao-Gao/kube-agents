@@ -69,6 +69,7 @@ import threading
 from pathlib import Path
 from typing import Any, Callable
 
+import repo_ref
 from providers import (
     CliTransport,
     Forge,
@@ -178,11 +179,7 @@ _AUTOMATION_MARKING = re.compile(r"\[[^\]]*\]$")
 
 def _short_ref(branch: str) -> str:
     """`refs/heads/x` and `heads/x` name the branch `x`; compare them as `x`."""
-    short = branch.strip()
-    for prefix in ("refs/heads/", "heads/"):
-        if short.startswith(prefix):
-            return short[len(prefix):]
-    return short
+    return repo_ref.short_branch(branch)
 
 
 def _login_key(login: str) -> str:
@@ -276,11 +273,16 @@ class VcsBroker:
         cli_runner: Callable[..., subprocess.CompletedProcess] | None = None,
         refresh: Callable[[str, str], None] | None = None,
         base_branch: str | None = None,
+        base_repository: str | None = None,
     ) -> None:
         self.scratch_root = Path(scratch_root)
         self.scratch_root.mkdir(parents=True, exist_ok=True)
         self._git_runner = git_runner
         self.base_branch = (base_branch or "").strip()
+        # The repository `base_branch` is the proposal base of. Both together
+        # pin that one repository's base (`_pinned_base`); `base_branch` alone
+        # keeps only its older meaning, a branch no write door may move.
+        self.base_repository = (base_repository or "").strip()
         # A CLI transport needs the broker's credential environment but no
         # repository. When the caller does not separate the two, the git runner
         # serves both.
@@ -391,6 +393,32 @@ class VcsBroker:
         local = git(root, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
         return (local.stdout or "").strip() or "main"
 
+    def _pinned_base(self, repo: str) -> str | None:
+        """The branch every proposal onto `repo` must target, or None."""
+        return repo_ref.pinned_base(repo, self.base_branch, self.base_repository)
+
+    def _refuse_off_base(self, repo: str, target: Any) -> None:
+        """Refuse a proposal target that is not `repo`'s pinned base.
+
+        Request-only, so it runs before a credential is made current or the
+        forge is called. Compared exactly once the ref prefix is gone: git
+        branch names are case-sensitive, and `Main` is another branch. The base
+        goes in the message because the sandbox client keeps only the error
+        text and the code.
+        """
+        base = self._pinned_base(repo)
+        if base is None:
+            return
+        target = _short_ref(validate_branch(target, "target"))
+        if target != base:
+            raise WorkspaceError(
+                f"{repo} takes proposals onto {base} only, the base branch this "
+                f"install is configured with, and {target} is not it. Use {base} "
+                "as the target.",
+                status=409,
+                code="TARGET_NOT_BASE",
+            )
+
     # ---- repository verbs ----------------------------------------------
 
     def capabilities(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -399,6 +427,10 @@ class VcsBroker:
         Answered without making a credential current or touching the network. A
         caller that discovers the gap by failing halfway through a publish has
         already written the revision it cannot deliver.
+
+        `baseBranch` is the repository's pinned base, or None when this install
+        pins none for it. It is the read a caller with no clone uses to learn
+        which branch its proposals must target.
         """
         try:
             forge, repo = self.registry.resolve(payload.get("repository"))
@@ -409,8 +441,11 @@ class VcsBroker:
                 "proposalNoun": None,
                 "verbs": [],
                 "missing": [str(exc)],
+                "baseBranch": None,
             }
-        return forge.capabilities(repo)
+        answer = forge.capabilities(repo)
+        answer["baseBranch"] = self._pinned_base(repo)
+        return answer
 
     def clone(self, payload: dict[str, Any]) -> dict[str, Any]:
         """The repository's history, as a bundle, with nothing left behind.
@@ -425,8 +460,15 @@ class VcsBroker:
         not carry; cloning it fails with "remote did not send all necessary
         objects". Naming a `branch` is the size control that does work, because
         it makes the clone single-branch.
+
+        With no `branch` named, a repository with a pinned base is checked out
+        on that base rather than on the remote's default: the copy is what a
+        proposal is cut from, and the base is the only target the proposal
+        will be accepted onto. A pinned base the remote does not have is
+        refused by name. `baseBranch` in the answer is the pinned base, or None.
         """
         bound = self._bind(payload)
+        base = self._pinned_base(bound.repo)
         branch = payload.get("branch")
         branch = validate_branch(branch) if branch is not None else None
         if payload.get("depth") is not None:
@@ -447,6 +489,21 @@ class VcsBroker:
             argv += [bound.forge.clone_url(bound.repo), "."]
             git(root, *argv)
             self._enforce_ceiling(root, bound.repo)
+            if branch is None and base is not None:
+                present = git(
+                    root, "rev-parse", "--verify", "--quiet",
+                    f"refs/remotes/origin/{base}", check=False,
+                )
+                if present.returncode != 0:
+                    raise WorkspaceError(
+                        f"{bound.repo} has no branch {base}, the base branch "
+                        "this install is configured with. Proposals onto this "
+                        "repository can only target that branch, so it has to "
+                        "exist on the remote first.",
+                        status=409,
+                        code="BASE_BRANCH_MISSING",
+                    )
+                branch = base
             if branch is None:
                 branch = self._default_branch(git, root)
             git(root, "checkout", "--force", "-B", branch, f"origin/{branch}")
@@ -475,6 +532,7 @@ class VcsBroker:
                 "revision": head,
                 "size": size,
                 "bundleBase64": blob,
+                "baseBranch": base,
             }
         )
 
@@ -562,6 +620,18 @@ class VcsBroker:
                 status=409,
                 code="TARGET_IS_BRANCH",
             )
+        if not advance:
+            # A first publish is the start of a new proposal, so its target
+            # must be the repository's pinned base, the only one
+            # `proposal-create` will accept. Refused here, before a credential
+            # is spent, rather than after the branch is already on the remote.
+            #
+            # A later round (`advance`) is exempt. It adds to a proposal that
+            # already exists, and its target is that proposal's, which no verb
+            # can move. Refusing it would block every follow-up on a proposal
+            # a person opened onto another branch while leaving the proposal
+            # exactly where it is.
+            self._refuse_off_base(bound.repo, target)
         raw = payload.get("bundleBase64")
         if not isinstance(raw, str) or not raw:
             raise WorkspaceError("bundleBase64 must be a base64 bundle")
@@ -1238,13 +1308,19 @@ class VcsBroker:
         except ForgeUnsupported:
             return ""
 
-    def _forge_verb(self, verb: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _forge_verb(
+        self, verb: str, payload: dict[str, Any], pinned_target: bool = False
+    ) -> dict[str, Any]:
         bound = self._bind(payload)
+        if pinned_target:
+            # Before the method is looked up and before `bound.api`, so a
+            # refused target makes no forge call and spends no credential.
+            self._refuse_off_base(bound.repo, payload.get("target"))
         method = getattr(bound.forge, verb.replace("-", "_"))
         return bound.stamp(method(bound.api, bound.repo, payload))
 
     def proposal_create(self, payload):
-        return self._forge_verb("proposal-create", payload)
+        return self._forge_verb("proposal-create", payload, pinned_target=True)
 
     def proposal_list(self, payload):
         return self._forge_verb("proposal-list", payload)
@@ -1268,7 +1344,14 @@ class VcsBroker:
         return self._forge_verb("issue-comment", payload)
 
     def proposal_update(self, payload):
-        return self._forge_verb("proposal-update", payload)
+        # No adapter moves a proposal's target today, so this is defensive: a
+        # `target` that reaches one is held to the same pinned base as
+        # `proposal-create`, and the rule stays true the day an adapter learns
+        # to retarget.
+        return self._forge_verb(
+            "proposal-update", payload,
+            pinned_target=payload.get("target") is not None,
+        )
 
     def proposal_close(self, payload):
         return self._forge_verb("proposal-close", payload)

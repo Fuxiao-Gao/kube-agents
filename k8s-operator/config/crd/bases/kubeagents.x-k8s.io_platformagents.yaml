@@ -9568,6 +9568,31 @@ spec:
                 integration:
                   description: Integration configures platform-specific external connections.
                   properties:
+                    baseBranch:
+                      description: |-
+                        BaseBranch is the branch every pull request onto the GitOps repository
+                        must target. The credential broker enforces it: it refuses a proposal
+                        onto any other branch, and a clone that names no branch checks it out.
+                        It applies to the GitOps repository only: set without one, it does
+                        nothing and is reported as an integration problem. Empty means the
+                        repository's own default branch.
+
+                        The schema holds it to the branch names the broker accepts, because
+                        the chart installs the operator with its webhook off.
+                      maxLength: 255
+                      pattern: ^$|^[A-Za-z0-9_][A-Za-z0-9._/@-]*$
+                      type: string
+                      x-kubernetes-validations:
+                        - message:
+                            "baseBranch must be a git branch name: no '..', '/.',
+                            '//', '@{' or '.lock/'"
+                          rule:
+                            "!self.contains('..') && !self.contains('/.') && !self.contains('//')
+                            && !self.contains('@{') && !self.contains('.lock/')"
+                        - message:
+                            "baseBranch must be a git branch name: it may not end
+                            in '/', '.' or '.lock'"
+                          rule: "!self.endsWith('/') && !self.endsWith('.') && !self.endsWith('.lock')"
                     forges:
                       description: |-
                         Forges declares the forges this agent works with: which provider each
