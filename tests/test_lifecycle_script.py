@@ -1060,7 +1060,7 @@ class UninstallHelmReleasesTest(unittest.TestCase):
     _CONTEXT = "gke_test-project_us-central1_test-cluster"
 
     def _run(self, state=(_KUBE_AGENTS,), helm=True, credentials_rc=0,
-             list_output=None, list_rc=0, uninstall_rc=0, show_rc=0):
+             list_output=None, list_rc=0, uninstall_rc=0, show_rc=0, list_stderr=""):
         """Run uninstall_helm_releases against stubbed terraform, gcloud and helm.
 
         `list_output` is what `helm list` prints; by default it names the
@@ -1116,7 +1116,7 @@ exit 0
                 (bin_dir / "helm").write_text(f"""#!{bash}
 echo "helm $*" >> "{calls}"
 case "$1" in
-  list) {list_cmd}; exit {list_rc} ;;
+  list) {list_cmd}; [[ -z '{list_stderr}' ]] || echo '{list_stderr}' >&2; exit {list_rc} ;;
   uninstall) [[ {uninstall_rc} == 0 ]] || echo "Error: context deadline exceeded" >&2; exit {uninstall_rc} ;;
 esac
 exit 0
@@ -1143,8 +1143,8 @@ exit 0
         proc, calls = self._run(state=(self._CERT_MANAGER, self._KUBE_AGENTS))
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         uninstalls = self._uninstalls(calls)
-        # kube-agents first: cert-manager's uninstall deletes the CRDs of the
-        # Certificate and Issuer the kube-agents release holds.
+        # kube-agents first: its Certificate and Issuer are cert-manager kinds,
+        # removed while cert-manager is still running.
         self.assertEqual([u[2] for u in uninstalls], ["kube-agents", "cert-manager"], calls)
         for uninstall, namespace in zip(uninstalls, ("kubeagents-system", "cert-manager")):
             self.assertIn(f"-n {namespace}", " ".join(uninstall))
@@ -1178,6 +1178,12 @@ exit 0
         proc, calls = self._run(list_output="")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("helm list", calls)
+        self.assertEqual(self._uninstalls(calls), [])
+        self.assertIn("already gone", proc.stdout)
+
+    def test_a_warning_on_stderr_is_not_a_release(self):
+        proc, calls = self._run(list_output="", list_stderr="WARNING: Kubernetes configuration file is group-readable")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertEqual(self._uninstalls(calls), [])
         self.assertIn("already gone", proc.stdout)
 

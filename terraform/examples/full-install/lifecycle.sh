@@ -1056,7 +1056,7 @@ delete_agent_cr() {
 # Only releases this state installed, named from state rather than the
 # configuration: a cert-manager the cluster already ran is not in state and is
 # left alone. kube-agents goes first: its Certificate and Issuer are
-# cert-manager kinds, and cert-manager's uninstall deletes their CRDs. The
+# cert-manager kinds, removed while cert-manager is still running. The
 # PlatformAgent's finalizer is already handled (delete_agent_cr), so the
 # chart's pre-delete hook is a no-op and --wait has nothing left to hang on.
 #
@@ -1096,13 +1096,14 @@ uninstall_helm_releases() {
       continue
     fi
     # --all: a release left pending-install or uninstalling is still one to
-    # remove, and the default listing hides it. Empty output with exit 0 is
-    # "not there"; a non-zero exit is "could not ask". Checked first rather
-    # than passing --ignore-not-found, which older helm 3 releases lack.
+    # remove, and the default listing hides it. Exit 0 with no line naming the
+    # release is "not there" (a warning on stderr is not a release); a non-zero
+    # exit is "could not ask". Checked first rather than passing
+    # --ignore-not-found, which older helm 3 releases lack.
     if ! output=$(helm list --all --short --filter "^${name}\$" \
                     -n "$namespace" --kube-context "$CLUSTER_CONTEXT" 2>&1); then
       :
-    elif [[ -z "$output" ]]; then
+    elif ! grep -qxF -- "$name" <<<"$output"; then
       log "Helm release $namespace/$name is already gone"
       continue
     elif output=$(helm uninstall "$name" -n "$namespace" --kube-context "$CLUSTER_CONTEXT" \
@@ -1115,6 +1116,8 @@ uninstall_helm_releases() {
     warn "This state did not create the cluster, so the release would outlive the teardown."
     warn "Fix access to the cluster and re-run (destroy is safe to re-run), or remove it by hand:"
     warn "  helm uninstall $name -n $namespace --kube-context $CLUSTER_CONTEXT --wait"
+    warn "If this host cannot get access back and the cluster's owner will remove the release,"
+    warn "drop it from state instead and re-run:  terraform state rm '$addr'"
     exit 1
   done
 }
