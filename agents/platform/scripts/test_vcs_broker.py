@@ -2179,7 +2179,9 @@ class CollaborationTest(unittest.TestCase):
 
     def test_proposal_create_refuses_a_target_that_is_not_the_pinned_base(self):
         broker, recorder = self.pinned()
-        for target in ("main", "Gitops-Base", "refs/heads/main"):
+        # `heads/gitops-base` is a branch of its own, and the forge would open
+        # the proposal on it rather than on the base.
+        for target in ("main", "Gitops-Base", "refs/heads/main", "heads/gitops-base"):
             with self.subTest(target=target), self.assertRaises(WorkspaceError) as caught:
                 broker.proposal_create(
                     {"repository": "acme/infra", "source": "fix/a", "target": target, "title": "t"}
@@ -2202,13 +2204,15 @@ class CollaborationTest(unittest.TestCase):
         self.assertEqual(recorder.calls, [])
 
     def test_proposal_create_onto_the_pinned_base_reaches_the_forge(self):
+        # As the bare name, whichever spelling it came in as: the forge opens
+        # the proposal on the name it is sent.
         for target in ("gitops-base", "refs/heads/gitops-base"):
             with self.subTest(target=target):
                 broker, recorder = self.pinned({"number": 3, "state": "open"})
                 broker.proposal_create(
                     {"repository": "acme/infra", "source": "fix/a", "target": target, "title": "t"}
                 )
-                self.assertEqual(recorder.body["base"], target)
+                self.assertEqual(recorder.body["base"], "gitops-base")
 
     def test_proposal_create_on_a_repository_the_pin_does_not_name_is_unchanged(self):
         broker, recorder = self.pinned({"number": 3, "state": "open"})

@@ -4206,15 +4206,17 @@ func mergeCredentialProxyEnv(managed, custom []corev1.EnvVar) []corev1.EnvVar {
 		// pool this line is the only thing reserving it.
 		"CREDENTIAL_PROXY_SCOPED_SA_POOL",
 		"CREDENTIAL_PROXY_SCOPED_SA_POOL_FILE",
-		// The pull-request base and the repository it pins. A plugin that
-		// could set them would choose the branch the broker holds proposals
-		// to, or switch the pin onto a repository of its own choosing. Both
-		// are only in `managed` when spec.integration.baseBranch is set, so
-		// on an install without one these lines are the only thing reserving
-		// them. GITOPS_BASE_BRANCH stays unreserved: the broker still reads
-		// it as a protected branch, and never enforces it as a base, which
-		// takes CREDENTIAL_PROXY_BASE_REPOSITORY as well.
-		credentialProxyBaseBranchEnv,
+		// The repository the pull-request base pins. The broker enforces a
+		// base only when this is set, so a plugin that could set it would
+		// turn the pin on for a repository and branch of its own choosing.
+		// It is only in `managed` when spec.integration.baseBranch is set, so
+		// on an install without one this line is the only thing reserving it.
+		// CREDENTIAL_PROXY_BASE_BRANCH is not listed: with baseBranch set it
+		// is managed, so the operator's value wins and the broker reads it
+		// ahead of GITOPS_BASE_BRANCH, which it then no longer reads. With no
+		// baseBranch, a spec.deployment.env CREDENTIAL_PROXY_BASE_BRANCH or
+		// GITOPS_BASE_BRANCH passes through, and the broker reads it as a
+		// protected branch only.
 		credentialProxyBaseRepositoryEnv,
 		"CREDENTIAL_PROXY_STATE_DIR",
 		"CREDENTIAL_PROXY_TIMEOUT_SECONDS",

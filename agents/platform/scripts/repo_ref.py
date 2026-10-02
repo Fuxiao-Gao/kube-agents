@@ -109,9 +109,11 @@ KNOWN_HOSTS = frozenset({GITHUB_CANONICAL_HOST})
 #: Matches `forge.RepoUnparseable`, whose reason codes are operator-facing.
 REASON_UNPARSEABLE = "GIT_REPO_UNPARSEABLE"
 
-#: The spellings git accepts for a branch that are not the bare name:
-#: `refs/heads/x` and `heads/x` both name the branch `x`.
-BRANCH_REF_PREFIXES = ("refs/heads/", "heads/")
+#: The one spelling of a branch, besides the bare name, that is stripped before
+#: it is compared: `refs/heads/x` names the branch `x`. `heads/x` is not read as
+#: `x`, because a forge sends a base on as the name it was given, and `heads/x`
+#: is a branch anyone may push.
+BRANCH_REF_PREFIXES = ("refs/heads/",)
 
 
 class RepoRefError(ValueError):
@@ -323,7 +325,7 @@ def is_github_slug(value: object) -> bool:
 
 
 def short_branch(name: str) -> str:
-    """`refs/heads/x` and `heads/x` name the branch `x`; compare them as `x`."""
+    """`refs/heads/x` names the branch `x`; compare it as `x`."""
     short = name.strip()
     for prefix in BRANCH_REF_PREFIXES:
         if short.startswith(prefix):

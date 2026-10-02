@@ -1993,6 +1993,18 @@ class GhPullRequestBaseTest(unittest.TestCase):
 
     BASE = "gitops-base"
     PINNED = "acme/infra"
+    MANAGED = ("acme/infra", "acme/other")
+
+    def setUp(self):
+        # The managed list is cached for thirty seconds; each test reads its own.
+        patcher = mock.patch.object(credential_proxy, "_managed_repository_cache", None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        reader = mock.patch(
+            "gitops_workspace.get_managed_github_repos", return_value=list(self.MANAGED)
+        )
+        self.reader = reader.start()
+        self.addCleanup(reader.stop)
 
     def violation(self, argv, base=BASE, repository=PINNED):
         return credential_proxy.gh_pr_base_violation(argv, base, repository)
@@ -2020,6 +2032,8 @@ class GhPullRequestBaseTest(unittest.TestCase):
             ["gh", "pr", "create", "-R", "acme/infra", "--base"],
             # A value is not a flag: this title carries the only --base.
             ["gh", "pr", "create", "-R", "acme/infra", "--title", "--base=gitops-base"],
+            # `heads/gitops-base` is a branch of its own, which gh passes on as is.
+            ["gh", "pr", "create", "-R", "acme/infra", "-B", "heads/gitops-base"],
         ):
             with self.subTest(argv=argv):
                 message = self.violation(argv)
@@ -2033,8 +2047,8 @@ class GhPullRequestBaseTest(unittest.TestCase):
             ["gh", "pr", "new", "--repo=acme/infra", "-B", "gitops-base"],
             ["gh", "pr", "create", "-R", "acme/infra", "-Bgitops-base", "--title", "t"],
             ["gh", "pr", "create", "-R", "acme/infra", "--base", "refs/heads/gitops-base"],
-            ["gh", "pr", "create", "-R", "acme/infra", "-B", "heads/gitops-base"],
             ["gh", "pr", "create", "-R", "acme/infra", "-d", "-B", "gitops-base", "-b", "--base=main"],
+            ["gh", "pr", "create", "-R", "github.com/acme/infra", "--base", "gitops-base"],
         ):
             with self.subTest(argv=argv):
                 self.assertIsNone(self.violation(argv))
@@ -2070,6 +2084,101 @@ class GhPullRequestBaseTest(unittest.TestCase):
             with self.subTest(argv=argv):
                 self.assertIsNone(self.violation(argv))
 
+    def test_a_host_prefix_gh_reads_is_dropped_before_the_repository_is_matched(self):
+        # gh reads a schemeless HOST/OWNER/REPO with any host, and folds every
+        # *.github.com into github.com, so each of these is acme/infra to gh.
+        for prefix in (
+            "www.github.com/",
+            "ssh.github.com/",
+            "api.github.com/",
+            "WWW.GitHub.com/",
+            "github.example.com/",
+            "https://www.github.com/",
+            "git@ssh.github.com:",
+        ):
+            for action in (["create"], ["edit", "7"]):
+                argv = ["gh", "pr", *action, "-R", f"{prefix}acme/infra", "--base", "main"]
+                with self.subTest(argv=argv):
+                    self.assertIn(self.BASE, self.violation(argv) or "")
+
+        # Paired ordinary use: the same spellings onto the base go through.
+        for prefix in ("www.github.com/", "github.example.com/"):
+            argv = ["gh", "pr", "create", "-R", f"{prefix}acme/infra", "--base", "gitops-base"]
+            with self.subTest(argv=argv):
+                self.assertIsNone(self.violation(argv))
+
+    def test_a_repository_value_that_is_not_owner_name_is_refused(self):
+        # One gh would not read as owner/name, or this check cannot, is refused
+        # rather than taken for a repository the pin does not cover.
+        for value in (
+            "acme",
+            "a/b/acme/infra",
+            "https://github.com/acme/infra/extra",
+            "github.com/x/acme/infra",
+            "acme/..",
+            "",
+        ):
+            argv = ["gh", "pr", "create", "-R", value, "--base", "main"]
+            with self.subTest(value=value):
+                self.assertIn("owner/name", self.violation(argv) or "")
+
+    def test_a_repository_this_install_does_not_manage_is_refused(self):
+        # An old name GitHub redirects from is not on the managed list, so a
+        # renamed or transferred GitOps repository is not reachable through it.
+        for argv in (
+            ["gh", "pr", "create", "-R", "acme/old-infra", "--base", "main"],
+            ["gh", "pr", "create", "-R", "someone/else", "--base", "gitops-base"],
+            ["gh", "pr", "edit", "7", "-R", "acme/old-infra", "--base", "main"],
+            ["gh", "pr", "edit", "https://github.com/acme/old-infra/pull/5", "--title", "t"],
+            ["gh", "pr", "edit", "acme/old-infra#5", "--base", "main"],
+            # Every value is judged, not only the one gh would keep.
+            ["gh", "pr", "create", "-R", "acme/infra", "-R", "acme/old-infra", "--base", "gitops-base"],
+        ):
+            with self.subTest(argv=argv):
+                message = self.violation(argv) or ""
+                self.assertIn("must name a repository this install manages", message)
+
+        # Matched case-insensitively, as `repository_is_managed` matches.
+        self.assertIsNone(
+            self.violation(["gh", "pr", "create", "-R", "Acme/Other", "--base", "main"])
+        )
+
+    def test_an_unreadable_managed_list_refuses(self):
+        self.reader.side_effect = RuntimeError("kubectl exited 1")
+        for argv in (
+            ["gh", "pr", "create", "-R", "acme/other", "--base", "main"],
+            ["gh", "pr", "create", "-R", "acme/infra", "--base", "gitops-base"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertIn("unavailable", self.violation(argv) or "")
+        # A command naming no repository asks nothing of the list.
+        self.assertIsNone(self.violation(["gh", "pr", "edit", "7", "--add-label", "x"]))
+
+    def test_an_edit_s_pull_request_selector_names_a_repository_too(self):
+        # gh takes the repository from a pull request URL over -R, so the
+        # pinned repository in the URL is the one the edit moves.
+        for argv in (
+            ["gh", "pr", "edit", "https://github.com/acme/infra/pull/5", "-R", "acme/other",
+             "--base", "main"],
+            ["gh", "pr", "edit", "https://GitHub.com/Acme/Infra/pull/5/files", "--base", "main"],
+            ["gh", "pr", "edit", "acme/infra#5", "-R", "acme/other", "--base", "main"],
+            # Any candidate being the pinned one is enough.
+            ["gh", "pr", "edit", "https://github.com/acme/other/pull/5", "-R", "acme/infra",
+             "--base", "main"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertIn(self.BASE, self.violation(argv) or "")
+
+        # Paired ordinary use: another managed repository's pull request, or
+        # one on the pinned repository that names the base or leaves it alone.
+        for argv in (
+            ["gh", "pr", "edit", "https://github.com/acme/other/pull/5", "--base", "main"],
+            ["gh", "pr", "edit", "https://github.com/acme/infra/pull/5", "--base", "gitops-base"],
+            ["gh", "pr", "edit", "acme/infra#5", "--title", "t"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertIsNone(self.violation(argv))
+
     def test_what_the_pin_does_not_cover_is_untouched(self):
         for argv in (
             ["gh", "pr", "create", "-R", "acme/other", "--base", "main"],
@@ -2088,11 +2197,18 @@ class GhPullRequestBaseTest(unittest.TestCase):
                 self.assertIsNone(self.violation(argv))
 
     def test_an_install_that_pins_nothing_is_untouched(self):
-        argv = ["gh", "pr", "create", "-R", "acme/infra", "--base", "main"]
+        self.reader.side_effect = RuntimeError("kubectl exited 1")
         for base, repository in (("", ""), (self.BASE, ""), ("", self.PINNED)):
-            with self.subTest(base=base, repository=repository):
-                self.assertIsNone(self.violation(argv, base, repository))
-                self.assertIsNone(self.violation(["gh", "pr", "create"], base, repository))
+            for argv in (
+                ["gh", "pr", "create", "-R", "acme/infra", "--base", "main"],
+                ["gh", "pr", "create"],
+                ["gh", "pr", "create", "-R", "www.github.com/acme/infra", "--base", "main"],
+                ["gh", "pr", "create", "-R", "someone/else", "--base", "main"],
+            ):
+                with self.subTest(base=base, repository=repository, argv=argv):
+                    self.assertIsNone(self.violation(argv, base, repository))
+        # Not even the managed list is read.
+        self.reader.assert_not_called()
 
     def test_the_pin_s_ref_prefix_is_not_part_of_the_branch(self):
         argv = ["gh", "pr", "create", "-R", "acme/infra", "--base", "gitops-base"]
@@ -5424,6 +5540,12 @@ class ReadOnlyOverTheSocketTest(unittest.TestCase):
         self.addCleanup(restore)
         CredentialProxyHandler.base_branch = base_branch
         CredentialProxyHandler.base_repository = base_repository
+        for patcher in (
+            mock.patch.object(credential_proxy, "_managed_repository_cache", None),
+            mock.patch("gitops_workspace.get_managed_github_repos", return_value=["acme/infra"]),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def test_a_pull_request_off_the_pinned_base_never_reaches_the_executor(self):
         self._pin("gitops-base", "acme/infra")
@@ -5432,6 +5554,15 @@ class ReadOnlyOverTheSocketTest(unittest.TestCase):
         self.assertEqual("SECURITY_POLICY_BLOCKED", payload["code"])
         self.assertEqual("github.pr-base", payload["rule"])
         self.assertIn("gitops-base", payload["message"])
+        self.assertEqual([], self.executed)
+
+        # A repository this install does not manage takes the same rule.
+        status, payload = self._post(
+            ["gh", "-R", "acme/old-infra", "pr", "create", "--base", "main"]
+        )
+        self.assertEqual(403, status)
+        self.assertEqual("github.pr-base", payload["rule"])
+        self.assertIn("manages", payload["message"])
         self.assertEqual([], self.executed)
 
         # Paired ordinary use: the same pull request onto the base runs.

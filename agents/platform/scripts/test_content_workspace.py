@@ -1781,6 +1781,34 @@ class PinnedBaseOpenTest(unittest.TestCase):
         # Nothing is left behind for a handle nobody holds.
         self.assertEqual([], list((self.base / "trees").iterdir()))
 
+    def test_a_shallow_open_of_a_pinned_base_the_remote_lacks_is_refused_with_a_code(self):
+        # A shallow clone names the base with --branch, and git fails it for a
+        # missing branch, so the remote is asked before anything is cloned.
+        store = self.store({"ls-remote": FakeResult(exit_code=2)})
+        with self.assertRaises(ContentWorkspaceError) as caught:
+            store.open("acme/fleet", depth=1)
+        self.assertEqual(409, caught.exception.status)
+        self.assertEqual("workspace.base-branch-missing", caught.exception.code)
+        self.assertIn("gitops-base", str(caught.exception))
+        self.assertEqual(
+            ["git", "ls-remote", "--exit-code", "--heads",
+             "https://github.com/acme/fleet.git", "refs/heads/gitops-base"],
+            self.runner.calls[0][0],
+        )
+        self.assertNotIn("clone", self.runner.subcommands)
+        self.assertEqual([], list((self.base / "trees").iterdir()))
+
+        # Paired ordinary use: a base the remote has, or a probe that could not
+        # ask, goes on to the shallow clone of the base.
+        for exit_code in (0, 128):
+            with self.subTest(exit_code=exit_code):
+                store = self.store({"ls-remote": FakeResult(exit_code=exit_code)})
+                workspace = store.open("acme/fleet", depth=1)
+                self.assertEqual("gitops-base", workspace.base)
+                clone = next(argv for argv, _ in self.runner.calls if argv[1] == "clone")
+                self.assertIn("--branch", clone)
+                self.assertIn("gitops-base", clone)
+
 
 class GrepTest(unittest.TestCase):
     """`git grep` over a real tree, because the argv is the whole control."""

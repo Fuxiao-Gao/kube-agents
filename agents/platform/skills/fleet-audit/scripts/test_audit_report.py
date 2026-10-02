@@ -9183,7 +9183,7 @@ class TestRemediationBaseBranch(HarnessTestCase):
         }
         self.harness.replies = {"pr create": "https://github.com/acme/fleet/pull/8\n"}
 
-    def open_it(self):
+    def open_it(self, existing=None):
         with contextlib.redirect_stderr(io.StringIO()):
             return audit_report.open_remediation_pr(
                 "acme/fleet",
@@ -9192,7 +9192,7 @@ class TestRemediationBaseBranch(HarnessTestCase):
                 snapshot=self.snapshot,
                 root=self.workspace,
                 issue_number=42,
-                existing=None,
+                existing=existing,
                 generated_at=NOW,
             )
 
@@ -9237,6 +9237,37 @@ class TestRemediationBaseBranch(HarnessTestCase):
         self.assertEqual(asked, ["acme/fleet"])
         self.assertIn(["git", "fetch", "origin", "release-1.29"], self.harness.calls)
         self.assertEqual(self.base_used(), "release-1.29")
+
+    def existing_pr(self, state, base):
+        found = pr(9, audit_report.group_branch_for(AUDIT, self.group), state=state)
+        found["baseRefName"] = base
+        return found
+
+    def test_an_open_pull_request_is_recut_from_the_base_it_targets(self):
+        # The pull request was opened onto main before the operator pinned
+        # release. Recut from release, its diff would carry every commit
+        # release has that main lacks, while it still targets main.
+        self.harness.origin_head = "origin/master"
+        self.pin("release")
+        self.open_it(existing=self.existing_pr("OPEN", "main"))
+        self.assertIn(["git", "fetch", "origin", "main"], self.harness.calls)
+        self.assertTrue(
+            any(c[:2] == ["git", "checkout"] and "origin/main" in c for c in self.harness.calls)
+        )
+        self.assertNotIn(["git", "fetch", "origin", "release"], self.harness.calls)
+        self.assertEqual(self.harness.gh_calls("pr", "create"), [])
+        self.assertTrue(
+            any("--title" in c for c in self.harness.gh_calls("pr", "edit"))
+        )
+
+    def test_a_closed_pull_request_does_not_choose_the_base(self):
+        # A closed pull request is not refreshed, so the new one goes onto the
+        # pinned base like any other.
+        self.harness.origin_head = "origin/master"
+        self.pin("release")
+        self.open_it(existing=self.existing_pr("CLOSED", "main"))
+        self.assertIn(["git", "fetch", "origin", "release"], self.harness.calls)
+        self.assertEqual(self.base_used(), "release")
 
     def test_a_pin_on_another_repository_leaves_this_one_on_its_default(self):
         self.harness.origin_head = "origin/master"

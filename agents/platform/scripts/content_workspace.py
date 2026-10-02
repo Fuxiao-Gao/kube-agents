@@ -137,8 +137,15 @@ WORKSPACE_GIT_SUBCOMMANDS = frozenset(
         "clean",
         "check-ref-format",
         "symbolic-ref",
+        "ls-remote",
     }
 )
+
+# `git ls-remote --exit-code` exits 2 when the remote has no ref matching the
+# pattern, and with another non-zero code when it could not ask at all.
+LS_REMOTE_NO_MATCH_EXIT_CODE = 2
+# The fully qualified spelling of a branch, which is what `ls-remote` is asked for.
+BRANCH_REF_PREFIX = "refs/heads/"
 
 _HANDLE_RE = re.compile(r"\A[0-9a-f]{32}\Z")
 # The same grammar unanchored, for taking handles back out of git's stderr.
@@ -218,6 +225,14 @@ class BaseBranchMissing(ContentWorkspaceError):
 
     status = 409
     code = "workspace.base-branch-missing"
+
+
+def _base_branch_missing(repo: str, pinned: str) -> BaseBranchMissing:
+    return BaseBranchMissing(
+        f"{repo} has no branch '{pinned}', the base branch this install is "
+        "configured with; proposals onto this repository can only target that "
+        "branch, so it has to exist on the remote first"
+    )
 
 
 def _limit(name: str, default: int) -> int:
@@ -895,7 +910,7 @@ class ContentWorkspaceStore:
             if isinstance(workspace_or_dir, Workspace)
             else Path(workspace_or_dir)
         )
-        # `config` is handed on only when there is something in it. The two
+        # `config` is handed on only when there is something in it. The three
         # verbs that talk to the remote are the only ones that ever have any,
         # and a runner that takes `(argv, cwd)` -- every recorded one in the
         # tests, and the executor before it learned the argument -- keeps
@@ -1052,8 +1067,9 @@ class ContentWorkspaceStore:
             # Which credential, if any, this clone presents is decided by the
             # broker from the repository's registered role: a read-only token
             # for a context repository, nothing added for anything else. It is
-            # applied to this clone and to the fetch in `commit`, and to no
-            # other git this store runs -- everything else is local.
+            # applied to this clone, the probe before it and the fetch in
+            # `commit`, and to no other git this store runs -- everything else
+            # is local.
             credential = self._credential(repo)
             remote_config = tuple(credential.git_config(repo)) if credential else ()
             # The URL is composed here from a validated `owner/name`, never taken
@@ -1067,6 +1083,21 @@ class ContentWorkspaceStore:
             # container. Observed against a real install: a private repository with
             # no credential available left one directory per attempt.
             try:
+                # A shallow clone fetches the pinned base by name, and git fails
+                # that clone for a branch the remote lacks before the check
+                # after it can say so. Asked first, so the answer is the 409.
+                if depth is not None and pinned is not None:
+                    probe = self._git(
+                        tree,
+                        [
+                            "ls-remote", "--exit-code", "--heads", url,
+                            f"{BRANCH_REF_PREFIX}{pinned}",
+                        ],
+                        check=False,
+                        config=remote_config,
+                    )
+                    if getattr(probe, "exit_code", 1) == LS_REMOTE_NO_MATCH_EXIT_CODE:
+                        raise _base_branch_missing(repo, pinned)
                 argv = ["clone", "--quiet"]
                 if depth is not None:
                     argv += ["--depth", str(depth), "--single-branch"]
@@ -1095,12 +1126,7 @@ class ContentWorkspaceStore:
                 )
                 workspace.default_branch = self._default_branch(workspace)
                 if pinned is not None and not self._remote_branch_exists(workspace, pinned):
-                    raise BaseBranchMissing(
-                        f"{repo} has no branch '{pinned}', the base branch this "
-                        "install is configured with; proposals onto this "
-                        "repository can only target that branch, so it has to "
-                        "exist on the remote first"
-                    )
+                    raise _base_branch_missing(repo, pinned)
                 workspace.base = base or workspace.default_branch
                 workspace.base_sha = self._sha(workspace, f"origin/{workspace.base}")
                 workspace.started_from = f"origin/{workspace.base}"

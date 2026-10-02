@@ -1336,10 +1336,12 @@ type IntegrationSpec struct {
 	// nothing and is reported as an integration problem. Empty means the
 	// repository's own default branch.
 	//
-	// The schema holds it to the branch names the broker accepts, because
-	// the chart installs the operator with its webhook off.
-	// +kubebuilder:validation:MaxLength=255
-	// +kubebuilder:validation:Pattern=`^$|^[A-Za-z0-9_][A-Za-z0-9._/@-]*$`
+	// The schema holds it to the branch names the broker accepts
+	// (providers/validate.validate_branch), because the chart installs the
+	// operator with its webhook off.
+	// +kubebuilder:validation:MaxLength=200
+	// +kubebuilder:validation:Pattern=`^$|^[A-Za-z0-9][A-Za-z0-9._/-]*$`
+	// +kubebuilder:validation:XValidation:rule="self != 'HEAD'",message="baseBranch may not be HEAD"
 	// +kubebuilder:validation:XValidation:rule="!self.contains('..') && !self.contains('/.') && !self.contains('//') && !self.contains('@{') && !self.contains('.lock/')",message="baseBranch must be a git branch name: no '..', '/.', '//', '@{' or '.lock/'"
 	// +kubebuilder:validation:XValidation:rule="!self.endsWith('/') && !self.endsWith('.') && !self.endsWith('.lock')",message="baseBranch must be a git branch name: it may not end in '/', '.' or '.lock'"
 	// +optional

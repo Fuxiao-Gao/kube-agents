@@ -99,6 +99,13 @@ DEFAULT_MAX_BUNDLE_BYTES = 64 << 20  # 64 MiB
 # not a case this refusal is trying to be exact about.
 OPEN_PROPOSALS_ON_A_BRANCH = 10
 
+# The spellings `_short_ref` reads as the bare branch. Wider than
+# `repo_ref.BRANCH_REF_PREFIXES` on purpose: it feeds the protected-branch check,
+# where reading `heads/main` as `main` refuses more, and the branch verbs. A
+# proposal's target is compared through `repo_ref.short_branch` instead, because
+# a forge opens the proposal on the name it was given.
+_SHORT_REF_PREFIXES = ("refs/heads/", "heads/")
+
 # The ref an incoming bundle is fetched into. Under `refs/vcs/` rather than
 # `refs/heads/` so nothing here can be confused with a branch, and so a publish
 # of a leftover ref cannot happen by naming a plausible branch.
@@ -179,7 +186,11 @@ _AUTOMATION_MARKING = re.compile(r"\[[^\]]*\]$")
 
 def _short_ref(branch: str) -> str:
     """`refs/heads/x` and `heads/x` name the branch `x`; compare them as `x`."""
-    return repo_ref.short_branch(branch)
+    short = branch.strip()
+    for prefix in _SHORT_REF_PREFIXES:
+        if short.startswith(prefix):
+            return short[len(prefix):]
+    return short
 
 
 def _login_key(login: str) -> str:
@@ -397,19 +408,23 @@ class VcsBroker:
         """The branch every proposal onto `repo` must target, or None."""
         return repo_ref.pinned_base(repo, self.base_branch, self.base_repository)
 
-    def _refuse_off_base(self, repo: str, target: Any) -> None:
+    def _refuse_off_base(self, repo: str, target: Any) -> str | None:
         """Refuse a proposal target that is not `repo`'s pinned base.
 
         Request-only, so it runs before a credential is made current or the
-        forge is called. Compared exactly once the ref prefix is gone: git
-        branch names are case-sensitive, and `Main` is another branch. The base
-        goes in the message because the sandbox client keeps only the error
-        text and the code.
+        forge is called. Compared exactly once a `refs/heads/` prefix is gone.
+        `Main` is another branch, because git branch names are case-sensitive,
+        and so is `heads/main`. The base goes in the message because the
+        sandbox client keeps only the error text and the code.
+
+        Answers the bare base when the target is it, so the caller sends the
+        forge that name rather than the spelling it was given; None when
+        nothing is pinned for `repo`.
         """
         base = self._pinned_base(repo)
         if base is None:
-            return
-        target = _short_ref(validate_branch(target, "target"))
+            return None
+        target = repo_ref.short_branch(validate_branch(target, "target"))
         if target != base:
             raise WorkspaceError(
                 f"{repo} takes proposals onto {base} only, the base branch this "
@@ -418,6 +433,7 @@ class VcsBroker:
                 status=409,
                 code="TARGET_NOT_BASE",
             )
+        return base
 
     # ---- repository verbs ----------------------------------------------
 
@@ -1315,7 +1331,9 @@ class VcsBroker:
         if pinned_target:
             # Before the method is looked up and before `bound.api`, so a
             # refused target makes no forge call and spends no credential.
-            self._refuse_off_base(bound.repo, payload.get("target"))
+            base = self._refuse_off_base(bound.repo, payload.get("target"))
+            if base is not None:
+                payload = {**payload, "target": base}
         method = getattr(bound.forge, verb.replace("-", "_"))
         return bound.stamp(method(bound.api, bound.repo, payload))
 

@@ -9351,7 +9351,8 @@ def list_remediation_prs(repo: str, audit_id: str) -> list[dict]:
     human made, and asking for it here costs nothing over the request already
     being sent. `closedAt` is there for the other half of the same rule: a
     `/remediate` only overrules a human close if it was written after it, and
-    that comparison needs a time on both sides.
+    that comparison needs a time on both sides. `baseRefName` is there so a
+    refresh of an open pull request is cut from the branch it targets.
     """
     res = gh(
         [
@@ -9366,7 +9367,7 @@ def list_remediation_prs(repo: str, audit_id: str) -> list[dict]:
             "--state",
             "all",
             "--json",
-            "number,headRefName,state,mergedAt,closedAt,url,body,labels",
+            "number,headRefName,baseRefName,state,mergedAt,closedAt,url,body,labels",
             "--limit",
             str(MAX_PR_PAGE),
         ],
@@ -9569,8 +9570,12 @@ def _land_group_via_clone(
     paths: list[str],
     snapshot: dict[str, bytes],
     root: Path,
+    base: str | None = None,
 ) -> _GroupPush:
     """Cut the branch in the leased clone, stage the files, commit, force-push.
+
+    `base` is the branch an open pull request for `branch` already targets.
+    Without one, the branch is cut from the repository's base branch.
 
     `finish` owns the working tree while it runs: the checkout is forced, and
     the caller re-materialises the files from `snapshot` afterwards, because a
@@ -9579,7 +9584,7 @@ def _land_group_via_clone(
     untracked. Do not leave unrelated uncommitted work in the tree during an
     audit.
     """
-    base = base_branch(repo)
+    base = base or base_branch(repo)
 
     git(["fetch", "origin", base])
     git(["checkout", "--force", "-B", branch, f"origin/{base}"])
@@ -9693,10 +9698,20 @@ def open_remediation_pr(
     """
     branch = assert_pushable(group_branch_for(audit_id, group))
     paths = group_paths(group)
+    # The clone recuts the branch, so an open pull request's branch is cut from
+    # the base it targets. Cut from a newly configured base instead, its diff
+    # would carry every commit the new base has that the old one lacks.
+    open_base = (
+        str(existing.get("baseRefName") or "")
+        if existing and str(existing.get("state", "")).upper() == "OPEN"
+        else ""
+    )
     landed = (
         _land_group_via_broker(repo, audit_id, group, branch, paths, snapshot)
         if content_mode()
-        else _land_group_via_clone(repo, audit_id, group, branch, paths, snapshot, root)
+        else _land_group_via_clone(
+            repo, audit_id, group, branch, paths, snapshot, root, base=open_base or None
+        )
     )
     if not landed.proposable:
         return None

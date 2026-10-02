@@ -389,6 +389,16 @@ GH_PR_VALUE_FLAGS = frozenset(
     }
 )
 GH_PR_VALUE_SHORTHANDS = frozenset("aBbFHlmprRtT")
+# How gh reads a repository off `-R`: a schemeless value of three segments is
+# HOST/OWNER/REPO, whatever the host, and gh folds every *.github.com host into
+# github.com. So the first segment of such a value is dropped, never matched.
+GH_HOST_OWNER_REPO_DEPTH = 3
+# The pull request selector `gh pr edit` reads a repository from, and which
+# overrides `-R` when it does: a pull request URL (gh's own pattern) or
+# OWNER/REPO#NUMBER.
+GH_PR_URL_SCHEMES = frozenset({"http", "https"})
+GH_PR_URL_PATH_RE = re.compile(r"^/(?P<repository>[^/]+/[^/]+)/pull/\d+")
+GH_PR_REFERENCE_RE = re.compile(r"^(?P<repository>[^/#]+/[^/#]+)#\d+$")
 
 # The broker's log is one JSON object per line (JsonLineFormatter): these are its
 # keys, Cloud Logging's names where it has one. A tool-execution audit record is
@@ -3195,22 +3205,69 @@ def _gh_pr_arguments(arguments: list[str]) -> tuple[list[str], list[str], list[s
     return words, repos, bases
 
 
+def _gh_repository(value: str) -> str | None:
+    """The `owner/name` gh reads off a repository value, or None.
+
+    Reduced the way gh reduces it: a URL or an scp remote to its path, and a
+    schemeless HOST/OWNER/REPO to its last two segments whatever the host is,
+    because gh reads any host there and folds every *.github.com into
+    github.com. Anything that does not come out as exactly `owner/name` is
+    None, which the caller refuses rather than lets past.
+    """
+    ref = repo_ref.try_parse(value)
+    if ref is None:
+        return None
+    segments = ref.segments
+    if not ref.host and len(segments) == GH_HOST_OWNER_REPO_DEPTH:
+        segments = segments[1:]
+    if len(segments) != repo_ref.GITHUB_PATH_DEPTH:
+        return None
+    return repo_ref.PATH_SEPARATOR.join(segments)
+
+
+def _gh_pr_selector_repository(selector: str) -> str | None:
+    """The repository a `gh pr edit` selector names, or None for a number or branch.
+
+    gh takes the repository from a pull request URL over any `-R`, so the
+    selector is a repository the edit can land on as much as `-R` is.
+    """
+    reference = GH_PR_REFERENCE_RE.match(selector)
+    if reference is not None:
+        return reference.group("repository")
+    try:
+        split = urllib.parse.urlsplit(selector)
+    except ValueError:
+        return None
+    if split.scheme not in GH_PR_URL_SCHEMES:
+        return None
+    url = GH_PR_URL_PATH_RE.match(split.path)
+    return url.group("repository") if url is not None else None
+
+
 def gh_pr_base_violation(
     argv: list[str], base_branch: str, base_repository: str
 ) -> str | None:
     """Why this `gh pr` argv may not run under a pinned base, or None.
 
     With a base pinned for the GitOps repository, a pull request onto that
-    repository must target the base. `gh pr create` (and its alias `new`)
-    must name the repository with `-R` and the base with `--base`: with no
-    `-R` the broker cannot tell which repository the pull request lands on,
-    and with no `--base` gh picks the remote's default branch. `gh pr edit`
-    may not move a pull request to another base, on that repository or on one
-    it cannot see. Pull requests onto other repositories, every other `gh`
-    command, and an install that pins nothing are not this check's business.
+    repository must target the base. Every repository a `gh pr create`, `new`
+    or `edit` names -- each `-R`, and the repository in an edit's pull request
+    URL or OWNER/REPO#NUMBER selector -- must reduce to `owner/name` the way gh
+    reduces it and must be one this install manages. A name gh would follow
+    somewhere else, such as a host prefix or a renamed repository's old name,
+    is refused rather than compared. An unreadable managed list refuses too.
 
-    The branch is compared exactly once a `refs/heads/` or `heads/` prefix is
-    gone, because git branch names are case-sensitive.
+    `gh pr create` (and its alias `new`) must name the repository with `-R` and
+    the base with `--base`: with no `-R` the broker cannot tell which
+    repository the pull request lands on, and with no `--base` gh picks the
+    remote's default branch. `gh pr edit` may not move a pull request to
+    another base when any repository it names is the pinned one, or when it
+    names none. Pull requests onto other managed repositories, every other
+    `gh` command, and an install that pins nothing are not this check's
+    business.
+
+    The branch is compared exactly once a `refs/heads/` prefix is gone,
+    because git branch names are case-sensitive.
     """
     if not argv or Path(argv[0]).name != GH_EXECUTABLE:
         return None
@@ -3224,17 +3281,52 @@ def gh_pr_base_violation(
     action = words[1]
     if action not in GH_PR_CREATE_ACTIONS and action != GH_PR_EDIT_ACTION:
         return None
-    if repos and not any(
-        repo_ref.pinned_base(repo, base, pinned_repository) for repo in repos
-    ):
-        return None
+    named = list(repos)
+    if action == GH_PR_EDIT_ACTION and len(words) > 2:
+        selected = _gh_pr_selector_repository(words[2])
+        if selected is not None:
+            named.append(selected)
     configured = (
         f"pull requests onto {pinned_repository} must target {base}, the base "
         "branch this install is configured with"
     )
+    managed_only = (
+        "while a base is pinned, gh pull-request commands must name a "
+        "repository this install manages"
+    )
+    repositories = []
+    for value in named:
+        repository = _gh_repository(value)
+        if repository is None:
+            return (
+                f"`gh pr {action}` is refused: {value!r} does not name a "
+                f"repository as owner/name, and {managed_only}."
+            )
+        repositories.append(repository)
+    try:
+        unmanaged = [r for r in repositories if not repository_is_managed(r)]
+    except Exception as exc:
+        LOGGER.warning(
+            "refusing a gh pull request command: the managed-repository list "
+            "could not be read type=%s",
+            type(exc).__name__,
+        )
+        return (
+            f"`gh pr {action}` is refused: the managed repository list is "
+            f"unavailable, and {managed_only}."
+        )
+    if unmanaged:
+        return (
+            f"`gh pr {action}` is refused: {unmanaged[0]} is not a repository "
+            f"this install manages, and {managed_only}."
+        )
+    pinned = any(
+        repo_ref.pinned_base(repository, base, pinned_repository)
+        for repository in repositories
+    )
     off_base = [value for value in bases if repo_ref.short_branch(value) != base]
     if action == GH_PR_EDIT_ACTION:
-        if not off_base:
+        if (repositories and not pinned) or not off_base:
             return None
         return (
             f"`gh pr edit --base {off_base[0]}` is refused: {configured}. "
@@ -3246,7 +3338,7 @@ def gh_pr_base_violation(
             f"tell which repository it opens a pull request on, and {configured}. "
             f"Name the repository with -R and pass --base {base}."
         )
-    if not bases or off_base:
+    if pinned and (not bases or off_base):
         return f"`gh pr {action}` is refused: {configured}. Pass --base {base}."
     return None
 
@@ -4408,7 +4500,7 @@ class CommandExecutor:
 
         Three things are enforced here rather than assumed:
 
-        * the subcommand is one of the twelve this product issues, checked
+        * the subcommand is one of the thirteen this product issues, checked
           against the argv as parsed rather than as composed, so a later edit
           that threads a caller's string into one of these vectors is refused
           instead of run;
@@ -4458,8 +4550,8 @@ class CommandExecutor:
         """git the version-control broker issues, in its own scratch tree.
 
         A third door rather than a widening of the second. The broker needs
-        `bundle`, `init`, `remote` and `ls-remote`, which content-passing does
-        not, and putting them on one list would grant each path the other's
+        `bundle`, `init` and `remote`, which content-passing does not, and
+        putting them on one list would grant each path the other's
         subcommands for no reason beyond sharing a method.
 
         `config` is what the forge's credential asked for on this invocation --
@@ -7599,7 +7691,11 @@ def parse_args() -> argparse.Namespace:
         default=os.getenv(
             "CREDENTIAL_PROXY_BASE_BRANCH", os.getenv("GITOPS_BASE_BRANCH", "")
         ),
-        help="Protected GitOps base branch that agents may not push to directly",
+        help=(
+            "Protected GitOps base branch that agents may not push to directly; "
+            "with --base-repository it is also the pinned base every pull "
+            "request onto that repository must target"
+        ),
     )
     parser.add_argument(
         "--base-repository",

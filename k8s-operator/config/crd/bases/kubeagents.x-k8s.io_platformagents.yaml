@@ -9577,12 +9577,15 @@ spec:
                         nothing and is reported as an integration problem. Empty means the
                         repository's own default branch.
 
-                        The schema holds it to the branch names the broker accepts, because
-                        the chart installs the operator with its webhook off.
-                      maxLength: 255
-                      pattern: ^$|^[A-Za-z0-9_][A-Za-z0-9._/@-]*$
+                        The schema holds it to the branch names the broker accepts
+                        (providers/validate.validate_branch), because the chart installs the
+                        operator with its webhook off.
+                      maxLength: 200
+                      pattern: ^$|^[A-Za-z0-9][A-Za-z0-9._/-]*$
                       type: string
                       x-kubernetes-validations:
+                        - message: baseBranch may not be HEAD
+                          rule: self != 'HEAD'
                         - message:
                             "baseBranch must be a git branch name: no '..', '/.',
                             '//', '@{' or '.lock/'"

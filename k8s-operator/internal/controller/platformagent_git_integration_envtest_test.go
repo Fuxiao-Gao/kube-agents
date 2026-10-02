@@ -82,14 +82,18 @@ func TestIntegrationSchemaRulesEnvtest(t *testing.T) {
 				{Forge: "github", Repository: "infra2", Role: "gitops"}},
 		}, "at most one repository may have role gitops"},
 	}
-	// baseBranch is held to the branch names gitops_workspace.is_valid_ref
-	// accepts: the pattern for the characters and the leading one, the CEL
-	// rules for the sequences git refuses.
+	// baseBranch is held to the branch names the broker's
+	// providers/validate.validate_branch accepts: the pattern and the length
+	// for the characters and the leading one, the CEL rules for HEAD and the
+	// sequences git refuses.
 	gitops := []agentv1alpha1.RepositorySpec{{Forge: "github", Repository: "infra", Role: "gitops"}}
 	for name, tc := range map[string]struct{ base, message string }{
 		"base-leading-dash":   {"-main", "spec.integration.baseBranch"},
 		"base-space":          {"my branch", "spec.integration.baseBranch"},
-		"base-too-long":       {strings.Repeat("a", 256), "spec.integration.baseBranch"},
+		"base-leading-under":  {"_release", "spec.integration.baseBranch"},
+		"base-at":             {"release@2026", "spec.integration.baseBranch"},
+		"base-too-long":       {strings.Repeat("a", 201), "spec.integration.baseBranch"},
+		"base-head":           {"HEAD", "may not be HEAD"},
 		"base-dotdot":         {"a..b", "no '..'"},
 		"base-slash-dot":      {"a/.b", "no '..'"},
 		"base-double-slash":   {"a//b", "no '..'"},
@@ -118,7 +122,7 @@ func TestIntegrationSchemaRulesEnvtest(t *testing.T) {
 		"forge-only": {Forges: gh},
 		"alias":      {GitHub: &agentv1alpha1.GitHubSpec{GitRepo: "gke-labs/kube-agents"}},
 		"base":       {Forges: gh, Repositories: gitops, BaseBranch: "release/2026"},
-		"base-at":    {Forges: gh, Repositories: gitops, BaseBranch: "release@2026"},
+		"base-max":   {Forges: gh, Repositories: gitops, BaseBranch: strings.Repeat("a", 200)},
 		"base-ref":   {Forges: gh, Repositories: gitops, BaseBranch: "refs/heads/main"},
 		"base-alias": {GitHub: &agentv1alpha1.GitHubSpec{GitRepo: "gke-labs/kube-agents"}, BaseBranch: "main"},
 	} {

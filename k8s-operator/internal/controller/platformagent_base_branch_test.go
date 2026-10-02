@@ -101,6 +101,11 @@ func TestNoBaseIsRenderedWithoutAnAcceptedGitOpsRepository(t *testing.T) {
 	}
 }
 
+// With the field set, the operator's base is managed and wins over a
+// spec.deployment.env entry. With it unset, a user CREDENTIAL_PROXY_BASE_BRANCH
+// passes through, as GITOPS_BASE_BRANCH does: the broker reads either as a
+// protected branch only, because enforcing a base also takes
+// CREDENTIAL_PROXY_BASE_REPOSITORY, which spec.deployment.env never sets.
 func TestDeploymentEnvCannotChooseTheBase(t *testing.T) {
 	for name, tc := range map[string]struct {
 		baseBranch string
@@ -110,15 +115,15 @@ func TestDeploymentEnvCannotChooseTheBase(t *testing.T) {
 			"CREDENTIAL_PROXY_BASE_BRANCH":     "release",
 			"CREDENTIAL_PROXY_BASE_REPOSITORY": "gke-labs/infra",
 		}},
-		// Without the field the names are in no managed set, so only the
-		// reserved list keeps a user entry out.
-		"field unset": {"", map[string]string{}},
+		"field unset": {"", map[string]string{
+			"CREDENTIAL_PROXY_BASE_BRANCH": "attacker",
+		}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			agent := baseBranchAgent(gitopsIntegration(tc.baseBranch))
 			agent.Spec.Deployment = &agentv1alpha1.DeploymentSpec{Env: append([]corev1.EnvVar{
-				// Legacy: still reaches the broker, which reads it as a
-				// protected branch and never enforces it as a base.
+				// Legacy: passed through unchanged. The broker reads it only
+				// while CREDENTIAL_PROXY_BASE_BRANCH is unset.
 				{Name: "GITOPS_BASE_BRANCH", Value: "legacy"},
 			}, pinningEnvAttempts...)}
 			envVars := buildCredentialProxyEnv(agent)
@@ -126,7 +131,7 @@ func TestDeploymentEnvCannotChooseTheBase(t *testing.T) {
 				value, count := envValueCount(envVars, env.Name)
 				want, rendered := tc.want[env.Name]
 				if rendered && (count != 1 || value != want) {
-					t.Errorf("%s = %q (x%d), want exactly the operator's %q", env.Name, value, count, want)
+					t.Errorf("%s = %q (x%d), want exactly one %q", env.Name, value, count, want)
 				}
 				if !rendered && count != 0 {
 					t.Errorf("%s = %q survived from spec.deployment.env", env.Name, value)
@@ -140,13 +145,15 @@ func TestDeploymentEnvCannotChooseTheBase(t *testing.T) {
 }
 
 // Called with an empty managed list, as for the scoped-SA pool variables: the
-// explicit entries are what reserve the names on an install with no base.
-func TestTheReservedListNamesTheBaseVariables(t *testing.T) {
+// explicit entry is what reserves the repository on an install with no base,
+// and the branch is left to pass through.
+func TestTheReservedListNamesTheBaseRepositoryOnly(t *testing.T) {
 	merged := mergeCredentialProxyEnv(nil, pinningEnvAttempts)
-	for _, env := range pinningEnvAttempts {
-		if _, count := envValueCount(merged, env.Name); count != 0 {
-			t.Errorf("%s survived the merge from spec.deployment.env", env.Name)
-		}
+	if value, count := envValueCount(merged, "CREDENTIAL_PROXY_BASE_REPOSITORY"); count != 0 {
+		t.Errorf("CREDENTIAL_PROXY_BASE_REPOSITORY = %q survived the merge from spec.deployment.env", value)
+	}
+	if value, count := envValueCount(merged, "CREDENTIAL_PROXY_BASE_BRANCH"); count != 1 || value != "attacker" {
+		t.Errorf("CREDENTIAL_PROXY_BASE_BRANCH = %q (x%d), want the CR's value passed through once", value, count)
 	}
 }
 
@@ -158,10 +165,14 @@ func TestTheAgentAndTheSandboxGetNoBase(t *testing.T) {
 	shellSpec := buildShellSandboxStatefulSet(agent, "keys", "http://broker", "s").Spec.Template.Spec
 	for pod, spec := range map[string]corev1.PodSpec{"agent": agentSpec, "shell sandbox": shellSpec} {
 		for _, container := range append(append([]corev1.Container{}, spec.Containers...), spec.InitContainers...) {
-			for _, env := range pinningEnvAttempts {
-				if value, count := envValueCount(container.Env, env.Name); count != 0 {
-					t.Errorf("%s container %q carries %s=%q", pod, container.Name, env.Name, value)
-				}
+			// A spec.deployment.env CREDENTIAL_PROXY_BASE_BRANCH reaches
+			// agent-api-auth as any unreserved name does; what must not reach
+			// any container here is the operator's base or the repository.
+			if value, count := envValueCount(container.Env, "CREDENTIAL_PROXY_BASE_BRANCH"); count != 0 && value != "attacker" {
+				t.Errorf("%s container %q carries CREDENTIAL_PROXY_BASE_BRANCH=%q", pod, container.Name, value)
+			}
+			if value, count := envValueCount(container.Env, "CREDENTIAL_PROXY_BASE_REPOSITORY"); count != 0 {
+				t.Errorf("%s container %q carries CREDENTIAL_PROXY_BASE_REPOSITORY=%q", pod, container.Name, value)
 			}
 		}
 	}

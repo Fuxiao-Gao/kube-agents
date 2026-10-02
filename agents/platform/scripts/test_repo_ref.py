@@ -365,11 +365,18 @@ class PinnedBaseTest(unittest.TestCase):
                 )
 
     def test_the_ref_prefix_goes_and_the_case_stays(self):
-        for configured in ("refs/heads/Release/Q3", "heads/Release/Q3", " Release/Q3 "):
+        for configured in ("refs/heads/Release/Q3", " Release/Q3 "):
             with self.subTest(configured=configured):
                 self.assertEqual(
                     "Release/Q3", repo_ref.pinned_base("acme/infra", configured, "acme/infra")
                 )
+
+    def test_only_the_fully_qualified_prefix_is_stripped(self):
+        # `heads/x` is a branch of its own that anyone may push, and a forge
+        # takes a base as the name it was given, so it is not read as `x`.
+        self.assertEqual("release", repo_ref.short_branch("refs/heads/release"))
+        self.assertEqual("heads/release", repo_ref.short_branch("heads/release"))
+        self.assertEqual("heads/release", repo_ref.short_branch("refs/heads/heads/release"))
 
     def test_anything_else_answers_none(self):
         for repository, branch, pinned in (

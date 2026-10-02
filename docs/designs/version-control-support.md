@@ -566,16 +566,20 @@ The branch a proposal must target is configuration the agent cannot reach.
 `spec.integration.baseBranch` on the PlatformAgent names it, for the GitOps
 repository only. The operator renders it into the broker container's environment
 as `CREDENTIAL_PROXY_BASE_BRANCH`, beside `CREDENTIAL_PROXY_BASE_REPOSITORY`, the
-GitOps repository's `owner/name`, and reserves both names so `spec.deployment.env`
-cannot set them. Nothing reaches the agent container or the sandbox, and the
-sandbox's environment is never consulted: the skills ask the broker for the base,
-so a branch name an agent exports changes nothing. Without a GitOps repository
+GitOps repository's `owner/name`. `spec.deployment.env` can never set the
+repository variable, and its branch variable gives way to the field's. Nothing
+reaches the agent container or the sandbox, and the sandbox's environment is
+never consulted: the skills ask the broker for the base, so a branch name an
+agent exports changes nothing. Without a GitOps repository
 the field pins nothing and the operator renders neither variable. With no
-`baseBranch` set, a `GITOPS_BASE_BRANCH` in `spec.deployment.env` still reaches
-the broker and joins the protected branches above, but pins no target, because
-nothing names its repository. For the GitOps repository, matched by slug without
-regard to case, every door that chooses a target holds it to the base and
-compares branch names exactly.
+`baseBranch` set, a `CREDENTIAL_PROXY_BASE_BRANCH` in `spec.deployment.env`, or
+failing that a `GITOPS_BASE_BRANCH`, still reaches the broker and joins the
+protected branches above, but pins no target, because nothing names its
+repository. Once `baseBranch` is set, the broker no longer reads
+`GITOPS_BASE_BRANCH`. For the GitOps repository, matched by slug without regard
+to case, every door that chooses a target holds it to the base and compares
+branch names exactly: the base is accepted as `<base>` or `refs/heads/<base>`,
+and `heads/<base>` is another branch.
 `proposal-create` refuses any other target with `TARGET_NOT_BASE` (409) before it
 calls the forge, and so does `proposal-update` when its request carries a target.
 A first-round `publish` refuses one too, before the bundle is read. A publish with
@@ -585,14 +589,21 @@ proposal a person opened onto another branch. A `clone` that names no branch
 checks out the base instead of the remote's default, and refuses a base the
 remote does not hold with `BASE_BRANCH_MISSING` rather than a git failure. The
 content door's `open` uses the base as the workspace base when the caller names
-none, and refuses a missing one with `workspace.base-branch-missing` (409).
+none, and refuses a missing one with `workspace.base-branch-missing` (409),
+shallow opens included.
 `clone` and `capabilities` answer `baseBranch` so the client can default to it.
 The command execution door refuses, as rule `github.pr-base`, a `gh pr create` or
 `gh pr new` that names the GitOps repository with a missing or different
 `--base`, one that names no repository (the broker cannot tell which one it
-targets), and a `gh pr edit` that moves the base. That check is interim: it
+targets), a `gh pr edit` that moves the base, and any `gh pr create`, `new` or
+`edit` that names a repository the install does not manage. It reads `-R` the
+way `gh` does, host and case included, and on `gh pr edit` it also reads a pull
+request URL or `owner/name#number` given as the selector, because `gh` takes the
+repository from the selector over `-R`. Refusing
+unmanaged names also covers the old name of a renamed or transferred GitOps
+repository, which the forge would otherwise redirect. That check is interim: it
 lasts only as long as `/v1/exec` accepts `gh`. With no base configured, and for
-every other repository, the doors behave as they did: a clone takes the remote's
+every other repository the install manages, the doors behave as they did: a clone takes the remote's
 default branch and a proposal may target any branch.
 
 The scratch repository is never checked out. It is fetched into and pushed from,
