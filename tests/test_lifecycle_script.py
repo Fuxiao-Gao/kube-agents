@@ -1307,6 +1307,11 @@ exit 0
         self.assertEqual(self._uninstalls(calls), [])
         self.assertIn("already gone", proc.stdout)
 
+    def test_a_warning_on_stderr_does_not_hide_a_release_that_is_there(self):
+        proc, calls = self._run(list_stderr="WARNING: Kubernetes configuration file is group-readable")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual([u[2] for u in self._uninstalls(calls)], ["kube-agents"], calls)
+
     def test_a_host_without_helm_warns_and_leaves_it_to_terraform(self):
         proc, _ = self._run(helm=False)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)

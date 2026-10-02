@@ -1217,8 +1217,10 @@ uninstall_helm_releases() {
     warn "This state did not create the cluster, so the release would outlive the teardown."
     warn "Fix access to the cluster and re-run (destroy is safe to re-run), or remove it by hand:"
     warn "  helm uninstall $name -n $namespace --kube-context $CLUSTER_CONTEXT --wait"
-    warn "If this host cannot get access back and the cluster's owner will remove the release,"
-    warn "drop it from state instead and re-run:  terraform state rm '$addr'"
+    warn "If this host cannot get access back and the cluster's owner will remove the release, drop it"
+    warn "from this install's state instead and re-run destroy: in terraform/examples/full-install, with"
+    warn "the same KUBE_AGENTS_STATE_BUCKET as this run and after a plan has initialised that backend,"
+    warn "  terraform state rm '$addr'"
     exit 1
   done
 }
