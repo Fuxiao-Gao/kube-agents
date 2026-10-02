@@ -112,7 +112,8 @@ class GkeClusterDestroyWalkTest(unittest.TestCase):
                     f" google_container_cluster.standard[0].{attr}",
                     f"{name} must pick the one cluster source that exists by the same"
                     " conditions as the sources' count expressions. Only the selected"
-                    " branch is evaluated, so it stays known during terraform destroy.",
+                    " branch is evaluated, so a count-0 source never makes it unknown during"
+                    " terraform destroy.",
                 )
 
 

@@ -1071,7 +1071,8 @@ guard_minter_key() {
 
 # Fetches credentials for this install's cluster, once per run, for the
 # in-cluster steps of a destroy, and sets CLUSTER_CONTEXT to the kubeconfig
-# context gcloud writes for it. Returns 1 when get-credentials fails.
+# context gcloud writes for it, which every kubectl and helm call after it
+# names. Returns 1 when get-credentials fails.
 #
 # Through the helper, so teardown reaches the cluster over the endpoint the
 # install used. Without the flag a cluster whose IP endpoint this host cannot
@@ -1113,13 +1114,13 @@ delete_agent_cr() {
   # the chart's default, but extra_helm_values can override it, and the admission
   # webhook allows only one PlatformAgent per cluster — so whatever is in the
   # namespace is the one to delete.
-  names=$(kubectl get platformagent -n "$namespace" -o name 2>/dev/null || true)
+  names=$(kubectl --context "$CLUSTER_CONTEXT" get platformagent -n "$namespace" -o name 2>/dev/null || true)
   [[ -n "$names" ]] || { log "no PlatformAgent to delete"; return 0; }
 
   while read -r ref; do
     [[ -n "$ref" ]] || continue
     log "deleting ${ref} and waiting for its finalizer"
-    if kubectl delete "$ref" -n "$namespace" --wait --timeout=180s >/dev/null 2>&1; then
+    if kubectl --context "$CLUSTER_CONTEXT" delete "$ref" -n "$namespace" --wait --timeout=180s >/dev/null 2>&1; then
       log "${ref} deleted cleanly"
       continue
     fi
@@ -1131,14 +1132,14 @@ delete_agent_cr() {
     # normally destroyed moments later, but a destroy can stop between the
     # release and the cluster, so delete the two objects here as well.
     warn "finalizer did not clear in time; removing it so the namespace can terminate"
-    kubectl patch "$ref" -n "$namespace" --type=merge \
+    kubectl --context "$CLUSTER_CONTEXT" patch "$ref" -n "$namespace" --type=merge \
       -p '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1 || true
     # The operator's naming, kubeagents:minimal:<namespace>:<name>, from
     # k8s-operator/internal/controller/platformagent_manifests.go; a bash
     # script cannot import it, so this must move when that does.
-    kubectl delete clusterrolebinding "kubeagents:minimal:${namespace}:${ref##*/}" \
+    kubectl --context "$CLUSTER_CONTEXT" delete clusterrolebinding "kubeagents:minimal:${namespace}:${ref##*/}" \
       --ignore-not-found >/dev/null 2>&1 || true
-    kubectl delete clusterrole "kubeagents:minimal:${namespace}:${ref##*/}" \
+    kubectl --context "$CLUSTER_CONTEXT" delete clusterrole "kubeagents:minimal:${namespace}:${ref##*/}" \
       --ignore-not-found >/dev/null 2>&1 || true
   done <<<"$names"
 }
@@ -1187,8 +1188,10 @@ uninstall_helm_releases() {
 
   local name namespace output line
   for addr in "${addresses[@]}"; do
-    name=$(state_attr "$addr" name)
-    namespace=$(state_attr "$addr" namespace)
+    if ! name=$(state_attr "$addr" name) || ! namespace=$(state_attr "$addr" namespace); then
+      warn "could not read $addr from state (terraform state show failed); re-run destroy, which is safe to re-run"
+      exit 1
+    fi
     if [[ -z "$name" || -z "$namespace" ]]; then
       warn "could not read the release name or namespace of $addr from state; leaving it to terraform destroy"
       continue
@@ -1463,7 +1466,8 @@ case "${1:-}" in
     ensure_init
     # Confirm before the FIRST side effect, not at terraform's own prompt: by
     # the time `terraform destroy` asks, this script has already deleted the
-    # PlatformAgent CR, permanently deleted every backup the plan owns,
+    # PlatformAgent CR, uninstalled the Helm releases on a cluster this state
+    # did not create, permanently deleted every backup the plan owns,
     # cleared deletion_protection, and forgotten the KMS state entries — and
     # answering "no" there undoes none of it. One gate, up front; once passed,
     # -auto-approve is appended so terraform does not present a second gate
