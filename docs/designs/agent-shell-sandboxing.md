@@ -328,9 +328,10 @@ which is an upstream change and not one this repository will carry as a patch.
 
 ### What the credential proxy is for
 
-`kubectl`, `gcloud`, `gh`, and `git` are not real binaries in the agent image. They are
-symlinks to `credential-proxy-exec`, a client that forwards the argv to the proxy and
-returns its output. The agent composes a command; something else runs it, holding the
+`kubectl` and `gcloud` are not real binaries in the sandbox. They are symlinks to
+`credential-proxy-exec`, a client that forwards the argv to the proxy and returns its
+output. The sandbox's `git` is a real, local one that holds no credential, there is no
+`gh`, and forge work goes through the version-control verbs, which the broker runs. The agent composes a command; something else runs it, holding the
 credential.
 
 That gives three properties: the credential material never enters the agent's address

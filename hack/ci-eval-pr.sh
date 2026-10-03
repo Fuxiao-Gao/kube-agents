@@ -2499,6 +2499,9 @@ unit_cost_hint() {
     # Two prepare/submit rounds and a close. Measured on `dev-1918-69fd3893`:
     # 587-1512s a repetition, 937s the middle one.
     vcs-spent-branch-reuse) echo 1000 ;;
+    # One delegation and one forge list call. Measured on `dev-vcs3-20261001b`:
+    # 173-237s a repetition over three runs, 225s the middle one.
+    vcs-forge-cli-request-uses-the-verbs) echo 240 ;;
     *) echo 200 ;;
   esac
 }

@@ -107,26 +107,19 @@ RUN pip install --no-cache-dir pyyaml requests
 # `.git/config` that came with it -- out of the container holding the token.
 # See docs/designs/version-control-support.md.
 #
-# The binary lives at /opt/vcs/libexec/git and is on no PATH at all. It is
-# reached by absolute path from vcs_client.py -- see LOCAL_GIT there, and the
-# KUBE_AGENTS_LOCAL_GIT it reads -- and
-# by /usr/lib/git-core, which is git's compiled-in exec path rather than a PATH
-# directory. A bare `git` typed by the model still resolves to the credential
-# shim, exactly as it did before this layer existed.
+# The binary lives at /opt/vcs/libexec/git. vcs_client.py reaches it by that
+# absolute path -- see LOCAL_GIT there, and the KUBE_AGENTS_LOCAL_GIT it reads --
+# and git's own re-exec reaches it through /usr/lib/git-core, its compiled-in
+# exec path. The name `git` on PATH is /opt/vcs/bin/git, a wrapper that runs it
+# with hooks disarmed (deploy/sandbox/vcs-git.sh says what it covers and what it
+# does not). There is no credential shim named `git` or `gh` beside it: a shim
+# owning the name is how the agent leaves the abstraction, and the measurement
+# says so -- with the version-control skill loaded and a shim still on `git`,
+# agents still reached for the shim over the verbs.
+# docs/designs/version-control-support.md carries the reasoning.
 #
-# Giving the local binary the name `git` instead is the better arrangement and
-# it is still not done here. The rename has to travel with the last caller of
-# bare `git` moving onto the verbs, because until then the name has to keep
-# meaning the shim. submit_suggestion.py is off it as of this change;
-# gitops_workspace.py and fleet-audit's audit_report.py are not, so the rename
-# waits on them. docs/designs/version-control-support.md carries the reasoning, including
-# the measurement that motivates it: given the version-control skill and a shim
-# still owning the name, an agent answered 8 of 60 read probes through the shim
-# alone and issued 4 credentialed clones through it.
-#
-# What will make putting this git on a PATH safe is that it cannot present a
-# request to a forge, and that property is established now so the later change
-# is a PATH edit and nothing more. Git reaches a network three ways and each
+# What makes putting this git on a PATH safe is that it cannot present a
+# request to a forge. Git reaches a network three ways and each
 # gets its own answer; docs/designs/version-control-support.md §3 is the
 # argument, this is the mechanism.
 #
@@ -230,6 +223,14 @@ RUN apt-get update && \
       || /opt/vcs/libexec/git -C /tmp/vcs-guard bundle create /tmp/vcs-guard.bundle HEAD main && \
     /opt/vcs/libexec/git clone -q /tmp/vcs-guard.bundle /tmp/vcs-guard-clone && \
     rm -rf /tmp/vcs-guard /tmp/vcs-guard.bundle /tmp/vcs-guard-clone
+
+# Root-owned and empty: the wrapper points `core.hooksPath` here, and a
+# directory the agent could write to would be a hooks directory it controls.
+COPY --chmod=0755 deploy/sandbox/vcs-git.sh /opt/vcs/bin/git
+COPY --chmod=0644 deploy/sandbox/vcs-path.sh /etc/profile.d/vcs-path.sh
+RUN mkdir -p /opt/vcs/share/no-hooks && \
+    chmod 0555 /opt/vcs/share/no-hooks && \
+    /opt/vcs/bin/git --version
 
 # The login the agent connects as. `usermod -p '*'` matters: useradd leaves a
 # '!' in /etc/shadow, which sshd reads as a locked account and refuses even for
@@ -409,10 +410,7 @@ COPY agents/platform/governance/ /opt/defaults/governance/
 #                          a forge module answers it, so it imports vcs_client
 #                          rather than anything that speaks HTTP
 #   pr_triggers.py         imported by pr_conversation, imports forge
-#   github_token_refresh.py  named by SOUL.md as the token refresher the agent
-#                          runs by hand (`python3 ./scripts/github_token_refresh.py
-#                          <owner>/<repo>`), and imported for its `log` by
-#                          submit_suggestion
+#   github_token_refresh.py  imported for its `log` by submit_suggestion
 #   wif_credentials.py     imported by github_token_refresh, and reached only by
 #                          the branch the proxy container takes; here so that the
 #                          import at the top of that script resolves
@@ -424,16 +422,16 @@ COPY agents/platform/governance/ /opt/defaults/governance/
 #                          that read a whole tree — inspect-repository and
 #                          fleet-upgrade-verification's api_deprecation_scan, both
 #                          `ensure_workspace(..., lease=...)` — and by fleet-audit's
-#                          audit_report, which also proposes from it. That last one
-#                          is the consumer this migration does not move; every
-#                          other working copy that *proposes* a change is
-#                          `vcs_client`'s now
+#                          audit_report, whose directory-mode fallback still
+#                          reaches for it; the content mode it runs in does not.
+#                          Every working copy that *proposes* a change goes
+#                          through `vcs_client`
 #   credential_proxy_client.py  how anything here reaches the broker at all, and
 #                          the only way out of this container that carries a
 #                          credential. Imported by vcs_client, and through it by
 #                          every verb. The same file is also COPYed to
 #                          /usr/local/bin/credential-proxy-exec above, as the
-#                          kubectl/git/gh shim; that copy is not importable by
+#                          kubectl/gcloud shim; that copy is not importable by
 #                          module name, so it is staged here as well
 #   vcs_client.py          the client half of the verb surface: it composes a
 #                          request, sends it over the line above, and raises on a
@@ -620,16 +618,14 @@ RUN set -e; \
 # the build PATH — profile.d puts it there at login — so `command -v` here can
 # only be finding a native binary.
 #
-# `gh` keeps its shim here. Taking it away is the right end state -- a forge CLI
-# on PATH is the route out of a forge-neutral abstraction and the model takes
-# it, answering through `gh api` on a quarter of the write probes with the
-# version-control skill loaded -- but callers in the tree still mean this shim.
-# The consumer migration moved the pull-request and issue paths onto the
-# version-control verbs and deliberately left `fleet-audit`'s `audit_report.py`
-# on the CLI, on size grounds. The removal travels with that port, not with
-# this line.
+# `gh` and `git` are in the guard and have no shim. Neither spends a
+# credential from here any more: the forge is reached through the
+# version-control verbs, and a forwarded git would run in the broker's
+# filesystem, not this one. The `git` the agent does get is /opt/vcs/bin's,
+# which is not on the build PATH either, so a hit below still means a native
+# binary arrived by some other route.
 RUN mkdir -p /opt/credential-proxy/bin && \
-    for binary in gcloud kubectl gh git; do \
+    for binary in gcloud kubectl; do \
         ln -s /usr/local/bin/credential-proxy-exec "/opt/credential-proxy/bin/${binary}"; \
     done && \
     for binary in gcloud kubectl gh git; do \

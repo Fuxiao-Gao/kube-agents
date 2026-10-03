@@ -477,8 +477,9 @@ func buildShellSandboxService(agent *agentv1alpha1.PlatformAgent) *corev1.Servic
 //
 // authorizedKeysSecret holds the public half of the keypair the agent pod connects
 // with, under the key "authorized_keys". credentialProxyURL is what the sandbox's
-// kubectl/gcloud/gh/git wrappers post to — always the broker's Service, which is
-// always another pod. Empty is a supported state: the entrypoint logs that the
+// kubectl/gcloud wrappers and the version-control verbs post to — always the
+// broker's Service, which is always another pod. The sandbox's git is local and
+// carries no credential; forge work goes through the verbs. Empty is a supported state: the entrypoint logs that the
 // wrappers are unconfigured and starts anyway, so file and code-execution tools
 // work while the credentialed ones report a clear error instead of a stack trace.
 //

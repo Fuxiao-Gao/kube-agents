@@ -778,7 +778,7 @@ fi
 
 echo
 echo "== 5. credential-proxy wrappers =="
-for cli in kubectl gcloud gh git; do
+for cli in kubectl gcloud; do
   check "$cli resolves to the wrapper, not 'command not found'" "/opt/credential-proxy/bin/$cli" \
     "$("${SSH[@]}" "command -v $cli" 2>&1)"
 done
@@ -797,7 +797,7 @@ check "CREDENTIAL_PROXY_TOKEN_FILE crosses too" "/var/run/secrets/kubeagents/cre
   "$("${SSH[@]}" 'echo "$CREDENTIAL_PROXY_TOKEN_FILE"' 2>&1)"
 check "the wrapper dispatches rather than refusing to start" "credential proxy" \
   "$("${SSH[@]}" 'kubectl version 2>&1' 2>&1)"
-check "the wrappers are ahead of anything else on PATH" "/opt/credential-proxy/bin:" \
+check "the wrappers are on PATH" "/opt/credential-proxy/bin:" \
   "$("${SSH[@]}" 'echo "$PATH"' 2>&1)"
 # A login shell runs /etc/profile, which overwrites PATH wholesale; profile.d is
 # what puts the wrappers back. Both paths, because only one of them is sshd's.
@@ -806,15 +806,23 @@ check "PATH survives /etc/profile in a login shell" "/opt/credential-proxy/bin/k
 
 echo
 echo "== 5b. the version-control skill's local git =="
-# A second git, off PATH, that the version-control skill reaches by absolute
-# path to read a clone the broker unpacked here. Asserted as absent from PATH
-# first, because that is the property the section is really about: the name
-# `git` still belongs to the shim, and every caller in the tree that types it
-# still means the shim.
-check "the name git still resolves to the shim" "/opt/credential-proxy/bin/git" \
+# The only git in the image, and gh nowhere at all. Asserted by what the name
+# resolves to rather than by which PATH entry wins, in both session shapes:
+# /etc/profile overwrites PATH in a login shell, and profile.d is what puts
+# /opt/vcs/bin back there.
+check "the name git resolves to the local git" "/opt/vcs/bin/git" \
   "$("${SSH[@]}" 'command -v git' 2>&1)"
-check "and in a login session too" "/opt/credential-proxy/bin/git" \
+check "and in a login session too" "/opt/vcs/bin/git" \
   "$("${SSH[@]}" "bash -l -c 'command -v git'" 2>&1)"
+check "gh is not there" "absent" \
+  "$("${SSH[@]}" 'command -v gh >/dev/null 2>&1 && echo present || echo absent' 2>&1)"
+check "nor in a login session" "absent" \
+  "$("${SSH[@]}" "bash -l -c 'command -v gh >/dev/null 2>&1 && echo present || echo absent'" 2>&1)"
+# A working copy that names its own hooks directory still gets the empty one:
+# the wrapper's `-c` outranks the repository's config.
+check "a repository's own hooksPath does not reach the wrapper" "/opt/vcs/share/no-hooks" \
+  "$("${SSH[@]}" 'git init -q /tmp/sh && git -C /tmp/sh config core.hooksPath .githooks && git -C /tmp/sh config core.hooksPath' 2>&1)"
+"${SSH[@]}" 'rm -rf /tmp/sh' >/dev/null 2>&1
 check "the local git is a real git" "git version" \
   "$("${SSH[@]}" '/opt/vcs/libexec/git --version' 2>&1)"
 # The message, not the exit status: example.invalid resolves nowhere, so an
