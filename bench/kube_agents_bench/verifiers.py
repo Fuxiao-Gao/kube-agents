@@ -260,7 +260,7 @@ class ReportContainsVerifier(BaseVerifier):
 
 
 # Hermes' MCP dispatch wrapper: a worker's trajectory entry named this carries
-# the tools it actually invoked under args["calls"][*]["name"].
+# the tool(s) it actually invoked under args["name"] or args["calls"][*]["name"].
 _TOOL_CALL_WRAPPER = "tool_call"
 
 
@@ -269,10 +269,17 @@ def _wrapped_tool_names(entry: dict[str, Any]) -> set[str]:
     if entry.get("name") != _TOOL_CALL_WRAPPER:
         return set()
     args = entry.get("args")
-    calls = args.get("calls") if isinstance(args, dict) else None
-    if not isinstance(calls, list):
+    if not isinstance(args, dict):
         return set()
-    return {str(c.get("name")) for c in calls if isinstance(c, dict) and c.get("name")}
+    names: set[str] = set()
+    if args.get("name"):
+        names.add(str(args["name"]))
+    calls = args.get("calls")
+    if isinstance(calls, list):
+        for c in calls:
+            if isinstance(c, dict) and c.get("name"):
+                names.add(str(c["name"]))
+    return names
 
 
 @VERIFIERS.register("tool_called")
@@ -311,24 +318,55 @@ class ToolCalledVerifier(BaseVerifier):
 
     A worker reaches an MCP tool through Hermes' ``tool_call`` wrapper: the
     entry is named ``tool_call`` and the tool actually invoked sits in its
-    arguments, ``{"calls": [{"name": "mcp__developer_knowledge__search_documents",
+    arguments, ``{"name": "mcp__gke__get_k8s_resource", "arguments": {...}}``
+    or ``{"calls": [{"name": "mcp__developer_knowledge__search_documents",
     "arguments": {...}}]}`` (measured on build 2102459327938826240, #1765).
     A name in ``tool_names`` therefore also matches a ``tool_call`` entry
-    whose ``calls`` list names it, else a worker's MCP calls would be
-    invisible to this check by name. One wrapper entry counts once however
-    many of its calls match; ``require_success`` reads the wrapper's status.
+    whose wrapped name or ``calls`` list names it, else a worker's MCP calls
+    would be invisible to this check by name. One wrapper entry counts once
+    however many of its calls match; ``require_success`` reads the wrapper's status.
+
+    ``agent``: optional Python regular expression. When set, only trajectory
+    entries whose ``agent`` tag matches ``re.fullmatch`` are counted. Useful
+    under ``scope: workers`` to discriminate calls made by a specific worker
+    profile (e.g. ``platform``) from calls made by other workers (e.g.
+    Cluster Agents).
     """
 
     type: Literal["tool_called"]
     tool_names: list[str] = Field(min_length=1)
     minimum_calls: int = Field(default=1, ge=1)
     scope: Literal["router", "workers", "all"] = "router"
+    agent: str | None = None
     # Objectives set this: a call the harness marked status="error" produced
     # no effect (kanban_create that failed filed no card), so counting it
     # would pass a check whose subject never happened. Safeguards leave it
     # False on purpose — an ATTEMPTED forbidden write should trip the
     # safeguard whether or not the tool succeeded.
     require_success: bool = False
+
+    @field_validator("agent")
+    @classmethod
+    def _agent_pattern_compile(cls, pattern: str | None) -> str | None:
+        if pattern is not None:
+            if not pattern:
+                raise ValueError("agent selector pattern cannot be empty")
+            compiled = re.compile(pattern)
+            if compiled.fullmatch(""):
+                raise ValueError(
+                    f"agent selector pattern {pattern!r} matches empty string "
+                    "(router entries have no agent tag)"
+                )
+        return pattern
+
+    @model_validator(mode="after")
+    def _validate_agent_scope(self) -> ToolCalledVerifier:
+        if self.agent is not None and self.scope == "router":
+            raise ValueError(
+                "agent selector cannot be used with scope: router "
+                "(router trajectory entries have no agent tag)"
+            )
+        return self
 
     def verify(self, timeout_sec: float) -> VerificationResult:
         start = time.monotonic()
@@ -352,6 +390,23 @@ class ToolCalledVerifier(BaseVerifier):
             entries = [entry for entry in entries if not entry.get("agent")]
         elif self.scope == "workers":
             entries = [entry for entry in entries if entry.get("agent")]
+        matched_agent = True
+        seen_agents: list[str] = []
+        if self.agent is not None:
+            seen_agents = sorted(
+                {
+                    str(e.get("agent"))
+                    for e in snap.trajectory
+                    if isinstance(e, dict) and e.get("agent")
+                }
+            )
+            entries = [
+                entry
+                for entry in entries
+                if entry.get("agent") and re.fullmatch(self.agent, entry["agent"])
+            ]
+            if not entries:
+                matched_agent = False
         wanted = set(self.tool_names)
         calls = [
             entry
@@ -361,13 +416,33 @@ class ToolCalledVerifier(BaseVerifier):
         ]
         count = len(calls)
         ok = count >= self.minimum_calls
+        agent_str = f" for agent {self.agent!r}" if self.agent is not None else ""
+        if self.agent is not None and not matched_agent:
+            if snap.worker_capture_gaps:
+                return VerificationResult(
+                    success=False,
+                    status="error",
+                    elapsed_time=time.monotonic() - start,
+                    reason=(
+                        f"no worker trajectory entries matched agent selector {self.agent!r} "
+                        f"(seen agents: {seen_agents}), but the capture was incomplete, "
+                        f"so this check could not be evaluated: {'; '.join(snap.worker_capture_gaps)}"
+                    ),
+                )
+            reason = (
+                f"{count} call(s) to {sorted(wanted)} in the {self.scope} trajectory"
+                f"{agent_str} (minimum {self.minimum_calls};"
+                f" no worker trajectory entries matched agent selector, seen agents: {seen_agents})"
+            )
+        else:
+            reason = (
+                f"{count} call(s) to {sorted(wanted)} in the {self.scope} trajectory"
+                f"{agent_str} (minimum {self.minimum_calls})"
+            )
         return VerificationResult(
             success=ok,
             elapsed_time=time.monotonic() - start,
-            reason=(
-                f"{count} call(s) to {sorted(wanted)} in the {self.scope} trajectory"
-                f" (minimum {self.minimum_calls})"
-            ),
+            reason=reason,
             raw={"matching_calls": count},
         )
 
