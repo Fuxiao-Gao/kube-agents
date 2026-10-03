@@ -1122,9 +1122,24 @@ section gives - and neither is the console adapter, which has no durable to spli
 `verifiedBy` is `slack-socket-mode+principal-map`: Slack authenticated the sender over
 the socket and asserted the `user_id`, our table joined it to a principal. Rendering
 into mrkdwn is a narrow deterministic translation of the two forms the relay emits
-(bold, links); the legacy Hermes converter stays where it is. Everything posted is
-escaped first (`&`, `<`, `>`) - relayed text is executor-authored, ie model output,
-and an unescaped `<!channel>` in a result would ping the room.
+(bold, links); the legacy Hermes converter stays where it is. The translation leaves
+code spans as written, converts bold only on a closed `**` pair, never alters a
+link's destination, and refuses a link whose label carries a URL naming a host other
+than the one it opens. Everything posted is escaped first (`&`, `<`, `>`) - relayed
+text is executor-authored, ie model output, and an unescaped `<!channel>` in a result
+would ping the room. The Google Chat adapter applies the same markdown rules behind its
+own defang, in two halves: the link defang reads prose, link text and an unclosed fence
+but not a closed code span or fenced block; the mention defang reads everything, code
+included. The adapters translate each chunk of a result alone, so the chunker closes a
+fenced block it cuts and reopens it with a bare fence at the start of the next chunk,
+reading the cut with the same code-span parse the adapters use: every chunk is balanced on
+its fences, so a cut block never leaks its closer into the next chunk, the fences added stay
+within the chunk cap, and the text between them is the original, byte for byte. The
+guarantee covers fenced blocks only: a cut inside a multi-line double-backtick span, or a
+hard cut that lands inside a mid-line fence opener, still leaves the next chunk parsing
+differently from the whole, a display defect tracked as a follow-up. The opener's language tag is not carried onto the
+reopened fence (it is the rest of the opener's line, unbounded), so a continuation chunk
+loses the tag on Discord.
 
 ## The console adapter (added 9/23)
 
