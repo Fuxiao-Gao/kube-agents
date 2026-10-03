@@ -56,7 +56,7 @@ the agent a usable kubectl context) when it has the complete triple; with one mi
 | `memory.provider`                              | string | Memory provider implementation. Default `multiuser_memory`; `none` for none. See below.                                                                                                                                           |
 | `memory.userProfileEnabled`                    | bool   | Toggle per-user memory profiling. Default `false`.                                                                                                                                                                                |
 | `eventWatcher.enabled`                         | bool   | Start the `k8s-event-watcher`. Default `true`; `false` is the emergency stop for an event storm (see below).                                                                                                                      |
-| `driftDetector.enabled`                        | bool   | Start the `drift-detector`. Default `false`, because it needs a Pub/Sub subscription no stock install creates. See below.                                                                                                         |
+| `driftDetector.enabled`                        | bool   | Start the `drift-detector`. Default `false`, because it needs a Pub/Sub subscription a hand-written CR or a Helm-only install does not create; `install.sh` creates one and sets this to `true` unless told otherwise. See below. |
 | `driftDetector.subscription`                   | string | Pub/Sub subscription the detector pulls audit records from. Unset takes the detector's own default, which is the name the Terraform module creates.                                                                               |
 | `driftDetector.gitopsManagers`                 | string | Comma-separated `managedFields` field managers belonging to your GitOps controller, matched exactly — `argocd-controller`, `flux`. Unset means no card is ever annotated as possibly already reconciled.                          |
 | `tuning.<persona>.apiMaxRetries`               | int    | Model-call retries before a run gives up. Unset = Hermes default `3`.                                                                                                                                                             |
@@ -187,17 +187,32 @@ watcher posts to — so a change someone made to a cluster by hand arrives on th
 control plane, CI, and every service account are dropped alike; on a busy cluster that is the
 overwhelming majority of the stream.
 
-**It is off unless you ask for it, the opposite of the watcher.** The subscription it reads does not
-exist in a stock install: the audit log sink, topic, and subscription come from the
-`drift-pubsub` Terraform module, which the
+**Through `install.sh` it is on unless you turn it off; the field itself still defaults to
+`false`.** The two layers differ on purpose — the field is what a hand-written CR or a Helm-only
+install sets, and neither of those creates a subscription for the detector to read, so the API
+default stays off and the installer is what turns it on. It is not free either, and what it costs is
+GCP resources rather than cluster resources: the subscription it reads comes with an audit log sink
+and a Pub/Sub topic, all three from the `drift-pubsub` Terraform module, and the sink exports the
+admin-activity audit records of every GKE cluster in the project. The
 [`terraform/examples/full-install`](https://github.com/gke-labs/kube-agents/tree/main/terraform/examples/full-install)
-composition instantiates only when you set `enable_drift_pubsub = true`, and the field below is
-written only when you set `enable_drift_detector = true` alongside it. Asking for the second
-without the first is refused by a precondition rather than applied. If you installed with
-`install.sh`, ask for both at once with `ENABLE_DRIFT_DETECTOR=true` in `install.env` (or
-`install.sh --enable-drift-detector`), which writes both variables together; the front doors
-regenerate `terraform.tfvars` on every run, so a value written into that file by hand does not
-survive the next one.
+composition instantiates the module when you set `enable_drift_pubsub = true`, and writes the field
+below when you set `enable_drift_detector = true` alongside it. Asking for the second without the
+first is refused by a precondition rather than applied.
+
+If you installed with `install.sh`, one key covers both: `ENABLE_DRIFT_DETECTOR` in `install.env`
+writes the two variables together, and it defaults to `true`, so an install that says nothing gets
+the sink, topic, subscription and detector. To go without them, set `ENABLE_DRIFT_DETECTOR=false`
+in `install.env`. Put it in the file rather than relying on
+`install.sh --enable-drift-detector=false`: the run that creates `install.env` records that flag
+into it, but `install.sh` never rewrites the file afterwards, so on every later run the flag
+applies to the run you pass it to and is recorded nowhere — the next run resolves the default and
+provisions the three resources again, and `upgrade.sh` takes no such flag at all. The
+front doors regenerate `terraform.tfvars` on every run, so a value written into that file by hand
+does not survive the next one either.
+
+This reaches an install created before the key existed. Its `install.env` records no choice, so the
+next `install.sh` or `upgrade.sh` run resolves the default and provisions the three resources —
+`upgrade.sh --plan` shows them as additions before you apply.
 
 An install that has neither provisioned the ingress nor applied the module by hand has nothing for
 the detector to pull. Setting this field there anyway — which now takes a hand-edited CR or chart
