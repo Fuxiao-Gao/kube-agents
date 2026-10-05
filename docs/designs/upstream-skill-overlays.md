@@ -43,7 +43,7 @@ flowchart LR
 | F4  | Unregistered edits are not caught | Tests check each registered substitution and one of the five footers. A direct edit to a mirrored file passes review and is lost on the next sync.                                                                                                                                                                                                                                  |
 | F5  | Upstream adoption is mishandled   | An adopted substitution is skipped silently and stays in the script forever; an adopted footer is appended a second time (only its marker is checked).                                                                                                                                                                                                                              |
 | F6  | Prune by name                     | Any local `gke-*` directory upstream lacks is deleted on the next sync, so a skill we write with that prefix is lost.                                                                                                                                                                                                                                                               |
-| F7  | Manual, all-at-once sync          | One run refreshes every skill from `HEAD`; nothing schedules it, and nothing proposes new upstream skills until someone runs it.                                                                                                                                                                                                                                                    |
+| F7  | Manual, all-at-once sync          | One run refreshes every skill from `HEAD`, and nothing schedules it, so new upstream skills arrive only when someone runs it. One drifted snippet aborts the whole run, for every skill, and the error goes only to the runner's terminal: no issue, no notification.                                                                                                               |
 
 As of 2026-10-05, every stored snippet still matches upstream's latest version: the upstream edits since the last sync were all outside them. F1 is about the next edit inside a snippet, not a current breakage.
 
@@ -86,7 +86,7 @@ How each fault is addressed:
 | F4  | `make skills-check` rebuilds every mirrored skill and fails on any byte no patch records.                                                                                                                                           | [The presubmit check](#the-presubmit-check)                     |
 | F5  | A patch upstream adopts comes out of the rebase empty and is reported retired; the sync also reports an `append.md` whose text the new upstream copy already contains.                                                              | [Sync](#sync-rebasing-the-overlay)                              |
 | F6  | A skill is mirrored because it has a lock, not because of its name; local skills are never touched.                                                                                                                                 | [Skills this repository writes](#skills-this-repository-writes) |
-| F7  | A weekly job opens one pin-bump PR per changed skill and an add-skill PR per new upstream skill.                                                                                                                                    | [Automation](#automation)                                       |
+| F7  | A weekly job opens one pin-bump PR per changed skill and an add-skill PR per new upstream skill. A conflict stops only that skill and files a `skill-sync-conflict` issue.                                                          | [Automation](#automation)                                       |
 
 ### The three layers
 
@@ -255,12 +255,13 @@ flowchart LR
 
 ### Changing a mirrored skill
 
-| Task                                | Steps                                                                                                                                      |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| Make a new change                   | Edit `agents/platform/skills/<skill>/…`; run `make skills-refresh SKILL=<skill>`; fill in the new patch's headers; commit patch and skill. |
-| Adjust an existing change           | Edit the skill; run `make skills-refresh SKILL=<skill> PATCH=<nnnn>` to fold the edit into that patch.                                     |
-| Edit the appended section           | Edit it in the skill; `refresh` writes it back to `append.md`.                                                                             |
-| Remove a change or edit the overlay | Delete or edit the patch (or `append.md`); run `make skills-generate SKILL=<skill>`. Offline.                                              |
+| Task                                     | Steps                                                                                                                                                                                                                                                           |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Make a new change                        | Edit `agents/platform/skills/<skill>/…`; run `make skills-refresh SKILL=<skill>`; fill in the new patch's headers; commit patch and skill.                                                                                                                      |
+| Adjust an existing change                | Edit the skill; run `make skills-refresh SKILL=<skill> PATCH=<nnnn>` to fold the edit into that patch.                                                                                                                                                          |
+| Edit the appended section                | Edit it in the skill; `refresh` writes it back to `append.md`.                                                                                                                                                                                                  |
+| Remove a change or edit the overlay      | Delete or edit the patch (or `append.md`); run `make skills-generate SKILL=<skill>`. Offline.                                                                                                                                                                   |
+| Change lines an earlier patch introduced | Fold the edit into that patch with `PATCH=<nnnn>`; it is the same reason. `refresh` warns when a new patch changes lines from an earlier one. A new patch stacked on an earlier one still applies, in filename order, but breaks if the earlier one is deleted. |
 
 - `make skills-refresh` rebuilds the skill from ① and ②, compares the edited skill with that rebuild, and writes the difference as the new (or folded) patch.
 - The reviewer sees the change to the skill and the patch that records it; the upstream copy does not change.
@@ -268,11 +269,12 @@ flowchart LR
 
 What `make skills-check` reports when a step is skipped:
 
-| What happened                                               | What the check sees                               | Fix                          |
-| ----------------------------------------------------------- | ------------------------------------------------- | ---------------------------- |
-| The skill was edited and no patch records the edit          | the rebuilt skill differs from the committed one  | `make skills-refresh`        |
-| A patch or `append.md` was edited and the skill not rebuilt | the rebuilt skill differs from the committed one  | `make skills-generate`       |
-| The upstream copy was edited by hand                        | the copy no longer matches the sha256 in its lock | revert it; sync to change it |
+| What happened                                                                                  | What the check sees                               | Fix                                                    |
+| ---------------------------------------------------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------------ |
+| The skill was edited and no patch records the edit                                             | the rebuilt skill differs from the committed one  | `make skills-refresh`                                  |
+| A patch or `append.md` was edited and the skill not rebuilt                                    | the rebuilt skill differs from the committed one  | `make skills-generate`                                 |
+| The upstream copy was edited by hand                                                           | the copy no longer matches the sha256 in its lock | revert it; sync to change it                           |
+| A patch no longer applies (an earlier patch it depends on was deleted, or a hand edit clashes) | the overlay cannot be applied in filename order   | fold or refresh the patch, then `make skills-generate` |
 
 ### Skills this repository writes
 
