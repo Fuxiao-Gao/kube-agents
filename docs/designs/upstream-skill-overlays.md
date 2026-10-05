@@ -45,6 +45,8 @@ flowchart LR
 | F6  | Prune by name                     | Any local `gke-*` directory upstream lacks is deleted on the next sync, so a skill we write with that prefix is lost.                                                                                                                                                                                                                                                               |
 | F7  | Manual, all-at-once sync          | One run refreshes every skill from `HEAD`; nothing schedules it, and nothing proposes new upstream skills until someone runs it.                                                                                                                                                                                                                                                    |
 
+As of 2026-10-05, every stored snippet still matches upstream's latest version: the upstream edits since the last sync were all outside them. F1 is about the next edit inside a snippet, not a current breakage.
+
 ## Proposed design
 
 ```mermaid
@@ -292,7 +294,17 @@ What `make skills-check` reports when a step is skipped:
 - If a lock-less local skill already has that name, the job files an issue instead; a person renames ours, adopts upstream's with our differences as patches, or leaves upstream's unmirrored by adding `NOT_MIRRORED`. The job never writes over a skill it does not own.
 - Skills marked `NOT_MIRRORED` are skipped, and the job updates an existing open issue rather than filing a duplicate.
 - PRs are opened as `kube-agents-robot` or with a GitHub App token: a PR opened with the workflow's `GITHUB_TOKEN` does not start other workflows.
-- When a patch stops, the job files an issue with the patch and its `Why:`, the upstream diff and the conflicting hunk; `kube-agents-robot` picks it up like any other issue.
+- When a patch stops, only that skill's sync stops: nothing is written for it, it keeps shipping at its old pin, and the other skills still get their PRs.
+
+What happens after a sync conflict:
+
+| Step | Who                 | What                                                                                                                                                                                |
+| ---- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1    | Weekly job          | Files one issue per conflicted skill, or updates the open one: label `skill-sync-conflict`, unassigned, with the patch and its `Why:`, the upstream diff and the conflicting lines. |
+| 2    | `kube-agents-robot` | Claims it by assigning itself, as `agents/contributor/AGENTS.md` requires; the contract only claims unassigned issues, which is why the job does not assign it.                     |
+| 3    | `kube-agents-robot` | Runs `make skills-sync SKILL=<skill>` in its fork, resolves the conflicting lines, runs `make skills-continue`, and opens a PR that closes the issue.                               |
+| 4    | Reviewers           | `kube-agents-bot` reviews; a skill owner approves (the PR changes the upstream copy, so `OWNERS` applies); Tide merges.                                                             |
+| —    | Fallback            | If the robot is stuck it adds `needs-human` and stops, per its contract; a person resolves from the same issue.                                                                     |
 
 ```mermaid
 sequenceDiagram
@@ -377,7 +389,7 @@ GitHub has no read-only directories, so each guardrail below is a check, an `OWN
 | 2    | `make skills-check` and the comparison with `google/skills`, as steps in `validate`.                                                                 |
 | 3    | Every other skill migrated, generated tree byte-identical to `main`; registries, their tests and the old script removed; references updated (below). |
 | 4    | The weekly sync job, add-skill PRs and the name-collision issue.                                                                                     |
-| 5    | Conflict issues routed to `kube-agents-robot`.                                                                                                       |
+| 5    | Conflict issues (unassigned, `skill-sync-conflict`) for `kube-agents-robot` to claim.                                                                |
 
 Step 3 also updates every file that names the old script or its registries:
 
