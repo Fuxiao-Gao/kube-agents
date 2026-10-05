@@ -13,6 +13,7 @@ exec the patched and unpatched fixtures, and compare what each sends: with the
 flag off, or for any platform but Slack, the two must be identical.
 """
 
+import ast
 import asyncio
 import importlib
 import os
@@ -35,10 +36,20 @@ import verify_slack_boilerplate as verifier
 
 DELIVERY = '''\
 """Fixture standing in for cron/scheduler_delivery.py."""
+from dataclasses import dataclass
+
 SENT = []
 
 
-def _prepare_target_delivery(target):
+@dataclass
+class _TargetDelivery:
+    job: dict
+    platform_name: str
+    chat_id: str
+    live_adapter_ready: bool = False
+
+
+def _prepare_target_delivery(target) -> "Optional[_TargetDelivery]":
     return target
 
 
@@ -590,6 +601,37 @@ class _Adapter:
         return SimpleNamespace(success=True)
 
 
+def target_reads(source):
+    """The attributes ``cron_delivery_text`` reads off ``target``.
+
+    Every appearance of ``target`` must be ``target.<attr>`` or
+    ``getattr(target, "<attr>", ...)``; any other (a keyword or positional
+    hand-off, a container, an alias) carries it where this cannot follow, and
+    fails rather than leaving a read unpinned.
+    """
+    fn = next(
+        node for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef) and node.name == "cron_delivery_text"
+    )
+    parents = {child: node for node in ast.walk(fn) for child in ast.iter_child_nodes(node)}
+    read = set()
+    for node in ast.walk(fn):
+        if not (isinstance(node, ast.Name) and node.id == "target"):
+            continue
+        parent = parents[node]
+        if isinstance(parent, ast.Attribute):
+            read.add(parent.attr)
+        elif (
+            isinstance(parent, ast.Call) and ast.unparse(parent.func) == "getattr"
+            and len(parent.args) >= 2 and parent.args[0] is node
+            and isinstance(parent.args[1], ast.Constant)
+        ):
+            read.add(parent.args[1].value)
+        else:
+            raise AssertionError(f"target escapes at line {node.lineno}: {ast.unparse(parent)}")
+    return read
+
+
 class ApplierTest(unittest.TestCase):
     def setUp(self):
         self.root = _Root()
@@ -744,6 +786,98 @@ class ApplierTest(unittest.TestCase):
                 self.assertIn(f"reads {name}, which nothing binds", str(caught.exception))
                 path.write_text(patched)
         verifier.check_bound(self.root.dir)
+
+    def test_verifier_refuses_a_renamed_target_field(self):
+        # drive() hands cron_delivery_text a SimpleNamespace, and the helper reads
+        # through getattr with a default, so a rename upstream raises nothing.
+        applier.apply(self.root.dir)
+        path = self.root.dir / applier.DELIVERY
+        patched = path.read_text()
+        for name in verifier.TARGET_FIELDS:
+            with self.subTest(name=name):
+                old = f"    {name}: "
+                self.assertEqual(patched.count(old), 1)
+                path.write_text(patched.replace(old, f"    {name}_v2: "))
+                with self.assertRaises(SystemExit) as caught:
+                    verifier.main(self.root.dir)
+                self.assertIn(f"no longer declares {name},", str(caught.exception))
+        path.write_text(patched)
+        verifier.main(self.root.dir)
+
+    def test_target_fields_are_what_cron_delivery_text_reads(self):
+        # A new getattr in the helper would otherwise go unpinned.
+        self.assertEqual(target_reads(Path(runtime.__file__).read_text()), set(verifier.TARGET_FIELDS))
+
+    def test_target_reads_refuses_target_escaping_the_helper(self):
+        for escape in (
+            "_log(job, target=target)",
+            "_log(*[target])",
+            "_log([target])",
+            "t = target",
+        ):
+            with self.subTest(escape=escape):
+                source = f"def cron_delivery_text(target):\n    getattr(target, 'chat_id', '')\n    {escape}\n"
+                with self.assertRaises(AssertionError):
+                    target_reads(source)
+
+    def test_verifier_refuses_a_target_from_elsewhere(self):
+        applier.apply(self.root.dir)
+        path = self.root.dir / applier.DELIVERY
+        patched = path.read_text()
+        bind = "t = _prepare_target_delivery(target)"
+        indent = patched.split(bind)[0].rsplit("\n", 1)[1]
+        for old, new, detail in (
+            ('-> "Optional[_TargetDelivery]"', '-> "Optional[_SlackTarget]"', "no longer annotated"),
+            ('-> "Optional[_TargetDelivery]"', '-> "Union[_TargetDelivery, _SlackTarget]"', "no longer annotated"),
+            ('-> "Optional[_TargetDelivery]"', '-> "Optional[_TargetDeliveryV2]"', "no longer annotated"),
+            (bind, "t = _prepare_slack_target(target)", "no longer binds t"),
+            (bind, f"{bind}\n{indent}t = target", "no longer binds t"),
+            (bind, f"{bind}\n{indent}def _one(t):\n{indent}    pass", "no longer binds t"),
+            (bind, f"{bind}\n{indent}try:\n{indent}    pass\n{indent}except Exception as t:\n{indent}    pass",
+             "no longer binds t"),
+        ):
+            with self.subTest(detail=detail):
+                self.assertEqual(patched.count(old), 1)
+                path.write_text(patched.replace(old, new))
+                with self.assertRaises(SystemExit) as caught:
+                    verifier.check_target_fields(self.root.dir)
+                self.assertIn(detail, str(caught.exception))
+        path.write_text(patched)
+        verifier.check_target_fields(self.root.dir)
+
+    def test_verifier_accepts_every_spelling_of_optional(self):
+        applier.apply(self.root.dir)
+        path = self.root.dir / applier.DELIVERY
+        patched = path.read_text()
+        for spelling in (
+            '-> "Union[_TargetDelivery, None]"',
+            '-> "typing.Optional[_TargetDelivery]"',
+            '-> "_TargetDelivery | None"',
+        ):
+            with self.subTest(spelling=spelling):
+                path.write_text(patched.replace('-> "Optional[_TargetDelivery]"', spelling))
+                verifier.check_target_fields(self.root.dir)
+
+    def test_verifier_accepts_an_annotated_binding_and_a_nested_forward_reference(self):
+        applier.apply(self.root.dir)
+        path = self.root.dir / applier.DELIVERY
+        patched = path.read_text()
+        for old, new in (
+            ("t = _prepare_target_delivery(target)", "t: _TargetDelivery = _prepare_target_delivery(target)"),
+            ('-> "Optional[_TargetDelivery]"', '-> Optional["_TargetDelivery"]'),
+        ):
+            with self.subTest(new=new):
+                self.assertEqual(patched.count(old), 1)
+                path.write_text(patched.replace(old, new))
+                verifier.check_target_fields(self.root.dir)
+
+    def test_verifier_names_an_unparseable_return_annotation(self):
+        applier.apply(self.root.dir)
+        path = self.root.dir / applier.DELIVERY
+        path.write_text(path.read_text().replace('-> "Optional[_TargetDelivery]"', '-> "Optional[_TargetDelivery"'))
+        with self.assertRaises(SystemExit) as ctx:
+            verifier.check_target_fields(self.root.dir)
+        self.assertIn("does not parse", str(ctx.exception))
 
     def test_verifier_refuses_a_dropped_wrapper(self):
         applier.apply(self.root.dir)
