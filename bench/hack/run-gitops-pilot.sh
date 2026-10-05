@@ -58,8 +58,9 @@
 #     head of the repository, used as the base and b-0011's history parent
 #     only while GITOPS_BROKEN_BASE_SHA is unset (a per-run repository)
 #   AGENT_STATE_RESET=true re-create the PlatformAgent on fresh volumes (with
-#     GITOPS_REPO as its managed repository and the event watcher off unless
-#     AGENT_EVENT_WATCHER=true) before the run, then refuse to run unless its
+#     GITOPS_REPO as its managed repository, the event watcher off unless
+#     AGENT_EVENT_WATCHER=true and the drift detector off unless
+#     AGENT_DRIFT_DETECTOR=true) before the run, then refuse to run unless its
 #     stores hold nothing but the first-boot discovery card (#1773)
 #   DEVOPS_BENCH_PIN (empty: the repository's pin) a pip requirement for another
 #     devops-bench, e.g. `devops-bench @ git+https://github.com/pradeepvrd/devops-bench@<sha>`
@@ -451,10 +452,14 @@ reset_agent_state() {
   # The event watcher turns Warning events from every watched cluster into
   # autonomous triage cards; on a benchmark run the prompt must be the only
   # stimulus (a reset alone made it file four cards about the host), so the
-  # re-applied agent has it off. AGENT_EVENT_WATCHER=true keeps it on.
+  # re-applied agent has it off. AGENT_EVENT_WATCHER=true keeps it on. The
+  # drift detector is the same kind of stimulus: it turns the reset's own
+  # deletions on the host into out-of-band-change triage cards (four of them
+  # before the freshness check on a 2026-10-05 run), so it is off too, keeping
+  # its other settings; AGENT_DRIFT_DETECTOR=true keeps it on.
   python3 -c '
 import json, re, sys
-d = json.load(open(sys.argv[1])); repo = sys.argv[2]; watcher = sys.argv[3] == "true"; lists = sys.argv[4] == "true"; slug = sys.argv[5]
+d = json.load(open(sys.argv[1])); repo = sys.argv[2]; watcher = sys.argv[3] == "true"; lists = sys.argv[4] == "true"; slug = sys.argv[5]; drift = sys.argv[6] == "true"
 d.pop("status", None)
 for k in ("resourceVersion", "uid", "creationTimestamp", "generation", "managedFields", "finalizers", "deletionTimestamp"): d["metadata"].pop(k, None)
 d["metadata"].get("annotations", {}).pop("kubectl.kubernetes.io/last-applied-configuration", None)
@@ -494,7 +499,8 @@ if repo and (lists or integration.get("forges") or integration.get("repositories
 elif repo:
     integration.setdefault("github", {})["gitRepo"] = repo
 d["spec"].setdefault("harness", {})["eventWatcher"] = {"enabled": watcher}
-print(json.dumps(d))' "${backup}" "${GITOPS_REPO:-}" "${AGENT_EVENT_WATCHER:-false}" "${lists}" "${slug}" | "${K[@]}" apply -f -
+d["spec"]["harness"]["driftDetector"] = {**(d["spec"]["harness"].get("driftDetector") or {}), "enabled": drift}
+print(json.dumps(d))' "${backup}" "${GITOPS_REPO:-}" "${AGENT_EVENT_WATCHER:-false}" "${lists}" "${slug}" "${AGENT_DRIFT_DETECTOR:-false}" | "${K[@]}" apply -f -
   "${K[@]}" wait "${CR}" --for=condition=Ready --timeout="${CR_READY_TIMEOUT}"
   "${K[@]}" rollout status deploy/platform-agent-gateway --timeout="${GATEWAY_ROLLOUT_TIMEOUT}" >/dev/null
   "${K[@]}" rollout status sts/"${SHELL_STATEFULSET}" --timeout="${GATEWAY_ROLLOUT_TIMEOUT}" >/dev/null

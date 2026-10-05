@@ -811,6 +811,19 @@ class WrapperCaseSelectionTest(_StubbedScriptTest):
             "repositories": [{"forge": "github", "repository": _REPO, "role": "gitops"}],
         })
 
+    def test_reset_turns_the_drift_detector_off_unless_asked_and_keeps_its_settings(self):
+        # Left on, the detector files triage cards about the reset's own
+        # deletions, and the freshness check refuses the run.
+        for env, enabled in (({}, False), ({"AGENT_DRIFT_DETECTOR": "true"}, True)):
+            with self.subTest(env=env):
+                cr = _platform_agent(alias=True)
+                cr["spec"].setdefault("harness", {})["driftDetector"] = {"enabled": True, "subscription": "drift-sub"}
+                self.given_cr(cr)
+                proc = self.run_wrapper(CASE="b-0022b-gitops-pinned-base", AGENT_STATE_RESET="true", **env)
+                self.assertEqual(proc.returncode, _KUBECTL_STOP, proc.stderr)
+                self.assertEqual(self.state()["applied"]["spec"]["harness"]["driftDetector"],
+                                 {"enabled": enabled, "subscription": "drift-sub"})
+
     def test_reset_for_a_case_that_pins_the_base_keeps_the_alias_on_a_crd_without_the_lists_form(self):
         # The stub's apply refuses forges and repositories on such a CRD, as
         # strict field validation does, after the delete.
