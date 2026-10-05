@@ -3,21 +3,26 @@
 #
 # Gap. The platform agent cuts its GitOps fix from, and opens its pull request
 # onto, the repository's default branch. On an operator without
-# spec.integration.baseBranch, an install whose synced branch is not the
-# default has no way to say so: the pilot cases name the run branch in the
-# prompt and also make it the repository's default for the run, so neither
+# spec.integration.repositories[].baseBranch, an install whose synced branch is
+# not the default has no way to say so: the pilot cases name the run branch in
+# the prompt and also make it the repository's default for the run, so neither
 # exercises the install's own setting. On an operator whose CRD declares
-# spec.integration.baseBranch on the PlatformAgent, the operator renders it
-# into the credential broker, which checks a branch-less clone out on it and
-# refuses a proposal onto the GitOps repository that targets any other branch
+# baseBranch on the PlatformAgent's repository entries, the operator renders
+# the GitOps repository's into the credential broker
+# (CREDENTIAL_PROXY_PINNED_BASES), which checks a branch-less clone out on it
+# and refuses a proposal onto that repository that targets any other branch
 # (TARGET_NOT_BASE).
 #
 # What this case changes against b-0022b-gitops, and nothing else: the same
 # stack, task, seeding, node count and verification_spec, with three
 # differences.
-#   1. gitops_pin_agent_base_branch: the stack sets the PlatformAgent's
-#      spec.integration.baseBranch to the run branch after the seed, waits for
-#      the credential broker to roll onto it, and removes it on destroy.
+#   1. gitops_pin_agent_base_branch: the stack sets the baseBranch of the
+#      PlatformAgent's spec.integration.repositories[] entry with role gitops
+#      for the repository to the run branch after the seed, waits for the
+#      credential broker to roll onto it, and removes it on destroy. The
+#      deprecated github alias carries no base, so the PlatformAgent needs the
+#      lists form; the run wrapper's agent state reset (AGENT_STATE_RESET=true)
+#      writes it for this case, on a CRD that has it.
 #   2. gitops_switch_default_branch: false, so the repository's default branch
 #      stays main. The stack instead fast-forwards main onto the run branch's
 #      starting commit, so both branches carry the same broken tasks/b-0022b
@@ -25,7 +30,9 @@
 #   3. The prompt names the repository and the directory, not the branch.
 #
 # Red on an operator whose CRD does not declare the field: the API server
-# drops the field (the stack logs the read-back) and the broker pins nothing.
+# drops the field (the stack logs the read-back), or, on a CRD from before the
+# lists form, the PlatformAgent stays on the alias and the stack logs that
+# there is no entry to pin; either way the broker pins nothing.
 # The agent's clone lands on main, its pull request goes to main, and the
 # repository's check workflow merges only pull requests onto run/**, so
 # nothing reaches the branch Argo syncs. The cluster stays broken and the
@@ -45,7 +52,7 @@
 # stack changes the PlatformAgent on the agent host for the run. Run it alone
 # on that install: with the field in place, every other proposal onto the
 # GitOps repository is pinned to this run's branch until the destroy. The stack
-# refuses to pin over a baseBranch the install already sets.
+# refuses to pin over a baseBranch the install already sets on that entry.
 id: b-0022b-gitops-pinned-base
 task_version: 1
 name: "b-0022b through the GitOps fix cycle, PR base from the PlatformAgent's baseBranch"

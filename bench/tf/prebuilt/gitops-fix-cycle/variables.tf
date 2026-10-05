@@ -151,21 +151,26 @@ variable "gitops_restore_default_branch" {
 # set it on the install. When true, run-branch.sh fast-forwards the
 # repository's default branch onto the run branch's starting commit (so the
 # default carries the same task directory and differs only in being the
-# default), and scripts/agent-base-branch.sh sets the PlatformAgent's
-# spec.integration.baseBranch to the run branch after the seed, waits for the
-# credential broker to roll onto it, and removes it on destroy (and on a failed
-# pin) when it still names the run branch; a baseBranch the install already
-# sets is refused, never overwritten. Needs agent_host_context, a task without
+# default), and scripts/agent-base-branch.sh sets the baseBranch of the
+# PlatformAgent's spec.integration.repositories[] entry with role gitops for
+# gitops_repo to the run branch after the seed, waits for the credential broker
+# to roll onto it, and removes it on destroy (and on a failed pin) when it
+# still names the run branch; a baseBranch the install already sets there is
+# refused, never overwritten, and on a CRD that declares the field a
+# PlatformAgent without that entry (one on the deprecated github alias) is
+# refused. Needs agent_host_context, a task without
 # staged history (so not b-0011), a per-run repository whose default branch
 # head is gitops_broken_base_sha and that commit its root (run-branch.sh
 # refuses to move the default from a base with parents), and an install whose
 # accepted GitOps repository is gitops_repo; excludes
-# gitops_switch_default_branch. On an install whose CRD has no baseBranch the
-# API server drops the field and the script says so, which is the case's red,
-# not a setup failure. One run at a time per install.
+# gitops_switch_default_branch. On an install whose CRD has no
+# spec.integration.repositories[].baseBranch (one from before the lists form
+# included, whose PlatformAgent stays on the alias) the API server drops the
+# field, or there is no entry to write, and the script says so, which is the
+# case's red, not a setup failure. One run at a time per install.
 variable "gitops_pin_agent_base_branch" {
   type        = bool
-  description = "Set the PlatformAgent's spec.integration.baseBranch to the run branch for the run, and seed the default branch with the same starting commit."
+  description = "Set the baseBranch of the PlatformAgent's GitOps repository entry (spec.integration.repositories[]) to the run branch for the run, and seed the default branch with the same starting commit."
   default     = false
 }
 

@@ -135,7 +135,9 @@ rendered bases. The staged history's commit messages are the shape a build pipel
 not a title. Repositories are archived after the campaign, not deleted, so handoff links
 keep resolving. The agent side of the same isolation is the wrapper's
 `AGENT_STATE_RESET`, which re-creates the `PlatformAgent` on fresh volumes with the run's
-repository as its managed repository and refuses to run unless its stores are empty,
+repository as its managed repository (as a `gitops` entry of `spec.integration.repositories`
+for a case that pins its base on a CRD that has the lists form, or a spec already in that
+form; as the `github` alias otherwise) and refuses to run unless its stores are empty,
 the first-boot discovery card and its inventory work excepted.
 
 ## What the stack installs (`bench/tf/prebuilt/gitops-fix-cycle`)
@@ -221,22 +223,33 @@ before every PR; one run at a time.
 
 **Pinned-base mode** (`gitops_pin_agent_base_branch`, set in the case's own variables; used
 by `b-0022b-gitops-pinned-base`) gives the base through the install instead. After the
-seed, `scripts/agent-base-branch.sh` sets the PlatformAgent's `spec.integration.baseBranch`
-to the run branch, and refuses when the install already sets another base. On an operator
-whose CRD declares `spec.integration.baseBranch`, the operator renders it into the
-credential broker's environment, the broker checks a branch-less clone out on it and refuses
-a proposal onto any other branch, and the stack waits for the broker to roll. On an operator
-whose CRD does not declare the field, the API server drops it, the stack logs that, and the
-broker pins nothing, so the agent's base falls back to the default branch unless it finds the
+seed, `scripts/agent-base-branch.sh` sets `baseBranch` on the PlatformAgent's
+`spec.integration.repositories[]` entry with role `gitops` for `GITOPS_REPO` to the run
+branch, and refuses when the install already sets another base there. The write is a JSON
+patch that tests the entry and the resourceVersion, so a concurrent change fails it rather
+than being overwritten. The deprecated `github` alias carries no base, so on a CRD that
+declares the field a PlatformAgent without that entry is refused; the wrapper's agent state
+reset (`AGENT_STATE_RESET=true`) writes the lists form (`forges` and a `gitops` repository)
+for a case that pins its base, on a CRD that has it, and keeps an existing base of that
+repository's entry. On
+an operator whose CRD declares `spec.integration.repositories[].baseBranch`, the operator
+renders the pin into the credential broker's `CREDENTIAL_PROXY_PINNED_BASES` (the
+repository as `https://<host>/<path>`, and the branch), the broker checks a branch-less clone
+out on it and refuses a proposal onto that repository that targets any other branch, and the
+stack waits until the broker's Deployment holds this repository's pin and has rolled. On an operator
+whose CRD does not declare the field, the API server drops it (or, on a CRD from before the
+lists form, the PlatformAgent stays on the alias and there is no entry to write), the stack
+logs that, and the broker pins nothing, so the agent's base falls back to the default branch unless it finds the
 run branch on its own; a pull request onto the default is never merged. The wrapper's
 pull-request list tells the outcomes apart (see the comment at the top of
 [the case](../../bench/tasks/b-0022b-gitops-pinned-base/task.yaml)). The stack clears the field on destroy, and after a
 failed pin, when it still names the run branch. On destroy, the removal itself (after a few
 tries) and the waits for the broker to roll off it only warn, so a slow API server or broker does
 not keep the task cluster alive; destroy can then finish with the pin still set. The wrapper's
-leak check is how such a leftover pin surfaces: it warns that the field still names the run
-branch, or reports it as unknown when it cannot read the field, and the next run's wrapper
-refuses to start while a `run/**` base other than its own is set. The repository's default stays `main` (it
+leak check is how such a leftover pin surfaces: it warns that a repository entry's
+`baseBranch` still names the run branch, or reports it as unknown when it cannot read the
+PlatformAgent, and the next run's wrapper refuses to start while any entry carries a
+`run/**` base other than its own. The repository's default stays `main` (it
 is not switched), and `run-branch.sh` fast-forwards `main` onto the run branch's starting
 commit, so both branches carry the same broken task directory and only the configured base
 tells them apart. The mode excludes `gitops_switch_default_branch` and needs

@@ -8,8 +8,8 @@ should not, or removes an administrator's base. Each test runs the real script
 with `curl` or `kubectl` replaced by a stub on PATH that answers from a JSON
 state file and logs every call, then asserts on the exit status, the calls
 made, and the state left behind. run-gitops-pilot.sh is run from its TASK/CASE
-resolution and leaked-pin refusal through its base-mode decision (step 2), and
-stops at the token read that follows; its post-run pull-request listing is
+resolution and leaked-pin refusal, through its agent state reset, to its
+base-mode decision (step 2), and stops at the token read that follows; its post-run pull-request listing is
 gitops-run-prs.sh, run here with `gh` stubbed. The wrapper's post-teardown leak
 check is not covered: reaching it means stubbing the whole run.
 """
@@ -85,10 +85,19 @@ sys.stdout.write(str(code))
 """
 
 # kubectl as agent-base-branch.sh calls it, against one PlatformAgent, its CRD
-# and the credential broker's Deployment, all held in the state file. For
-# run-gitops-pilot.sh, `exec` (gitops-run-repo.sh check) succeeds, and the
-# secret read records the default-branch switch the wrapper exported before it,
-# then stops the wrapper.
+# and the credential broker's Deployment, all held in the state file. A JSON
+# patch is applied to the PlatformAgent op by op (test, add, remove) and fails
+# whole when a test op does not hold; a CRD without
+# spec.integration.repositories[].baseBranch prunes it after the patch, as the
+# API server does; a CRD from before the lists form (crd_has_lists false)
+# declares neither forges nor repositories, and its `apply` refuses them as
+# strict field validation does. The broker's CREDENTIAL_PROXY_PINNED_BASES is rendered from
+# the PlatformAgent at each read, under render_repository when the state sets
+# one. For run-gitops-pilot.sh, its agent state reset (delete, PVC wait, apply,
+# waits) is answered and the applied PlatformAgent kept, its freshness report
+# answers fresh, any other `exec` (gitops-run-repo.sh check) succeeds, and the
+# secret read records the default-branch switch the wrapper exported before
+# it, then stops the wrapper.
 _STUB_KUBECTL = """\
 import json, os, sys
 path = os.environ["STUB_STATE"]
@@ -116,94 +125,155 @@ def flag(prefix):
             return a.split("=", 1)[1]
     return None
 
-def missing_cr():
-    sys.stderr.write('Error from server (NotFound): platformagents "platform-agent" not found\\n')
+def fail(message):
+    save()
+    sys.stderr.write(message + "\\n")
     sys.exit(1)
+
+def missing_cr():
+    fail('Error from server (NotFound): platformagents "platform-agent" not found')
+
+def repositories(cr):
+    return cr["spec"].get("integration", {}).get("repositories", [])
+
+def set_base(value):
+    # Another writer: the GitOps entry's base changes, and so does the resourceVersion.
+    entry = next(r for r in repositories(state["cr"]) if r["role"] == "gitops")
+    entry.pop("baseBranch", None)
+    if value:
+        entry["baseBranch"] = value
+    state["rv"] = state.get("rv", 1) + 1
+
+def cr_json():
+    cr = json.loads(json.dumps(state["cr"]))
+    cr.setdefault("metadata", {})["resourceVersion"] = str(state.get("rv", 1))
+    return cr
+
+def apply_patch(doc, ops):
+    for op in ops:
+        *parents, last = op["path"].split("/")[1:]
+        node = doc
+        for key in parents:
+            node = node[int(key)] if isinstance(node, list) else node[key]
+        key = int(last) if isinstance(node, list) else last
+        if op["op"] == "test":
+            if node[key] != op["value"]:
+                raise ValueError(op["path"])
+        elif op["op"] == "add":
+            node[key] = op["value"]
+        elif op["op"] == "remove":
+            del node[key]
 
 verb, target = rest[0], rest[1]
 if verb == "get" and target == "crd":
     if state.get("crd_unreadable"):
-        sys.stderr.write('Error from server (Forbidden): customresourcedefinitions.apiextensions.k8s.io is forbidden\\n')
-        sys.exit(1)
-    props = {"github": {"type": "object"}}
+        fail('Error from server (Forbidden): customresourcedefinitions.apiextensions.k8s.io is forbidden')
+    repository = {"forge": {"type": "string"}, "repository": {"type": "string"}, "role": {"type": "string"}}
     if state["crd_has_field"]:
+        repository["baseBranch"] = {"type": "string"}
+    props = {"github": {"type": "object"}}
+    if state.get("crd_has_lists", True):
+        props.update({"forges": {"type": "array"}, "repositories": {"type": "array", "items": {"properties": repository}}})
+    if state.get("crd_integration_field"):
         props["baseBranch"] = {"type": "string"}
     schema = {"properties": {"spec": {"properties": {"integration": {"properties": props}}}}}
     print(json.dumps({"spec": {"versions": [{"name": "v1alpha1", "served": True, "schema": {"openAPIV3Schema": schema}}]}}))
 elif verb == "get" and target == "%(cr)s":
-    if not state["cr_exists"]:
+    if not state["cr_exists"] or flag("-o") != "json":
         missing_cr()
-    if "resourceVersion" in (flag("-o") or ""):
-        sys.stdout.write("%%d %%s" %% (state.get("rv", 1), state["base"]))
-    else:
-        sys.stdout.write(state["base"])
+    print(json.dumps(cr_json()))
 elif verb == "get" and target == "%(broker)s":
     if state.get("broker_read_failures", 0) > 0:
         state["broker_read_failures"] -= 1
-        save()
-        sys.stderr.write("Unable to connect to the server: net/http: TLS handshake timeout\\n")
-        sys.exit(1)
-    env = []
-    if state["base"]:
-        env = [{"name": "CREDENTIAL_PROXY_BASE_BRANCH", "value": state["base"]},
-               {"name": "CREDENTIAL_PROXY_BASE_REPOSITORY", "value": state["repository"]}]
-    print(json.dumps({"spec": {"template": {"spec": {"containers": [{"name": "proxy", "env": env}]}}}}))
+        fail("Unable to connect to the server: net/http: TLS handshake timeout")
+    pins = [{"repository": state.get("render_repository", "%(repo)s"), "branch": r["baseBranch"]}
+            for r in repositories(state["cr"]) if r["role"] in ("gitops", "managed") and r.get("baseBranch")]
+    env = [{"name": "CREDENTIAL_PROXY_PINNED_BASES", "value": json.dumps(pins)}] if pins else []
+    print(json.dumps({"spec": {"template": {"spec": {"containers": [{"name": "credential-proxy", "env": env}]}}}}))
 elif verb == "patch" and target == "%(cr)s":
     if not state["cr_exists"]:
         missing_cr()
-    payload = json.loads(flag("-p"))
-    if flag("--type") == "merge":
-        if state.get("written_before_patch") is not None:
-            # Another writer between pin's read and its patch.
-            state["base"] = state.pop("written_before_patch")
-            state["rv"] = state.get("rv", 1) + 1
-            save()
-        sent = payload.get("metadata", {}).get("resourceVersion")
-        if sent is not None and sent != str(state.get("rv", 1)):
-            sys.stderr.write('Error from server (Conflict): Operation cannot be fulfilled on platformagents "platform-agent": the object has been modified\\n')
-            sys.exit(1)
-        if state["crd_has_field"]:
-            state["base"] = payload["spec"]["integration"]["baseBranch"]
-        save()
-        if state.get("patch_fails_after_apply"):
-            sys.stderr.write("error: stream error: context deadline exceeded\\n")
-            sys.exit(1)
-    else:
-        state.setdefault("json_patches", []).append(payload)
-        if state.get("remove_fails"):
-            if state.get("remove_fails_sets_base") is not None:
-                state["base"] = state.pop("remove_fails_sets_base")
-            save()
-            sys.stderr.write("error: stream error: context deadline exceeded\\n")
-            sys.exit(1)
-        tested = [op["value"] for op in payload if op["op"] == "test"]
-        if not state["base"] or any(v != state["base"] for v in tested):
-            save()
-            sys.stderr.write("The request is invalid: the server rejected our request due to an error in our request\\n")
-            sys.exit(1)
-        state["base"] = ""
-        save()
-        if state.pop("remove_fails_after_apply", False):
-            save()
-            sys.stderr.write("error: stream error: context deadline exceeded\\n")
-            sys.exit(1)
-elif verb == "exec":
+    ops = json.loads(flag("-p"))
+    state.setdefault("json_patches", []).append(ops)
+    removal = any(op["op"] == "remove" for op in ops)
+    if not removal and state.get("written_before_patch") is not None:
+        # Another writer between pin's read and its patch.
+        set_base(state.pop("written_before_patch"))
+    if removal and state.get("remove_fails"):
+        if state.get("remove_fails_sets_base") is not None:
+            set_base(state.pop("remove_fails_sets_base"))
+        fail("error: stream error: context deadline exceeded")
+    doc = cr_json()
+    try:
+        apply_patch(doc, ops)
+    except (ValueError, KeyError, IndexError, TypeError):
+        fail("The request is invalid: the server rejected our request due to an error in our request")
+    if not state["crd_has_field"]:
+        for r in repositories(doc):
+            r.pop("baseBranch", None)
+    doc["metadata"].pop("resourceVersion")
+    state["cr"] = doc
+    state["rv"] = state.get("rv", 1) + 1
+    save()
+    if not removal and state.get("patch_fails_after_apply"):
+        fail("error: stream error: context deadline exceeded")
+    if removal and state.pop("remove_fails_after_apply", False):
+        fail("error: stream error: context deadline exceeded")
+elif verb == "delete" and target == "%(cr)s":
+    state["deleted"] = True
+    save()
+elif verb == "delete" and target == "pvc":
     pass
+elif verb == "get" and target == "pvc":
+    fail('Error from server (NotFound): persistentvolumeclaims not found')
+elif verb == "apply":
+    applied = json.load(sys.stdin)
+    if not state.get("crd_has_lists", True):
+        # kubectl apply validates strictly by default.
+        for field in ("forges", "repositories"):
+            if field in applied["spec"].get("integration", {}):
+                fail('Error from server (BadRequest): error when creating "STDIN": PlatformAgent in version '
+                     '"v1alpha1" cannot be handled as a PlatformAgent: strict decoding error: '
+                     'unknown field "spec.integration.%%s"' %% field)
+    state["applied"] = applied
+    state["cr"] = state["applied"]
+    save()
+elif verb == "wait":
+    pass
+elif verb == "exec":
+    if any(a.startswith("ONBOARDING_CARD_PREFIX=") for a in args):
+        print(json.dumps({"kanban_cards": [], "onboarding_cards": [], "front_messages": 0, "platform_messages": 0,
+                          "platform_messages_outside_onboarding": 0, "scratch": [], "gitops": [],
+                          "workspaces": [], "profiles": []}))
 elif verb == "get" and target == "secret":
     state["switch_at_token_read"] = os.environ.get("TF_VAR_gitops_switch_default_branch")
     save()
     sys.exit(%(stop)d)
 elif verb == "rollout" and target == "status":
     if state.get("rollout_sets_base") is not None:
-        state["base"] = state["rollout_sets_base"]
+        set_base(state.pop("rollout_sets_base"))
         save()
     if state.get("rollout_fails"):
-        sys.stderr.write("error: timed out waiting for the condition\\n")
-        sys.exit(1)
+        fail("error: timed out waiting for the condition")
 else:
     sys.stderr.write("stub kubectl: unexpected call %%r\\n" %% (args,))
     sys.exit(2)
-""" % {"cr": _CR, "broker": _BROKER, "stop": _KUBECTL_STOP}
+""" % {"cr": _CR, "broker": _BROKER, "stop": _KUBECTL_STOP, "repo": _REPO}
+
+
+def _platform_agent(base="", alias=False, gitops_repository=_REPO, forge=None):
+    """A PlatformAgent whose GitOps repository entry (index 1) carries `base`, or one on the github alias."""
+    if alias:
+        return {"metadata": {"name": "platform-agent"},
+                "spec": {"integration": {"github": {"org": "example-org", "gitRepo": _REPO}}}}
+    gitops = {"forge": "github", "repository": gitops_repository, "role": "gitops"}
+    if base:
+        gitops["baseBranch"] = base
+    return {"metadata": {"name": "platform-agent"}, "spec": {"integration": {
+        "forges": [forge or {"name": "github", "provider": "github", "namespace": "example-org"}],
+        "repositories": [{"forge": "github", "repository": "example-org/docs", "role": "context"}, gitops],
+    }}}
+
 
 # uv as run-gitops-pilot.sh calls it up to its base-mode decision: `uv sync`
 # succeeds, case_var's `uv run --no-sync python - <task.yaml> <name>` runs the
@@ -408,67 +478,130 @@ class AgentBaseBranchTest(_StubbedScriptTest):
         "AGENT_BASE_BRANCH_POLL_SECONDS": "1",
     }
 
-    def given(self, **overrides):
-        state = {"base": "", "crd_has_field": True, "cr_exists": True, "repository": _SLUG}
+    # Where the GitOps entry of _platform_agent() sits.
+    entry = "/spec/integration/repositories/1"
+
+    def given(self, base="", alias=False, cr=None, **overrides):
+        state = {"cr": cr or _platform_agent(base, alias=alias), "crd_has_field": True, "cr_exists": True}
         state.update(overrides)
         self.write_state(state)
+
+    def base(self):
+        (entry,) = [r for r in self.state()["cr"]["spec"]["integration"]["repositories"] if r["role"] == "gitops"]
+        return entry.get("baseBranch", "")
 
     def run_action(self, action, **env):
         return self.run_script(["bash", str(_AGENT_BASE_BRANCH), action], {**self.env, **env})
 
-    def patches(self, patch_type):
-        return [c for c in self.calls() if c[4:5] == ["patch"] and f"--type={patch_type}" in c]
+    def patches(self):
+        return [c for c in self.calls() if c[4:5] == ["patch"]]
 
-    def test_pin_sets_the_base_and_waits_for_the_broker(self):
+    def removals(self):
+        return [ops for ops in self.state().get("json_patches", []) if any(op["op"] == "remove" for op in ops)]
+
+    def test_pin_sets_the_base_with_a_patch_that_tests_the_entry_and_waits_for_the_broker(self):
         self.given()
         proc = self.run_action("pin")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(self.state()["base"], _RUN)
+        self.assertEqual(self.base(), _RUN)
+        self.assertEqual(self.state()["json_patches"], [[
+            {"op": "test", "path": "/metadata/resourceVersion", "value": "1"},
+            {"op": "test", "path": f"{self.entry}/repository", "value": _REPO},
+            {"op": "test", "path": f"{self.entry}/role", "value": "gitops"},
+            {"op": "add", "path": f"{self.entry}/baseBranch", "value": _RUN},
+        ]])
+        self.assertIn(f"CREDENTIAL_PROXY_PINNED_BASES holds {_REPO} -> {_RUN}", proc.stdout)
         self.assertTrue([c for c in self.calls() if c[4:6] == ["rollout", "status"]])
+
+    def test_the_gitops_entry_is_found_in_each_way_a_repository_is_written(self):
+        for written in (_SLUG, "gitops-run", f"git@github.com:{_SLUG}.git", "https://github.com/Example-Org/gitops-run/"):
+            with self.subTest(written=written):
+                self.given(cr=_platform_agent(gitops_repository=written))
+                proc = self.run_action("pin")
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(self.base(), _RUN)
+
+    def test_pin_refuses_a_platformagent_without_a_gitops_entry_for_the_repository_and_writes_nothing(self):
+        for name, cr in (
+            ("github alias", _platform_agent(alias=True)),
+            ("another repository", _platform_agent(gitops_repository="example-org/another-repo")),
+            ("same name on another host", _platform_agent(
+                forge={"name": "github", "provider": "github", "host": "github.example.com"})),
+        ):
+            with self.subTest(name):
+                self.given(cr=cr)
+                self.log_path.write_text("")
+                proc = self.run_action("pin")
+                self.assertEqual(proc.returncode, 1, proc.stderr)
+                self.assertIn(f"has no spec.integration.repositories[] entry with role gitops naming {_SLUG}",
+                              proc.stderr)
+                self.assertEqual(self.patches(), [])
+
+    def test_pin_without_a_gitops_entry_on_a_crd_without_the_field_logs_it_and_succeeds(self):
+        # Before the lists form the PlatformAgent can only be on the alias; that
+        # is the case's red, not a setup failure.
+        for name, crd in (("before the lists form", {"crd_has_lists": False}), ("lists without baseBranch", {})):
+            with self.subTest(name):
+                self.given(alias=True, crd_has_field=False, **crd)
+                self.log_path.write_text("")
+                proc = self.run_action("pin")
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertIn("this install pins no base", proc.stdout)
+                self.assertEqual(self.patches(), [])
+
+    def test_pin_without_a_gitops_entry_and_an_unreadable_crd_fails(self):
+        self.given(alias=True, crd_unreadable=True)
+        proc = self.run_action("pin")
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("cannot read the CRD", proc.stderr)
+        self.assertEqual(self.patches(), [])
 
     def test_pin_refuses_an_existing_different_base_and_leaves_it(self):
         self.given(base="production")
         proc = self.run_action("pin")
         self.assertEqual(proc.returncode, 1)
         self.assertIn("refusing to overwrite", proc.stderr)
-        self.assertEqual(self.state()["base"], "production")
-        self.assertEqual(self.patches("merge") + self.patches("json"), [])
+        self.assertEqual(self.base(), "production")
+        self.assertEqual(self.patches(), [])
 
     def test_a_base_written_between_the_read_and_the_patch_is_not_overwritten(self):
         self.given(written_before_patch=_OTHER_RUN)
         proc = self.run_action("pin")
         self.assertEqual(proc.returncode, 1)
-        self.assertIn("Conflict", proc.stderr)
-        self.assertEqual(self.state()["base"], _OTHER_RUN)
-        self.assertEqual(self.patches("json"), [], "the undo must leave the other run's base")
+        self.assertIn("it was not overwritten", proc.stderr)
+        self.assertEqual(self.base(), _OTHER_RUN)
+        self.assertEqual(self.removals(), [], "the undo must leave the other run's base")
 
     def test_failed_wait_after_the_patch_removes_this_runs_base(self):
         self.given(rollout_fails=True)
         proc = self.run_action("pin")
         self.assertNotEqual(proc.returncode, 0)
-        self.assertEqual(self.state()["base"], "")
-        self.assertEqual(len(self.patches("json")), 1)
+        self.assertEqual(self.base(), "")
+        self.assertEqual(len(self.removals()), 1)
 
     def test_undo_leaves_a_base_that_no_longer_names_this_run(self):
         self.given(rollout_fails=True, rollout_sets_base=_OTHER_RUN)
         proc = self.run_action("pin")
         self.assertNotEqual(proc.returncode, 0)
-        self.assertEqual(self.state()["base"], _OTHER_RUN)
-        self.assertEqual(self.patches("json"), [])
+        self.assertEqual(self.base(), _OTHER_RUN)
+        self.assertEqual(self.removals(), [])
 
     def test_patch_applied_but_reported_failed_is_undone(self):
         self.given(patch_fails_after_apply=True)
         proc = self.run_action("pin")
         self.assertNotEqual(proc.returncode, 0)
-        self.assertEqual(self.state()["base"], "", "the undo trap must be armed before the patch")
+        self.assertEqual(self.base(), "", "the undo trap must be armed before the patch")
 
-    def test_broker_naming_another_repository_is_refused_and_the_pin_undone(self):
-        self.given(repository="example-org/another-repo")
-        proc = self.run_action("pin")
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("CREDENTIAL_PROXY_BASE_REPOSITORY is 'example-org/another-repo'", proc.stderr)
-        self.assertEqual(self.state()["base"], "")
-        self.assertEqual(len(self.patches("json")), 1)
+    def test_broker_pinning_another_repository_or_host_is_refused_and_the_pin_undone(self):
+        for rendered in ("https://github.com/example-org/another-repo", f"https://github.example.com/{_SLUG}"):
+            with self.subTest(rendered=rendered):
+                self.given(render_repository=rendered)
+                proc = self.run_action("pin")
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn(f'CREDENTIAL_PROXY_PINNED_BASES is \'[{{"repository": "{rendered}"', proc.stderr)
+                self.assertIn(f"expected the pin of {_REPO} to {_RUN} to be held", proc.stderr)
+                self.assertEqual(self.base(), "")
+                self.assertEqual(len(self.removals()), 1)
 
     def test_failed_broker_reads_in_the_wait_count_as_not_yet(self):
         self.given(broker_read_failures=2)
@@ -476,7 +609,7 @@ class AgentBaseBranchTest(_StubbedScriptTest):
         # so a 2s timeout can expire after about one second of waiting.
         proc = self.run_action("pin", AGENT_BASE_BRANCH_RENDER_TIMEOUT_SEC="10")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(self.state()["base"], _RUN)
+        self.assertEqual(self.base(), _RUN)
         self.assertEqual(self.state()["broker_read_failures"], 0)
 
     def test_unreadable_crd_fails_the_pin_before_any_write(self):
@@ -485,24 +618,28 @@ class AgentBaseBranchTest(_StubbedScriptTest):
         self.assertEqual(proc.returncode, 1, proc.stderr)
         self.assertIn("cannot read the CRD", proc.stderr)
         self.assertNotIn("API server dropped it", proc.stdout)
-        self.assertEqual(self.state()["base"], "")
-        self.assertEqual(self.patches("merge") + self.patches("json"), [], "an unreadable CRD must write nothing")
+        self.assertEqual(self.base(), "")
+        self.assertEqual(self.patches(), [], "an unreadable CRD must write nothing")
 
     def test_pin_on_a_crd_without_the_field_reads_back_logs_it_and_succeeds(self):
-        self.given(crd_has_field=False)
-        proc = self.run_action("pin")
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("API server dropped it", proc.stdout)
-        self.assertEqual(self.state()["base"], "")
-        self.assertEqual(self.patches("json"), [])
-        # The CRD read carries no -n, so drop the context and namespace flags.
-        verbs = [[a for i, a in enumerate(c) if a not in ("--context", "-n") and c[i - 1] not in ("--context", "-n")][:2]
-                 for c in self.calls()]
-        crd_read = verbs.index(["get", "crd"])
-        merge = verbs.index(["patch", _CR])
-        self.assertLess(crd_read, merge, "the CRD is read before the patch")
-        self.assertIn(["get", _CR], verbs[merge + 1:], "the base is read back after the patch")
-        self.assertIn("read back: spec.integration.baseBranch=''", proc.stdout)
+        # The earlier scalar spec.integration.baseBranch is not the field.
+        for integration_field in (False, True):
+            with self.subTest(integration_field=integration_field):
+                self.given(crd_has_field=False, crd_integration_field=integration_field)
+                self.log_path.write_text("")
+                proc = self.run_action("pin")
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertIn("API server dropped it", proc.stdout)
+                self.assertEqual(self.base(), "")
+                self.assertEqual(self.removals(), [])
+                # The CRD read carries no -n, so drop the context and namespace flags.
+                verbs = [[a for i, a in enumerate(c) if a not in ("--context", "-n") and c[i - 1] not in ("--context", "-n")][:2]
+                         for c in self.calls()]
+                crd_read = verbs.index(["get", "crd"])
+                patch = verbs.index(["patch", _CR])
+                self.assertLess(crd_read, patch, "the CRD is read before the patch")
+                self.assertIn(["get", _CR], verbs[patch + 1:], "the base is read back after the patch")
+                self.assertIn(f"read back: spec.integration.repositories[{_SLUG}].baseBranch=''", proc.stdout)
 
     def test_poll_and_timeout_settings_must_be_whole_seconds_above_zero(self):
         for name, value in (
@@ -523,17 +660,19 @@ class AgentBaseBranchTest(_StubbedScriptTest):
         proc = self.run_action("unpin")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("failed 3 times", proc.stderr)
-        self.assertEqual(len(self.patches("json")), 3)
-        self.assertEqual(self.state()["base"], _RUN)
+        self.assertEqual(len(self.removals()), 3)
+        self.assertEqual(self.base(), _RUN)
 
-    def test_unpin_removal_tests_the_run_branch_before_removing(self):
+    def test_unpin_removal_tests_the_entry_and_the_run_branch_before_removing(self):
         self.given(base=_RUN)
         proc = self.run_action("unpin")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(self.state()["base"], "")
+        self.assertEqual(self.base(), "")
         self.assertEqual(self.state()["json_patches"], [[
-            {"op": "test", "path": "/spec/integration/baseBranch", "value": _RUN},
-            {"op": "remove", "path": "/spec/integration/baseBranch"},
+            {"op": "test", "path": f"{self.entry}/repository", "value": _REPO},
+            {"op": "test", "path": f"{self.entry}/role", "value": "gitops"},
+            {"op": "test", "path": f"{self.entry}/baseBranch", "value": _RUN},
+            {"op": "remove", "path": f"{self.entry}/baseBranch"},
         ]])
 
     def test_unpin_removal_applied_but_reported_failed_stops_retrying(self):
@@ -543,8 +682,8 @@ class AgentBaseBranchTest(_StubbedScriptTest):
         self.assertNotIn("failed 3 times", proc.stderr)
         self.assertNotIn("WARN", proc.stderr)
         self.assertIn("baseBranch is gone", proc.stdout)
-        self.assertEqual(len(self.patches("json")), 1)
-        self.assertEqual(self.state()["base"], "")
+        self.assertEqual(len(self.removals()), 1)
+        self.assertEqual(self.base(), "")
         self.assertTrue([c for c in self.calls() if c[4:6] == ["rollout", "status"]],
                         "the broker wait still runs once the field is gone")
 
@@ -553,28 +692,35 @@ class AgentBaseBranchTest(_StubbedScriptTest):
         proc = self.run_action("unpin")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn(f"baseBranch is now '{_OTHER_RUN}', not this run's; leaving it", proc.stdout)
-        self.assertEqual(len(self.patches("json")), 1)
-        self.assertEqual(self.state()["base"], _OTHER_RUN)
+        self.assertEqual(len(self.removals()), 1)
+        self.assertEqual(self.base(), _OTHER_RUN)
 
     def test_unpin_with_a_failing_rollout_wait_removes_the_base_and_succeeds(self):
         self.given(base=_RUN, rollout_fails=True)
         proc = self.run_action("unpin")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(self.state()["base"], "")
+        self.assertEqual(self.base(), "")
         self.assertIn("WARN", proc.stderr)
 
     def test_unpin_leaves_another_base(self):
         self.given(base="production")
         proc = self.run_action("unpin")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(self.state()["base"], "production")
-        self.assertEqual(self.patches("json"), [])
+        self.assertEqual(self.base(), "production")
+        self.assertEqual(self.patches(), [])
 
     def test_unpin_without_the_platformagent_warns_and_succeeds(self):
         self.given(cr_exists=False)
         proc = self.run_action("unpin")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("WARN", proc.stderr)
+
+    def test_unpin_without_a_gitops_entry_for_the_repository_succeeds_with_nothing_written(self):
+        self.given(alias=True)
+        proc = self.run_action("unpin")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("nothing to unpin", proc.stdout)
+        self.assertEqual(self.patches(), [])
 
 
 class WrapperCaseSelectionTest(_StubbedScriptTest):
@@ -584,10 +730,10 @@ class WrapperCaseSelectionTest(_StubbedScriptTest):
 
     def setUp(self):
         super().setUp()
-        self.given_base("")
+        self.given_cr(_platform_agent())
 
-    def given_base(self, base, cr_exists=True):
-        self.write_state({"base": base, "crd_has_field": True, "cr_exists": cr_exists, "repository": _SLUG})
+    def given_cr(self, cr, cr_exists=True, **overrides):
+        self.write_state({"cr": cr, "crd_has_field": True, "cr_exists": cr_exists, **overrides})
 
     def run_wrapper(self, wrapper=_WRAPPER, **env):
         token = self.tmp / "token"
@@ -601,8 +747,8 @@ class WrapperCaseSelectionTest(_StubbedScriptTest):
             # Given, so the wrapper reads neither the repository nor LiteLLM.
             "GITOPS_BROKEN_BASE_SHA": _BASE_SHA,
             "AGENT_MODEL": "example-model",
-            # The task copy's mktemp lands here, so a run killed at the timeout
-            # leaves nothing outside the test's directory.
+            # The task copy's mktemp and the reset's backup land here, so a run
+            # killed at the timeout leaves nothing outside the test's directory.
             "TMPDIR": str(self.tmp),
             **env,
         })
@@ -632,32 +778,99 @@ class WrapperCaseSelectionTest(_StubbedScriptTest):
         )
 
     def test_another_runs_pin_on_the_platformagent_is_refused_as_leaked(self):
-        self.given_base(_OTHER_RUN)
+        self.given_cr(_platform_agent(_OTHER_RUN))
         proc = self.run_wrapper(CASE="b-0022b-gitops-pinned-base")
         self.assertEqual(proc.returncode, 1, proc.stderr)
-        self.assertIn(f"spec.integration.baseBranch is '{_OTHER_RUN}', not this run's {_RUN}: a leaked pin",
-                      proc.stderr)
+        self.assertIn(f"spec.integration.repositories[1].baseBranch ({_REPO}) is '{_OTHER_RUN}', "
+                      f"not this run's {_RUN}: a leaked pin", proc.stderr)
         self.assertIn('patch platformagents.kubeagents.x-k8s.io/platform-agent --type=json', proc.stderr)
-        self.assertEqual(self.state()["base"], _OTHER_RUN, "the wrapper only refuses; it removes nothing")
+        self.assertIn('"path":"/spec/integration/repositories/1/baseBranch"', proc.stderr)
+        self.assertEqual(self.state()["cr"], _platform_agent(_OTHER_RUN), "the wrapper only refuses; it removes nothing")
 
-    def test_this_runs_own_pin_or_an_install_base_does_not_stop_the_wrapper(self):
-        for base in (_RUN, "production"):
-            with self.subTest(base=base):
-                self.given_base(base)
+    def test_this_runs_own_pin_an_install_base_or_the_alias_does_not_stop_the_wrapper(self):
+        for name, cr in (("own pin", _platform_agent(_RUN)), ("install base", _platform_agent("production")),
+                         ("github alias", _platform_agent(alias=True))):
+            with self.subTest(name):
+                self.given_cr(cr)
                 proc = self.run_wrapper(CASE="b-0022b-gitops-pinned-base")
                 self.assertEqual(proc.returncode, _KUBECTL_STOP, proc.stderr)
                 self.assertNotIn("leaked pin", proc.stderr)
 
     def test_unreadable_platformagent_stops_the_wrapper(self):
-        self.given_base("", cr_exists=False)
+        self.given_cr(_platform_agent(), cr_exists=False)
         proc = self.run_wrapper(CASE="b-0022b-gitops-pinned-base")
         self.assertEqual(proc.returncode, 1, proc.stderr)
         self.assertIn("whether an earlier run left a pin there is unknown", proc.stderr)
 
+    def test_reset_for_a_case_that_pins_the_base_writes_the_lists_form(self):
+        self.given_cr(_platform_agent(alias=True))
+        proc = self.run_wrapper(CASE="b-0022b-gitops-pinned-base", AGENT_STATE_RESET="true")
+        self.assertEqual(proc.returncode, _KUBECTL_STOP, proc.stderr)
+        self.assertEqual(self.state()["applied"]["spec"]["integration"], {
+            "forges": [{"name": "github", "provider": "github", "namespace": "example-org"}],
+            "repositories": [{"forge": "github", "repository": _REPO, "role": "gitops"}],
+        })
+
+    def test_reset_for_a_case_that_pins_the_base_keeps_the_alias_on_a_crd_without_the_lists_form(self):
+        # The stub's apply refuses forges and repositories on such a CRD, as
+        # strict field validation does, after the delete.
+        self.given_cr(_platform_agent(alias=True), crd_has_lists=False, crd_has_field=False)
+        proc = self.run_wrapper(CASE="b-0022b-gitops-pinned-base", AGENT_STATE_RESET="true")
+        self.assertEqual(proc.returncode, _KUBECTL_STOP, proc.stderr)
+        self.assertIn("so the reset keeps the github alias", proc.stdout)
+        self.assertEqual(self.state()["applied"]["spec"]["integration"],
+                         {"github": {"org": "example-org", "gitRepo": _REPO}})
+
+    def test_reset_for_a_case_that_pins_the_base_on_an_unreadable_crd_deletes_nothing(self):
+        self.given_cr(_platform_agent(alias=True), crd_unreadable=True)
+        proc = self.run_wrapper(CASE="b-0022b-gitops-pinned-base", AGENT_STATE_RESET="true")
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("cannot read the PlatformAgent CRD", proc.stderr)
+        self.assertNotIn("deleted", self.state())
+        self.assertNotIn("applied", self.state())
+
+    def test_reset_keeps_the_base_and_namespace_of_a_gitops_entry_for_the_same_repository(self):
+        cr = _platform_agent()
+        cr["spec"]["integration"]["forges"].append({"name": "work", "provider": "github", "namespace": "elsewhere"})
+        cr["spec"]["integration"]["repositories"][1] = {
+            "forge": "work", "repository": "Gitops-Run", "namespace": "example-org", "role": "gitops",
+            "baseBranch": "production"}
+        for case in ("b-0022b-gitops-pinned-base", "b-0022b-gitops"):
+            with self.subTest(case):
+                self.given_cr(cr)
+                proc = self.run_wrapper(CASE=case, AGENT_STATE_RESET="true")
+                self.assertEqual(proc.returncode, _KUBECTL_STOP, proc.stderr)
+                self.assertEqual(self.state()["applied"]["spec"]["integration"]["repositories"], [
+                    {"forge": "work", "repository": _REPO, "role": "gitops", "namespace": "example-org",
+                     "baseBranch": "production"},
+                    {"forge": "github", "repository": "example-org/docs", "role": "context"},
+                ])
+                self.assertNotIn("replaces the gitops entry", proc.stderr)
+
+    def test_reset_for_a_case_that_pins_nothing_keeps_the_spec_form(self):
+        for name, cr, integration in (
+            ("github alias", _platform_agent(alias=True), {"github": {"org": "example-org", "gitRepo": _REPO}}),
+            # The alias beside the lists would be refused; a pinned run leaves an install so.
+            ("lists", _platform_agent("production", gitops_repository="example-org/earlier-run"), {
+                "forges": [{"name": "github", "provider": "github", "namespace": "example-org"}],
+                "repositories": [{"forge": "github", "repository": _REPO, "role": "gitops"},
+                                 {"forge": "github", "repository": "example-org/docs", "role": "context"}],
+            }),
+        ):
+            with self.subTest(name):
+                self.given_cr(cr)
+                proc = self.run_wrapper(CASE="b-0022b-gitops", AGENT_STATE_RESET="true")
+                self.assertEqual(proc.returncode, _KUBECTL_STOP, proc.stderr)
+                self.assertEqual(self.state()["applied"]["spec"]["integration"], integration)
+                if name == "lists":
+                    # Another repository's entry is replaced, and the base it held is logged.
+                    self.assertIn("replaces the gitops entry example-org/earlier-run, and with it its baseBranch production",
+                                  proc.stderr)
+
     def test_a_case_that_pins_the_base_leaves_the_default_branch_switch_off(self):
         proc = self.run_wrapper(CASE="b-0022b-gitops-pinned-base")
         self.assertEqual(proc.returncode, _KUBECTL_STOP, proc.stderr)
-        self.assertIn("==> base branch via the PlatformAgent's spec.integration.baseBranch", proc.stdout)
+        self.assertIn("==> base branch via the PlatformAgent's spec.integration.repositories[].baseBranch", proc.stdout)
         self.assertIsNone(self.state()["switch_at_token_read"])
 
     def test_a_case_that_pins_nothing_switches_the_default_branch(self):

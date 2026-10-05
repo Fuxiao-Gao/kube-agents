@@ -183,9 +183,10 @@ FIXTURE_NOT_READY = {
     "b-0022b-gitops-pinned-base": (
         "#1307: needs a leaderboard GitOps repository and its credentials in "
         "the pool projects, as b-0011-gitops does, and also an install the case "
-        "may change: it sets the PlatformAgent's spec.integration.baseBranch "
-        "(#1970) on the agent host for the run, which a shared CI install cannot "
-        "allow. The entry stays until both exist. Run it locally with "
+        "may change: it sets the PlatformAgent's "
+        "spec.integration.repositories[].baseBranch (#1970) on the agent host "
+        "for the run, which a shared CI install cannot allow. The entry stays "
+        "until both exist. Run it locally with AGENT_STATE_RESET=true "
         "CASE=b-0022b-gitops-pinned-base bench/hack/run-gitops-pilot.sh"
     ),
     "scope-second-project-denied": (

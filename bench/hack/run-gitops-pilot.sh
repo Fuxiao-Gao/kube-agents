@@ -20,8 +20,9 @@
 #      gitops_pin_agent_base_branch is left to its stack instead, which pins
 #      the base on the PlatformAgent and leaves the repository default alone.
 #      Before any of that (right after the case is resolved), a run/** branch
-#      other than this run's in the PlatformAgent's spec.integration.baseBranch
-#      is refused as a pin leaked by an earlier run.
+#      other than this run's in any of the PlatformAgent's
+#      spec.integration.repositories[].baseBranch is refused as a pin leaked by
+#      an earlier run.
 #   3. Reads PLATFORM_AGENT_TOKEN and the judge key from the install's secret.
 #   4. Runs `devops-bench ./tasks/<CASE> --agent-type kubeagents` with
 #      the stack and harness pointed at the same run branch.
@@ -75,9 +76,9 @@
 #     the finished record alone, writing integrity-sweep.json and .md beside
 #     it for adjudication (#1773)
 #   BENCH_NO_TEARDOWN=true to keep the cluster and branch for inspection; a
-#     case that pins the base also keeps the PlatformAgent's
-#     spec.integration.baseBranch on the run branch until the destroy is run
-#     by hand, which pins every proposal onto the GitOps repository from that
+#     case that pins the base also keeps the baseBranch of the PlatformAgent's
+#     GitOps repository entry on the run branch until the destroy is run by
+#     hand, which pins every proposal onto the GitOps repository from that
 #     install to it
 set -euo pipefail
 
@@ -200,25 +201,39 @@ case_task="$(case_var gitops_task)"
 : "${TASK:=${case_task}}"
 [ "${TASK}" = "${case_task}" ] || { echo "TASK=${TASK} disagrees with ${CASE}'s gitops_task ${case_task}; unset TASK or pick the matching case" >&2; exit 1; }
 RUN_BRANCH="run/${CLUSTER_NAME}/${TASK}"   # must match the stack's locals.run_branch
+case_pin="$(case_var gitops_pin_agent_base_branch)"
 echo "==> run ${CLUSTER_NAME}: case ${CASE}, branch ${RUN_BRANCH}"
+# agent_bases: one line per spec.integration.repositories[] entry of the
+# PlatformAgent that sets baseBranch (an operator without the field has none):
+# its index, repository and base, tab-separated. Fails when the PlatformAgent
+# cannot be read.
+agent_bases() {
+  "${K[@]}" get "${CR}" -o json | python3 -c '
+import json, sys
+for i, r in enumerate((json.load(sys.stdin)["spec"].get("integration") or {}).get("repositories") or []):
+    if r.get("baseBranch"):
+        print("%d\t%s\t%s" % (i, r.get("repository", ""), r["baseBranch"]))'
+}
 # A run/** base on the PlatformAgent that is not this run's was left by an
 # earlier run (agent-base-branch.sh's unpin only warns when its removal fails),
 # unless that run is still in flight. Refused here, before the agent state reset
 # copies the spec forward and before the stack applies: it would point this
 # run's broker at a branch that is gone, and the row would read no_pr. A base
 # outside run/** is the install's own and is left to the stack.
-if ! agent_base="$("${K[@]}" get "${CR}" -o jsonpath='{.spec.integration.baseBranch}')"; then
-  echo "cannot read the PlatformAgent's spec.integration.baseBranch on ${AGENT_HOST_CONTEXT}, so whether an earlier run left a pin there is unknown" >&2
+if ! agent_base_lines="$(agent_bases)"; then
+  echo "cannot read the PlatformAgent's spec.integration.repositories[].baseBranch on ${AGENT_HOST_CONTEXT}, so whether an earlier run left a pin there is unknown" >&2
   exit 1
 fi
-case "${agent_base}" in
-  run/*)
-    if [ "${agent_base}" != "${RUN_BRANCH}" ]; then
-      echo "the PlatformAgent's spec.integration.baseBranch is '${agent_base}', not this run's ${RUN_BRANCH}: a leaked pin from an earlier run (its destroy could not remove it), unless a run on that branch is still in flight. When none is, remove it and rerun:" >&2
-      echo "  kubectl --context ${AGENT_HOST_CONTEXT} -n ${AGENT_NAMESPACE} patch ${CR} --type=json -p '[{\"op\":\"remove\",\"path\":\"/spec/integration/baseBranch\"}]'" >&2
-      exit 1
-    fi ;;
-esac
+while IFS=$'\t' read -r base_index base_repo agent_base; do
+  case "${agent_base}" in
+    run/*)
+      if [ "${agent_base}" != "${RUN_BRANCH}" ]; then
+        echo "the PlatformAgent's spec.integration.repositories[${base_index}].baseBranch (${base_repo}) is '${agent_base}', not this run's ${RUN_BRANCH}: a leaked pin from an earlier run (its destroy could not remove it), unless a run on that branch is still in flight. When none is, remove it and rerun:" >&2
+        echo "  kubectl --context ${AGENT_HOST_CONTEXT} -n ${AGENT_NAMESPACE} patch ${CR} --type=json -p '[{\"op\":\"test\",\"path\":\"/spec/integration/repositories/${base_index}/baseBranch\",\"value\":\"${agent_base}\"},{\"op\":\"remove\",\"path\":\"/spec/integration/repositories/${base_index}/baseBranch\"}]'" >&2
+        exit 1
+      fi ;;
+  esac
+done <<<"${agent_base_lines}"
 HOLD_SUPPORTED="$(uv run --no-sync python - <<'PY'
 from devops_bench.verification.spec import parse_entries
 probe = [{"name": "p", "role": "safeguard", "severity": "recoverable", "mode": "hold",
@@ -333,7 +348,13 @@ echo "==> result row model: ${AGENT_MODEL} (LiteLLM alias ${AGENT_MODEL_ALIAS})"
 # Remove the PlatformAgent (the operator garbage-collects everything it owns,
 # the data and session-metadata claims included), remove the shell
 # StatefulSet's claims, re-apply the same spec with the run's repository as
-# its managed repository, and wait for Ready. Then prove the stores are empty
+# its managed repository, and wait for Ready. For a case that pins its base
+# (and for a spec already in that form), the repository goes into the lists
+# form (spec.integration.forges and a repositories[] entry with role gitops)
+# instead of the deprecated github alias, which carries no base, so
+# agent-base-branch.sh has an entry to pin; on a CRD from before the lists form
+# the alias stays, and that install pins no base. An existing gitops entry for
+# the run's repository keeps its baseBranch. Then prove the stores are empty
 # before the card is created; a non-empty store is a refusal, not a warning.
 agent_stores_report() {
   "${K[@]}" exec -i deploy/platform-agent-gateway -c platform-agent -- env ONBOARDING_CARD_PREFIX="${ONBOARDING_CARD_PREFIX}" python3 - <<'STORES'
@@ -381,8 +402,41 @@ r = json.loads(os.environ["AGENT_STORES"])
 bad = [k for k in ("kanban_cards", "front_messages", "platform_messages_outside_onboarding", "scratch", "gitops", "workspaces") if r[k]]
 sys.exit(1 if bad else 0)' || { echo "the agent is not fresh (see the stores above); rerun with AGENT_STATE_RESET=true" >&2; exit 1; }
 }
+# Whether a served version of the PlatformAgent CRD declares the lists form
+# (spec.integration.forges and repositories): 0 yes, 1 no, anything else when
+# the CRD could not be read. A CRD from before them (#2070) refuses both on
+# kubectl apply, whose field validation is strict by default.
+crd_has_lists() {
+  kubectl --context "${AGENT_HOST_CONTEXT}" get crd platformagents.kubeagents.x-k8s.io -o json | python3 -c '
+import json, sys
+try:
+    versions = json.load(sys.stdin)["spec"]["versions"]
+except (ValueError, KeyError, TypeError):
+    sys.exit(2)
+for v in versions:
+    props = (v.get("schema", {}).get("openAPIV3Schema", {}).get("properties", {})
+             .get("spec", {}).get("properties", {}).get("integration", {}).get("properties", {}))
+    if v.get("served") and "forges" in props and "repositories" in props:
+        sys.exit(0)
+sys.exit(1)'
+}
 reset_agent_state() {
-  local backup pvc waited
+  local backup pvc waited lists="${case_pin:-false}" crd_rc=0
+  # Before anything is deleted: on a CRD without the lists form, a case that
+  # pins its base keeps the alias, and agent-base-branch.sh then logs that the
+  # install pins no base (the case's red).
+  if [ "${lists}" = "true" ]; then
+    crd_has_lists || crd_rc=$?
+    case "${crd_rc}" in
+      0) ;;
+      1)
+        echo "==> the installed PlatformAgent CRD has no spec.integration.forges and repositories, so the reset keeps the github alias, which carries no base: this install pins none"
+        lists=false ;;
+      *)
+        echo "cannot read the PlatformAgent CRD on ${AGENT_HOST_CONTEXT}, so whether the reset can write the lists form is unknown; nothing was reset" >&2
+        exit 1 ;;
+    esac
+  fi
   backup="${TMPDIR:-/tmp}/platformagent-$(date +%Y%m%d-%H%M%S).json"
   "${K[@]}" get "${CR}" -o json > "${backup}"
   echo "==> resetting agent state: PlatformAgent saved to ${backup}"
@@ -399,14 +453,48 @@ reset_agent_state() {
   # stimulus (a reset alone made it file four cards about the host), so the
   # re-applied agent has it off. AGENT_EVENT_WATCHER=true keeps it on.
   python3 -c '
-import json, sys
-d = json.load(open(sys.argv[1])); repo = sys.argv[2]; watcher = sys.argv[3] == "true"
+import json, re, sys
+d = json.load(open(sys.argv[1])); repo = sys.argv[2]; watcher = sys.argv[3] == "true"; lists = sys.argv[4] == "true"; slug = sys.argv[5]
 d.pop("status", None)
 for k in ("resourceVersion", "uid", "creationTimestamp", "generation", "managedFields", "finalizers", "deletionTimestamp"): d["metadata"].pop(k, None)
 d["metadata"].get("annotations", {}).pop("kubectl.kubernetes.io/last-applied-configuration", None)
-if repo: d["spec"].setdefault("integration", {}).setdefault("github", {})["gitRepo"] = repo
+integration = d["spec"].setdefault("integration", {})
+if repo and (lists or integration.get("forges") or integration.get("repositories")):
+    # Also for a spec already in the lists form (a pinned run leaves it so),
+    # beside which the alias would be refused. The alias is one forge named
+    # github with namespace org, and its gitRepo the gitops repository on it;
+    # other forges and repositories are kept.
+    alias = integration.pop("github", None) or {}
+    forges = integration.setdefault("forges", [])
+    github = {f.get("name"): f.get("namespace", "") for f in forges
+              if (f.get("provider") or "github") == "github" and (f.get("host") or "github.com").lower() == "github.com"}
+    forge = next(iter(github), None)
+    if forge is None:
+        forge = "github"
+        forges.append({"name": forge, "provider": "github", **({"namespace": alias["org"]} if alias.get("org") else {})})
+    # An existing gitops entry for the same repository (resolved as
+    # agent-base-branch.sh resolves it) keeps its forge, namespace and
+    # baseBranch, so an administrator'"'"'s base survives the reset; one for
+    # another repository is replaced, and a base it held is logged.
+    def path(r):
+        p = re.sub(r"^([a-z][a-z0-9+.-]*://[^/]+/|[^@/:]+@[^:/]+:)", "", r.get("repository", "").strip(), flags=re.I).rstrip("/")
+        p = p[:-4] if p.endswith(".git") else p
+        ns = r.get("namespace") or github[r["forge"]]
+        return p if "/" in p or not ns else ns + "/" + p
+    gitops = {"forge": forge, "repository": repo, "role": "gitops"}
+    for r in integration.get("repositories") or []:
+        if r.get("role") != "gitops":
+            continue
+        if r.get("forge") in github and path(r).casefold() == slug.casefold():
+            gitops.update({k: r[k] for k in ("forge", "namespace", "baseBranch") if k in r})
+        elif r.get("baseBranch"):
+            print("==> the reset replaces the gitops entry %s, and with it its baseBranch %s" % (r.get("repository"), r["baseBranch"]), file=sys.stderr)
+    integration["repositories"] = [gitops] + [
+        r for r in integration.get("repositories") or [] if r.get("role") != "gitops"]
+elif repo:
+    integration.setdefault("github", {})["gitRepo"] = repo
 d["spec"].setdefault("harness", {})["eventWatcher"] = {"enabled": watcher}
-print(json.dumps(d))' "${backup}" "${GITOPS_REPO:-}" "${AGENT_EVENT_WATCHER:-false}" | "${K[@]}" apply -f -
+print(json.dumps(d))' "${backup}" "${GITOPS_REPO:-}" "${AGENT_EVENT_WATCHER:-false}" "${lists}" "${slug}" | "${K[@]}" apply -f -
   "${K[@]}" wait "${CR}" --for=condition=Ready --timeout="${CR_READY_TIMEOUT}"
   "${K[@]}" rollout status deploy/platform-agent-gateway --timeout="${GATEWAY_ROLLOUT_TIMEOUT}" >/dev/null
   "${K[@]}" rollout status sts/"${SHELL_STATEFULSET}" --timeout="${GATEWAY_ROLLOUT_TIMEOUT}" >/dev/null
@@ -443,19 +531,19 @@ fi
 # opens the PR, and that mode is gone.
 # The case's own variables decide how the agent gets its base; the wrapper
 # reads them and logs what the case does. A case that sets
-# gitops_pin_agent_base_branch has its stack set the PlatformAgent's
-# spec.integration.baseBranch to the run branch and leave the repository
-# default alone, so the default-branch switch is not exported for it.
+# gitops_pin_agent_base_branch has its stack set the baseBranch of the
+# PlatformAgent's GitOps repository entry (spec.integration.repositories[]) to
+# the run branch and leave the repository default alone, so the
+# default-branch switch is not exported for it.
 # BENCH_NO_TEARDOWN=true leaves that pin in place until the destroy is run by
 # hand (see 5).
 case "${BASE_BRANCH_MODE:-default-branch}" in
   default-branch) ;;
   *) echo "BASE_BRANCH_MODE=${BASE_BRANCH_MODE} is not offered: the case's variables decide how the agent gets its base (see the comment above)" >&2; exit 1 ;;
 esac
-case_pin="$(case_var gitops_pin_agent_base_branch)"
 case_switch="$(case_var gitops_switch_default_branch)"
 if [ "${case_pin}" = "true" ]; then
-  echo "==> base branch via the PlatformAgent's spec.integration.baseBranch (${CASE} sets gitops_pin_agent_base_branch: its stack pins the base for the run, and the repository default stays ${REPO_DEFAULT_BRANCH})"
+  echo "==> base branch via the PlatformAgent's spec.integration.repositories[].baseBranch (${CASE} sets gitops_pin_agent_base_branch: its stack pins the base for the run, and the repository default stays ${REPO_DEFAULT_BRANCH})"
 elif [ "${case_switch}" = "false" ]; then
   echo "${CASE} sets gitops_switch_default_branch false and pins no base: nothing would make the run branch the agent's base" >&2
   exit 1
@@ -509,7 +597,7 @@ uv run --no-sync devops-bench "${TASK_SOURCE}" --agent-type kubeagents "$@" || r
 # on its own. Then what the row was produced with,
 # beside the record, so a campaign's rows can be shown to share one setup;
 # then the checks that catch a leaked run (a cluster or branch left behind,
-# the default branch still switched, the PlatformAgent's baseBranch still
+# the default branch still switched, a baseBranch on the PlatformAgent still
 # pinned).
 gh_token="$(tr -d '\r\n' < "${GITOPS_TOKEN_FILE}")"
 RUN_PRS="$(GH_TOKEN="${gh_token}" ./hack/gitops-run-prs.sh "${slug}" "${RUN_STARTED_AT}" "${REPO_DEFAULT_BRANCH}")" \
@@ -565,16 +653,16 @@ if [ "${BENCH_NO_TEARDOWN:-false}" != "true" ]; then
   fi
   default_branch="$(GH_TOKEN="${gh_token}" gh api "repos/${repo_slug}" --jq .default_branch 2>/dev/null || true)"
   [ "${default_branch}" = "${REPO_DEFAULT_BRANCH}" ] || echo "WARN leak: default branch of ${repo_slug} is '${default_branch}', not ${REPO_DEFAULT_BRANCH}" >&2
-  if ! agent_base="$("${K[@]}" get "${CR}" -o jsonpath='{.spec.integration.baseBranch}' 2>/dev/null)"; then
-    echo "WARN leak: whether the PlatformAgent's spec.integration.baseBranch still names ${RUN_BRANCH} is unknown (it could not be read); check it by hand" >&2
-  elif [ "${agent_base}" = "${RUN_BRANCH}" ]; then
-    echo "WARN leak: the PlatformAgent's spec.integration.baseBranch still names ${RUN_BRANCH}" >&2
+  if ! agent_base_lines="$(agent_bases 2>/dev/null)"; then
+    echo "WARN leak: whether a PlatformAgent spec.integration.repositories[].baseBranch still names ${RUN_BRANCH} is unknown (it could not be read); check it by hand" >&2
+  elif cut -f3 <<<"${agent_base_lines}" | grep -qxF "${RUN_BRANCH}"; then
+    echo "WARN leak: a PlatformAgent spec.integration.repositories[].baseBranch still names ${RUN_BRANCH}" >&2
   fi
   if gcloud container clusters list --project "${GCP_PROJECT_ID}" --filter="name=${CLUSTER_NAME}" --format="value(name)" 2>/dev/null | grep -q .; then
     echo "WARN leak: task cluster ${CLUSTER_NAME} still exists" >&2
   fi
 elif [ "${case_pin}" = "true" ] \
-  && [ "$("${K[@]}" get "${CR}" -o jsonpath='{.spec.integration.baseBranch}' 2>/dev/null || true)" = "${RUN_BRANCH}" ]; then
-  echo "WARN BENCH_NO_TEARDOWN=true: the PlatformAgent's spec.integration.baseBranch still names ${RUN_BRANCH}, so every proposal onto ${slug} from this install targets it until the stack's destroy is run by hand" >&2
+  && { agent_bases 2>/dev/null || true; } | cut -f3 | grep -qxF "${RUN_BRANCH}"; then
+  echo "WARN BENCH_NO_TEARDOWN=true: the PlatformAgent's spec.integration.repositories[].baseBranch still names ${RUN_BRANCH}, so every proposal onto ${slug} from this install targets it until the stack's destroy is run by hand" >&2
 fi
 exit "${rc}"
