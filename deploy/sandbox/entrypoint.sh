@@ -379,6 +379,13 @@ if [ -d "$DEFAULTS" ]; then
       log "$(cd "$DEFAULTS" && echo *) in $home are read-only mounts"
       ;;
     "")
+      # Outside the operator a broken image only warns, as a missing $DEFAULTS
+      # does below, but it must not report a sync that staged nothing.
+      if ! defaults_hold_a_tree; then
+        log "no image trees under $DEFAULTS — the agent's skills, SOPs and shared"
+        log "scripts will be absent from $home and every skill that names one will fail."
+        continue
+      fi
       for entry in "$DEFAULTS"/*; do
         [ -e "$entry" ] || continue
         stage_image_tree "$home" "$(basename "$entry")"

@@ -619,6 +619,16 @@ class SandboxEntrypointReadOnlyMountGateTest(_SandboxEntrypointHarness):
                 self.assertEqual([], handed, "the fallback handed an image tree to the model")
         self.assertIn("rename a tree aside", self.result.stderr)
 
+    def test_with_the_mode_unset_an_empty_defaults_warns_and_reports_no_sync(self) -> None:
+        """The fallback stays warn-only, but must not log a sync of the literal `*`."""
+        for entry in self.defaults.iterdir():
+            shutil.rmtree(entry)
+        self._run(". profiles/platform")
+        self.assertIn("no image trees under", self.result.stderr)
+        self.assertNotIn("synced", self.result.stderr)
+        # Warn-only: the run went on to step 2 and stopped at the missing key.
+        self.assertIn("no authorized_keys", self.result.stderr)
+
 
 class SandboxEntrypointForwardedEnvTest(unittest.TestCase):
     def test_forwarded_env_names_include_context_and_gke_variables(self) -> None:
