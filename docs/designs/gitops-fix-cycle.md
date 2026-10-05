@@ -222,7 +222,9 @@ the run and restores the original on destroy. Works because the skill re-asks th
 before every PR; one run at a time.
 
 **Pinned-base mode** (`gitops_pin_agent_base_branch`, set in the case's own variables; used
-by `b-0022b-gitops-pinned-base`) gives the base through the install instead. After the
+by `b-0022b-gitops-pinned-base`, which grades only b-0022b's search-api objectives and the
+safeguards, since it asks where the pull request lands rather than how much of b-0022b the
+agent repairs) gives the base through the install instead. After the
 seed, `scripts/agent-base-branch.sh` sets `baseBranch` on the PlatformAgent's
 `spec.integration.repositories[]` entry with role `gitops` for `GITOPS_REPO` to the run
 branch, and refuses when the install already sets another base there. The write is a JSON
@@ -299,10 +301,7 @@ reset before each task-run) are kept there, each with its `campaign.json` versio
 b-0022b on `claude-opus-5` (`run_20260918_185657_889776`). The b-0022b cell on
 `gemini-3.7-flash` has no record: its one campaign attempt (2026-09-18) ended in the
 harness's status-turn transport failure with an empty trajectory and a null row, and is
-not kept. `b-0022b-gitops-pinned-base` keeps its red run against `main` on `gemini-3.7-flash`
-(`run_20261005_193923_963594`, a per-run repository and a reset agent, without the
-integrity sweep): every objective failed and the agent's one pull request went onto `main`.
-Its addresses were mapped to documentation ranges for the fixture sanitizer. The shared-install runs are summarised in the Findings below and in
+not kept. The shared-install runs are summarised in the Findings below and in
 gke-labs/kube-agents#1307's comments; their records are not in the tree (b-0011 run 11 has
 none: its results directory was removed by hand during teardown; b-0011 run 14 and b-0022b
 run 1 failed in the seed).
