@@ -7,15 +7,16 @@ live campaign run otherwise, and a regression there moves a default branch it
 should not, or removes an administrator's base. Each test runs the real script
 with `curl` or `kubectl` replaced by a stub on PATH that answers from a JSON
 state file and logs every call, then asserts on the exit status, the calls
-made, and the state left behind. run-gitops-pilot.sh is run only as far as its
-TASK/CASE resolution and its leaked-pin refusal right after it; its post-run
-pull-request listing is gitops-run-prs.sh, run here with `gh` stubbed. The
-wrapper's post-teardown leak check is not covered: reaching it means stubbing
-the whole run.
+made, and the state left behind. run-gitops-pilot.sh is run from its TASK/CASE
+resolution and leaked-pin refusal through its base-mode decision (step 2), and
+stops at the token read that follows; its post-run pull-request listing is
+gitops-run-prs.sh, run here with `gh` stubbed. The wrapper's post-teardown leak
+check is not covered: reaching it means stubbing the whole run.
 """
 
 import json
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -42,6 +43,9 @@ _CR = "platformagents.kubeagents.x-k8s.io/platform-agent"
 _BROKER = "deploy/platform-agent-credential-proxy"
 # Exit status of the stub uv once the wrapper is past what these tests cover.
 _UV_STOP = 97
+# Exit status of the stub kubectl at the wrapper's token read (step 3), the
+# first call after its base-mode decision.
+_KUBECTL_STOP = 98
 
 # curl as run-branch.sh's api() calls it: -o <body> -w '%{http_code}', headers,
 # then [-X METHOD] URL [-d DATA]. Answers with the first route in the state
@@ -81,7 +85,10 @@ sys.stdout.write(str(code))
 """
 
 # kubectl as agent-base-branch.sh calls it, against one PlatformAgent, its CRD
-# and the credential broker's Deployment, all held in the state file.
+# and the credential broker's Deployment, all held in the state file. For
+# run-gitops-pilot.sh, `exec` (gitops-run-repo.sh check) succeeds, and the
+# secret read records the default-branch switch the wrapper exported before it,
+# then stops the wrapper.
 _STUB_KUBECTL = """\
 import json, os, sys
 path = os.environ["STUB_STATE"]
@@ -180,6 +187,12 @@ elif verb == "patch" and target == "%(cr)s":
             save()
             sys.stderr.write("error: stream error: context deadline exceeded\\n")
             sys.exit(1)
+elif verb == "exec":
+    pass
+elif verb == "get" and target == "secret":
+    state["switch_at_token_read"] = os.environ.get("TF_VAR_gitops_switch_default_branch")
+    save()
+    sys.exit(%(stop)d)
 elif verb == "rollout" and target == "status":
     if state.get("rollout_sets_base") is not None:
         state["base"] = state["rollout_sets_base"]
@@ -190,11 +203,12 @@ elif verb == "rollout" and target == "status":
 else:
     sys.stderr.write("stub kubectl: unexpected call %%r\\n" %% (args,))
     sys.exit(2)
-""" % {"cr": _CR, "broker": _BROKER}
+""" % {"cr": _CR, "broker": _BROKER, "stop": _KUBECTL_STOP}
 
-# uv as run-gitops-pilot.sh calls it up to its TASK/CASE resolution: `uv sync`
+# uv as run-gitops-pilot.sh calls it up to its base-mode decision: `uv sync`
 # succeeds, case_var's `uv run --no-sync python - <task.yaml> <name>` runs the
-# real snippet, and anything after that stops the wrapper.
+# real snippet, the HOLD_SUPPORTED probe (the same call with no arguments)
+# answers no, and anything else stops the wrapper.
 _STUB_UV = """\
 import os, sys
 args = sys.argv[1:]
@@ -202,6 +216,9 @@ if args[:1] == ["sync"]:
     sys.exit(0)
 if args[:4] == ["run", "--no-sync", "python", "-"] and len(args) == 6 and args[4].endswith("task.yaml"):
     os.execv(sys.executable, [sys.executable, "-"] + args[4:])
+if args == ["run", "--no-sync", "python", "-"]:
+    print("no")
+    sys.exit(0)
 sys.exit(%d)
 """ % _UV_STOP
 
@@ -231,7 +248,12 @@ class _StubbedScriptTest(unittest.TestCase):
         self.bin_dir = self.tmp / "bin"
         self.bin_dir.mkdir()
         # The scripts' own python3 calls get this interpreter, which has pyyaml.
-        (self.bin_dir / "python3").symlink_to(sys.executable)
+        # A wrapper, not a symlink: a venv is found from the path the interpreter
+        # was invoked by, so a symlink elsewhere runs the base interpreter without
+        # the venv's packages (render-broken-base.sh imports yaml through it).
+        python3 = self.bin_dir / "python3"
+        python3.write_text(f"#!{sys.executable}\nimport os, sys\nos.execv(sys.executable, [sys.executable, *sys.argv[1:]])\n")
+        python3.chmod(0o755)
         for name, source in self.stubs.items():
             stub = self.bin_dir / name
             stub.write_text(f"#!{sys.executable}\n{source}")
@@ -335,6 +357,10 @@ class RunBranchSeedTest(_StubbedScriptTest):
         self.assertEqual(patches[0]["path"], f"/repos/{_SLUG}/git/refs/heads/main")
         self.assertEqual(json.loads(patches[0]["data"]), {"sha": _COMMIT_SHA, "force": False})
         self.assertFalse([c for c in self.calls() if c["method"] == "DELETE"])
+        # A render that fails inside commit_stage's command substitution does not
+        # stop create; it shows only as blobs with nothing in them.
+        blobs = [json.loads(c["data"]) for c in self.calls() if c["method"] == "POST" and c["path"].endswith("/git/blobs")]
+        self.assertTrue(blobs and all(b["content"] for b in blobs), "the blobs carry the broken render's files")
 
     def test_base_with_history_is_refused_before_any_write(self):
         self.routes(base_has_task=False, default_head=_BASE_SHA, base_parents=[_ELSEWHERE_SHA])
@@ -552,7 +578,7 @@ class AgentBaseBranchTest(_StubbedScriptTest):
 
 
 class WrapperCaseSelectionTest(_StubbedScriptTest):
-    """run-gitops-pilot.sh up to its TASK/CASE resolution and leaked-pin refusal."""
+    """run-gitops-pilot.sh from its TASK/CASE resolution to its base-mode decision."""
 
     stubs = {"uv": _STUB_UV, "kubectl": _STUB_KUBECTL}
 
@@ -563,17 +589,30 @@ class WrapperCaseSelectionTest(_StubbedScriptTest):
     def given_base(self, base, cr_exists=True):
         self.write_state({"base": base, "crd_has_field": True, "cr_exists": cr_exists, "repository": _SLUG})
 
-    def run_wrapper(self, **env):
+    def run_wrapper(self, wrapper=_WRAPPER, **env):
         token = self.tmp / "token"
         token.write_text("ghp_test\n")
-        return self.run_script(["bash", str(_WRAPPER)], {
+        return self.run_script(["bash", str(wrapper)], {
             "GCP_PROJECT_ID": "example-project",
             "AGENT_HOST_CONTEXT": "agent-host",
             "GITOPS_REPO": _REPO,
             "GITOPS_TOKEN_FILE": str(token),
             "CLUSTER_NAME": "gitops-pilot-t1",
+            # Given, so the wrapper reads neither the repository nor LiteLLM.
+            "GITOPS_BROKEN_BASE_SHA": _BASE_SHA,
+            "AGENT_MODEL": "example-model",
             **env,
         })
+
+    def wrapper_with_case(self, case, text):
+        """A copy of the wrapper whose ./tasks holds one more case, as a run's frozen copy is."""
+        bench = self.tmp / "bench"
+        (bench / "hack").mkdir(parents=True)
+        for script in (_WRAPPER, _WRAPPER.parent / "gitops-run-repo.sh"):
+            shutil.copy(script, bench / "hack" / script.name)
+        (bench / "tasks" / case).mkdir(parents=True)
+        (bench / "tasks" / case / "task.yaml").write_text(text)
+        return bench / "hack" / _WRAPPER.name
 
     def test_task_that_disagrees_with_the_case_is_refused(self):
         proc = self.run_wrapper(TASK="b-0011", CASE="b-0022b-gitops-pinned-base")
@@ -583,7 +622,7 @@ class WrapperCaseSelectionTest(_StubbedScriptTest):
 
     def test_case_alone_takes_the_task_from_the_case(self):
         proc = self.run_wrapper(CASE="b-0022b-gitops-pinned-base")
-        self.assertEqual(proc.returncode, _UV_STOP, proc.stderr)
+        self.assertEqual(proc.returncode, _KUBECTL_STOP, proc.stderr)
         self.assertIn(
             "==> run gitops-pilot-t1: case b-0022b-gitops-pinned-base, branch run/gitops-pilot-t1/b-0022b",
             proc.stdout,
@@ -603,7 +642,7 @@ class WrapperCaseSelectionTest(_StubbedScriptTest):
             with self.subTest(base=base):
                 self.given_base(base)
                 proc = self.run_wrapper(CASE="b-0022b-gitops-pinned-base")
-                self.assertEqual(proc.returncode, _UV_STOP, proc.stderr)
+                self.assertEqual(proc.returncode, _KUBECTL_STOP, proc.stderr)
                 self.assertNotIn("leaked pin", proc.stderr)
 
     def test_unreadable_platformagent_stops_the_wrapper(self):
@@ -611,6 +650,28 @@ class WrapperCaseSelectionTest(_StubbedScriptTest):
         proc = self.run_wrapper(CASE="b-0022b-gitops-pinned-base")
         self.assertEqual(proc.returncode, 1, proc.stderr)
         self.assertIn("whether an earlier run left a pin there is unknown", proc.stderr)
+
+    def test_a_case_that_pins_the_base_leaves_the_default_branch_switch_off(self):
+        proc = self.run_wrapper(CASE="b-0022b-gitops-pinned-base")
+        self.assertEqual(proc.returncode, _KUBECTL_STOP, proc.stderr)
+        self.assertIn("==> base branch via the PlatformAgent's spec.integration.baseBranch", proc.stdout)
+        self.assertIsNone(self.state()["switch_at_token_read"])
+
+    def test_a_case_that_pins_nothing_switches_the_default_branch(self):
+        proc = self.run_wrapper(CASE="b-0022b-gitops")
+        self.assertEqual(proc.returncode, _KUBECTL_STOP, proc.stderr)
+        self.assertIn("==> base branch via repository default", proc.stdout)
+        self.assertEqual(self.state()["switch_at_token_read"], "true")
+
+    def test_a_case_that_turns_the_switch_off_and_pins_nothing_is_refused(self):
+        pinned = (_WRAPPER.parents[1] / "tasks" / "b-0022b-gitops-pinned-base" / "task.yaml").read_text()
+        pin_line = "    gitops_pin_agent_base_branch: true\n"
+        self.assertIn(pin_line, pinned)
+        case = "b-0022b-gitops-no-base"
+        proc = self.run_wrapper(wrapper=self.wrapper_with_case(case, pinned.replace(pin_line, "")), CASE=case)
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn(f"{case} sets gitops_switch_default_branch false and pins no base", proc.stderr)
+        self.assertNotIn("switch_at_token_read", self.state())
 
 
 
