@@ -160,7 +160,12 @@ wait_broker_env() {
 
 case "${ACTION}" in
   pin)
-    got="$(current_base)"
+    # The resourceVersion read with the base goes into the patch, so a base
+    # written between this read and the patch fails it (409) rather than being
+    # overwritten.
+    read="$("${K[@]}" get "${CR}" -o jsonpath='{.metadata.resourceVersion} {.spec.integration.baseBranch}')"
+    resource_version="${read%% *}"
+    got="${read#* }"
     if [ -n "${got}" ] && [ "${got}" != "${GITOPS_RUN_BRANCH}" ]; then
       echo "agent-base-branch: spec.integration.baseBranch is already '${got}'; refusing to overwrite it (another run in flight, or the install's own base)" >&2
       exit 1
@@ -177,7 +182,8 @@ case "${ACTION}" in
     echo "==> agent-base-branch: spec.integration.baseBranch <- ${GITOPS_RUN_BRANCH} on ${AGENT_HOST_CONTEXT}"
     trap undo_failed_pin EXIT
     "${K[@]}" patch "${CR}" --type=merge \
-      -p "{\"spec\":{\"integration\":{\"baseBranch\":\"${GITOPS_RUN_BRANCH}\"}}}"
+      -p "{\"metadata\":{\"resourceVersion\":\"${resource_version}\"},\"spec\":{\"integration\":{\"baseBranch\":\"${GITOPS_RUN_BRANCH}\"}}}" \
+      || { echo "agent-base-branch: the patch failed; if ${CR} changed since it was read (another run pinning?), it was not overwritten" >&2; exit 1; }
     got="$(current_base)"
     echo "    read back: spec.integration.baseBranch='${got}'"
     if [ "${crd_rc}" -eq 1 ]; then

@@ -204,7 +204,6 @@ seed_default_head=""
 # check_default_seed <target>: an empty target is a commit still to be made.
 check_default_seed() {
   local target="$1" code
-  [ -z "${GITOPS_HISTORY_PARENT_SHA:-}" ] || { echo "run-branch: seeding the default branch is not offered for staged history (the run branch moves on from the commit the default would stay at)" >&2; exit 1; }
   seed_default="$(current_default_branch)"
   case "${seed_default}" in
     run/*) echo "run-branch: the default branch is '${seed_default}', a run branch; refusing to seed it" >&2; exit 1 ;;
@@ -239,6 +238,11 @@ seed_default_branch() {
 case "${ACTION}" in
   create)
     : "${GITOPS_BASE_SHA:?}"
+    # Refused here, before the healthy commit of staged history is written.
+    if [ "${GITOPS_SEED_DEFAULT_BRANCH:-false}" = "true" ] && [ -n "${GITOPS_HISTORY_PARENT_SHA:-}" ]; then
+      echo "run-branch: seeding the default branch is not offered for staged history (the run branch moves on from the commit the default would stay at)" >&2
+      exit 1
+    fi
     if [ -n "${GITOPS_HISTORY_PARENT_SHA:-}" ]; then
       echo "==> run-branch: staged history for ${GITOPS_TASK:?}; healthy commit on ${GITOPS_HISTORY_PARENT_SHA}"
       target="$(commit_stage healthy "${GITOPS_HISTORY_PARENT_SHA}" "${HEALTHY_MESSAGE}" "${HEALTHY_AGE_DAYS}")"

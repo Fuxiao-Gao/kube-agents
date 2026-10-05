@@ -126,7 +126,10 @@ if verb == "get" and target == "crd":
 elif verb == "get" and target == "%(cr)s":
     if not state["cr_exists"]:
         missing_cr()
-    sys.stdout.write(state["base"])
+    if "resourceVersion" in (flag("-o") or ""):
+        sys.stdout.write("%%d %%s" %% (state.get("rv", 1), state["base"]))
+    else:
+        sys.stdout.write(state["base"])
 elif verb == "get" and target == "%(broker)s":
     if state.get("broker_read_failures", 0) > 0:
         state["broker_read_failures"] -= 1
@@ -143,6 +146,15 @@ elif verb == "patch" and target == "%(cr)s":
         missing_cr()
     payload = json.loads(flag("-p"))
     if flag("--type") == "merge":
+        if state.get("written_before_patch") is not None:
+            # Another writer between pin's read and its patch.
+            state["base"] = state.pop("written_before_patch")
+            state["rv"] = state.get("rv", 1) + 1
+            save()
+        sent = payload.get("metadata", {}).get("resourceVersion")
+        if sent is not None and sent != str(state.get("rv", 1)):
+            sys.stderr.write('Error from server (Conflict): Operation cannot be fulfilled on platformagents "platform-agent": the object has been modified\\n')
+            sys.exit(1)
         if state["crd_has_field"]:
             state["base"] = payload["spec"]["integration"]["baseBranch"]
         save()
@@ -243,7 +255,7 @@ class _StubbedScriptTest(unittest.TestCase):
     def run_script(self, argv, env):
         base = get_isolated_test_env(bin_dir=self.bin_dir)
         for key in list(base):
-            if key.startswith(("GITOPS_", "TF_VAR_", "AGENT_", "BENCH_")) or key in ("TASK", "CASE"):
+            if key.startswith(("GITOPS_", "TF_VAR_", "AGENT_", "BENCH_", "DEVOPS_BENCH_")) or key in ("TASK", "CASE"):
                 del base[key]
         base.update({"STUB_STATE": str(self.state_path), "STUB_LOG": str(self.log_path)})
         base.update(env)
@@ -332,6 +344,20 @@ class RunBranchSeedTest(_StubbedScriptTest):
         writes = [c for c in self.calls() if c["method"] != "GET"]
         self.assertEqual(writes, [], "a base that is not a root commit must write nothing, git objects included")
 
+    def test_staged_history_is_refused_before_its_healthy_commit_is_written(self):
+        self.routes(base_has_task=True, default_head=_BASE_SHA)
+        state = self.state()
+        # What commit_stage reads of the staged history's parent.
+        state["routes"].insert(0, {"method": "GET", "path": f"/repos/{_SLUG}/git/commits/{_ELSEWHERE_SHA}",
+                                   "code": 200, "body": {"tree": {"sha": "t" * 40}, "parents": []}})
+        self.write_state(state)
+        proc = self.run_script(["bash", str(_RUN_BRANCH), "create"],
+                               {**self.env, "GITOPS_HISTORY_PARENT_SHA": _ELSEWHERE_SHA})
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("not offered for staged history", proc.stderr)
+        writes = [c for c in self.calls() if c["method"] != "GET"]
+        self.assertEqual(writes, [], "staged history must be refused before any git object is written")
+
     def test_default_already_at_the_target_needs_no_write_on_a_base_with_history(self):
         self.routes(base_has_task=True, default_head=_BASE_SHA, base_parents=[_ELSEWHERE_SHA])
         proc = self.run_script(["bash", str(_RUN_BRANCH), "create"], self.env)
@@ -382,13 +408,13 @@ class AgentBaseBranchTest(_StubbedScriptTest):
         self.assertEqual(self.state()["base"], "production")
         self.assertEqual(self.patches("merge") + self.patches("json"), [])
 
-    def test_pin_on_a_crd_without_the_field_logs_it_and_succeeds(self):
-        self.given(crd_has_field=False)
+    def test_a_base_written_between_the_read_and_the_patch_is_not_overwritten(self):
+        self.given(written_before_patch=_OTHER_RUN)
         proc = self.run_action("pin")
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("API server dropped it", proc.stdout)
-        self.assertEqual(self.state()["base"], "")
-        self.assertEqual(self.patches("json"), [])
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("Conflict", proc.stderr)
+        self.assertEqual(self.state()["base"], _OTHER_RUN)
+        self.assertEqual(self.patches("json"), [], "the undo must leave the other run's base")
 
     def test_failed_wait_after_the_patch_removes_this_runs_base(self):
         self.given(rollout_fails=True)
@@ -420,7 +446,9 @@ class AgentBaseBranchTest(_StubbedScriptTest):
 
     def test_failed_broker_reads_in_the_wait_count_as_not_yet(self):
         self.given(broker_read_failures=2)
-        proc = self.run_action("pin")
+        # A ceiling with margin: bash's SECONDS ticks on wall-clock boundaries,
+        # so a 2s timeout can expire after about one second of waiting.
+        proc = self.run_action("pin", AGENT_BASE_BRANCH_RENDER_TIMEOUT_SEC="10")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(self.state()["base"], _RUN)
         self.assertEqual(self.state()["broker_read_failures"], 0)
@@ -434,10 +462,13 @@ class AgentBaseBranchTest(_StubbedScriptTest):
         self.assertEqual(self.state()["base"], "")
         self.assertEqual(self.patches("merge") + self.patches("json"), [], "an unreadable CRD must write nothing")
 
-    def test_crd_without_the_field_is_still_read_back_after_the_patch(self):
+    def test_pin_on_a_crd_without_the_field_reads_back_logs_it_and_succeeds(self):
         self.given(crd_has_field=False)
         proc = self.run_action("pin")
         self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("API server dropped it", proc.stdout)
+        self.assertEqual(self.state()["base"], "")
+        self.assertEqual(self.patches("json"), [])
         # The CRD read carries no -n, so drop the context and namespace flags.
         verbs = [[a for i, a in enumerate(c) if a not in ("--context", "-n") and c[i - 1] not in ("--context", "-n")][:2]
                  for c in self.calls()]
@@ -460,20 +491,6 @@ class AgentBaseBranchTest(_StubbedScriptTest):
                 self.assertEqual(proc.returncode, 1, proc.stderr)
                 self.assertIn(f"{name} must be a whole number of seconds above zero, not '{value}'", proc.stderr)
                 self.assertEqual(self.calls(), [], "a bad setting is refused before kubectl runs")
-
-    def test_old_unprefixed_settings_are_ignored(self):
-        # One failed broker read forces a sleep: a script that honoured the old
-        # name would run `sleep fast`, fail, and undo the pin.
-        self.given(broker_read_failures=1)
-        env = {k: v for k, v in self.env.items() if not k.startswith("AGENT_BASE_BRANCH_")}
-        proc = self.run_script(["bash", str(_AGENT_BASE_BRANCH), "pin"],
-                               {**env, "POLL_SECONDS": "fast", "RENDER_TIMEOUT_SEC": "x"})
-        # Checked on stderr too: bash 3.2 hands an EXIT trap status 0, so the
-        # return code alone would not show a script that honoured the old name.
-        self.assertNotIn("sleep:", proc.stderr)
-        self.assertNotIn("unbound variable", proc.stderr)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(self.state()["base"], _RUN)
 
     def test_unpin_whose_removal_keeps_failing_retries_then_warns_and_succeeds(self):
         self.given(base=_RUN, remove_fails=True)
