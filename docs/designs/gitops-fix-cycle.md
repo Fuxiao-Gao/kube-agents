@@ -301,7 +301,11 @@ reset before each task-run) are kept there, each with its `campaign.json` versio
 b-0022b on `claude-opus-5` (`run_20260918_185657_889776`). The b-0022b cell on
 `gemini-3.7-flash` has no record: its one campaign attempt (2026-09-18) ended in the
 harness's status-turn transport failure with an empty trajectory and a null row, and is
-not kept. The shared-install runs are summarised in the Findings below and in
+not kept. `b-0022b-gitops-pinned-base` (task_version 2) keeps its red run against `main` on
+`gemini-3.7-flash` (`run_20261005_215541_763063`, a per-run repository and a reset agent,
+without the integrity sweep): both search-api objectives failed and the agent's one pull
+request went onto `main`. Its addresses were mapped to documentation ranges for the fixture
+sanitizer. The shared-install runs are summarised in the Findings below and in
 gke-labs/kube-agents#1307's comments; their records are not in the tree (b-0011 run 11 has
 none: its results directory was removed by hand during teardown; b-0011 run 14 and b-0022b
 run 1 failed in the seed).
