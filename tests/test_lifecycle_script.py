@@ -1082,7 +1082,7 @@ class DeleteAgentCrEndpointTest(unittest.TestCase):
     """
 
     def _run_delete(self, dns_endpoint="gke-abc.us-central1.gke.goog",
-                    allow_external="True", supports_flag=True):
+                    allow_external="True", supports_flag=True, wedged=False):
         """Run delete_agent_cr against stubbed gcloud, kubectl and terraform.
 
         Returns (completed process, recorded get-credentials invocation).
@@ -1108,7 +1108,18 @@ exit 0
             # which is all these assertions need. What is under test is the
             # command that ran before it, not the deletion itself.
             kubectl = bin_dir / "kubectl"
-            kubectl.write_text(f"#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> '{kubectl_record}'\nexit 0\n")
+            # wedged: one PlatformAgent whose delete times out, which walks the
+            # finalizer patch and both RBAC deletes as well.
+            kubectl.write_text(f"""#!/usr/bin/env bash
+printf '%s\\n' "$*" >> '{kubectl_record}'
+if [[ "{wedged}" == True ]]; then
+  case "$*" in
+    *"get platformagent"*) echo platformagent.kubeagents.x-k8s.io/agent ;;
+    *"delete platformagent"*) exit 1 ;;
+  esac
+fi
+exit 0
+""")
             kubectl.chmod(0o755)
 
             terraform = bin_dir / "terraform"
@@ -1141,9 +1152,12 @@ exit 0
     def test_kubectl_names_the_context_it_fetched(self):
         # Not the kubeconfig's current context, which another get-credentials
         # sharing the file can move while the teardown runs.
-        proc, _ = self._run_delete()
+        proc, _ = self._run_delete(wedged=True)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("--context gke_test-project_us-central1_test-cluster get platformagent", self.kubectl_args)
+        calls = self.kubectl_args.splitlines()
+        self.assertEqual(len(calls), 5, self.kubectl_args)
+        for call in calls:
+            self.assertTrue(call.startswith("--context gke_test-project_us-central1_test-cluster "), call)
 
     def test_it_uses_the_dns_endpoint_when_one_accepts_external_traffic(self):
         proc, args = self._run_delete()
