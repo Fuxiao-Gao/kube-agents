@@ -277,7 +277,7 @@ class _StubbedScriptTest(unittest.TestCase):
     def run_script(self, argv, env):
         base = get_isolated_test_env(bin_dir=self.bin_dir)
         for key in list(base):
-            if key.startswith(("GITOPS_", "TF_VAR_", "AGENT_", "BENCH_", "DEVOPS_BENCH_")) or key in ("TASK", "CASE"):
+            if key.startswith(("GITOPS_", "TF_VAR_", "AGENT_", "BENCH_", "DEVOPS_BENCH_")) or key in ("TASK", "CASE", "BASE_BRANCH_MODE"):
                 del base[key]
         base.update({"STUB_STATE": str(self.state_path), "STUB_LOG": str(self.log_path)})
         base.update(env)
@@ -601,6 +601,9 @@ class WrapperCaseSelectionTest(_StubbedScriptTest):
             # Given, so the wrapper reads neither the repository nor LiteLLM.
             "GITOPS_BROKEN_BASE_SHA": _BASE_SHA,
             "AGENT_MODEL": "example-model",
+            # The task copy's mktemp lands here, so a run killed at the timeout
+            # leaves nothing outside the test's directory.
+            "TMPDIR": str(self.tmp),
             **env,
         })
 
