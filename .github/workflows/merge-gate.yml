@@ -1,0 +1,128 @@
+name: Merge Gate
+
+# The merge queue's three gate checks: `Smoke gate`, `CLA` and `Merge labels`
+# (#1363). Each stands in for something Tide decides today that no required
+# GitHub check covers; `scripts/merge_gate.py`'s docstring says what each one
+# reads and is the reference.
+#
+# The queue asks twice. A pull request must pass every required check to enter
+# it, so the `pull-request` job posts the three verdicts as commit statuses on
+# the pull request head whenever an input changes: a push, a label, a new
+# smoke status or a finished CLA check run. A status, not the job's own check
+# run: a run started by `status` or `check_run` attaches to the default
+# branch, where the queue does not look. Then the queue runs every required
+# check again on its own commit, and the `gate` jobs decide the same three
+# there under the check names themselves. The queue must group with
+# `ALLGREEN`; the script says why.
+#
+# Until a merge queue is enabled on `main` nothing requires these and
+# `merge_group` never fires. Tide does read them, as it reads every posted
+# context, so the head statuses are posted green only; `post_verdicts` in the
+# script says why. Tide also reads this job's own check run on the pull
+# request head, where a cancelled or failed run holds the merge, so the job
+# has no concurrency group (a superseded pending run is cancelled) and no
+# step can fail it.
+on:
+  # zizmor: ignore[dangerous-triggers] - the job checks out the default
+  # branch only (the script) and reads pull-request state through the API;
+  # no pull-request content reaches the write token's context.
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review, labeled, unlabeled]
+    branches: [main]
+  status:
+  check_run:
+    types: [completed]
+  merge_group:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  pull-request:
+    name: Post the merge gate statuses on the pull request head
+    # The repository guard, by the convention for workflows that write. The
+    # rest keeps events that cannot change a verdict off a runner: other
+    # labels, the statuses of every other context, which is most of the
+    # `status` events this repository sees, and every other check run.
+    if: >-
+      github.repository == 'gke-labs/kube-agents' &&
+      ((github.event_name == 'pull_request_target' &&
+        ((github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
+          github.event.label.name == 'lgtm' ||
+          github.event.label.name == 'approved' ||
+          startsWith(github.event.label.name, 'do-not-merge'))) ||
+        (github.event_name == 'status' &&
+          github.event.context == 'pull-kube-agents-smoke-test') ||
+        (github.event_name == 'check_run' &&
+          github.event.check_run.name == 'cla/google'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # check out the default branch: the script
+      pull-requests: read # the pull request's labels and files
+      checks: read # the cla/google check run on its head
+      statuses: write # post the three gate statuses on its head
+    steps:
+      # The default branch, never a pull request head: this job holds a
+      # writable token and must not run code from a fork. `ref:` is explicit
+      # because on `pull_request_target` the fallback is the pull request's
+      # base branch.
+      - name: Checkout the default branch
+        continue-on-error: true
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      # Event fields go in through the environment, never into the script
+      # text. A failure here or in the checkout is logged and left to the
+      # next event: a red check run here would hold the Tide merge of a pull
+      # request the gate exists only to describe.
+      - name: Post the statuses
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT: ${{ github.event_name }}
+          NUMBER: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.sha || github.event.check_run.head_sha }}
+        run: |
+          if [ "$EVENT" = "status" ] || [ "$EVENT" = "check_run" ]; then
+            python3 scripts/merge_gate.py status --sha "$SHA"
+          else
+            python3 scripts/merge_gate.py pull --number "$NUMBER"
+          fi
+
+  gate:
+    # The job name is the required check's name.
+    name: ${{ matrix.gate }}
+    # No repository guard here, unlike the job above. A skipped job reports
+    # success to a required check, so a guard that ever evaluated false on a
+    # queue commit would pass every group. A fork has no merge queue and never
+    # sees this event.
+    if: github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # check out the default branch: the script
+      pull-requests: read # the queued pull request's head, labels and files
+      statuses: read # the smoke status on that head
+      checks: read # the cla/google check run on that head
+    strategy:
+      fail-fast: false
+      matrix:
+        gate: [Smoke gate, CLA, Merge labels]
+    steps:
+      # The default branch, not the group, for the script: a pull request
+      # that changes `scripts/merge_gate.py` is judged by the script already
+      # on `main`. This workflow file itself is read from the group, so a
+      # change to it is a change to the gate; the OWNERS review covers it.
+      - name: Checkout the default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Judge the queued pull request
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF: ${{ github.event.merge_group.head_ref }}
+          GATE: ${{ matrix.gate }}
+        run: python3 scripts/merge_gate.py group --ref "$REF" --gate "$GATE"
