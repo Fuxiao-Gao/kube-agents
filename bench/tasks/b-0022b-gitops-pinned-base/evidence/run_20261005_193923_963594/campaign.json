@@ -1,0 +1,39 @@
+{
+  "task": "b-0022b",
+  "cluster": "gitops-pilot-red1",
+  "run_branch": "run/gitops-pilot-red1/b-0022b",
+  "gitops_repo": "https://github.com/gke-agentic/kube-agents-eval-1970-red-1",
+  "gitops_repo_root_sha": "f14ac92e3597f142860e069f7bcd52fb1bed254e",
+  "agent_model": "gemini-3.7-flash",
+  "judge_model": "gemini-3.1-pro-preview",
+  "devops_bench_pin": "repository pin",
+  "agent_image": "us-central1-docker.pkg.dev/fuxiaogao-gkedemos/ka-1970/platform-agent:9a53b5f3dbd295d52b081ca07b1597e479c35eba",
+  "operator_image": "",
+  "kube_agents_commit": "e120453481d461039a48f0be9a993ddae60dc3e5",
+  "agent_state_reset": "true",
+  "agent_stores_before_run": {
+    "kanban_cards": [],
+    "onboarding_cards": [],
+    "front_messages": 0,
+    "platform_messages": 0,
+    "platform_messages_outside_onboarding": 0,
+    "scratch": [],
+    "gitops": [],
+    "workspaces": [],
+    "profiles": [
+      "platform"
+    ]
+  },
+  "case": "b-0022b-gitops-pinned-base",
+  "run_started_at": "2026-10-05T19:38:17Z",
+  "default_branch": "main",
+  "pull_requests": [
+    {
+      "number": 1,
+      "base": "main",
+      "head": "platform-agent/fix-catalog-service-errors",
+      "url": "https://github.com/gke-agentic/kube-agents-eval-1970-red-1/pull/1",
+      "created_at": "2026-10-05T19:56:31Z"
+    }
+  ]
+}
