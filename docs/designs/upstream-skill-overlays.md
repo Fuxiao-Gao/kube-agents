@@ -100,7 +100,9 @@ the 29 mirrored skills add about 440 KiB of text.
 The **overlay** is this repository's change to one skill, and every mirrored skill has one, even if
 it holds only the lock. `upstream.lock` records the upstream commit and the sha256 of the upstream
 skill tree at that commit; the sync writes it, and the sync and the presubmit check verify the
-upstream copy against it. That pin and checksum are what requirement C4 asks for. One lock per
+upstream copy against it. The sync rewrites the lock in the same pull request that replaces the
+copy, so the two always match unless the copy was edited by hand. That pin and checksum are what
+requirement C4 asks for. One lock per
 skill, rather than one shared file, keeps the one-skill-per-PR syncs from editing neighbouring lines
 of the same file, which git would treat as a conflict.
 
@@ -108,6 +110,11 @@ The lock files are also the list of what is mirrored. A skill counts as mirrored
 lock, not because its name starts with `gke-`, so the sync never touches a skill this repository
 writes, whatever its name. When upstream drops or renames a skill, the sync reports it rather than
 deleting anything, and a person moves or removes the copy, the overlay and the lock.
+
+A skill this repository writes is added as today: a directory under `agents/platform/skills/`, with
+no upstream copy, overlay or lock. The sync and the presubmit check skip it. Today's script prunes
+by name instead, deleting any local `gke-*` directory upstream does not have, so a local skill with
+that prefix is lost on the next sync; deciding by lock removes that rule.
 
 Each patch is one change in `git format-patch` form, and its header records the reason in the place
 a reader of the skill directory will find it:
@@ -284,6 +291,26 @@ flowchart LR
     class L,R,T,D plain;
 ```
 
+### Protecting the upstream copy
+
+Nothing stops a branch from editing `third_party/google-skills/`, and an edit there followed by
+`make skills-generate` passes the comparison above while no patch records it; the next sync then
+replaces the copy and the change is lost. Three layers stop that:
+
+| Layer                                    | Runs on                                                   | Stops                                                                                                  |
+| ---------------------------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| Checksum against `upstream.lock`         | every pull request, offline                               | an accidental edit to the copy                                                                         |
+| Comparison with `google/skills` itself   | pull requests that change the copy or any `upstream.lock` | an edit to the copy with a matching edit to the lock, and a pin to a commit outside upstream's history |
+| `OWNERS` on `third_party/google-skills/` | every pull request that changes the copy                  | a change to the copy approved by someone other than the skill owners                                   |
+
+The second layer fetches `google/skills` at the locked commit and requires the copy to be
+byte-identical to that commit's `skills/cloud/<skill>/`. It also requires the commit to be reachable
+from upstream's default branch: GitHub serves a commit that exists only in a fork through the
+parent repository's URL, so fetching by commit alone would accept content nobody published
+upstream. It needs the network, so it runs only on the pull requests that change upstream files,
+which are almost always sync pull requests. The third layer follows `hack/OWNERS`, which uses
+`no_parent_owners` so that a root approver does not count for the paths it filters.
+
 The check and the sync cover each other. The check guarantees that every change to a generated
 skill is recorded in its overlay; the sync guarantees that what the overlay records survives an
 upstream update. The repository tests that each assert one registered change is present are no
@@ -339,7 +366,10 @@ request per skill, the way Dependabot opens one per dependency. It also lists th
 `skills/cloud/gke-*` directories that have no lock here and opens a pull request for each that adds
 the upstream copy, a lock, an empty overlay and the generated skill (identical to the upstream copy
 until a patch is added), so a skill upstream adds ships and is adopted the way
-the current script adopts it. It opens them as
+the current script adopts it. If `agents/platform/skills/` already holds a skill of that name with
+no lock — one this repository wrote — the job files an issue instead of a pull request, and a
+person decides whether to rename the local skill, adopt upstream's and turn the local differences
+into patches, or leave upstream's unmirrored. The job never writes over a skill it does not own. It opens them as
 `kube-agents-robot` or with a GitHub App token, because a pull request opened with the workflow's
 `GITHUB_TOKEN` does not start other workflows. When every patch applies, the pull request is ready
 for review. When one stops, the job files an issue carrying the patch and its `Why:` header, the
@@ -356,7 +386,7 @@ sequenceDiagram
     participant Human as Reviewer
 
     Cron->>Up: fetch skills whose tree changed, and new gke-* skills
-    Cron->>Repo: open add-skill PR for each skill with no lock
+    Cron->>Repo: open add-skill PR for each new upstream skill (issue if a local skill has the name)
     Cron->>Cron: rebase each changed skill's overlay
     alt every patch applies
         Cron->>Repo: open pin-bump PR (one per skill)
@@ -397,9 +427,10 @@ requests edit, so it lands after them.
 
 ## Rollout
 
-1. Tooling, the upstream copy with its docs-map rows and exclusions, and one pilot skill with a
-   single substitution.
-2. The presubmit check.
+1. Tooling, the upstream copy with its docs-map rows, exclusions and `OWNERS`, and one pilot skill
+   with a single substitution.
+2. The presubmit check, and the comparison with `google/skills` on pull requests that change
+   upstream files.
 3. Every other skill migrated with the generated tree byte-identical to `main`; registries, their
    tests and the old script removed. Every file that names the old script or its registries
    follows: the Skills Guidelines rule in `AGENTS.md`, the `skill_sync` source in
@@ -409,5 +440,5 @@ requests edit, so it lands after them.
    `agents/platform/scripts/gke_endpoint.py`. The Dependabot `docker` entry for
    `agents/platform/skills/gke-app-onboarding/assets` in `.github/dependabot.yml` is removed (see
    [Automated edits to a generated skill](#automated-edits-to-a-generated-skill)).
-4. The weekly sync job, including add-skill pull requests.
+4. The weekly sync job, including add-skill pull requests and the name-collision issue.
 5. Conflict issues routed to `kube-agents-robot`.
