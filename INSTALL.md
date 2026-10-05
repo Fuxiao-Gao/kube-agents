@@ -955,7 +955,8 @@ and ranks the findings. The ranked report is posted once, into the thread of the
 someone sends the bot in Google Chat or Slack
 ([Step 5](#step-5-enable-google-chat--slack-integrations-manual-required-steps)), after the report
 is ready. A `kubectl exec` session ([Step 6](#step-6-talk-to-the-agent-with-no-chat-platform)) does
-not receive it; with no chat platform enabled, read it from the sandbox once it is written:
+not receive it; with no chat platform enabled, read it from the sandbox once it is written. After
+a delivery run the file is renamed `INVENTORY.delivered.md`.
 
 ```bash
 kubectl exec platform-agent-shell-0 -n kubeagents-system -c shell -- cat /opt/data/INVENTORY.md
@@ -968,14 +969,15 @@ kubectl exec deploy/platform-agent-gateway -n kubeagents-system -c platform-agen
   ls /opt/data/.bootstrap_scan_filed /opt/data/.bootstrap_completed
 ```
 
-`.bootstrap_scan_filed` means the scan has started and `.bootstrap_completed` that the report was
-sent; `ls` reports the one that does not exist yet. The site's
-[first-run onboarding](docs/site/src/content/docs/concepts/chatops.md#first-run-onboarding)
+`.bootstrap_scan_filed` means the scan's task has been filed. `.bootstrap_completed` means a
+delivery run has claimed the report; it is written before the chat post, so it does not prove the
+post arrived, and the report is not sent again. `ls` reports the one that does not exist yet.
+The site's [first-run onboarding](docs/site/src/content/docs/concepts/chatops.md#first-run-onboarding)
 section describes each stage.
 
 ### Each morning: the scheduled audits
 
-The Platform Agent runs its governance audits on a cron schedule in UTC, some daily and some on
+The Platform Agent runs its fleet audits on a cron schedule in UTC, some daily and some on
 Mondays only. To list every job with its next and last run:
 
 ```bash
@@ -983,10 +985,12 @@ kubectl exec deploy/platform-agent-gateway -n kubeagents-system -c platform-agen
   env HERMES_HOME=/opt/data/profiles/platform hermes cron list
 ```
 
-Each run posts a summary to the home channel of each enabled chat platform unless nothing changed
-since the last run: the Slack channel is set in Step 5, the Google Chat one by
-`GOOGLE_CHAT_HOME_CHANNEL`. With the GitHub integration enabled, each audit also keeps a ledger
-issue in the GitOps repository and can open remediation pull requests there.
+Each audit's report is a ledger issue in the GitOps repository, so the audits need the GitHub
+integration: with no GitOps repository configured, every run fails before it audits anything. A
+run that changed something since the last one also posts a one-line summary linking the issue to
+the home channel of each enabled chat platform (the Slack channel is set in Step 5, the Google Chat
+one by `GOOGLE_CHAT_HOME_CHANNEL`), and an audit can open remediation pull requests in the
+repository.
 [Autonomous watchdogs](docs/site/src/content/docs/concepts/autonomous-watchdogs.md) covers the
 schedule and delivery, and
 [the declarative workflow](docs/site/src/content/docs/concepts/declarative-workflow.md) the ledger
