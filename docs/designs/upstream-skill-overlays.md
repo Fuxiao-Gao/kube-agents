@@ -383,6 +383,24 @@ PR 4 also updates every file that names the old script or its registries:
 - The Dependabot `docker` entry for `gke-app-onboarding/assets`, removed ([Automated edits](#automated-edits-to-a-generated-skill)).
 - The marker line in the five footers names the old script. Migration keeps it verbatim in `append.md` so the generated tree stays byte-identical; a follow-up rewords it.
 
+## What this design addresses
+
+| #   | Fault                                                               | Addressed                 | How, or what is left                                                                                                                                                                                         |
+| --- | ------------------------------------------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| F1  | No upstream commit recorded, no common ancestor                     | Fully                     | The upstream version is kept in `third_party/` and its commit and sha256 in `upstream.lock`; a sync rebases our patches onto the new copy, so git does a three-way merge.                                    |
+| F2  | Changes live in the script; a new kind of edit needs a new registry | Fully                     | Each change is a patch file next to its skill and covers any file type; the registries and the script go away.                                                                                               |
+| F3  | One shared file, so parallel PRs conflict                           | Fully, for the skill sync | One overlay and one lock per skill, patches ordered by filename. Left: edits a few lines apart from two PRs are caught on `main` after merge, not before (a merge queue would catch them earlier).           |
+| F4  | Unregistered edits are not caught                                   | Fully                     | `make skills-check` on every PR rebuilds each mirrored skill and fails on any byte no patch records.                                                                                                         |
+| F5  | Upstream adoption is mishandled                                     | Mostly                    | An adopted patch is retired automatically. An adopted `append.md` is detected and reported, and a person deletes it.                                                                                         |
+| F6  | Local skills deleted by name                                        | Fully                     | A skill is mirrored because it has a lock, not because of its name; local skills are never touched.                                                                                                          |
+| F7  | Manual, all-at-once sync                                            | Partly                    | Fixed: one skill per sync, a conflict stops only that skill, and `make skills-status` and the notice in `refresh` show which skills are behind. Left: nothing runs a sync on its own and nobody is notified. |
+
+Out of scope:
+
+- Eval coverage for skills: a sync that changes what the agent knows still needs eval evidence, and most mirrored skills have no case of their own yet.
+- Upstream defects such as wrong facts or routes to skills we do not mirror: a person still spots them in the sync PR's diff; the design makes the fix a clean patch.
+- Conflicts in the eval roster files (`hack/eval/nightly-cases.txt`, `scripts/test_eval_rosters.py`) when several sync PRs each register a case.
+
 ## Future work: scheduled sync
 
 Not part of this design's rollout. A scheduled job could run the manual sync above for every skill upstream has moved:
@@ -430,3 +448,11 @@ Open before this is built:
 - The eval policy for automated sync PRs: each needs eval evidence, and per-skill coverage is thin today (one of the 29 mirrored skills is named by any case), so a bot PR would wait on a person writing a case.
 - The token the job opens PRs with, which needs a repository admin and the robot's operator.
 - How `kube-agents-robot` is pointed at `skill-sync-conflict` issues, and review load in weeks when upstream changes many skills at once.
+
+### What the scheduled sync would add
+
+| Gap left by this design                      | What the scheduled sync adds                                                                                      | Still open                                             |
+| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| F7: nothing runs a sync on its own           | A weekly job syncs every mirrored skill whose upstream folder changed and opens one PR per skill                  | The eval evidence each of those PRs needs              |
+| F7: nobody is notified                       | A conflict files a `skill-sync-conflict` issue for `kube-agents-robot` to claim; stale skills surface as open PRs | How the robot is pointed at those issues               |
+| New upstream skills wait until someone looks | An add-skill PR for each new upstream `gke-*` skill                                                               | Review load in weeks when upstream changes many skills |
