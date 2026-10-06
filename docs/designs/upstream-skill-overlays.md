@@ -86,7 +86,7 @@ How each fault is addressed:
 | F4  | `make skills-check` rebuilds every mirrored skill and fails on any byte no patch records.                                                                                                                                           | [The presubmit check](#the-presubmit-check)                     |
 | F5  | A patch upstream adopts comes out of the rebase empty and is reported retired; the sync also reports an `append.md` whose text the new upstream copy already contains.                                                              | [Sync](#sync-rebasing-the-overlay)                              |
 | F6  | A skill is mirrored because it has a lock, not because of its name; local skills are never touched.                                                                                                                                 | [Skills this repository writes](#skills-this-repository-writes) |
-| F7  | A weekly job opens one pin-bump PR per changed skill and an add-skill PR per new upstream skill. A conflict stops only that skill and files a `skill-sync-conflict` issue.                                                          | [Automation](#automation)                                       |
+| F7  | `make skills-sync SKILL=<skill>` syncs one skill, when someone chooses, in its own PR; a conflict stops only that skill. `make skills-status` and a notice in `refresh` show which skills upstream has moved past.                  | [Syncing a skill](#syncing-a-skill)                             |
 
 ### The three layers
 
@@ -101,19 +101,18 @@ How each fault is addressed:
   - A sync PR shows upstream's change as a diff of this directory.
 - **`upstream.lock`:** two values, rewritten by the sync in the PR that replaces the copy, so copy and lock match unless the copy was edited by hand. One per skill, so per-skill PRs share no file.
 
-  | Value    | Main job                                                                                                                                                                                                                                                                                                                                                          |
-  | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-  | `sha256` | Content check: does `third_party/google-skills/<skill>/` still match what we pinned? Catches hand edits, offline, on every PR.                                                                                                                                                                                                                                    |
-  | `commit` | Which upstream version we ship. The weekly job compares `skills/cloud/<skill>/` at upstream's latest commit with the same folder at this commit, not the two commit IDs (upstream's head moves when any skill changes), to decide whether there is anything to sync. It is also the rebase's starting point and what the comparison with `google/skills` fetches. |
+  | Value    | Main job                                                                                                                                                                                                                                                                                                                                                                                         |
+  | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+  | `sha256` | Content check: does `third_party/google-skills/<skill>/` still match what we pinned? Catches hand edits, offline, on every PR.                                                                                                                                                                                                                                                                   |
+  | `commit` | Which upstream version we ship. `make skills-status` and the notice in `refresh` compare `skills/cloud/<skill>/` at upstream's latest commit with the same folder at this commit, not the two commit IDs (upstream's head moves when any skill changes), to tell whether there is anything to sync. It is also the rebase's starting point and what the comparison with `google/skills` fetches. |
 
 - **Mirrored list:** a skill is mirrored if its overlay has a lock (the overlay may hold only the lock).
-  - A skill we decided not to mirror keeps an overlay holding only `NOT_MIRRORED`, with the reason; the sync and the weekly job skip it.
   - When upstream drops or renames a skill, the sync reports it and a person moves or removes the copy, overlay and lock.
 - **Patches:** one change per file in `git format-patch` form, without commit hashes, `index` lines or a diffstat, so a refresh changes only hunk headers and moved lines. A patch can touch any file in the skill or add one. Example header below.
 - **One patch per reason:** follow-up edits fold into the existing patch, so the count tracks reasons: today's registries become seven patches across four skills (at most four in one) plus five `append.md` files.
 - **When to stop mirroring:** a person's decision, not a CI rule. Patch count alone is not a signal: several small patches over a small part of a skill still leave the rest getting upstream's updates.
   - Review a skill when its patches rewrite most of it, when most of its syncs conflict, or when upstream keeps moving it away from what we need.
-  - To stop: delete its copy and lock and leave `NOT_MIRRORED` with the reason; the generated skill becomes ours.
+  - To stop: delete its copy, lock and overlay; the generated skill becomes ours.
 - **`append.md`:** what `SKILL_FOOTERS` appends today. Applied after the patches rather than as one, because git treats an edit to upstream's last lines as adjacent to anything appended below them.
 - **Generated skill:** stays where skills are today and stays committed, so reviewers, `grep`, the bench tasks and the Dockerfile read it. Contributors edit it like any other file; the presubmit fails on an edit no patch records.
 
@@ -147,14 +146,13 @@ Retire-When: never; the persona rule is ours
 
 The alternative is a `series` file listing patches in order, as `quilt` does. Every new patch goes on its last line, so two PRs that each add a patch both write that line:
 
-| Two concurrent pull requests on one skill            | With a `series` file                                                 | Filename order                             |
-| ---------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------ |
-| Change the same lines of the skill                   | Conflict in the skill; the second author rebases and refreshes       | The same                                   |
-| Change unrelated lines of the skill                  | Conflict in `series`; the second author rebases and keeps both lines | Merges on its own                          |
-| One or both opened by a bot (sync, add-skill, robot) | Someone rebases the bot's pull request                               | Merges on its own unless the lines overlap |
-| Merged by Tide once approved                         | Not while `series` conflicts                                         | Yes                                        |
+| Two concurrent pull requests on one skill | With a `series` file                                                 | Filename order    |
+| ----------------------------------------- | -------------------------------------------------------------------- | ----------------- |
+| Change the same lines of the skill        | Conflict in the skill; the second author rebases and refreshes       | The same          |
+| Change unrelated lines of the skill       | Conflict in `series`; the second author rebases and keeps both lines | Merges on its own |
+| Merged by Tide once approved              | Not while `series` conflicts                                         | Yes               |
 
-- A `series` conflict is easy to resolve, but it falls on every concurrent pair and every bot PR.
+- A `series` conflict is easy to resolve, but it falls on every concurrent pair.
 - Git's `union` merge mode does not help: GitHub ignores it when deciding whether a PR conflicts.
 - Filename order gives up switching a patch off while keeping its file; git history covers that.
 - Same or adjacent lines: GitHub reports a conflict on the second PR; its author rebases and runs `make skills-refresh`.
@@ -170,9 +168,9 @@ A sync bumps one skill's pin, in a scratch repository, so the working tree chang
 4. Write the new upstream copy and `upstream.lock`, re-export the surviving commits as the patch files, and regenerate the skill.
 5. Report each patch dropped as empty (retired), and each `append.md` whose text the new upstream copy already contains, for a person to delete. The sync PR lists retired patches with their `Why:`, so a reviewer sees what upstream adopted and can restore a patch from history if upstream later reverts it; a retired patch whose `Retire-When:` says never deserves a second look.
 
-- The scratch repository lives in a git-ignored `.skill-sync/<skill>/` until the sync finishes. The sync goes one patch at a time, like a git rebase: when a patch stops, the person or robot fixes the conflicted text there and runs `make skills-continue SKILL=<skill>`, which rewrites that patch in place (same file, number and `Why:`) and moves on to the next.
+- The scratch repository lives in a git-ignored `.skill-sync/<skill>/` until the sync finishes. The sync goes one patch at a time, like a git rebase: when a patch stops, the person running the sync fixes the conflicted text there and runs `make skills-continue SKILL=<skill>`, which rewrites that patch in place (same file, number and `Why:`) and moves on to the next.
 - A patch is deleted only when upstream adopted it exactly (retired automatically) or the person resolving a conflict decides upstream's new version makes it unnecessary.
-- The sync PR description also shows, per skill, the number of patches, the share of the skill's lines they change, and how many recent syncs conflicted. It is information for the stop-mirroring decision and blocks nothing.
+- The sync prints, for its PR description, the number of patches, the share of the skill's lines they change, and how many recent syncs conflicted. It is information for the stop-mirroring decision and blocks nothing.
 
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 30, 'rankSpacing': 50}}}%%
@@ -278,6 +276,7 @@ flowchart LR
 - `make skills-refresh` rebuilds the skill from ① and ②, compares the edited skill with that rebuild, and writes the difference as the new (or folded) patch.
 - The reviewer sees the change to the skill and the patch that records it; the upstream copy does not change.
 - A change takes effect when its PR merges and the image is rebuilt, as today. Upstream updates arrive separately, through the sync.
+- `refresh` notes when upstream has changed the skill since its pin and suggests running `make skills-sync SKILL=<skill>` in its own commit or PR. It never syncs on its own: an edit and an upstream update stay separate changes, each reviewed and validated on its own.
 
 What `make skills-check` reports when a step is skipped:
 
@@ -301,14 +300,96 @@ What `make skills-check` reports when a step is skipped:
 - Migration records the pin as a patch (its `Why:` says why we run a newer base image), removes the Dependabot entry for that directory, and bumps the image from then on by changing the patch.
 - Any other in-place tool pointed at a mirrored skill gets the same treatment.
 
-### Automation
+### Syncing a skill
 
-- A weekly job syncs each mirrored skill whose upstream tree changed and opens one PR per skill, the way Dependabot opens one per dependency.
-- It opens an add-skill PR for each upstream `skills/cloud/gke-*` directory with no lock: upstream copy, lock, empty overlay and the generated skill (identical to the copy until a patch is added), so the skill ships.
-- If a lock-less local skill already has that name, the job files an issue instead; a person renames ours, adopts upstream's with our differences as patches, or leaves upstream's unmirrored by adding `NOT_MIRRORED`. The job never writes over a skill it does not own.
-- Skills marked `NOT_MIRRORED` are skipped, and the job updates an existing open issue rather than filing a duplicate.
+Syncing is manual and per skill:
+
+- `make skills-sync SKILL=<skill>` moves one skill to upstream's latest version (or `REF=<commit>`), rebasing its patches; the result goes in its own PR.
+- `make skills-status` lists the mirrored skills whose upstream folder changed since their pin, and the upstream `skills/cloud/gke-*` skills not yet mirrored.
+- `make skills-sync SKILL=<new-skill>` adopts a new upstream skill: copy, lock, empty overlay and the generated skill (identical to the copy until a patch is added). It refuses if a skill without a lock already has that name; a person renames one of them first.
+- When a patch stops, only that skill's sync stops and nothing is written for it; the person resolves the text and runs `make skills-continue`.
+- A sync PR changes what the agent reads, so it follows the eval-driven rule like any skill change: a case that is red on `main` and green three times with the sync.
+- The resolution needs a person: a skill is instructions the agent follows, and a merge that reads well can still change what the agent does.
+- Upstreaming shrinks the work: a general fix (the NetworkPolicy two-step, the `answer_query` quota) is filed as a `google/skills` issue and recorded in `Upstream-Issue:`; once upstream carries it, the next sync reports it retired.
+
+## Security guardrails
+
+GitHub has no read-only directories, so each guardrail below is a check, an `OWNERS` rule, a review rule or a behaviour of the tools in this design; none exists today. The checks and the `OWNERS` rule block merge; [Where the checks run](#where-the-checks-run) says how.
+
+| Scenario                                                                 | Risk                                                                                                                                                                                                                               | Guardrail                                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Two concurrent, unrelated changes to one skill                           | A shared list makes every pair conflict, so authors resolve by hand                                                                                                                                                                | No shared file: filename-ordered patches and a lock per skill. Same or adjacent lines conflict in git and block the second PR. Nearby lines can both merge green; `validate` on `main` then fails and names the skill until a follow-up runs `make skills-refresh`. A merge queue would catch it before merge. |
+| Direct edit to a generated skill with no patch                           | The edit is lost on the next sync                                                                                                                                                                                                  | `make skills-check` rebuilds ① + ② and fails on any difference from ③.                                                                                                                                                                                                                                         |
+| Accidental edit to the upstream copy                                     | Edit the copy, run `make skills-generate`, and the rebuild-and-compare step passes with no patch recorded                                                                                                                          | Checksum of ① against `upstream.lock`, offline, every PR.                                                                                                                                                                                                                                                      |
+| Edit to the upstream copy plus a matching edit to the lock               | The checksum passes; unpublished content becomes agent instructions                                                                                                                                                                | Comparison with `google/skills` at the locked commit, on PRs that change ① or any `upstream.lock`.                                                                                                                                                                                                             |
+| Lock pinned to a commit that exists only in a fork                       | GitHub serves fork-only commits through the parent repository's URL, so a fetch by commit accepts content nobody published                                                                                                         | The same comparison requires the commit to be reachable from upstream's default branch.                                                                                                                                                                                                                        |
+| Change to the upstream copy approved by someone outside the skill owners | A routine-looking sync PR carries unreviewed instructions                                                                                                                                                                          | `OWNERS` on `third_party/google-skills/` naming a new `skill-owners` alias in `OWNERS_ALIASES` (membership to be decided), with `no_parent_owners`, as `hack/OWNERS` does with `eval-crew`; a root approver does not count.                                                                                    |
+| No record of which upstream version ships                                | A behaviour change cannot be traced to an upstream version, and nothing shows our copy is what upstream published; the conformance test for C4 (`test_C4_upstream_skills_are_pinned_and_verified`) records it as a known violation | Commit and sha256 in every lock; every pin bump is a reviewed PR.                                                                                                                                                                                                                                              |
+| In-place tool edits a generated skill (Dependabot)                       | A standing red PR, or an edit nobody records                                                                                                                                                                                       | The entry is removed and its pin becomes a patch; the check fails any other such tool.                                                                                                                                                                                                                         |
+| Adopting an upstream skill whose name a local skill uses                 | The new copy overwrites our skill                                                                                                                                                                                                  | `make skills-sync` refuses; a person renames one of them first.                                                                                                                                                                                                                                                |
+
+### Where the checks run
+
+| Check                                            | Runs as                                                         | Runs on                                                                                         | Blocks merge because                                                                                             |
+| ------------------------------------------------ | --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `make skills-check` (checksum, rebuild, compare) | A step in the `validate` job (`.github/workflows/validate.yml`) | Every PR, offline                                                                               | `validate` is one of the contexts `main` already requires                                                        |
+| Comparison with `google/skills`                  | A step in the same job                                          | Every PR; skips itself unless the PR changes `third_party/google-skills/` or an `upstream.lock` | Same job. Not a workflow path filter: a required check that never starts waits as "Expected" and blocks every PR |
+| `OWNERS` on the upstream copy                    | Prow's approval plugin; no CI job                               | Every PR that changes the copy                                                                  | Tide merges only with the `approved` label                                                                       |
+
+- A step in the already-required `validate` job blocks merge whether it fails or never posts.
+- A new, separately named job would block merge when it posts red (Tide refuses any red context), but not when it never posts, because `main` does not require it until an admin adds it.
+
+## Alternatives considered
+
+| Approach                                                                        | Why not                                                                                                                                                                                                                                                                                         |
+| ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Keep the string registries                                                      | F1–F7 stay.                                                                                                                                                                                                                                                                                     |
+| Smarter matching on the stored snippets (fuzzy search plus a per-snippet merge) | Fixes small upstream edits inside a snippet, but only at registered snippets: footers, reference files and unregistered edits have no ancestor, so F4 stays, and no upstream version is recorded. Needs a custom fuzzy matcher that can pick the wrong passage in skills with repeated wording. |
+| Vendor branch or `git subtree` merges into main                                 | Real merges, but main is squash-merged, which loses the merge base a subtree merge needs; nothing records why each change exists; "what do we change" needs a diff against upstream.                                                                                                            |
+| Heading-keyed overlays (Kustomize-like)                                         | Markdown has no schema: list items, fenced blocks and frontmatter scalars, which current changes edit, are not addressable by heading, so it falls back to text matching.                                                                                                                       |
+| Whole-file override with an upstream-hash alarm                                 | Simple, but forks the whole file; every upstream change to it is a manual re-merge.                                                                                                                                                                                                             |
+| Runtime composition (companion skill or persona)                                | Leaves upstream untouched, but the model holds two instructions that disagree; the registry already prefers substitutions over footers for those cases; a companion cannot change the frontmatter `description` the router selects on.                                                          |
+| `git apply --3way` per patch                                                    | Merges only when the patch records the blob it was made against; for later patches that blob has to be rebuilt by replaying the series, which is a rebase without dropping adopted patches or resuming after a conflict.                                                                        |
+| Copybara with `patch.apply`                                                     | Google's standard tool for this, but it brings a Java toolchain and Starlark config into CI for about 30 directories. The layout here can move to it later.                                                                                                                                     |
+
+## Costs
+
+- Two copies of each mirrored skill (about 440 KiB for 29 skills).
+- A new script with six subcommands (`sync`, `continue`, `refresh`, `generate`, `check`, `status`) and its tests.
+- Patch files are awkward to edit by hand, hence `make skills-refresh`; a sync PR carries refreshed patches alongside the upstream and generated diffs.
+- Migration rewrites the script the open skill-sync PRs edit, so it lands after them.
+
+## Rollout and estimated effort
+
+Four PRs implement the design: about four days for one engineer working with a coding agent. None changes what the agent sees, since every migrated skill stays byte-identical to `main`, so none needs the eval loop; live validation is the byte-identical proof plus a spot check of a skill file in the agent pod. Each PR still runs the presubmit smoke test (1.5 to 3.5 hours per push), which is waiting time.
+
+| PR  | Delivers                                                                                                                                                                                                                                                                                   | Depends on  | Days |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------- | ---- |
+| 1   | `scripts/skill_overlay.py` (`sync`, `continue`, `refresh`, `generate`, `check`, `status`), the lock format, make targets and tests. No skill migrated.                                                                                                                                     | this design | 1–2  |
+| 2   | Pilot: `gke-workload-troubleshooting` migrated (copy, lock, one patch); `third_party/google-skills/` with `OWNERS` and the `skill-owners` alias, docs-map rows and exclusions; `make skills-check` and the upstream comparison as steps in `validate`; the old script skips locked skills. | PR 1        | 1    |
+| 3   | The other 28 skills migrated: copies, locks, the remaining patches, five `append.md` files, and the in-tree edits no registry records. Generated tree byte-identical to `main`.                                                                                                            | PR 2        | 1    |
+| 4   | Old script, registries and their tests removed; references updated (list below).                                                                                                                                                                                                           | PR 3        | 0.5  |
+
+- Not in the estimate: the first syncs after migration. They land what upstream has added since the last sync (new skills, two renamed TPU skills), which the agent does see, so each follows the eval loop like any skill change.
+- Outside the engineer's control, and worth starting first: landing or pausing the open skill-sync PRs before PR 3, and choosing the `skill-owners` members before PR 2.
+
+PR 4 also updates every file that names the old script or its registries:
+
+- `AGENTS.md` Skills Guidelines.
+- The `skill_sync` source in `tests/conformance/_harness.py` and its C4 tests, repointed at the new script.
+- The `Makefile` shellcheck comment and `.prettierignore`.
+- The message in `deploy/docker/check_skill_commands.py`.
+- Comments in two bench tasks and `agents/platform/scripts/gke_endpoint.py`.
+- The Dependabot `docker` entry for `gke-app-onboarding/assets`, removed ([Automated edits](#automated-edits-to-a-generated-skill)).
+- The marker line in the five footers names the old script. Migration keeps it verbatim in `append.md` so the generated tree stays byte-identical; a follow-up rewords it.
+
+## Future work: scheduled sync
+
+Not part of this design's rollout. A scheduled job could run the manual sync above for every skill upstream has moved:
+
+- A weekly job syncs each mirrored skill whose upstream folder changed and opens one PR per skill, the way Dependabot opens one per dependency, plus an add-skill PR for each new upstream skill.
 - PRs are opened as `kube-agents-robot` or with a GitHub App token: a PR opened with the workflow's `GITHUB_TOKEN` does not start other workflows.
-- When a patch stops, only that skill's sync stops: nothing is written for it, it keeps shipping at its old pin, and the other skills still get their PRs.
+- A conflict stops only that skill: it keeps shipping at its old pin and the other skills still get their PRs.
 
 What happens after a sync conflict:
 
@@ -344,79 +425,8 @@ sequenceDiagram
     Human->>Repo: approve (skill text changes agent behaviour)
 ```
 
-- The resolution still needs a person: a skill is instructions the agent follows, and a merge that reads well can still change what the agent does.
-- Upstreaming shrinks the work: a general fix (the NetworkPolicy two-step, the `answer_query` quota) is filed as a `google/skills` issue and recorded in `Upstream-Issue:`; once upstream carries it, the next sync reports it retired.
+Open before this is built:
 
-## Security guardrails
-
-GitHub has no read-only directories, so each guardrail below is a check, an `OWNERS` rule, a review rule or a behaviour of the tools in this design; none exists today. The checks and the `OWNERS` rule block merge; [Where the checks run](#where-the-checks-run) says how.
-
-| Scenario                                                                 | Risk                                                                                                                                                                                                                               | Guardrail                                                                                                                                                                                                                                                                                                      |
-| ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Two concurrent, unrelated changes to one skill                           | A shared list makes every pair conflict, so bot PRs stall and authors resolve by hand                                                                                                                                              | No shared file: filename-ordered patches and a lock per skill. Same or adjacent lines conflict in git and block the second PR. Nearby lines can both merge green; `validate` on `main` then fails and names the skill until a follow-up runs `make skills-refresh`. A merge queue would catch it before merge. |
-| Direct edit to a generated skill with no patch                           | The edit is lost on the next sync                                                                                                                                                                                                  | `make skills-check` rebuilds ① + ② and fails on any difference from ③.                                                                                                                                                                                                                                         |
-| Accidental edit to the upstream copy                                     | Edit the copy, run `make skills-generate`, and the rebuild-and-compare step passes with no patch recorded                                                                                                                          | Checksum of ① against `upstream.lock`, offline, every PR.                                                                                                                                                                                                                                                      |
-| Edit to the upstream copy plus a matching edit to the lock               | The checksum passes; unpublished content becomes agent instructions                                                                                                                                                                | Comparison with `google/skills` at the locked commit, on PRs that change ① or any `upstream.lock`.                                                                                                                                                                                                             |
-| Lock pinned to a commit that exists only in a fork                       | GitHub serves fork-only commits through the parent repository's URL, so a fetch by commit accepts content nobody published                                                                                                         | The same comparison requires the commit to be reachable from upstream's default branch.                                                                                                                                                                                                                        |
-| Change to the upstream copy approved by someone outside the skill owners | A routine-looking sync PR carries unreviewed instructions                                                                                                                                                                          | `OWNERS` on `third_party/google-skills/` naming a new `skill-owners` alias in `OWNERS_ALIASES` (membership to be decided), with `no_parent_owners`, as `hack/OWNERS` does with `eval-crew`; a root approver does not count.                                                                                    |
-| No record of which upstream version ships                                | A behaviour change cannot be traced to an upstream version, and nothing shows our copy is what upstream published; the conformance test for C4 (`test_C4_upstream_skills_are_pinned_and_verified`) records it as a known violation | Commit and sha256 in every lock; every pin bump is a reviewed PR.                                                                                                                                                                                                                                              |
-| Bot-proposed conflict resolution                                         | A plausible merge changes agent behaviour                                                                                                                                                                                          | A person approves through Tide; the robot never merges and is never an approver. The `kube-agents-bot` review is advice and does not count toward approval.                                                                                                                                                    |
-| In-place tool edits a generated skill (Dependabot)                       | A standing red PR, or an edit nobody records                                                                                                                                                                                       | The entry is removed and its pin becomes a patch; the check fails any other such tool.                                                                                                                                                                                                                         |
-| Upstream adds a skill with a local skill's name                          | The add-skill PR overwrites our skill                                                                                                                                                                                              | The job files an issue instead; it never writes over a lock-less skill.                                                                                                                                                                                                                                        |
-
-### Where the checks run
-
-| Check                                            | Runs as                                                         | Runs on                                                                                         | Blocks merge because                                                                                             |
-| ------------------------------------------------ | --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `make skills-check` (checksum, rebuild, compare) | A step in the `validate` job (`.github/workflows/validate.yml`) | Every PR, offline                                                                               | `validate` is one of the contexts `main` already requires                                                        |
-| Comparison with `google/skills`                  | A step in the same job                                          | Every PR; skips itself unless the PR changes `third_party/google-skills/` or an `upstream.lock` | Same job. Not a workflow path filter: a required check that never starts waits as "Expected" and blocks every PR |
-| `OWNERS` on the upstream copy                    | Prow's approval plugin; no CI job                               | Every PR that changes the copy                                                                  | Tide merges only with the `approved` label                                                                       |
-
-- A step in the already-required `validate` job blocks merge whether it fails or never posts.
-- A new, separately named job would block merge when it posts red (Tide refuses any red context), but not when it never posts, because `main` does not require it until an admin adds it.
-
-## Alternatives considered
-
-| Approach                                                                        | Why not                                                                                                                                                                                                                                                                                         |
-| ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Keep the string registries                                                      | F1–F6 stay; F7 could be fixed on its own with a scheduled job.                                                                                                                                                                                                                                  |
-| Smarter matching on the stored snippets (fuzzy search plus a per-snippet merge) | Fixes small upstream edits inside a snippet, but only at registered snippets: footers, reference files and unregistered edits have no ancestor, so F4 stays, and no upstream version is recorded. Needs a custom fuzzy matcher that can pick the wrong passage in skills with repeated wording. |
-| Vendor branch or `git subtree` merges into main                                 | Real merges, but main is squash-merged, which loses the merge base a subtree merge needs; nothing records why each change exists; "what do we change" needs a diff against upstream.                                                                                                            |
-| Heading-keyed overlays (Kustomize-like)                                         | Markdown has no schema: list items, fenced blocks and frontmatter scalars, which current changes edit, are not addressable by heading, so it falls back to text matching.                                                                                                                       |
-| Whole-file override with an upstream-hash alarm                                 | Simple, but forks the whole file; every upstream change to it is a manual re-merge.                                                                                                                                                                                                             |
-| Runtime composition (companion skill or persona)                                | Leaves upstream untouched, but the model holds two instructions that disagree; the registry already prefers substitutions over footers for those cases; a companion cannot change the frontmatter `description` the router selects on.                                                          |
-| `git apply --3way` per patch                                                    | Merges only when the patch records the blob it was made against; for later patches that blob has to be rebuilt by replaying the series, which is a rebase without dropping adopted patches or resuming after a conflict.                                                                        |
-| Copybara with `patch.apply`                                                     | Google's standard tool for this, but it brings a Java toolchain and Starlark config into CI for about 30 directories. The layout here can move to it later.                                                                                                                                     |
-
-## Costs
-
-- Two copies of each mirrored skill (about 440 KiB for 29 skills).
-- A new script with five subcommands (`sync`, `continue`, `refresh`, `generate`, `check`) and its tests.
-- Patch files are awkward to edit by hand, hence `make skills-refresh`; a sync PR carries refreshed patches alongside the upstream and generated diffs.
-- Migration rewrites the script the open skill-sync PRs edit, so it lands after them.
-
-## Rollout and estimated effort
-
-Five PRs implement the design: about one week for one engineer working with a coding agent. None changes what the agent sees, since every migrated skill stays byte-identical to `main`, so none needs the eval loop; live validation is the byte-identical proof plus a spot check of a skill file in the agent pod. Each PR still runs the presubmit smoke test (1.5 to 3.5 hours per push), which is waiting time, and the PRs overlap rather than queue.
-
-| PR  | Delivers                                                                                                                                                                                                                                                                                   | Depends on             | Days  |
-| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------- | ----- |
-| 1   | `scripts/skill_overlay.py` (`sync`, `continue`, `refresh`, `generate`, `check`, adopting a new upstream skill), the lock format, make targets and tests. No skill migrated.                                                                                                                | this design            | 1–2   |
-| 2   | Pilot: `gke-workload-troubleshooting` migrated (copy, lock, one patch); `third_party/google-skills/` with `OWNERS` and the `skill-owners` alias, docs-map rows and exclusions; `make skills-check` and the upstream comparison as steps in `validate`; the old script skips locked skills. | PR 1                   | 1     |
-| 3   | The other 28 skills migrated: copies, locks, the remaining patches, five `append.md` files, and the in-tree edits no registry records. Generated tree byte-identical to `main`.                                                                                                            | PR 2                   | 1     |
-| 4   | Old script, registries and their tests removed; references updated (list below).                                                                                                                                                                                                           | PR 3                   | 0.5   |
-| 5   | Weekly sync job: per-skill pin-bump PRs, add-skill PRs, retired-patch lists, `skill-sync-conflict` issues, `make docs-generate` in sync PRs; dry run by default; the note in the robot contract.                                                                                           | PR 1 (parallel to 2–4) | 1–1.5 |
-
-- PR 5 is built alongside PRs 2–4 and switched to live once PR 4 merges.
-- Not in the week: the first live sync. It lands what upstream has added since the last sync (new skills, two renamed TPU skills), which the agent does see, so it follows the eval loop like any skill change.
-- Outside the engineer's control, and worth starting first: landing or pausing the open skill-sync PRs before PR 3, choosing the `skill-owners` members before PR 2, and the token the weekly job opens PRs with before PR 5 goes live.
-
-PR 4 also updates every file that names the old script or its registries:
-
-- `AGENTS.md` Skills Guidelines.
-- The `skill_sync` source in `tests/conformance/_harness.py` and its C4 tests, repointed at the new script.
-- The `Makefile` shellcheck comment and `.prettierignore`.
-- The message in `deploy/docker/check_skill_commands.py`.
-- Comments in two bench tasks and `agents/platform/scripts/gke_endpoint.py`.
-- The Dependabot `docker` entry for `gke-app-onboarding/assets`, removed ([Automated edits](#automated-edits-to-a-generated-skill)).
-- The marker line in the five footers names the old script. Migration keeps it verbatim in `append.md` so the generated tree stays byte-identical; a follow-up rewords it.
+- The eval policy for automated sync PRs: each needs eval evidence, and per-skill coverage is thin today (one of the 29 mirrored skills is named by any case), so a bot PR would wait on a person writing a case.
+- The token the job opens PRs with, which needs a repository admin and the robot's operator.
+- How `kube-agents-robot` is pointed at `skill-sync-conflict` issues, and review load in weeks when upstream changes many skills at once.
