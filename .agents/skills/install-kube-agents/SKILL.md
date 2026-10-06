@@ -289,10 +289,10 @@ Kubernetes RBAC, which is read-only in every set, and it does not gate the GitOp
 path, which works in every set. See the site's
 [security and IAM reference](../../../docs/site/src/content/docs/reference/security-and-iam.md).
 
-| Set         | Grants                                                            |
-| ----------- | ----------------------------------------------------------------- |
-| `read-only` | Viewer roles only — no GCP write capability. **Default.**         |
-| `custom`    | Exactly the roles passed in `--custom-roles`; no built-in bundle. |
+| Set         | Grants                                                                           |
+| ----------- | -------------------------------------------------------------------------------- |
+| `read-only` | Auditing and observability: read roles, no write to infrastructure. **Default.** |
+| `custom`    | Exactly the roles passed in `--custom-roles`; no built-in bundle.                |
 
 ## Machine-Readable Results
 
