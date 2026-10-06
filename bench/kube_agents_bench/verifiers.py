@@ -49,6 +49,7 @@ for the harness), so devops-bench discovers them without a fork.
 
 from __future__ import annotations
 
+import fnmatch
 import http.client
 import json
 import os
@@ -616,6 +617,9 @@ _MAX_PR_CANDIDATES = 8
 _PR_COMMITS_PAGE_SIZE = 100
 # `/pulls/{n}/commits` lists at most 250 commits.
 _PR_COMMITS_MAX_PAGES = 3
+# `/pulls/{n}/files` pages 100 at a time and lists at most 3000 files.
+_PR_FILES_PAGE_SIZE = 100
+_PR_FILES_MAX_PAGES = 30
 
 _NO_PR_RUN_CLOCK_REASON = (
     "the run's transcript carries no start time (TranscriptSnapshot.started_at "
@@ -1757,6 +1761,40 @@ class PullRequestOpenedVerifier(BaseVerifier):
     # passes on the pull request an earlier one opened and this one found
     # already open. See the docstring.
     accepts_stream_pull_request: bool = False
+    # Repository paths, as `fnmatch` globs, the pull request must not change.
+    # A remediation that creates an object beside a workload must leave the
+    # workload's own declaration alone: one written over it changes a file and
+    # passes every other clause here while replacing the Deployment it was
+    # meant to protect. Listed from `/pulls/{n}/files`, so the credential needs
+    # `pull_requests: read`.
+    unchanged_paths: list[str] = Field(default_factory=list)
+
+    def _changed_paths(
+        self, owner: str, repo: str, number: int, token: str, budget: float
+    ) -> tuple[list[str], str | None]:
+        """``(paths the pull request changes, unevaluable reason)``.
+
+        A rename counts under both names: moving the declaration away is as
+        much a change to it as rewriting it.
+        """
+        base = f"https://api.github.com/repos/{owner}/{repo}/pulls/{number}/files"
+        paths: list[str] = []
+        for page in range(1, _PR_FILES_MAX_PAGES + 1):
+            status, files = _http_get_json(
+                f"{base}?per_page={_PR_FILES_PAGE_SIZE}&page={page}", token, budget
+            )
+            if status != 200 or not isinstance(files, list):
+                return [], (
+                    f"GitHub answered {status} for the files of {owner}/{repo}#{number}; "
+                    "the token needs `pull_requests: read` to check which paths the "
+                    "fix changes, so this check could not be evaluated"
+                )
+            for entry in files:
+                if isinstance(entry, dict):
+                    paths += [str(entry[key]) for key in ("filename", "previous_filename") if entry.get(key)]
+            if len(files) < _PR_FILES_PAGE_SIZE:
+                break
+        return paths, None
 
     def _spent_before(
         self,
@@ -2280,6 +2318,26 @@ class PullRequestOpenedVerifier(BaseVerifier):
                     continue
                 if rejection:
                     rejected.append(rejection)
+                    continue
+            if self.unchanged_paths:
+                try:
+                    paths, unevaluable = self._changed_paths(owner, repo, number, token, budget)
+                except OSError as exc:
+                    unresolved.append(f"could not reach the GitHub API for {slug}: {exc}")
+                    continue
+                if unevaluable:
+                    unresolved.append(unevaluable)
+                    continue
+                touched_kept = sorted(
+                    path for path in paths
+                    if any(fnmatch.fnmatchcase(path, pattern) for pattern in self.unchanged_paths)
+                )
+                if touched_kept:
+                    rejected.append(
+                        f"{slug}: changes {', '.join(touched_kept)}, which this case "
+                        "requires the fix to leave unchanged (`unchanged_paths`) -- a "
+                        "remediation written over the workload's own declaration"
+                    )
                     continue
             # Within the skew allowance a pull request a hair older than the
             # run is still this run's; "an earlier repetition" only when the

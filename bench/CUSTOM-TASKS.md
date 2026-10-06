@@ -562,6 +562,12 @@ answer did not carry one, lists `/pulls?state=closed&head={owner}:{branch}`, the
 check gets by with. Any non-200 answer in this clause is an error rather than a fail, and names that
 permission.
 
+`unchanged_paths` lists repository paths, as `fnmatch` globs, the pull request must not change.
+A remediation that creates an object beside a workload, such as a PodDisruptionBudget, changes one
+file whether it lands beside the workload's declaration or over it, and only the second replaces
+the Deployment it was meant to protect. The clause lists `/pulls/{n}/files`, counts a rename under
+both names, and needs `pull_requests: read`; an answer it cannot read is an error, not a pass.
+
 `accepts_stream_pull_request: true` is for a case whose later runs meet a pull request an earlier
 run left open on the same branch, as a fleet audit's remediation case does. The audit's `finish`
 names the branch after the files the fix touches, so every later run of the audit on the
