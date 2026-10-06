@@ -14,7 +14,7 @@ import tempfile
 import unittest
 import unittest.mock
 
-from eval_dashboard import nightly, post_health, render
+from eval_dashboard import nightly, post_health, render, trend
 from test_eval_dashboard_pages import (
     chrome,
     dom_text,
@@ -244,6 +244,200 @@ class DigestLineTest(unittest.TestCase):
         self.assertIn("newly failing: case-0, case-1, case-2 and 2 more", self.line(data))
 
 
+# A night split across two jobs (nightly.py's module docstring): the main
+# part beside the writers part, both started at 00:00 UTC on Tuesday.
+WRITERS_JOB = "ci-kube-agents-eval-nightly-writers"
+WRITERS_2 = "3000000000000000012"
+SPLIT_CASES = [*CASES, {"name": "pr-a", "domain": "gitops", "active": False, "nightly_active": True},
+               {"name": "pr-b", "domain": "gitops", "active": False, "nightly_active": True}]
+WRITERS_URL = f"https://oss.gprow.dev/view/gs/kube-agents-evals-nightly-logs/logs/{WRITERS_JOB}/{WRITERS_2}"
+
+
+def writers(build, started, finished, tasks, result="SUCCESS", duration_s=7800, **extra):
+    return night(build, started, finished, tasks, result=result, duration_s=duration_s, job=WRITERS_JOB,
+                 log_url=f"https://oss.gprow.dev/view/gs/kube-agents-evals-nightly-logs/logs/{WRITERS_JOB}/{build}", **extra)
+
+
+WRITERS_SECOND = writers(WRITERS_2, "2026-09-08T00:00:05+00:00", "2026-09-08T02:10:05+00:00", [
+    task("pr-a", "pass", "pass", "pass"), task("pr-b", "fail", "fail", "fail", reason="no pull request opened"),
+])
+
+
+def split_nights():
+    """Monday: the main job alone, before the split. Tuesday: both parts."""
+    data = two_nights()
+    data["cases"] = copy.deepcopy(SPLIT_CASES)
+    data["runs"].append(copy.deepcopy(WRITERS_SECOND))
+    return data
+
+
+class SplitNightTest(unittest.TestCase):
+    def line(self, data, at=DIGEST_AT):
+        return nightly.digest_line(data, at, clock=lambda value: post_health.clock(value, weekday=True))
+
+    def test_one_job_alone_is_one_part_per_night_and_expects_no_other(self):
+        for report in nightly.night_reports(two_nights()):
+            self.assertEqual([p["part"] for p in report["parts"]], ["main"])
+            self.assertEqual((report["missing_parts"], report["running_parts"]), ([], []))
+        self.assertEqual(nightly.night_reports(two_nights())[0]["parts"][0], {
+            "part": "main", "build": NIGHT_2, "job": JOB, "result": "FAILURE", "truncated": False,
+            "started": "2026-09-08T00:00:00+00:00", "finished": "2026-09-08T06:40:00+00:00", "duration_s": 24000,
+            "log_url": f"https://oss.gprow.dev/view/gs/kube-agents-prow/logs/{JOB}/{NIGHT_2}", "recorded": 3,
+        })
+
+    def test_two_builds_on_one_date_are_one_night(self):
+        nights = nightly.night_reports(split_nights())
+        self.assertEqual([n["build"] for n in nights], [NIGHT_2, NIGHT_1], "two nights, filed by the main part's build")
+        last = nights[0]
+        self.assertEqual([(p["part"], p["build"], p["job"]) for p in last["parts"]], [("main", NIGHT_2, JOB), ("writers", WRITERS_2, WRITERS_JOB)])
+        self.assertEqual(last["counts"], {"expected": 5, "recorded": 5, "passed": 2, "partial": 1, "failed": 2, "infra": 0, "missing": 0})
+        self.assertTrue(last["complete"])
+        self.assertFalse(last["truncated"])
+        self.assertEqual((last["missing_parts"], last["running_parts"]), ([], []))
+        self.assertEqual(last["newly_failing"], ["case-b", "pr-b"])
+        self.assertEqual((last["job"], last["result"], last["project"]), (JOB, "FAILURE", "kube-agents-evals-3"), "the main part's")
+        self.assertEqual((last["started"], last["finished"], last["duration_s"]), ("2026-09-08T00:00:00+00:00", "2026-09-08T06:40:00+00:00", 24000))
+        by_name = {c["case"]: c for c in last["cases"]}
+        self.assertEqual(by_name["pr-b"]["transcript_url"], f"{WRITERS_URL}/artifacts/eval_pr-b_rep1.log", "each case links its own build")
+        self.assertEqual([c["case"] for c in last["cases"]], ["case-a", "pr-a", "pr-b", "case-b", "case-c"], "by domain, then name, across the parts")
+        # Monday, before any writers build: incomplete against today's
+        # matrix, but no part is missing.
+        self.assertEqual((nights[1]["missing_parts"], nights[1]["counts"]["missing"]), ([], 2))
+        self.assertEqual(self.line(split_nights()), "🌙 Nightly: 5 cases · 2 passed all reps · 1 partial · 2 failed · newly failing: case-b, pr-b · 6h 40m")
+        # The writers build listed before the main one joins the same night.
+        data = split_nights()
+        data["runs"].reverse()
+        data["runs"][0]["started"] = "2026-09-07T23:59:59+00:00"  # still Monday, UTC: Monday's night
+        self.assertEqual([n["build"] for n in nightly.night_reports(data)], [NIGHT_2, NIGHT_1])
+        self.assertEqual(nightly.nightly_job(split_nights()), JOB, "the main part's job names the periodic")
+
+    def test_a_writers_part_cut_short_leaves_the_main_results_standing(self):
+        data = split_nights()
+        data["runs"][-1].update(result="FAILURE", eval_verdict=None, tasks=data["runs"][-1]["tasks"][:1])
+        last = nightly.night_reports(data)[0]
+        self.assertFalse(last["truncated"], "the main part ran to the end")
+        self.assertFalse(last["complete"])
+        self.assertEqual([p["truncated"] for p in last["parts"]], [False, True])
+        self.assertEqual([p["recorded"] for p in last["parts"]], [3, 1])
+        self.assertEqual(last["missing"], ["pr-b"])
+        self.assertEqual(self.line(data), "🌙 Nightly: 4 cases · 2 passed all reps · 1 partial · 1 failed · newly failing: case-b · writers part truncated after 2h 10m · incomplete: 4 of 5 cases recorded · 6h 40m")
+        # The main part cut short too: the whole night is.
+        data["runs"][-2].update(result="ABORTED")
+        last = nightly.night_reports(data)[0]
+        self.assertTrue(last["truncated"])
+        self.assertEqual(self.line(data), "🌙 Nightly: truncated after 6h 40m · 4 of 5 cases recorded · the night's numbers are not comparable")
+
+    def test_a_main_part_cut_short_truncates_the_night(self):
+        """The main part holds nearly every case: its deadline is the night's,
+        whatever the writers part did."""
+        data = split_nights()
+        data["runs"][-2].update(result="FAILURE", eval_verdict=None)
+        last = nightly.night_reports(data)[0]
+        self.assertEqual([p["truncated"] for p in last["parts"]], [True, False])
+        self.assertTrue(last["truncated"])
+        self.assertFalse(last["complete"])
+        self.assertEqual(self.line(data), "🌙 Nightly: truncated after 6h 40m · 5 of 5 cases recorded · the night's numbers are not comparable")
+
+    def test_a_part_cut_short_with_every_case_recorded_is_incomplete_without_a_count(self):
+        data = split_nights()
+        data["runs"][-1].update(result="FAILURE", eval_verdict=None)
+        last = nightly.night_reports(data)[0]
+        self.assertEqual((last["truncated"], last["complete"], last["counts"]["missing"]), (False, False, 0))
+        self.assertEqual(self.line(data), "🌙 Nightly: 5 cases · 2 passed all reps · 1 partial · 2 failed · newly failing: case-b, pr-b · writers part truncated after 2h 10m · incomplete · 6h 40m")
+
+    def test_a_missing_writers_part_is_named_once_writers_parts_appear(self):
+        data = split_nights()
+        wednesday = night("3000000000000000003", "2026-09-09T00:00:00+00:00", "2026-09-09T06:40:00+00:00",
+                          [task(name, "pass", "pass", "pass") for name in ("case-a", "case-b", "case-c")])
+        data["runs"].append(wednesday)
+        last = nightly.night_reports(data)[0]
+        self.assertEqual([p["part"] for p in last["parts"]], ["main"])
+        self.assertEqual((last["missing_parts"], last["running_parts"]), (["writers"], []))
+        self.assertFalse(last["complete"])
+        self.assertEqual(self.line(data, DIGEST_AT + datetime.timedelta(days=1)),
+                         "🌙 Nightly: 3 cases · 3 passed all reps · 0 partial · 0 failed · nothing newly failing · writers part missing · incomplete: 3 of 5 cases recorded · 6h 40m")
+        # Still in flight on that date: running, not missing.
+        data["pending_builds"] = [{"build_id": "3000000000000000013", "first_seen": "2026-09-09T00:05:00+00:00", "tier": "nightly",
+                                   "log_url": f"https://oss.gprow.dev/view/gs/kube-agents-evals-nightly-logs/logs/{WRITERS_JOB}/3000000000000000013"}]
+        last = nightly.night_reports(data, running=nightly.running_nights(data, None))[0]
+        self.assertEqual((last["missing_parts"], last["running_parts"]), ([], ["writers"]))
+        # In flight from the next date: that is the next night's writers
+        # part, and this night's is still missing.
+        data["pending_builds"][0]["first_seen"] = "2026-09-10T00:05:00+00:00"
+        last = nightly.night_reports(data, running=nightly.running_nights(data, None))[0]
+        self.assertEqual((last["missing_parts"], last["running_parts"]), (["writers"], []))
+        # The main job running the whole matrix again (the split undone):
+        # nothing is missing, so no part is.
+        del data["pending_builds"]
+        data["runs"][-1]["tasks"] += [task("pr-a", "pass", "pass", "pass"), task("pr-b", "pass", "pass", "pass")]
+        last = nightly.night_reports(data)[0]
+        self.assertEqual((last["missing_parts"], last["complete"]), ([], True))
+
+    def test_a_writers_part_alone_names_the_main_part_missing_or_running(self):
+        data = split_nights()
+        data["runs"] = [r for r in data["runs"] if r["build_id"] != NIGHT_2]
+        last = nightly.night_reports(data)[0]
+        self.assertEqual((last["build"], last["job"]), (WRITERS_2, WRITERS_JOB), "filed by the only part it has")
+        self.assertEqual((last["missing_parts"], last["running_parts"]), (["main"], []))
+        self.assertIn("main part missing", self.line(data))
+        data["pending_builds"] = [{"build_id": "3000000000000000002", "first_seen": "2026-09-08T00:03:00+00:00", "tier": "nightly"}]
+        self.assertIn("main part still running", self.line(data, datetime.datetime(2026, 9, 8, 3, 0, tzinfo=UTC)))
+        brief = render.brief_document(dict(data, generated_at="2026-09-08T03:00:00+00:00"), None, None, None, admitted=frozenset(), demoted={})
+        self.assertEqual(brief["nightly"]["nights"][0]["running_parts"], ["main"])
+
+    def test_a_rerun_of_the_main_part_on_the_same_date_is_a_night_of_its_own(self):
+        data = split_nights()
+        data["runs"].append(night("3000000000000000004", "2026-09-08T09:00:00+00:00", "2026-09-08T15:00:00+00:00", [task("case-a", "pass", "pass", "pass")]))
+        nights = nightly.group_nights(nightly.sorted_nightly_runs(data))
+        self.assertEqual([sorted(n) for n in nights], [["main"], ["main", "writers"], ["main"]])
+        self.assertEqual(nightly.night_builds(data), {NIGHT_1: NIGHT_1, NIGHT_2: NIGHT_2, WRITERS_2: NIGHT_2, "3000000000000000004": "3000000000000000004"})
+        # The writers part ran that date, in the first night: not missing.
+        last = nightly.night_reports(data)[0]
+        self.assertEqual((last["build"], last["missing_parts"], last["running_parts"]), ("3000000000000000004", [], []))
+
+    def test_a_rerun_of_the_writers_part_on_the_same_date_replaces_it_in_its_night(self):
+        """The writers job is the short one, the one re-run after a flake:
+        its newest build that date stands for the night, which stays last
+        night with every case."""
+        data = split_nights()
+        rerun = "3000000000000000014"
+        data["runs"].append(writers(rerun, "2026-09-08T05:00:00+00:00", "2026-09-08T07:10:00+00:00", [
+            task("pr-a", "pass", "pass", "pass"), task("pr-b", "pass", "pass", "pass"),
+        ]))
+        nights = nightly.night_reports(data)
+        self.assertEqual([n["build"] for n in nights], [NIGHT_2, NIGHT_1])
+        last = nights[0]
+        self.assertEqual([(p["part"], p["build"]) for p in last["parts"]], [("main", NIGHT_2), ("writers", rerun)])
+        self.assertEqual((last["missing_parts"], last["running_parts"], last["complete"]), ([], [], True))
+        self.assertEqual(last["newly_failing"], ["case-b"])
+        self.assertEqual(nightly.night_builds(data), {NIGHT_1: NIGHT_1, NIGHT_2: NIGHT_2, WRITERS_2: NIGHT_2, rerun: NIGHT_2}, "the replaced build still files under its night")
+        self.assertEqual(self.line(data), "🌙 Nightly: 5 cases · 3 passed all reps · 1 partial · 1 failed · newly failing: case-b · 6h 40m")
+
+    def test_a_night_is_one_run_level_event_across_its_parts(self):
+        """The pages charge a broken run's failures to the run. A writers
+        part of two cases both failing is 100% failed on its own; with the
+        rest of its night it is not a broken run, so its failures count
+        against the cases, as they did before the split."""
+        data = split_nights()
+        data["runs"][-1]["tasks"] = [task("pr-a", "fail", "fail", "fail"), task("pr-b", "fail", "fail", "fail")]
+        rates = render.tier_pass_rates(data, "nightly", 30)
+        self.assertEqual(rates["pr-a"], (0, 3))
+        self.assertTrue(render.is_run_event({"tasks": data["runs"][-1]["tasks"]}), "alone it would be dropped")
+        presubmit = {"build_id": "1", "pr": 5, "started": "2026-09-08T08:00:00+00:00", "finished": "2026-09-08T09:00:00+00:00", "result": "FAILURE", "tasks": []}
+        self.assertTrue(render.classify.nightly_failed_recent("pr-a", presubmit, [r for r in data["runs"] if r.get("tier") == "nightly"]))
+
+    def test_the_trend_page_files_a_split_night_once(self):
+        data = split_nights()
+        records = [
+            {"case": "case-a", "build": NIGHT_2, "recorded_at": "2026-09-08T06:30:00+00:00", "key": {}},
+            {"case": "pr-a", "build": WRITERS_2, "recorded_at": "2026-09-08T02:00:00+00:00", "key": {}},
+        ]
+        nights = trend.night_documents(sorted(records, key=lambda r: r["recorded_at"]), data)
+        self.assertEqual([(n["id"], n["build"], n["cases"], n["at"]) for n in nights], [(f"build:{NIGHT_2}", NIGHT_2, 2, "2026-09-08T06:30:00+00:00")])
+        anchors = nightly.night_builds(data)
+        self.assertEqual({p["night"] for p in trend.case_points(records[1:], None, anchors)}, {f"build:{NIGHT_2}"})
+
+
 class BriefDocumentTest(unittest.TestCase):
     def test_brief_json_carries_the_nightly_block(self):
         brief = render.brief_document(two_nights(), None, None, None, admitted=frozenset(), demoted={})
@@ -365,6 +559,42 @@ class NightlyPageTest(unittest.TestCase):
             self.assertIn("No night on record yet. Once <code>ci-kube-agents-eval-nightly</code> has run", dom_text(out / "index.html"))
             brief = json.loads((out / "brief.json").read_text())
             self.assertEqual(brief["nightly"]["nights"], [])
+
+
+@unittest.skipUnless(chrome(), "headless Chrome not found")
+class SplitNightPageTest(unittest.TestCase):
+    """A night split across two jobs, its writers part cut short: the page
+    names both jobs and links both builds, says which part was cut short
+    without calling the whole night truncated, and a link to the writers
+    build opens the same night."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        data = load_fixture()
+        data["generated_at"] = NOW
+        data["cases"] = copy.deepcopy(SPLIT_CASES)
+        cut = copy.deepcopy(WRITERS_SECOND)
+        cut.update(result="FAILURE", eval_verdict=None, tasks=cut["tasks"][:1])
+        data["runs"] += copy.deepcopy([FIRST, SECOND]) + [cut]
+        with unittest.mock.patch.object(render.classify, "admitted_cases", return_value=frozenset()), \
+                unittest.mock.patch.object(render, "demotion_dates", return_value={}), \
+                unittest.mock.patch.object(render, "recent_merges", return_value=None):
+            cls.out = render_to(cls.tmp.name, data, health=health_doc("GREEN"))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_the_report_names_both_parts_and_the_part_cut_short(self):
+        app = dom_text(self.out / "nightly.html")
+        self.assertIn(f"<code>{JOB}</code> and <code>{WRITERS_JOB}</code>", app)
+        self.assertIn(f'<a href="{WRITERS_URL}">writers part</a>', app)
+        self.assertIn("<b>Incomplete:</b> writers part cut short after 2h 10m. 4 of the 5 cases the nightly matrix on this checkout expects are recorded.", app)
+        self.assertNotIn("The night was cut short", app)
+        self.assertIn("<h1>Last night's run</h1>", dom_text(self.out / "nightly.html", fragment=f"#build={WRITERS_2}"))
+        brief = dom_text(self.out / "index.html")
+        self.assertIn("newly failing: <code>case-b</code> · writers part cut short after 2h 10m · 6h 40m", brief)
 
 
 if __name__ == "__main__":

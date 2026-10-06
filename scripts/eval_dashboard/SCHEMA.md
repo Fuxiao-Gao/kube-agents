@@ -65,7 +65,10 @@ One job feeds it today, the presubmit gate (`pull-kube-agents-smoke-test`,
 one build per pull-request push). The collector also reads a second, the
 nightly periodic (`ci-kube-agents-eval-nightly`, `EVAL_TIER=nightly` in the
 same `hack/ci-eval-pr.sh`, against `main`, no pull request), which archives
-the same layout and is collected from the moment it starts running.
+the same layout and is collected from the moment it starts running. A
+night split across two pool projects adds the nightly's writers periodic
+(`ci-kube-agents-eval-nightly-writers`, the cases that request a pull
+request): its runs are `nightly` runs too, told apart by `job`.
 
 - `build_id` — the Prow build directory name, as a **string** (the ids
   overflow 53-bit JSON-consumer integers).
@@ -86,7 +89,10 @@ the same layout and is collected from the moment it starts running.
   and `classify.py`'s per-case `nightly_failed_recent` note.
 - `job` — **optional, additive**: the Prow job name, read from the build
   directory's URL (the segment before the build id) or overridden by
-  `--nightly-job`. `null` for a `--from-dir` build, which has no URL.
+  `--nightly-job`. `null` for a `--from-dir` build, which has no URL. On a
+  nightly run it names the part of the night the build ran
+  (`nightly.py`'s `night_part`): `ci-kube-agents-eval-nightly-writers` is
+  the writers part, any other job the main part.
 - `pr` — `started.json`'s `pull`, falling back to the number in the GCS
   path. `null` when neither is available, and **always `null` on a
   `nightly` run**: a periodic runs `main`, whatever its metadata carries.
@@ -344,9 +350,11 @@ Additive, optional, and safe to omit — consumers must default them.
   they are not in `runs[]` and do not raise the watermark. Entries are
   `{"build_id": "<id>", "first_seen": "<iso8601>"}`, plus `"tier": "nightly"`
   and `"log_url"` (Spyglass's page for the build directory, as for
-  `runs[].log_url`) when the nightly periodic's listing named the build
-  (absent: the presubmit's, as for `runs[].tier`; both are kept across
-  scans), lowest
+  `runs[].log_url`) when either nightly periodic's listing (the main or
+  the writers job) named the build (absent: the presubmit's, as for
+  `runs[].tier`; both are kept across scans). `nightly.py` reads a running
+  nightly build's part from the job segment of its `log_url`; an entry
+  without one counts as the main part. Lowest
   id first; `first_seen` is when the collector first listed the build. The next
   incremental scan re-reads exactly these ids even though they sit at or
   below the watermark, and drops an entry once it is recorded or once
@@ -554,6 +562,15 @@ what the renderer does with them.
   call is.
 - `--nightly-job <name>` — the `job` recorded on nightly runs; default
   derived from the prefix.
+- `--nightly-writers-prefix [<gs prefix>]` — the same for the nightly's
+  writers periodic; given without a value it is
+  `gs://kube-agents-evals-nightly-logs/logs/ci-kube-agents-eval-nightly-writers/`.
+  Read the three ways above against its own watermark (below), so until a
+  writers build is on record any listing failure other than a hang is the
+  note. Its runs' `job` is always the prefix's last segment, and they count
+  as the writers part only when that segment is
+  `ci-kube-agents-eval-nightly-writers` (`nightly.NIGHTLY_WRITERS_JOB`);
+  any other is warned about and reported as the main part.
 - `--from-dir <dir>` — local `<build_id>/` subdirectories with the same
   files; the offline/testing path. Its runs are the presubmit with
   `job: null`.
@@ -571,7 +588,9 @@ what the renderer does with them.
   terminal), and skip every GCS build whose id is ≤ the newest
   **numeric** `build_id` on record **for that source** — the presubmit
   scan resumes above the newest presubmit run, the nightly scan above the
-  newest nightly run; Prow's ids are one global sequence, so the newest
+  newest nightly run, and the writers scan above the newest nightly run of
+  the writers job (which the main nightly scan's watermark leaves out);
+  Prow's ids are one global sequence, so the newest
   presubmit id is normally far above every nightly id and a shared
   watermark would skip every night — except the
   ids on the prior's `pending_builds`, which are re-read regardless (the
@@ -680,7 +699,8 @@ gate comment, the tracking issue) and `briefHref` / `gridHref` / `runHref`
   grammar and the `Z` form need none).
 - `run.html#build=<digits>`; an id not in `brief.json` shows a
   not-found page naming the window (`RUN_VIEW_DAYS`, 14 days).
-- `nightly.html#build=<digits>` opens that night instead of the newest;
+- `nightly.html#build=<digits>` opens that night instead of the newest
+  (either part's build opens a split night);
   an id not among the `nightly.nights[]` on record says so and links
   last night's.
 - `window`, `rows`, `sort` and `show` are the Grid's and the Cases page's
@@ -759,13 +779,32 @@ when the checkout is shallow or has no git; the Brief then omits "what
 changed right before" and the Grid its merge markers).
 
 `nightly` is `{job, nights[], running[]}` from `nightly.py`: `job` the
-periodic's name as the newest nightly run carries it (the default when none
-is on record),
-`nights[]` the last `NIGHTS_ON_RECORD` (14) nightly runs **newest first**,
+periodic's name as the newest main-part nightly run carries it (the default
+when none is on record),
+`nights[]` the last `NIGHTS_ON_RECORD` (14) nights **newest first**,
 each `{build, job, head_sha, project, started, finished, duration_s, result,
 log_url, truncated, complete, counts{expected, recorded, passed, partial,
 failed, infra, missing}, missing[], newly_failing[], fixed[],
-previous_build, cases[]}`. `cases[]` is every task row the night measured,
+previous_build, parts[], missing_parts[], running_parts[], cases[]}`. A
+night is one nightly run, or the main and writers parts' runs that started
+on one UTC date. A second run of the main part that date is a night of its
+own; a second run of the writers part takes the writers part of the date's
+newest night;
+`build`, `job`, `head_sha`, `project`, `result` and `log_url` are the main
+part's (the writers part's when there is no main part), `started` and
+`finished` the earliest and latest of the parts, `duration_s` the longest
+part's. `parts[]` is each run the night has, main first, as `{part, build,
+job, result, truncated, started, finished, duration_s, log_url, recorded}`
+with `part` `main` or `writers` and `recorded` the cases it recorded.
+`missing_parts[]` names a part the night should have and does not, and
+`running_parts[]` one that is still in flight (a `running[]` entry of that
+part first seen on the night's UTC date). A part that ran that date in
+another night is neither. The main part is expected beside a writers part;
+the writers part only once a writers run on record started on or before
+the night's date **and** the night is missing cases. So a night of the
+main job alone before the split has neither, and so does one after the
+main job runs the whole matrix again that records every case; one short of
+cases still reports the writers part missing. `cases[]` is every task row the night measured,
 sorted by domain then name, as `{case, domain, state, reps{pass, fail,
 infra}, reason, transcript_url}` with `state` in `pass|partial|fail|infra`
 by the strip's rule over the task's reps (no `reps` key: the task's result
@@ -776,10 +815,15 @@ pass). `expected` counts the cases `nightly_active` on this checkout;
 (an interrupt), or any other non-`SUCCESS` result with `eval_verdict`
 `null` — the periodic's deadline arrives as SIGTERM and Prow records
 `FAILURE`, so `ABORTED` alone would miss it; a record without the field
-is unknown, not truncated. `complete` is neither truncated nor missing
-anything. `newly_failing`
-is every `fail` tonight that was not `fail` on `previous_build`, the night
-before it on record (the one past the window included), `fixed` every
+is unknown, not truncated. `parts[].truncated` is that test on each part's
+run. The night's `truncated` is its main part's (every part's when it has
+no main part), so a writers part at its deadline leaves the main part's
+numbers standing. `complete` is no part
+truncated, no case missing, and no part missing or running. A case recorded
+by both parts counts once, as the main part recorded it. `newly_failing`
+is every `fail` tonight that was not `fail` on the night before it on
+record (the one past the window included; `previous_build` names its main
+part's build), `fixed` every
 `fail` then that is `pass` now; both `[]` on the first night, when
 `previous_build` is `null`. `log_url` and `transcript_url` point at
 Spyglass under `logs/<job>/<build>`, a periodic's path, in the bucket the
@@ -810,7 +854,8 @@ spreads and appear nowhere else (not as points, nights, key changes or in
 five components. `nights[]` is every night inside the drawn window the
 store holds a record for, oldest first, `{id, at, build, commit, started, log_url, cases}` — `id` is
 `build:<prow build id>` from the object name (or `at:<recorded_at>` for a
-record without one), `started` and `log_url` the collector's when that
+record without one; the records of a split night's two builds share the
+build `nightly.nights[]` files that night by), `started` and `log_url` the collector's when that
 build is a nightly run in `data.json` (`null` otherwise); the page dates
 every night by `at`, the stamp its points and markers are placed by, and
 uses `build` only for the link to the report. `cases{}` is per case `{domain, points[],
