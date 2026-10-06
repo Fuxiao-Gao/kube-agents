@@ -184,10 +184,10 @@ class LauncherThemeTest(unittest.TestCase):
             {name.strip() for name in accepted.group(1).split("|")}, set(THEMES)
         )
 
-    def test_launcher_refuses_an_unknown_theme_before_anything_else(self):
+    def test_launcher_refuses_an_unknown_theme_before_calling_gcloud(self):
         result = subprocess.run(
             ["bash", str(REPO_ROOT / "scripts" / "admin_portal.sh")],
-            env={**os.environ, "ADMIN_PORTAL_THEME": "solarized"},
+            env={"PATH": os.environ.get("PATH", ""), "ADMIN_PORTAL_THEME": "solarized"},
             capture_output=True,
             text=True,
             check=False,
