@@ -195,11 +195,11 @@ FIXTURE_NOT_READY = {
         "account is denied, as a fixture role of its own; the evaluation fleet has "
         "one project per install today, so the case cannot be red on main"
     ),
-    "networking-audit-pod-range-exhaustion": (
-        "#2450: its fixture is its own stack (prebuilt/pod-range-exhaustion), "
-        "but the case has not had its first red-on-main and green runs, and "
-        "the nightly's infra-lock chain has no room for another stack case "
-        "(#2467). Run it by hand against a dev install, as its header says"
+    "networking-audit-subnet-range-exhaustion": (
+        "#2467: its fixture is its own stack (prebuilt/subnet-range-exhaustion) "
+        "and it has its eval record (#2450, #2468), but the nightly's "
+        "infra-lock chain has no room for another stack case. Run it by hand "
+        "against a dev install, as its header says"
     ),
     "networking-audit-second-project": (
         "#1865: needs a second GCP project per pool project that the agent's "

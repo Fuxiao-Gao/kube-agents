@@ -19,48 +19,51 @@
 
 variable "project_id" {
   type        = string
-  description = "GCP Project ID the planted VPC and cluster are created in"
+  description = "GCP Project ID the planted VPC and subnet are created in"
 }
 
-# The runner's per-run task-cluster name (TF_VAR_cluster_name, derived from
-# the Prow run identity by hack/ci-eval-pr.sh). Not used as a resource name:
-# every stack in a run is handed the same value, and prebuilt/gpu-stress-test
-# creates a cluster under exactly that name. main.tf hashes it into this
-# stack's own names instead, so the two never share one.
+# The runner's per-run task-cluster name (TF_VAR_cluster_name). Not used as a
+# resource name; main.tf hashes it into this stack's own names.
 variable "cluster_name" {
   type        = string
   description = "Per-run identity the stack's resource names are derived from"
 }
 
-# A zone, not a region: a regional cluster puts one node in each of three
-# zones, and three nodes need three Pod blocks in a range that holds one, so
-# the create would fail rather than plant the defect.
+# The runner's zone (GCP_LOCATION). The planted subnet is regional, so only
+# the zone's region is used.
 variable "location" {
   type        = string
-  description = "Zone of the planted cluster; its region holds the planted subnet"
-
+  description = "Zone whose region holds the planted subnet"
   validation {
     condition     = can(regex("^[a-z]+-[a-z]+[0-9]+-[a-z]$", var.location))
-    error_message = "location must be a zone such as us-west4-a: a regional cluster needs a Pod block per zone and the planted range holds one."
+    error_message = "location must be a zone such as us-west4-a."
   }
 }
 
+# Both arrive from the environment (TF_VAR_host_cluster_name /
+# TF_VAR_host_cluster_location, exported by hack/ci-eval-pr.sh), and only
+# feed the outputs: the agent's host cluster, which devops-bench points the
+# kubeconfig at.
+variable "host_cluster_name" {
+  type        = string
+  description = "Name of the agent's host cluster"
+}
+
+variable "host_cluster_location" {
+  type        = string
+  description = "Region or zone of host_cluster_name"
+}
+
 # ---------------------------------------------------------------------------
-# The planted range. Its name is also written into
-# bench/tasks/networking-audit-pod-range-exhaustion/task.yaml — the prompt
+# The planted subnet's name prefix is also written into
+# bench/tasks/networking-audit-subnet-range-exhaustion/task.yaml — the prompt
 # does not name it (the audit has to find it), but the objective asserts on
 # it. Change one and change both.
 # ---------------------------------------------------------------------------
-
-# The planted noun the ledger objective requires: the helper files the
-# finding on object SecondaryRange/<this>, so a filed finding's derived id
-# ends in secondaryrange-<this>. Fixed rather than derived from the run, which
-# is safe because a secondary range name is unique only within its subnet,
-# and the subnet is this stack's own.
-variable "pod_range_name" {
+variable "subnet_name_prefix" {
   type        = string
-  description = "Name of the subnet's Pod secondary range, the one the cluster fills"
-  default     = "bench-pods-exhausted"
+  description = "Prefix of the planted VPC, subnet and address names"
+  default     = "bench-subnet-full"
 }
 
 variable "prow_build_id" {
