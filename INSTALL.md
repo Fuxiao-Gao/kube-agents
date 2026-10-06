@@ -32,9 +32,10 @@ This comprehensive, step-by-step guide explains how to install, configure, deplo
    - [Step 5: Deploy Integrations (LiteLLM & GitHub)](#step-5-deploy-integrations-litellm--github)
    - [Step 6: Apply Custom Resources](#step-6-apply-custom-resources)
 7. [Method 3: Local Development & Fast Iteration](#method-3-local-development--fast-iteration)
-8. [Upgrading](#upgrading)
-9. [Teardown & Cleanup](#teardown--cleanup)
-10. [Troubleshooting & Common FAQ](#troubleshooting--common-faq)
+8. [What to Expect After Installation](#what-to-expect-after-installation)
+9. [Upgrading](#upgrading)
+10. [Teardown & Cleanup](#teardown--cleanup)
+11. [Troubleshooting & Common FAQ](#troubleshooting--common-faq)
 
 ---
 
@@ -928,6 +929,72 @@ For fast iteration on the operator itself, against a GKE cluster or the kind clu
    ```bash
    make dev-rebuild-agent ARGS="platform"
    ```
+
+## What to Expect After Installation
+
+The commands below use the names this guide uses: namespace `kubeagents-system` and the
+`PlatformAgent` named `platform-agent`.
+
+### Within minutes: the components are running
+
+```bash
+kubectl wait platformagent/platform-agent -n kubeagents-system --for=condition=Ready --timeout=25m
+kubectl get pods -n kubeagents-system
+```
+
+`Ready` means the gateway, the shell sandbox and the credential broker are all up. A first boot can
+take over fifteen minutes. The site's quickstart
+[Verify step](docs/site/src/content/docs/install/quickstart-gke.mdx) says what each pod is and
+which startup errors to ignore. If a pod stays unready, see
+[Troubleshooting & Common FAQ](#troubleshooting--common-faq).
+
+### After the first chat message: the inventory report
+
+The first-run inventory scan starts by itself: the Platform Agent audits the GKE clusters in scope
+and ranks the findings. The ranked report is posted once, into the thread of the first message
+someone sends the bot in Google Chat or Slack
+([Step 5](#step-5-enable-google-chat--slack-integrations-manual-required-steps)), after the report
+is ready. A `kubectl exec` session ([Step 6](#step-6-talk-to-the-agent-with-no-chat-platform)) does
+not receive it; with no chat platform enabled, read it from the sandbox once it is written. After
+a delivery run the file is renamed `INVENTORY.delivered.md`.
+
+```bash
+kubectl exec platform-agent-shell-0 -n kubeagents-system -c shell -- cat /opt/data/INVENTORY.md
+```
+
+To see how far onboarding has got:
+
+```bash
+kubectl exec deploy/platform-agent-gateway -n kubeagents-system -c platform-agent -- \
+  ls /opt/data/.bootstrap_scan_filed /opt/data/.bootstrap_completed
+```
+
+`.bootstrap_scan_filed` means the scan's task has been filed. `.bootstrap_completed` means a
+delivery run has claimed the report; it is written before the chat post, so it does not prove the
+post arrived, and the report is not sent again. `ls` reports the one that does not exist yet.
+The site's [first-run onboarding](docs/site/src/content/docs/concepts/chatops.md#first-run-onboarding)
+section describes each stage.
+
+### Each morning: the scheduled audits
+
+The Platform Agent runs its fleet audits on a cron schedule in UTC, some daily and some on
+Mondays only. To list every job with its next and last run:
+
+```bash
+kubectl exec deploy/platform-agent-gateway -n kubeagents-system -c platform-agent -- \
+  env HERMES_HOME=/opt/data/profiles/platform hermes cron list
+```
+
+Each audit's report is a ledger issue in the GitOps repository, so the audits need the GitHub
+integration: with no GitOps repository configured, every run fails before it audits anything. A
+run that changed something since the last one also posts a one-line summary linking the issue to
+the home channel of each enabled chat platform (the Slack channel is set in Step 5, the Google Chat
+one by `GOOGLE_CHAT_HOME_CHANNEL`), and an audit can open remediation pull requests in the
+repository.
+[Autonomous watchdogs](docs/site/src/content/docs/concepts/autonomous-watchdogs.md) covers the
+schedule and delivery, and
+[the declarative workflow](docs/site/src/content/docs/concepts/declarative-workflow.md) the ledger
+issue and the pull requests.
 
 ## Upgrading
 
