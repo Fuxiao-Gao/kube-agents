@@ -211,17 +211,7 @@ flowchart LR
     class M plain;
 ```
 
-What counts as "other lines" was measured with git 2.56, rebasing two patches that change lines 10–11 and 25 of a file onto a changed upstream, and one patch onto an upstream that renamed or deleted the patched file:
-
-| Upstream change                   | Today's script                        | Rebase                         |
-| --------------------------------- | ------------------------------------- | ------------------------------ |
-| Lines inserted above the patch    | applies (snippet still matches)       | applies                        |
-| Edit two or three lines away      | stops if the line is inside a snippet | applies                        |
-| Edit on the adjacent line (12)    | stops if the line is inside a snippet | stops with conflict markers    |
-| Edit on a patched line (10)       | stops                                 | stops with conflict markers    |
-| Same change as patch 2 (line 25)  | skipped silently, entry stays         | patch dropped, reported        |
-| Patched file renamed, then edited | stops (file not found)                | applies to the renamed file    |
-| Patched file deleted              | stops (file not found)                | stops (modify/delete conflict) |
+"Other lines" means at least one unchanged line separates upstream's edit from the lines a patch changes. An edit on a patched line, or on the line right next to it, stops the sync; anything further away merges. A patched file that upstream renames is followed to its new name, and one that upstream deletes stops the sync. These rules were checked with git 2.56.
 
 - A stop is a real merge conflict: upstream and we rewrote the same passage, and only someone who knows both intents can write the merged text.
 - Any automatic rule would pick a side and silently drop either our correction or upstream's improvement, so the decision stays with a person and everything around it is automated.
