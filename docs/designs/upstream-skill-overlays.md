@@ -80,11 +80,11 @@ How each fault is addressed:
 
 | #   | Fix                                                                                                                                                                                                                                 | Section                                                         |
 | --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| F1  | Each skill's lock records its upstream commit and sha256, so we know and can verify which version ships; the sync rebases our patches onto that copy, so git does the matching and three-way merge instead of an exact-text search. | [Sync](#sync-rebasing-the-overlay)                              |
+| F1  | Each skill's lock records its upstream commit and sha256, so we know and can verify which version ships; the sync rebases our patches onto that copy, so git does the matching and three-way merge instead of an exact-text search. | [Sync](#syncing-a-skill)                                        |
 | F2  | Each change is a patch file next to the skill it changes; one mechanism covers every file type.                                                                                                                                     | [The three layers](#the-three-layers)                           |
 | F3  | One overlay directory and one lock per skill, patches ordered by filename: no shared file to conflict on.                                                                                                                           | [Patch order](#patch-order-no-series-file)                      |
 | F4  | `make skills-check` rebuilds every mirrored skill and fails on any byte no patch records.                                                                                                                                           | [The presubmit check](#the-presubmit-check)                     |
-| F5  | A patch upstream adopts comes out of the rebase empty and is reported retired; the sync also reports an `append.md` whose text the new upstream copy already contains.                                                              | [Sync](#sync-rebasing-the-overlay)                              |
+| F5  | A patch upstream adopts comes out of the rebase empty and is reported retired; the sync also reports an `append.md` whose text the new upstream copy already contains.                                                              | [Sync](#syncing-a-skill)                                        |
 | F6  | A skill is mirrored because it has a lock, not because of its name; local skills are never touched.                                                                                                                                 | [Skills this repository writes](#skills-this-repository-writes) |
 | F7  | `make skills-sync SKILL=<skill>` syncs one skill, when someone chooses, in its own PR; a conflict stops only that skill. `make skills-status` and a notice in `refresh` show which skills upstream has moved past.                  | [Syncing a skill](#syncing-a-skill)                             |
 
@@ -158,9 +158,18 @@ The alternative is a `series` file listing patches in order, as `quilt` does. Ev
 - Same or adjacent lines: GitHub reports a conflict on the second PR; its author rebases and runs `make skills-refresh`.
 - Nearby but not adjacent lines: both PRs can merge green, because `validate` does not rerun on an open PR when `main` moves and Tide retests only Prow presubmits. The second patch may then no longer apply; `validate`'s run on `main` fails and names the skill, and a follow-up PR runs `make skills-refresh`. With a merge queue (`validate` already runs on `merge_group`), the second PR fails in the queue instead.
 
-### Sync: rebasing the overlay
+### Syncing a skill
 
-A sync bumps one skill's pin, in a scratch repository, so the working tree changes only when the result is ready:
+Syncing is manual and per skill; each sync goes in its own PR.
+
+| Command                              | Does                                                                                                                                |
+| ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `make skills-sync SKILL=<skill>`     | Moves one skill to upstream's latest version (or `REF=<commit>`), rebasing its patches                                              |
+| `make skills-sync SKILL=<new-skill>` | Adopts a new upstream skill: copy, lock, empty overlay and generated skill. Refuses if a skill without a lock already has that name |
+| `make skills-status`                 | Lists mirrored skills whose upstream folder changed since their pin, and upstream `gke-*` skills not yet mirrored                   |
+| `make skills-continue SKILL=<skill>` | Resumes a sync that stopped on a conflict                                                                                           |
+
+How a sync works, in a scratch repository so the working tree changes only when the result is ready:
 
 1. Commit the old upstream copy, then each patch on top of it, in filename order, as its own commit.
 2. Commit the new upstream copy on a separate branch from the same root.
@@ -226,6 +235,8 @@ What counts as "other lines" was measured with git 2.56, rebasing two patches th
 
 - A stop is a real merge conflict: upstream and we rewrote the same passage, and only someone who knows both intents can write the merged text.
 - Any automatic rule would pick a side and silently drop either our correction or upstream's improvement, so the decision stays with a person and everything around it is automated.
+- A sync PR changes what the agent reads, so it follows the eval-driven rule like any skill change: a case that is red on `main` and green three times with the sync.
+- Upstreaming shrinks the work: a general fix (the NetworkPolicy two-step, the `answer_query` quota) is filed as a `google/skills` issue and recorded in `Upstream-Issue:`; once upstream carries it, the next sync reports it retired.
 
 ### The presubmit check
 
@@ -300,44 +311,31 @@ What `make skills-check` reports when a step is skipped:
 - Migration records the pin as a patch (its `Why:` says why we run a newer base image), removes the Dependabot entry for that directory, and bumps the image from then on by changing the patch.
 - Any other in-place tool pointed at a mirrored skill gets the same treatment.
 
-### Syncing a skill
-
-Syncing is manual and per skill:
-
-- `make skills-sync SKILL=<skill>` moves one skill to upstream's latest version (or `REF=<commit>`), rebasing its patches; the result goes in its own PR.
-- `make skills-status` lists the mirrored skills whose upstream folder changed since their pin, and the upstream `skills/cloud/gke-*` skills not yet mirrored.
-- `make skills-sync SKILL=<new-skill>` adopts a new upstream skill: copy, lock, empty overlay and the generated skill (identical to the copy until a patch is added). It refuses if a skill without a lock already has that name; a person renames one of them first.
-- When a patch stops, only that skill's sync stops and nothing is written for it; the person resolves the text and runs `make skills-continue`.
-- A sync PR changes what the agent reads, so it follows the eval-driven rule like any skill change: a case that is red on `main` and green three times with the sync.
-- The resolution needs a person: a skill is instructions the agent follows, and a merge that reads well can still change what the agent does.
-- Upstreaming shrinks the work: a general fix (the NetworkPolicy two-step, the `answer_query` quota) is filed as a `google/skills` issue and recorded in `Upstream-Issue:`; once upstream carries it, the next sync reports it retired.
-
 ## Security guardrails
 
-GitHub has no read-only directories, so each guardrail below is a check, an `OWNERS` rule, a review rule or a behaviour of the tools in this design; none exists today. The checks and the `OWNERS` rule block merge; [Where the checks run](#where-the-checks-run) says how.
+GitHub cannot make a directory read-only, so the design adds these. The checks are steps in the required `validate` job; approvals go through `OWNERS`.
 
-| Scenario                                                                 | Risk                                                                                                                                                                                                                               | Guardrail                                                                                                                                                                                                                                                                                                      |
-| ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Two concurrent, unrelated changes to one skill                           | A shared list makes every pair conflict, so authors resolve by hand                                                                                                                                                                | No shared file: filename-ordered patches and a lock per skill. Same or adjacent lines conflict in git and block the second PR. Nearby lines can both merge green; `validate` on `main` then fails and names the skill until a follow-up runs `make skills-refresh`. A merge queue would catch it before merge. |
-| Direct edit to a generated skill with no patch                           | The edit is lost on the next sync                                                                                                                                                                                                  | `make skills-check` rebuilds ① + ② and fails on any difference from ③.                                                                                                                                                                                                                                         |
-| Accidental edit to the upstream copy                                     | Edit the copy, run `make skills-generate`, and the rebuild-and-compare step passes with no patch recorded                                                                                                                          | Checksum of ① against `upstream.lock`, offline, every PR.                                                                                                                                                                                                                                                      |
-| Edit to the upstream copy plus a matching edit to the lock               | The checksum passes; unpublished content becomes agent instructions                                                                                                                                                                | Comparison with `google/skills` at the locked commit, on PRs that change ① or any `upstream.lock`.                                                                                                                                                                                                             |
-| Lock pinned to a commit that exists only in a fork                       | GitHub serves fork-only commits through the parent repository's URL, so a fetch by commit accepts content nobody published                                                                                                         | The same comparison requires the commit to be reachable from upstream's default branch.                                                                                                                                                                                                                        |
-| Change to the upstream copy approved by someone outside the skill owners | A routine-looking sync PR carries unreviewed instructions                                                                                                                                                                          | `OWNERS` on `third_party/google-skills/` naming a new `skill-owners` alias in `OWNERS_ALIASES` (membership to be decided), with `no_parent_owners`, as `hack/OWNERS` does with `eval-crew`; a root approver does not count.                                                                                    |
-| No record of which upstream version ships                                | A behaviour change cannot be traced to an upstream version, and nothing shows our copy is what upstream published; the conformance test for C4 (`test_C4_upstream_skills_are_pinned_and_verified`) records it as a known violation | Commit and sha256 in every lock; every pin bump is a reviewed PR.                                                                                                                                                                                                                                              |
-| In-place tool edits a generated skill (Dependabot)                       | A standing red PR, or an edit nobody records                                                                                                                                                                                       | The entry is removed and its pin becomes a patch; the check fails any other such tool.                                                                                                                                                                                                                         |
-| Adopting an upstream skill whose name a local skill uses                 | The new copy overwrites our skill                                                                                                                                                                                                  | `make skills-sync` refuses; a person renames one of them first.                                                                                                                                                                                                                                                |
+| Scenario                                                               | Guardrail                                                                                                                                                                                   |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Two concurrent, unrelated changes to one skill                         | No shared file: patches in filename order, one lock per skill. Same-line edits conflict in git; nearby edits fail `validate` on `main` after merge (a merge queue would catch them before). |
+| Direct edit to a generated skill with no patch                         | `make skills-check` fails: the rebuilt skill (① + ②) differs from ③.                                                                                                                        |
+| Hand edit to the upstream copy                                         | `make skills-check` fails: the copy no longer matches the sha256 in `upstream.lock`.                                                                                                        |
+| Hand edit to the copy and the lock, or a pin to a fork-only commit     | The upstream comparison fails: the copy differs from `google/skills` at that commit, or the commit is not on upstream's default branch.                                                     |
+| Upstream-copy change approved by someone outside the skill owners      | `OWNERS` on `third_party/google-skills/`: a `skill-owners` alias with `no_parent_owners`, so a root approver does not count.                                                                |
+| No record of which upstream version ships (conformance requirement C4) | Commit and sha256 in every lock; every pin bump is a reviewed PR.                                                                                                                           |
+| A tool edits a generated skill in place (Dependabot)                   | Its entry is removed and the pin becomes a patch; `make skills-check` fails any other such tool.                                                                                            |
+| Adopting an upstream skill whose name a local skill uses               | `make skills-sync` refuses.                                                                                                                                                                 |
 
 ### Where the checks run
 
-| Check                                            | Runs as                                                         | Runs on                                                                                         | Blocks merge because                                                                                             |
-| ------------------------------------------------ | --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `make skills-check` (checksum, rebuild, compare) | A step in the `validate` job (`.github/workflows/validate.yml`) | Every PR, offline                                                                               | `validate` is one of the contexts `main` already requires                                                        |
-| Comparison with `google/skills`                  | A step in the same job                                          | Every PR; skips itself unless the PR changes `third_party/google-skills/` or an `upstream.lock` | Same job. Not a workflow path filter: a required check that never starts waits as "Expected" and blocks every PR |
-| `OWNERS` on the upstream copy                    | Prow's approval plugin; no CI job                               | Every PR that changes the copy                                                                  | Tide merges only with the `approved` label                                                                       |
+| Check                           | Runs as                                                  | Runs on                                                                                         |
+| ------------------------------- | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `make skills-check`             | A step in `validate`                                     | Every PR, offline                                                                               |
+| Comparison with `google/skills` | A step in `validate`                                     | Every PR; skips itself unless the PR changes `third_party/google-skills/` or an `upstream.lock` |
+| `OWNERS`                        | Prow's approval plugin; Tide merges only with `approved` | PRs that change the upstream copy                                                               |
 
-- A step in the already-required `validate` job blocks merge whether it fails or never posts.
-- A new, separately named job would block merge when it posts red (Tide refuses any red context), but not when it never posts, because `main` does not require it until an admin adds it.
+- `validate` is already required, so its steps block merge from day one; a new job would need an admin to make it required.
+- The comparison skips itself rather than using a workflow path filter, because a required check that never starts blocks every PR.
 
 ## Alternatives considered
 
