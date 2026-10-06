@@ -192,7 +192,29 @@ flowchart TB
     class O1,O2,N1,N2 overlay;
 ```
 
-Each patch is merged three ways — old upstream copy as common ancestor, patch as ours, new copy as theirs — and ends one of three ways:
+Each patch is merged three ways. The old upstream copy is the common ancestor; ours and the new upstream both start from it, and the merge brings them back together:
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 40, 'rankSpacing': 45}}}%%
+flowchart TB
+    A["① <b>Old upstream</b><br/>third_party copy at the current pin<br/><i>common ancestor</i>"]
+    O["<b>Ours</b><br/>old upstream + our patches (②)"]
+    N["① <b>New upstream</b><br/>google/skills at the new pin"]
+    M["③ <b>Merged result</b><br/>new upstream + our rebased patches"]
+    A -->|"our patches"| O
+    A -->|"upstream's commits"| N
+    O --> M
+    N --> M
+
+    classDef mirror fill:#0EA5E9,stroke:#0369A1,color:#fff;
+    classDef overlay fill:#14B8A6,stroke:#0F766E,color:#fff;
+    classDef gen fill:#6366F1,stroke:#4338CA,color:#fff;
+    class A,N mirror;
+    class O overlay;
+    class M gen;
+```
+
+The ancestor is what lets git tell which side changed a line. Today's script has only ours and the new upstream, so any difference inside a snippet stops it. Each patch ends one of three ways:
 
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}}}%%
