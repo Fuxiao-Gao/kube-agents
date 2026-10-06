@@ -395,17 +395,23 @@ GitHub has no read-only directories, so each guardrail below is a check, an `OWN
 - Patch files are awkward to edit by hand, hence `make skills-refresh`; a sync PR carries refreshed patches alongside the upstream and generated diffs.
 - Migration rewrites the script the open skill-sync PRs edit, so it lands after them.
 
-## Rollout
+## Rollout and estimated effort
 
-| Step | Delivers                                                                                                                                             |
-| ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1    | Tooling; the upstream copy with its docs-map rows, exclusions, `OWNERS` and the `skill-owners` alias; one pilot skill with a single substitution.    |
-| 2    | `make skills-check` and the comparison with `google/skills`, as steps in `validate`.                                                                 |
-| 3    | Every other skill migrated, generated tree byte-identical to `main`; registries, their tests and the old script removed; references updated (below). |
-| 4    | The weekly sync job, add-skill PRs and the name-collision issue.                                                                                     |
-| 5    | Conflict issues (unassigned, `skill-sync-conflict`) for `kube-agents-robot` to claim.                                                                |
+Five PRs implement the design: about one week for one engineer working with a coding agent. None changes what the agent sees, since every migrated skill stays byte-identical to `main`, so none needs the eval loop; live validation is the byte-identical proof plus a spot check of a skill file in the agent pod. Each PR still runs the presubmit smoke test (1.5 to 3.5 hours per push), which is waiting time, and the PRs overlap rather than queue.
 
-Step 3 also updates every file that names the old script or its registries:
+| PR  | Delivers                                                                                                                                                                                                                                                                                   | Depends on             | Days  |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------- | ----- |
+| 1   | `scripts/skill_overlay.py` (`sync`, `continue`, `refresh`, `generate`, `check`, adopting a new upstream skill), the lock format, make targets and tests. No skill migrated.                                                                                                                | this design            | 1–2   |
+| 2   | Pilot: `gke-workload-troubleshooting` migrated (copy, lock, one patch); `third_party/google-skills/` with `OWNERS` and the `skill-owners` alias, docs-map rows and exclusions; `make skills-check` and the upstream comparison as steps in `validate`; the old script skips locked skills. | PR 1                   | 1     |
+| 3   | The other 28 skills migrated: copies, locks, the remaining patches, five `append.md` files, and the in-tree edits no registry records. Generated tree byte-identical to `main`.                                                                                                            | PR 2                   | 1     |
+| 4   | Old script, registries and their tests removed; references updated (list below).                                                                                                                                                                                                           | PR 3                   | 0.5   |
+| 5   | Weekly sync job: per-skill pin-bump PRs, add-skill PRs, retired-patch lists, `skill-sync-conflict` issues, `make docs-generate` in sync PRs; dry run by default; the note in the robot contract.                                                                                           | PR 1 (parallel to 2–4) | 1–1.5 |
+
+- PR 5 is built alongside PRs 2–4 and switched to live once PR 4 merges.
+- Not in the week: the first live sync. It lands what upstream has added since the last sync (new skills, two renamed TPU skills), which the agent does see, so it follows the eval loop like any skill change.
+- Outside the engineer's control, and worth starting first: landing or pausing the open skill-sync PRs before PR 3, choosing the `skill-owners` members before PR 2, and the token the weekly job opens PRs with before PR 5 goes live.
+
+PR 4 also updates every file that names the old script or its registries:
 
 - `AGENTS.md` Skills Guidelines.
 - The `skill_sync` source in `tests/conformance/_harness.py` and its C4 tests, repointed at the new script.
