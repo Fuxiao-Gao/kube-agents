@@ -3528,12 +3528,31 @@ const scopedSAPoolKey = "scoped-sa-pool.json"
 
 const scopedSAPoolMountPath = "/etc/credential-proxy/" + scopedSAPoolKey
 
+// scopedSAPoolVersion is the pool-file format the broker's `parse_pool`
+// accepts. Version 2 keys each member on the bare project id; version 1
+// carried a cluster tuple, and the broker refuses it by name rather than
+// matching nothing, so a stale operator against a new broker is a startup
+// error that says "version 2" instead of a refusal on every request.
+const scopedSAPoolVersion = 2
+
 // scopedSAPoolJSON renders the mapping the broker consumes, or "" when the
-// agent has none configured.
+// pool is not armed.
 //
-// Sorted by the scope key. The CR is a list and Kubernetes preserves its order,
+// Keyed on `enabled`, not on the list: a non-empty list with the pool off
+// renders nothing, so a file nothing reads is never written, and an armed
+// pool with an empty list (which admission refuses, but a CR applied before
+// the rule or with validation off still reaches here) renders the empty
+// document rather than nothing. The three things that have to agree — flag,
+// ConfigMap key, SubPath mount — then agree on every shape, and the failure
+// an empty armed pool produces is the broker's own "empty pool" refusal,
+// which names the cause, rather than a SubPath on a missing key, which
+// does not.
+//
+// Sorted by projectId. The CR is a list and Kubernetes preserves its order,
 // so an operator reordering two entries would otherwise rewrite the ConfigMap,
-// change its hash and roll the broker for no change in meaning.
+// change its hash and roll the broker for no change in meaning. Byte order is
+// what `sort(keys(...))` in the Terraform composition and `sorted()` in the
+// broker produce, so all three renderings of the list agree.
 //
 // No error return, because there is no failure to report: the document is a
 // struct of strings and ints, which json.Marshal cannot fail on. An error
@@ -3541,45 +3560,38 @@ const scopedSAPoolMountPath = "/etc/credential-proxy/" + scopedSAPoolKey
 // that has nowhere to put it, and a swallowed one would leave the broker armed
 // by its environment variable with no mapping file to read.
 func scopedSAPoolJSON(agent *agentv1alpha1.PlatformAgent) string {
-	if agent.Spec.Security == nil || len(agent.Spec.Security.ScopedServiceAccounts) == 0 {
+	if !scopedSAPoolEnabled(agent) {
 		return ""
 	}
 	type entry struct {
 		ProjectID           string `json:"projectId"`
-		Location            string `json:"location"`
-		ClusterName         string `json:"clusterName"`
 		ServiceAccountEmail string `json:"serviceAccountEmail"`
 	}
-	entries := make([]entry, 0, len(agent.Spec.Security.ScopedServiceAccounts))
-	for _, account := range agent.Spec.Security.ScopedServiceAccounts {
+	members := agent.Spec.Security.ScopedServiceAccountPool.ServiceAccounts
+	entries := make([]entry, 0, len(members))
+	for _, account := range members {
 		entries = append(entries, entry{
 			ProjectID:           account.ProjectID,
-			Location:            account.Location,
-			ClusterName:         account.ClusterName,
 			ServiceAccountEmail: account.ServiceAccountEmail,
 		})
 	}
 	sort.Slice(entries, func(i, j int) bool {
-		return scopedSAPoolScopeKey(entries[i].ProjectID, entries[i].Location, entries[i].ClusterName) <
-			scopedSAPoolScopeKey(entries[j].ProjectID, entries[j].Location, entries[j].ClusterName)
+		return entries[i].ProjectID < entries[j].ProjectID
 	})
 	document, _ := json.Marshal(struct {
 		Version         int     `json:"version"`
 		ServiceAccounts []entry `json:"serviceAccounts"`
-	}{Version: 1, ServiceAccounts: entries})
+	}{Version: scopedSAPoolVersion, ServiceAccounts: entries})
 	return string(document)
 }
 
-// scopedSAPoolScopeKey is the GKE resource name. Written here as well as in the
-// broker and in Terraform because all three have to agree; the broker's
-// `scoped_sa_pool.scope_key` and the key the Terraform module files each pool
-// member under are the other two, and tests compare them.
-func scopedSAPoolScopeKey(project, location, cluster string) string {
-	return fmt.Sprintf("projects/%s/locations/%s/clusters/%s", project, location, cluster)
-}
-
+// scopedSAPoolEnabled is the arming rule: the explicit switch, and only the
+// switch. The list arms nothing on its own (see ScopedServiceAccountPool on
+// the CRD for why), and declaring a project in spec.scope arms nothing either.
 func scopedSAPoolEnabled(agent *agentv1alpha1.PlatformAgent) bool {
-	return agent.Spec.Security != nil && len(agent.Spec.Security.ScopedServiceAccounts) > 0
+	return agent.Spec.Security != nil &&
+		agent.Spec.Security.ScopedServiceAccountPool != nil &&
+		agent.Spec.Security.ScopedServiceAccountPool.Enabled
 }
 
 func buildCredentialProxyPolicyConfigMap(agent *agentv1alpha1.PlatformAgent) *corev1.ConfigMap {

@@ -288,12 +288,13 @@ func TestTheBrokerPodAuthenticatesItsCallers(t *testing.T) {
 // scoped-identity path fails at the first read.
 func TestTheBrokerMountsEveryPathItsEnvironmentNames(t *testing.T) {
 	agent := brokerPodAgent()
-	agent.Spec.Security = &agentv1alpha1.SecuritySpec{ScopedServiceAccounts: []agentv1alpha1.ScopedServiceAccount{{
-		ProjectID:           "proj",
-		Location:            "us-central1",
-		ClusterName:         "cluster",
-		ServiceAccountEmail: "scoped-agent@proj.iam.gserviceaccount.com",
-	}}}
+	agent.Spec.Security = &agentv1alpha1.SecuritySpec{ScopedServiceAccountPool: &agentv1alpha1.ScopedServiceAccountPoolSpec{
+		Enabled: true,
+		ServiceAccounts: []agentv1alpha1.ScopedServiceAccount{{
+			ProjectID:           "proj",
+			ServiceAccountEmail: "scoped-agent@proj.iam.gserviceaccount.com",
+		}},
+	}}
 	container := buildCredentialProxyContainer(agent)
 	volumes := buildCredentialProxyRuntimeVolumes(agent)
 

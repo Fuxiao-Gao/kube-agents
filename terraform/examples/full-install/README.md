@@ -633,6 +633,23 @@ project added to the scope, after the last apply reads `denied` in the reconcile
 the next apply binds it. `scope_selector_members` outputs what each resolved to, under the name
 the snapshot's `containers` array uses.
 
+`scoped_pool_enabled` arms the scoped service account pool from the same `scope` object: the
+IAM module provisions one reader service account in `project_id` per project the plan listed
+(the management project, `scope.projects` less an exact `exclude.projects` entry, and each
+selector's members; a folder's or organisation's members are not listed at plan time yet, so a
+cluster under a declared container is refused while the pool is armed), keyed on the project id,
+and the chart renders the mapping into the CR as `spec.security.scopedServiceAccountPool` with
+`enabled` set from the same variable, so the broker is armed by this switch alone and never by
+declaring projects. Two clusters in one project share an account by design
+([`docs/designs/multi-project-scope.md`](../../../docs/designs/multi-project-scope.md) §6).
+`scoped_pool_max_accounts` bounds how many the plan may create and refuses a pool past it at plan;
+its default of 100 is GCP's default service-account quota, which the agent's own accounts share, so
+set it to the headroom the project has free rather than leaving a large pool at the default. Off by default, and it should stay off
+until per-cluster RBAC lands: a member holds no IAM grant, so an armed pool turns every cluster
+read into a `Forbidden`. Through the installer the two come from `SCOPED_SA_POOL_ENABLED` and
+`SCOPED_SA_POOL_MAX_ACCOUNTS` in `install.env`. `scoped_service_accounts` outputs the mapping,
+project id to email.
+
 ### Backups
 
 `enable_backup_agent` (default `true`) turns on the Backup for GKE addon. It

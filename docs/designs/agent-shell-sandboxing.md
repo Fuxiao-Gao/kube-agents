@@ -524,8 +524,9 @@ Nothing crosses as a path any more:
 - **A kubeconfig crosses as a context name, not a file.** The shim reads `current-context`
   in its own pod and sends the string; the broker validates it with `parse_gke_context` and
   regenerates the file itself with `gcloud container clusters get-credentials`. Naming a
-  cluster is not choosing an account: `scoped_sa_pool` maps the name to a service account,
-  and a name with no entry is refused rather than falling back to the wide credential.
+  cluster is not choosing an account: `scoped_sa_pool` maps the cluster's project to a service
+  account, and a cluster in a project with no entry is refused rather than falling back to the
+  wide credential.
 - **A document crosses on fd 0.** `--body-file -` and `kubectl apply -f -` are what a
   caller writes; `reads_stdin` in the shim matches the flag and forwards the stream.
 - **`git` crosses as content.** The broker owns the only checkout, and the agent hands it
