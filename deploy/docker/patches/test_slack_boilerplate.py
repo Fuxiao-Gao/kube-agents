@@ -20,6 +20,7 @@ import os
 import shutil
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -540,10 +541,14 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+_live_roots = []
+
+
 class _Root:
     """A throwaway Hermes root holding the fixtures and the runtime module."""
 
     def __init__(self):
+        self._cleaned = False
         self.dir = Path(tempfile.mkdtemp())
         for relative, text in FIXTURES.items():
             path = self.dir / relative
@@ -556,6 +561,15 @@ class _Root:
         # On the path for the root's lifetime: the delivery fixture imports
         # gateway.platforms.base when it is called, not when it is loaded.
         sys.path.insert(0, str(self.dir))
+        if _live_roots:
+            self._saved_modules = dict(_live_roots[0]._saved_modules)
+        else:
+            self._saved_modules = {
+                m: sys.modules[m]
+                for m in sys.modules
+                if m.partition(".")[0] in ("gateway", "agent")
+            }
+        _live_roots.append(self)
         self._forget_gateway()
 
     @staticmethod
@@ -570,9 +584,17 @@ class _Root:
         return namespace
 
     def cleanup(self):
-        sys.path.remove(str(self.dir))
+        if self._cleaned:
+            return
+        if str(self.dir) in sys.path:
+            sys.path.remove(str(self.dir))
+        if self in _live_roots:
+            _live_roots.remove(self)
         self._forget_gateway()
+        if not _live_roots:
+            sys.modules.update(self._saved_modules)
         shutil.rmtree(self.dir, ignore_errors=True)
+        self._cleaned = True
 
 
 def _target(platform, live=True):
@@ -1372,6 +1394,112 @@ class MissingPresenterTest(unittest.TestCase):
             ), mock.patch.object(runtime.logger, "warning") as warning:
                 runtime.enabled()
                 self.assertEqual(warning.called, warns)
+
+
+class RootTest(unittest.TestCase):
+    def test_root_preserves_external_modules(self):
+        fake_gateway = types.ModuleType("gateway.preexisting")
+        fake_agent = types.ModuleType("agent.preexisting")
+        patcher = mock.patch.dict(
+            sys.modules,
+            {
+                "gateway.preexisting": fake_gateway,
+                "agent.preexisting": fake_agent,
+            },
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        root = _Root()
+        self.addCleanup(root.cleanup)
+        # During the root's lifetime, pre-existing modules are cleared so the
+        # fixture tree imports cleanly.
+        self.assertNotIn("gateway.preexisting", sys.modules)
+        self.assertNotIn("agent.preexisting", sys.modules)
+
+        # Exercising delivery fixture imports gateway modules from root.dir.
+        delivery = root.load(applier.DELIVERY, "cron.scheduler_delivery")
+        delivery["_deliver_result"]({"id": "j1"}, "hello", [_target("slack")])
+        self.assertIn("gateway.platforms.base", sys.modules)
+        added = sys.modules["gateway.platforms.base"]
+
+        root.cleanup()
+        # After cleanup, what the root added is removed, and the pre-existing
+        # stubs are restored.
+        self.assertIsNot(sys.modules.get("gateway.platforms.base"), added)
+        self.assertIs(sys.modules.get("gateway.preexisting"), fake_gateway)
+        self.assertIs(sys.modules.get("agent.preexisting"), fake_agent)
+
+    def test_root_preserves_top_level_package_stubs(self):
+        fake_gateway = types.ModuleType("gateway")
+        patcher = mock.patch.dict(sys.modules, {"gateway": fake_gateway})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        root = _Root()
+        self.addCleanup(root.cleanup)
+        self.assertNotIn("gateway", sys.modules)
+
+        delivery = root.load(applier.DELIVERY, "cron.scheduler_delivery")
+        delivery["_deliver_result"]({"id": "j1"}, "hello", [_target("slack")])
+        self.assertIn("gateway", sys.modules)
+        self.assertIsNot(sys.modules.get("gateway"), fake_gateway)
+        added = sys.modules["gateway.platforms.base"]
+
+        root.cleanup()
+        self.assertIsNot(sys.modules.get("gateway.platforms.base"), added)
+        self.assertIs(sys.modules.get("gateway"), fake_gateway)
+
+    def test_root_cleanup_is_idempotent(self):
+        root = _Root()
+        self.addCleanup(root.cleanup)
+        root.cleanup()
+        # A second call must be a no-op, not a repeat: re-running forget and
+        # restore would evict whatever a newer root has imported since.
+        later = _Root()
+        self.addCleanup(later.cleanup)
+        delivery = later.load(applier.DELIVERY, "cron.scheduler_delivery")
+        delivery["_deliver_result"]({"id": "j1"}, "hello", [_target("slack")])
+        added = sys.modules["gateway.platforms.base"]
+        root.cleanup()
+        self.assertIs(sys.modules.get("gateway.platforms.base"), added)
+
+    def test_overlapping_roots_fifo_cleanup_does_not_leak_stale_modules(self):
+        # When two roots overlap and clean up out-of-order (FIFO), the inner root
+        # must inherit the outer root's baseline rather than snapshot the outer
+        # root's imports, and tearing down the outer root first must not leave
+        # stale deleted paths in sys.modules or lose the baseline on the way out.
+        stub = types.ModuleType("gateway.preexisting")
+        patcher = mock.patch.dict(sys.modules, {"gateway.preexisting": stub})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        outer = _Root()
+        self.addCleanup(outer.cleanup)
+        outer_delivery = outer.load(applier.DELIVERY, "cron.scheduler_delivery")
+        outer_delivery["_deliver_result"]({"id": "j1"}, "hello", [_target("slack")])
+        outer_mod = sys.modules.get("gateway.platforms.base")
+        self.assertIsNotNone(outer_mod)
+
+        inner = _Root()
+        self.addCleanup(inner.cleanup)
+        inner_delivery = inner.load(applier.DELIVERY, "cron.scheduler_delivery")
+        inner_delivery["_deliver_result"]({"id": "j1"}, "hello", [_target("slack")])
+        inner_mod = sys.modules.get("gateway.platforms.base")
+        self.assertIsNot(inner_mod, outer_mod)
+
+        # FIFO teardown: clean outer first, then inner
+        outer.cleanup()
+        # Baseline must stay out until the last live root exits: restoring it
+        # here would shadow inner's gateway package while inner is still live.
+        self.assertNotIn("gateway.preexisting", sys.modules)
+        self.assertIsNot(inner._saved_modules.get("gateway.platforms.base"), outer_mod)
+        self.assertIs(inner._saved_modules.get("gateway.preexisting"), stub)
+
+        inner.cleanup()
+        self.assertIsNot(sys.modules.get("gateway.platforms.base"), outer_mod)
+        self.assertIsNot(sys.modules.get("gateway.platforms.base"), inner_mod)
+        self.assertIs(sys.modules.get("gateway.preexisting"), stub)
 
 
 if __name__ == "__main__":
