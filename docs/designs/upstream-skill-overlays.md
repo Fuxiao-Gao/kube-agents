@@ -111,7 +111,9 @@ How each fault is addressed:
   - When upstream drops or renames a skill, the sync reports it and a person moves or removes the copy, overlay and lock.
 - **Patches:** one change per file in `git format-patch` form, without commit hashes, `index` lines or a diffstat, so a refresh changes only hunk headers and moved lines. A patch can touch any file in the skill or add one. Example header below.
 - **One patch per reason:** follow-up edits fold into the existing patch, so the count tracks reasons: today's registries become seven patches across four skills (at most four in one) plus five `append.md` files.
-- **Patch-count threshold:** past about five patches, file the general ones as `google/skills` issues, or stop mirroring the skill: delete its copy and lock, leave `NOT_MIRRORED`, and the generated skill becomes ours.
+- **When to stop mirroring:** a person's decision, not a CI rule. Patch count alone is not a signal: several small patches over a small part of a skill still leave the rest getting upstream's updates.
+  - Review a skill when its patches rewrite most of it, when most of its syncs conflict, or when upstream keeps moving it away from what we need.
+  - To stop: delete its copy and lock and leave `NOT_MIRRORED` with the reason; the generated skill becomes ours.
 - **`append.md`:** what `SKILL_FOOTERS` appends today. Applied after the patches rather than as one, because git treats an edit to upstream's last lines as adjacent to anything appended below them.
 - **Generated skill:** stays where skills are today and stays committed, so reviewers, `grep`, the bench tasks and the Dockerfile read it. Contributors edit it like any other file; the presubmit fails on an edit no patch records.
 
@@ -166,9 +168,11 @@ A sync bumps one skill's pin, in a scratch repository, so the working tree chang
 2. Commit the new upstream copy on a separate branch from the same root.
 3. Rebase the patch commits onto the new upstream copy with `git rebase --empty=drop`.
 4. Write the new upstream copy and `upstream.lock`, re-export the surviving commits as the patch files, and regenerate the skill.
-5. Report each patch dropped as empty (retired), and each `append.md` whose text the new upstream copy already contains, for a person to delete.
+5. Report each patch dropped as empty (retired), and each `append.md` whose text the new upstream copy already contains, for a person to delete. The sync PR lists retired patches with their `Why:`, so a reviewer sees what upstream adopted and can restore a patch from history if upstream later reverts it; a retired patch whose `Retire-When:` says never deserves a second look.
 
-- The scratch repository lives in a git-ignored `.skill-sync/<skill>/` until the sync finishes. When a patch stops, the conflict is resolved there and `make skills-continue SKILL=<skill>` resumes the rebase.
+- The scratch repository lives in a git-ignored `.skill-sync/<skill>/` until the sync finishes. The sync goes one patch at a time, like a git rebase: when a patch stops, the person or robot fixes the conflicted text there and runs `make skills-continue SKILL=<skill>`, which rewrites that patch in place (same file, number and `Why:`) and moves on to the next.
+- A patch is deleted only when upstream adopted it exactly (retired automatically) or the person resolving a conflict decides upstream's new version makes it unnecessary.
+- The sync PR description also shows, per skill, the number of patches, the share of the skill's lines they change, and how many recent syncs conflicted. It is information for the stop-mirroring decision and blocks nothing.
 
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 30, 'rankSpacing': 50}}}%%
