@@ -37,7 +37,8 @@ The shipped path is four stages, described in full by the
 [`bootstrap_onboarding` README](../../agents/chat/defaults/plugins/bootstrap_onboarding/README.md)
 and the site's [ChatOps concepts page](../site/src/content/docs/concepts/chatops.md), which are
 canonical for it. In outline: `bootstrap_scan_gate.py` files a kanban card to `platform`; that
-worker follows `inventory.md` and writes the complete findings to `/opt/data/INVENTORY.raw.md`; a
+worker follows `inventory.md` and lists the fleet, while the gate files one audit card per Cluster Agent; once their cards settle,
+`bootstrap_handoff.py` writes the complete findings to `/opt/data/INVENTORY.raw.md`; a
 second card follows `inventory_prioritize_sop.md`, collapsing duplicates and ranking everything
 before rendering at most five items to `/opt/data/INVENTORY.md`; `bootstrap_delivery.py` posts that
 file to chat verbatim (on Slack with `KAGE_SLACK_UX` on, laid out again by a fixed script that keeps
@@ -554,8 +555,8 @@ the raw file's prose and make the registration call itself, it lost findings thr
 for itself what counted as a finding, so two instrumented runs over the same nine-finding file
 registered seven and three, and not the same three; a batch rejected for one missing field came
 back one field at a time and was abandoned; and one accepted call read as done. Enumeration is not a
-judgement, so the sweep writes the findings as a machine-readable block
-(`inventory.md` Step 4) and `agents/platform/scripts/inventory_findings.py` owns both ends —
+judgement, so the findings travel as a machine-readable block, written by
+`bootstrap_handoff.py` from the Cluster Agents' structured results, and `agents/platform/scripts/inventory_findings.py` owns both ends —
 `extract` produces the numbered set, `register` refuses to send anything until every number carries
 a score. The stage's judgement is scoring, which is the part that needs a model.
 
