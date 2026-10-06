@@ -303,7 +303,7 @@ What `make skills-check` reports when a step is skipped:
 
 ## Security guardrails
 
-GitHub cannot make a directory read-only, so the design adds these. The checks are steps in the required `validate` job; approvals go through `OWNERS`.
+GitHub cannot make a directory read-only, so the design adds these checks, as steps in the required `validate` job.
 
 | Scenario                                                               | Guardrail                                                                                                                                                                                   |
 | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -311,21 +311,21 @@ GitHub cannot make a directory read-only, so the design adds these. The checks a
 | Direct edit to a generated skill with no patch                         | `make skills-check` fails: the rebuilt skill (① + ②) differs from ③.                                                                                                                        |
 | Hand edit to the upstream copy                                         | `make skills-check` fails: the copy no longer matches the sha256 in `upstream.lock`.                                                                                                        |
 | Hand edit to the copy and the lock, or a pin to a fork-only commit     | The upstream comparison fails: the copy differs from `google/skills` at that commit, or the commit is not on upstream's default branch.                                                     |
-| Upstream-copy change approved by someone outside the skill owners      | `OWNERS` on `third_party/google-skills/`: a `skill-owners` alias with `no_parent_owners`, so a root approver does not count.                                                                |
 | No record of which upstream version ships (conformance requirement C4) | Commit and sha256 in every lock; every pin bump is a reviewed PR.                                                                                                                           |
 | A tool edits a generated skill in place (Dependabot)                   | Its entry is removed and the pin becomes a patch; `make skills-check` fails any other such tool.                                                                                            |
 | Adopting an upstream skill whose name a local skill uses               | `make skills-sync` refuses.                                                                                                                                                                 |
 
 ### Where the checks run
 
-| Check                           | Runs as                                                  | Runs on                                                                                         |
-| ------------------------------- | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `make skills-check`             | A step in `validate`                                     | Every PR, offline                                                                               |
-| Comparison with `google/skills` | A step in `validate`                                     | Every PR; skips itself unless the PR changes `third_party/google-skills/` or an `upstream.lock` |
-| `OWNERS`                        | Prow's approval plugin; Tide merges only with `approved` | PRs that change the upstream copy                                                               |
+| Check                           | Runs as              | Runs on                                                                                         |
+| ------------------------------- | -------------------- | ----------------------------------------------------------------------------------------------- |
+| `make skills-check`             | A step in `validate` | Every PR, offline                                                                               |
+| Comparison with `google/skills` | A step in `validate` | Every PR; skips itself unless the PR changes `third_party/google-skills/` or an `upstream.lock` |
 
 - `validate` is already required, so its steps block merge from day one; a new job would need an admin to make it required.
 - The comparison skips itself rather than using a workflow path filter, because a required check that never starts blocks every PR.
+
+Optional, not part of this design: an `OWNERS` file on `third_party/google-skills/` with a dedicated approver alias and `no_parent_owners`, so that only named people can approve a sync. The checks above already guarantee the copy is what upstream published; this would only decide who reviews which upstream versions we adopt, at the cost of a second approver on every sync PR.
 
 ## Alternatives considered
 
@@ -351,15 +351,15 @@ GitHub cannot make a directory read-only, so the design adds these. The checks a
 
 Four PRs implement the design: about four days for one engineer working with a coding agent. None changes what the agent sees, since every migrated skill stays byte-identical to `main`, so none needs the eval loop; live validation is the byte-identical proof plus a spot check of a skill file in the agent pod. Each PR still runs the presubmit smoke test (1.5 to 3.5 hours per push), which is waiting time.
 
-| PR  | Delivers                                                                                                                                                                                                                                                                                   | Depends on  | Days |
-| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------- | ---- |
-| 1   | `scripts/skill_overlay.py` (`sync`, `continue`, `refresh`, `generate`, `check`, `status`), the lock format, make targets and tests. No skill migrated.                                                                                                                                     | this design | 1–2  |
-| 2   | Pilot: `gke-workload-troubleshooting` migrated (copy, lock, one patch); `third_party/google-skills/` with `OWNERS` and the `skill-owners` alias, docs-map rows and exclusions; `make skills-check` and the upstream comparison as steps in `validate`; the old script skips locked skills. | PR 1        | 1    |
-| 3   | The other 28 skills migrated: copies, locks, the remaining patches, five `append.md` files, and the in-tree edits no registry records. Generated tree byte-identical to `main`.                                                                                                            | PR 2        | 1    |
-| 4   | Old script, registries and their tests removed; references updated (list below).                                                                                                                                                                                                           | PR 3        | 0.5  |
+| PR  | Delivers                                                                                                                                                                                                                                            | Depends on  | Days |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- | ---- |
+| 1   | `scripts/skill_overlay.py` (`sync`, `continue`, `refresh`, `generate`, `check`, `status`), the lock format, make targets and tests. No skill migrated.                                                                                              | this design | 1–2  |
+| 2   | Pilot: `gke-workload-troubleshooting` migrated (copy, lock, one patch); `third_party/google-skills/` with docs-map rows and exclusions; `make skills-check` and the upstream comparison as steps in `validate`; the old script skips locked skills. | PR 1        | 1    |
+| 3   | The other 28 skills migrated: copies, locks, the remaining patches, five `append.md` files, and the in-tree edits no registry records. Generated tree byte-identical to `main`.                                                                     | PR 2        | 1    |
+| 4   | Old script, registries and their tests removed; references updated (list below).                                                                                                                                                                    | PR 3        | 0.5  |
 
 - Not in the estimate: the first syncs after migration. They land what upstream has added since the last sync (new skills, two renamed TPU skills), which the agent does see, so each follows the eval loop like any skill change.
-- Outside the engineer's control, and worth starting first: landing or pausing the open skill-sync PRs before PR 3, and choosing the `skill-owners` members before PR 2.
+- Outside the engineer's control, and worth starting first: landing or pausing the open skill-sync PRs before PR 3.
 
 PR 4 also updates every file that names the old script or its registries:
 
@@ -404,7 +404,7 @@ What happens after a sync conflict:
 | 1    | Weekly job          | Files one issue per conflicted skill, or updates the open one: label `skill-sync-conflict`, unassigned, with the patch and its `Why:`, the upstream diff and the conflicting lines. |
 | 2    | `kube-agents-robot` | Claims it by assigning itself, as `agents/contributor/AGENTS.md` requires; the contract only claims unassigned issues, which is why the job does not assign it.                     |
 | 3    | `kube-agents-robot` | Runs `make skills-sync SKILL=<skill>` in its fork, resolves the conflicting lines, runs `make skills-continue`, and opens a PR that closes the issue.                               |
-| 4    | Reviewers           | `kube-agents-bot` reviews; a skill owner approves (the PR changes the upstream copy, so `OWNERS` applies); Tide merges.                                                             |
+| 4    | Reviewers           | `kube-agents-bot` reviews; a root approver approves; Tide merges.                                                                                                                   |
 | —    | Fallback            | If the robot is stuck it adds `needs-human` and stops, per its contract; a person resolves from the same issue.                                                                     |
 
 ```mermaid
