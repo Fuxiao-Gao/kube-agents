@@ -27,7 +27,8 @@
 # The pilot-only default-branch mode below moves the default-branch pointer to
 # the run branch and back.
 #
-# Env: GITOPS_REPO (https URL), GITOPS_RUN_BRANCH, GITOPS_TOKEN_FILE,
+# Env: GITOPS_REPO (a github.com repository, as an https URL),
+#      GITOPS_RUN_BRANCH, GITOPS_TOKEN_FILE,
 #      GITOPS_BASE_SHA (create, advance),
 #      GITOPS_HISTORY_PARENT_SHA, GITOPS_TASK, GITOPS_TASK_PATH,
 #      GITOPS_MANIFESTS_DIR (staged history: create, advance),
@@ -38,6 +39,7 @@ set -euo pipefail
 GITHUB_API="https://api.github.com"
 GITHUB_API_VERSION="2022-11-28"
 RENDER_SCRIPT="$(cd "$(dirname "$0")" && pwd)/render-broken-base.sh"
+GITOPS_REPO_HELPER="$(cd "$(dirname "$0")" && pwd)/gitops_repo.py"
 # Staged history for b-0011 (see render-broken-base.sh): the task's clue is
 # that the memory request was inflated in an earlier change and this morning's
 # build update came on top of it, so the commits are back-dated to read that
@@ -68,9 +70,8 @@ case "${GITOPS_RUN_BRANCH}" in
   *) echo "run-branch: refusing to touch '${GITOPS_RUN_BRANCH}': only run/** branches are managed" >&2; exit 1 ;;
 esac
 
-slug="${GITOPS_REPO#https://github.com/}"
-slug="${slug%.git}"
-slug="${slug%/}"
+# owner/name, read as the operator and agent-base-branch.sh read it.
+slug="$(python3 "${GITOPS_REPO_HELPER}" slug "${GITOPS_REPO}")" || exit 1
 token_path="${GITOPS_TOKEN_FILE/#\~/$HOME}"
 [ -r "${token_path}" ] || { echo "run-branch: token file ${token_path} is missing or unreadable" >&2; exit 1; }
 

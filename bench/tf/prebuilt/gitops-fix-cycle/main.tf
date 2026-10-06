@@ -77,10 +77,10 @@ locals {
   # stages): their seed asserts the state that history produces and their
   # task_version names it, so the parent is required, not optional.
   staged_history_tasks = ["b-0011"]
-  task_path      = var.gitops_task_path != "" ? var.gitops_task_path : "tasks/${var.gitops_task}"
-  base_sha       = var.gitops_broken_base_sha
-  history_parent = var.gitops_history_parent_sha
-  manifests_dir  = "${path.module}/manifests/${var.gitops_task}"
+  task_path            = var.gitops_task_path != "" ? var.gitops_task_path : "tasks/${var.gitops_task}"
+  base_sha             = var.gitops_broken_base_sha
+  history_parent       = var.gitops_history_parent_sha
+  manifests_dir        = "${path.module}/manifests/${var.gitops_task}"
   # A GitOps case's prompt can name this branch via {{CLUSTER_NAME}}, so the
   # default must stay in step with each GitOps case whose prompt names the run
   # branch.
@@ -121,6 +121,10 @@ resource "null_resource" "run_branch" {
     precondition {
       condition     = !var.gitops_pin_agent_base_branch || var.agent_host_context != ""
       error_message = "gitops_pin_agent_base_branch needs agent_host_context: the base is set on the PlatformAgent there."
+    }
+    precondition {
+      condition     = !var.gitops_pin_agent_base_branch || (var.gitops_history_parent_sha == "" && !contains(local.staged_history_tasks, var.gitops_task))
+      error_message = "gitops_pin_agent_base_branch cannot run ${var.gitops_task} on staged history (a task main.tf lists as staged, or gitops_history_parent_sha set): run-branch.sh does not seed the default branch for staged history, whose run branch moves on from the commit the default would stay at."
     }
   }
   triggers = {

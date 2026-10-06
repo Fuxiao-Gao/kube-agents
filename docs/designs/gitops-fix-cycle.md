@@ -3,9 +3,10 @@
 Status: pilot, written from the code that ran from 2026-09-10 to 2026-09-18 (gke-labs/kube-agents#1307; the isolated campaign is gke-labs/kube-agents#1773).
 Scope: two devops-bench tasks, `b-0011` and `b-0022b`, each on a per-run GKE cluster,
 against one GitOps repository on GitHub, through one parameterised stack. Everything here
-exists and was exercised end to end at least once, except pinned-base mode and the run
-wrapper's pull-request listing, both added after the pilot and not yet run end to end; the
-"Findings" section says which parts held and which did not.
+exists and was exercised end to end at least once; pinned-base mode and the run wrapper's
+pull-request listing were added after the pilot and first ran end to end in
+`b-0022b-gitops-pinned-base`'s runs (red against `main`, kept below, and green on an operator
+that declares the base field). The "Findings" section says which parts held and which did not.
 
 ## Why this exists
 
@@ -227,20 +228,31 @@ safeguards, since it asks where the pull request lands rather than how much of b
 agent repairs) gives the base through the install instead. After the
 seed, `scripts/agent-base-branch.sh` sets `baseBranch` on the PlatformAgent's
 `spec.integration.repositories[]` entry with role `gitops` for `GITOPS_REPO` to the run
-branch, and refuses when the install already sets another base there. The write is a JSON
+branch, and refuses when the install already sets another base there. The entry is the one
+the operator accepts (only the first with role `gitops`, and not one whose own namespace
+GitHub's grammar refuses or whose repository an earlier entry declares), found as the
+operator resolves a repository (any spelling of the github.com host, a URL, an scp remote or
+a bare name qualified by the entry's or its forge's namespace, surrounding `/` and one `.git`
+dropped, compared case-insensitively), by `scripts/gitops_repo.py`, which `run-branch.sh`
+and the wrapper use for `GITOPS_REPO` too. The wrapper then hands `GITOPS_REPO` on as
+`https://github.com/<owner>/<name>`, the one spelling the harness reads. The write is a JSON
 patch that tests the entry and the resourceVersion, so a concurrent change fails it rather
-than being overwritten. The deprecated `github` alias carries no base, so on a CRD that
+than being overwritten; any write to the PlatformAgent moves the resourceVersion, so a
+failed patch is read again and retried a few times, and a base that appeared in between is
+refused. The deprecated `github` alias carries no base, so on a CRD that
 declares the field a PlatformAgent without that entry is refused; the wrapper's agent state
 reset (`AGENT_STATE_RESET=true`) writes the lists form (`forges` and a `gitops` repository)
 for a case that pins its base, on a CRD that has it, and keeps an existing base of that
-repository's entry. On
+repository's entry. The wrapper refuses both cases before anything is built, on a CRD that
+declares the field: a base the install already sets on that entry, and a PlatformAgent
+without the entry when `AGENT_STATE_RESET` is not set to write it. On
 an operator whose CRD declares `spec.integration.repositories[].baseBranch`, the operator
 renders the pin into the credential broker's `CREDENTIAL_PROXY_PINNED_BASES` (the
 repository as `https://<host>/<path>`, and the branch), the broker checks a branch-less clone
 out on it and refuses a proposal onto that repository that targets any other branch, and the
 stack waits until the broker's Deployment holds this repository's pin and has rolled. On an operator
-whose CRD does not declare the field, the API server drops it (or, on a CRD from before the
-lists form, the PlatformAgent stays on the alias and there is no entry to write), the stack
+whose CRD does not declare the field, the API server would drop it, so the stack writes
+nothing (on a CRD from before the lists form the PlatformAgent also stays on the alias),
 logs that, and the broker pins nothing, so the agent's base falls back to the default branch unless it finds the
 run branch on its own; a pull request onto the default is never merged. The wrapper's
 pull-request list tells the outcomes apart (see the comment at the top of
@@ -255,8 +267,8 @@ PlatformAgent, and the next run's wrapper refuses to start while any entry carri
 is not switched), and `run-branch.sh` fast-forwards `main` onto the run branch's starting
 commit, so both branches carry the same broken task directory and only the configured base
 tells them apart. The mode excludes `gitops_switch_default_branch` and needs
-`agent_host_context`. It also needs a task without staged history (`run-branch.sh` refuses
-to seed the default for one, so b-0011 cannot use it), a per-run repository whose
+`agent_host_context`. It also needs a task without staged history (refused at plan time:
+`run-branch.sh` does not seed the default for one, so b-0011 cannot use it), a per-run repository whose
 default-branch head is the broken base commit and that commit its root (`run-branch.sh`
 refuses to move the default from a base with parents), and an install whose accepted GitOps
 repository is `GITOPS_REPO` (otherwise the pin step's wait for the operator to render the

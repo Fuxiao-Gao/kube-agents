@@ -30,9 +30,9 @@
 #   3. The prompt names the repository and the directory, not the branch.
 #
 # Red on an operator whose CRD does not declare the field: the API server
-# drops the field (the stack logs the read-back), or, on a CRD from before the
-# lists form, the PlatformAgent stays on the alias and the stack logs that
-# there is no entry to pin; either way the broker pins nothing.
+# would drop the field, so the stack writes nothing and logs that the install
+# pins no base (on a CRD from before the lists form the PlatformAgent also
+# stays on the alias); either way the broker pins nothing.
 # The agent's clone lands on main, its pull request goes to main, and the
 # repository's check workflow merges only pull requests onto run/**, so
 # nothing reaches the branch Argo syncs. The cluster stays broken and the
