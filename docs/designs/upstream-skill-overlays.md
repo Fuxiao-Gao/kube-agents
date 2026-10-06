@@ -225,7 +225,7 @@ What counts as "other lines" was measured with git 2.56, rebasing two patches th
 
 - A stop is a real merge conflict: upstream and we rewrote the same passage, and only someone who knows both intents can write the merged text.
 - Any automatic rule would pick a side and silently drop either our correction or upstream's improvement, so the decision stays with a person and everything around it is automated.
-- A sync PR changes what the agent reads, so it follows the eval-driven rule like any skill change: a case that is red on `main` and green three times with the sync.
+- Every sync PR comes with an eval-driven development record (`.agents/rules/eval_driven_development.md`): a case that fails on `main` for the reason the sync addresses, then passes three times with the sync, registered in the nightly roster. See [Eval evidence for syncs and patches](#eval-evidence-for-syncs-and-patches).
 - Upstreaming shrinks the work: a general fix (the NetworkPolicy two-step, the `answer_query` quota) is filed as a `google/skills` issue and recorded in `Upstream-Issue:`; once upstream carries it, the next sync reports it retired.
 
 ### The presubmit check
@@ -268,7 +268,7 @@ flowchart LR
 
 | Task                                     | Steps                                                                                                                                                                                                                                                           |
 | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Make a new change                        | Edit `agents/platform/skills/<skill>/…`; run `make skills-refresh SKILL=<skill>`; fill in the new patch's headers; commit patch and skill.                                                                                                                      |
+| Make a new change                        | Edit `agents/platform/skills/<skill>/…`; run `make skills-refresh SKILL=<skill>`; fill in the new patch's headers; commit patch and skill, with the eval record below.                                                                                          |
 | Adjust an existing change                | Edit the skill; run `make skills-refresh SKILL=<skill> PATCH=<nnnn>` to fold the edit into that patch.                                                                                                                                                          |
 | Edit the appended section                | Edit it in the skill; `refresh` writes it back to `append.md`.                                                                                                                                                                                                  |
 | Remove a change or edit the overlay      | Delete or edit the patch (or `append.md`); run `make skills-generate SKILL=<skill>`. Offline.                                                                                                                                                                   |
@@ -277,6 +277,20 @@ flowchart LR
 - `make skills-refresh` rebuilds the skill from ① and ②, compares the edited skill with that rebuild, and writes the difference as the new (or folded) patch.
 - The reviewer sees the change to the skill and the patch that records it; the upstream copy does not change.
 - A change takes effect when its PR merges and the image is rebuilt, as today. Upstream updates arrive separately, through the sync.
+
+#### Eval evidence for syncs and patches
+
+Every PR that changes what the agent reads from a mirrored skill — a sync or a new or changed patch — carries an eval-driven development record:
+
+| Step     | Requirement                                                                                          |
+| -------- | ---------------------------------------------------------------------------------------------------- |
+| Red      | A case, new or existing, run against `main` on a dev install, fails for the reason the PR addresses. |
+| Green    | The same case passes three times against the PR's build, on the same deterministic check.            |
+| Register | A new case goes in `hack/eval/nightly-cases.txt` with an owner and a domain.                         |
+| Record   | The PR body names the case, the red run and the three green runs.                                    |
+
+- Exempt: PRs that leave every generated skill byte-identical, such as the four migration PRs below; the PR states it in one line.
+- Most mirrored skills have no case of their own today, so the first sync or patch for a skill usually adds one; later changes to the skill can reuse it when it is red for their reason.
 - `refresh` notes when upstream has changed the skill since its pin and suggests running `make skills-sync SKILL=<skill>` in its own commit or PR. It never syncs on its own: an edit and an upstream update stay separate changes, each reviewed and validated on its own.
 
 What `make skills-check` reports when a step is skipped:
@@ -363,7 +377,7 @@ Four PRs implement the design: about four days for one engineer working with a c
 
 PR 4 also updates every file that names the old script or its registries:
 
-- `AGENTS.md` Skills Guidelines.
+- `AGENTS.md` Skills Guidelines, which also states that every sync and patch carries the eval record above.
 - The `skill_sync` source in `tests/conformance/_harness.py` and its C4 tests, repointed at the new script.
 - The `Makefile` shellcheck comment and `.prettierignore`.
 - The message in `deploy/docker/check_skill_commands.py`.
@@ -385,7 +399,7 @@ PR 4 also updates every file that names the old script or its registries:
 
 Out of scope:
 
-- Eval coverage for skills: a sync that changes what the agent knows still needs eval evidence, and most mirrored skills have no case of their own yet.
+- Writing eval cases: the design requires a red-then-green case for every sync and patch, but does not supply them; most mirrored skills have no case of their own yet.
 - Upstream defects such as wrong facts or routes to skills we do not mirror: a person still spots them in the sync PR's diff; the design makes the fix a clean patch.
 - Conflicts in the eval roster files (`hack/eval/nightly-cases.txt`, `scripts/test_eval_rosters.py`) when several sync PRs each register a case.
 
