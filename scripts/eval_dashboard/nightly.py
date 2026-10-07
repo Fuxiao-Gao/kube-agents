@@ -464,7 +464,12 @@ def joined_night_document(night: dict[str, dict], data: dict, previous: dict[str
     cases.sort(key=lambda c: (c["domain"], c["case"]))
     recorded = {c["case"] for c in cases}
     now_states = states_of(cases)
-    before = states_of([c for run in night_parts(previous) for c in night_cases(run, domain_of)]) if previous else {}
+    # The night before, read the way tonight reads a case both its parts
+    # recorded: as the main part recorded it.
+    before: dict[str, str] = {}
+    for run in night_parts(previous) if previous else []:
+        for c in night_cases(run, domain_of):
+            before.setdefault(c["case"], c["state"])
     failing = sorted(name for name, state in now_states.items() if state == STATE_FAIL)
     newly_failing = [name for name in failing if before.get(name) != STATE_FAIL] if previous else []
     fixed = sorted(name for name, state in before.items() if state == STATE_FAIL and now_states.get(name) == STATE_PASS)
@@ -533,12 +538,16 @@ def by_start(runs: list[dict]) -> list[dict]:
 def night_reports(data: dict, limit: int = NIGHTS_ON_RECORD, running: list[dict] = ()) -> list[dict]:
     """The last ``limit`` nights, **newest first**, each compared with the
     night before it on record (the one older than the window included, so
-    the oldest listed night still has its "newly failing"). ``running`` is
+    the oldest listed night still has its "newly failing"). A night before
+    that lacks its main part is passed over for the newest earlier one that
+    has it, when there is one: compared with the writers' cases alone, every
+    main case failing tonight would read as newly failing. ``running`` is
     ``running_nights``, for a night with a part still in flight."""
     nights = group_nights(sorted_nightly_runs(data))
     out = []
     for index in range(len(nights) - 1, max(-1, len(nights) - 1 - limit), -1):
-        previous = nights[index - 1] if index > 0 else None
+        earlier = nights[:index]
+        previous = next((n for n in reversed(earlier) if PART_MAIN in n), earlier[-1] if earlier else None)
         out.append(joined_night_document(nights[index], data, previous, running))
     return out
 
@@ -638,25 +647,34 @@ def part_notes(night: dict, cut: bool = True) -> list[str]:
 def digest_line(data: dict | None, now: datetime.datetime, clock=None) -> str:
     """One line for the 9 AM digest. ``clock`` renders a datetime the way
     the rest of the digest does (post_health.clock); without one the ISO
-    form is used. A truncated or missing night says so instead of numbers;
-    a split night with one part cut short, missing or still running has its
-    numbers and says which part."""
+    form is used. A truncated or missing night says so instead of numbers,
+    and so does a split night whose main part is still running; a split
+    night with one part cut short, missing or still running otherwise has
+    its numbers and says which part, without a newly-failing verdict when
+    the main part is missing."""
     when = clock or (lambda value: value.isoformat(timespec="minutes"))
     if not data:
         return f"{DIGEST_GLYPH} Nightly: no data.json to read a night from"
     night, newest = last_night(data, now)
+
+    def still_running(entry: dict) -> str:
+        return f"{DIGEST_GLYPH} Nightly: still running (first seen {when(parse_iso(entry['first_seen']))}){SEP}the report follows when it finishes"
+
     if night is None:
         running = running_nights(data, now)
         if running:
             # Still in flight at digest time -- a late start, or a night at
             # its budget -- so there are no numbers yet, and the report
             # carries them once the collector records the build.
-            seen = parse_iso(running[-1]["first_seen"])
-            return f"{DIGEST_GLYPH} Nightly: still running (first seen {when(seen)}){SEP}the report follows when it finishes"
+            return still_running(running[-1])
         if newest is None:
             return f"{DIGEST_GLYPH} Nightly: no run on record yet"
         started = parse_iso(newest.get("started"))
         return f"{DIGEST_GLYPH} Nightly: no run last night (the newest on record started {when(started) if started else 'at an unknown time'})"
+    if PART_MAIN in night.get("running_parts", []):
+        # Only the writers part has finished: its few cases are not the
+        # night's numbers, which follow with the main part.
+        return still_running([e for e in running_nights(data, now) if pending_part(e) == PART_MAIN][-1])
     counts = night["counts"]
     took = duration_text(night["duration_s"]) if night.get("duration_s") is not None else "unknown wall clock"
     recorded = f"{counts['recorded']} of {counts['expected']} cases recorded" if counts["expected"] else f"{counts['recorded']} cases recorded"
@@ -666,7 +684,12 @@ def digest_line(data: dict | None, now: datetime.datetime, clock=None) -> str:
     parts = [f"{counts['recorded']} cases", f"{counts['passed']} passed all reps", f"{counts['partial']} partial", f"{counts['failed']} failed"]
     if counts["infra"]:
         parts.append(f"{counts['infra']} infra")
-    if night["newly_failing"]:
+    # Without its main part only the writers part's cases are on record, so
+    # no verdict on what is newly failing; the part notes say the main part
+    # is missing.
+    if PART_MAIN in night.get("missing_parts", []):
+        pass
+    elif night["newly_failing"]:
         parts.append(f"newly failing: {name_cases(night['newly_failing'])}")
     elif night.get("previous_build") is None:
         parts.append("first night on record")

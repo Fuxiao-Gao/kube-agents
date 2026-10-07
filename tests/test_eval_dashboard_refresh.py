@@ -326,6 +326,7 @@ class RefreshScriptTest(unittest.TestCase):
             path_prepend=str(stubs),
         )
         argv = collect_argv(argv_log)
+        self.assertIn("--pr-glob", argv, "the second run reached collect.py")
         self.assertNotIn("--nightly-prefix", argv)
         self.assertNotIn("--nightly-writers-prefix", argv)
 
