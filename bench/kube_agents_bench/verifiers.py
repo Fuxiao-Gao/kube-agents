@@ -104,6 +104,7 @@ __all__ = [
     "BootstrapFanoutVerifier",
     "BootstrapFindingsVerifier",
     "BootstrapHandoffVerifier",
+    "BootstrapReportCriticalsVerifier",
     "BootstrapReportReadVerifier",
     "FindingsItemStateVerifier",
     "FleetResourcePropertyVerifier",
@@ -141,6 +142,11 @@ _ONBOARDING_READ_TIMEOUT_SEC = 60.0
 # The sandbox's report changes at most twice (written, then renamed), so at most
 # two of three sandbox re-reads can differ from the read before them.
 _REPORT_READ_ATTEMPTS = 3
+# A numbered list item in the report: up to three spaces, the number, then `.`
+# or `)`. Lines indented under it, and blank lines, belong to the item.
+_NUMBERED_ITEM_RE = re.compile(r"^ {0,3}\d{1,3}[.)]\s")
+# The queue's severity word for the class the first report lists.
+_CRITICAL = "critical"
 
 # `{cluster:<slot>}` in a `forbidden_patterns` or `any_of_patterns` entry
 # stands for the cluster the runner recorded for that slot, as a frame that
@@ -4006,6 +4012,103 @@ class BootstrapDeliveredVerifier(_OnboardingPollVerifier):
         if status in ("claimed", "running"):
             return "fail", f"the {job} run that claimed the report at {claimed} is still {status}", read
         return "fail", f"the {job} run that claimed the report at {claimed} ended {status}: {run.get('error') or 'no error recorded'}", read
+
+
+def _numbered_items(text: str) -> list[str]:
+    """The report's numbered list items, each with the lines indented under it."""
+    items: list[list[str]] = []
+    current: list[str] | None = None
+    for line in text.splitlines():
+        if _NUMBERED_ITEM_RE.match(line):
+            current = [line]
+            items.append(current)
+        elif current is not None and (not line.strip() or line[:1].isspace()):
+            current.append(line)
+        else:
+            current = None
+    return ["\n".join(item).strip() for item in items]
+
+
+def _names(name: str) -> re.Pattern[str]:
+    """``name`` as a whole word: not part of a longer name such as ``<name>-key``."""
+    return re.compile(rf"(?<![\w-]){re.escape(name)}(?![\w-])", re.IGNORECASE)
+
+
+@VERIFIERS.register("bootstrap_report_criticals")
+class BootstrapReportCriticalsVerifier(_OnboardingPollVerifier):
+    """Checks how many critical findings the onboarding report lists.
+
+    The first report lists the top critical items up to the install's limit
+    (``FINDINGS_FIRST_REPORT_CRITICALS``) and defers the rest to the findings
+    nudge. This reads, off the shell sandbox
+    (:mod:`kube_agents_bench.onboarding`), the report the worker wrote (the
+    delivered copy first) and the worker's ``INVENTORY.scores.json``, scored
+    with the sandbox's own ``inventory_findings.py`` as ``register`` would score
+    it. The critical items are this batch's, not the live queue's: rows with
+    the same check on one project and cluster are one item, an item is critical
+    when any of its rows is, and a provider-managed observation is not an item.
+
+    ``limit``: how many critical items the report may list. Passes when the
+    report's numbered items name exactly ``limit`` of the critical items, an
+    item being named when one of its objects appears as a whole word in a
+    numbered item or the lines indented under it. A posture sentence or the
+    roll-up line naming a deferred critical does not count.
+
+    ``status="error"`` when the worker scored ``limit`` or fewer items
+    critical: a report listing every critical and one capped at ``limit``
+    are then the same report, so the run cannot grade the cap. Also an error:
+    an unreadable sandbox, a scorer the sandbox cannot import, or a batch that
+    cannot be scored. No report, or one that cannot be read, is a fail.
+    """
+
+    type: Literal["bootstrap_report_criticals"]
+    limit: int = Field(ge=0)
+
+    def _check(self, read_timeout: float) -> tuple[VerificationStatus, str, dict[str, Any] | None]:
+        read = onboarding.read_scored_report(onboarding.sandbox_shell, read_timeout)
+        pod = onboarding.sandbox_pod()
+        if read is None:
+            return "error", f"{pod} could not be read (kubectl exec failed or the command did not run)", None
+        if read.get("error"):
+            return "error", f"{pod}: {read['error']}", read
+        if read.get("rows") is None:
+            return (
+                "error",
+                f"{pod}: the batch cannot be scored, so which findings are critical is unknown: {read.get('errors')}",
+                read,
+            )
+        critical: dict[tuple[str, str, str], set[str]] = {}
+        for row in read["rows"]:
+            if row.get("provider_managed") and not row.get("actionable", True):
+                continue
+            if row.get("severity") == _CRITICAL:
+                key = tuple(str(row.get(k) or "").lower() for k in ("check_slug", "project", "cluster"))
+                critical.setdefault(key, set()).add(str(row.get("object")))
+        labels = {key: f"{key[0]} ({', '.join(sorted(objects))})" for key, objects in critical.items()}
+        raw: dict[str, Any] = {"critical": sorted(labels.values()), "report": read.get("report")}
+        if len(critical) <= self.limit:
+            return (
+                "error",
+                f"the worker scored {len(critical)} item(s) critical, not more than the limit of {self.limit}, "
+                f"so listing every critical and listing at most {self.limit} read the same: {raw['critical']}",
+                raw,
+            )
+        report, text = read.get("report"), read.get("text") or ""
+        if report == "absent":
+            return "fail", f"there is no INVENTORY.md or INVENTORY.delivered.md on {pod}: the worker wrote no report", raw
+        if report == "unreadable":
+            return "fail", f"the report on {pod} cannot be read: {text}", raw
+        items = _numbered_items(text)
+        named = sorted(
+            labels[key]
+            for key, objects in critical.items()
+            if any(_names(name).search(item) for name in objects for item in items)
+        )
+        raw.update({"named": named, "items": items})
+        counts = f"name {len(named)} of the {len(critical)} item(s) the worker scored critical"
+        if len(named) != self.limit:
+            return "fail", f"the report's {len(items)} numbered item(s) {counts}; expected exactly {self.limit}: {named}", raw
+        return "pass", f"the report's {len(items)} numbered item(s) {counts}, the limit of {self.limit}: {named}", raw
 
 
 @VERIFIERS.register("bootstrap_handoff")
