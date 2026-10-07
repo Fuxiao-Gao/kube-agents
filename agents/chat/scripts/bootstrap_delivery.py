@@ -297,8 +297,12 @@ def _mark_shown(data_dir: Path, in_sandbox: bool) -> bool:
             try:
                 _post_surfaced(endpoint, finding_id, body)
             except urllib.error.HTTPError as e:
-                # This row only: an unregistered one is a 404.
-                detail = e.read().decode("utf-8", "replace").strip()
+                # This row only: an unregistered one is a 404. Reading the
+                # body can itself time out, which must not escape.
+                try:
+                    detail = e.read().decode("utf-8", "replace").strip()
+                except Exception:
+                    detail = ""
                 sys.stderr.write(f"bootstrap_delivery: could not mark {finding_id} shown: {e.code} {detail}\n")
             except Exception as e:
                 sys.stderr.write(

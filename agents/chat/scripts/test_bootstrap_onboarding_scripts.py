@@ -272,6 +272,18 @@ class DeliveryMarksShownTest(unittest.TestCase):
         self.assertEqual(post.call_count, 3)
         self.assertIn("could not mark sa-key.acme.prod.app.sa1 shown: 404", err)
 
+    def test_a_refusal_whose_body_cannot_be_read_does_not_stop_the_report(self):
+        self._shown()
+        self.post.stop()
+        refused = urllib.error.HTTPError("u", 503, "Unavailable", {}, io.BytesIO(b""))
+        refused.read = mock.Mock(side_effect=TimeoutError("read timed out"))
+        with mock.patch.object(bootstrap_delivery, "_post_surfaced", side_effect=[refused, None, None]) as post:
+            rc, out, err = self._run()
+        self.post.start()
+        self.assertEqual((rc, out), (0, "# Report\n"))
+        self.assertEqual(post.call_count, 3)
+        self.assertIn("could not mark sa-key.acme.prod.app.sa1 shown: 503", err)
+
     def test_no_shown_file_marks_nothing_and_delivers(self):
         rc, out, err = self._run()
         self.assertEqual((rc, out), (0, "# Report\n"))
