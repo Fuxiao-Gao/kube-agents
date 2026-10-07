@@ -355,9 +355,12 @@ was sent. Fix every problem it listed and run it again; the run is repeatable an
 is safe.
 
 **Exit 13 — one or more clusters could not be sent.** **Write the report anyway.** The clusters it
-did not name are registered; the ones it named are not. Say which in the card's completion summary,
-do not block the card, do not retry more than once, and do not skip Step 5. A user waiting on their
-first report is not served by a stage that stops because a background queue was unavailable.
+did not name are registered; the ones it named are not yet. The delivery job registers the whole
+batch again from the agent pod when it delivers the report, from the items and scores files this
+step read, so leave both in place. Where your terminal cannot reach the queue at all, every cluster
+fails this way. Say which clusters failed in the card's completion summary, do not block the card,
+do not retry more than once, and do not skip Step 5. A user waiting on their first report is not
+served by a stage that stops because a background queue was unavailable.
 
 On success the script prints each cluster's outcomes and a final `registered N of N`. It also names
 any finding that came back **`suppressed`**, meaning the user has already dismissed it permanently: a

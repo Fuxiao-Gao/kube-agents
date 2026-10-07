@@ -351,23 +351,40 @@ def _read_batch(items_path: str, scores_path: str) -> tuple[list, dict]:
     return _read_items(items_path), _read_scores(scores_path)
 
 
+def complete_clusters(raw_scores: dict) -> set[str]:
+    """The scores file's `complete_clusters`, as '<project>/<cluster>' strings."""
+    return {str(name) for name in raw_scores.get("complete_clusters") or []}
+
+
+def cluster_batches(payloads: list[dict], complete: set[str]) -> list[tuple[str, list[dict], dict | None]]:
+    """The payloads as one `(where, batch, scope)` per cluster, in sorted order.
+
+    `where` is '<project>/<cluster>'; `scope` marks that cluster's sweep
+    complete when `complete` names it, and is None otherwise.
+    """
+    by_cluster: dict[tuple[str, str], list[dict]] = {}
+    for payload in payloads:
+        by_cluster.setdefault((payload["project"], payload["cluster"]), []).append(payload)
+    batches = []
+    for (project, cluster), batch in sorted(by_cluster.items()):
+        where = f"{project}/{cluster}"
+        scope = {"project": project, "cluster": cluster, "complete": True} if where in complete else None
+        batches.append((where, batch, scope))
+    return batches
+
+
 def cmd_register(args: argparse.Namespace) -> int:
     items, raw_scores = _read_batch(args.items, args.scores)
-    complete = {str(name) for name in raw_scores.get("complete_clusters") or []}
+    complete = complete_clusters(raw_scores)
     payloads = build_payloads(items, raw_scores["scores"])
     if not payloads:
         print("nothing to register: the sweep extracted no findings")
         return 0
 
-    by_cluster: dict[tuple[str, str], list[dict]] = {}
-    for payload in payloads:
-        by_cluster.setdefault((payload["project"], payload["cluster"]), []).append(payload)
-
+    batches = cluster_batches(payloads, complete)
     sent = 0
     failures: list[str] = []
-    for (project, cluster), batch in sorted(by_cluster.items()):
-        where = f"{project}/{cluster}"
-        scope = {"project": project, "cluster": cluster, "complete": True} if where in complete else None
+    for where, batch, scope in batches:
         if args.dry_run:
             print(f"{where}: {len(batch)} finding(s), scope={'complete' if scope else 'omitted'} (dry run)")
             sent += len(batch)
@@ -392,7 +409,7 @@ def cmd_register(args: argparse.Namespace) -> int:
     # An unmatched entry is a silent no-op with a real cost: the absence rule
     # never runs, so a fixed critical keeps its floor severity and the nudge
     # nags about it every morning with no exit.
-    for entry in sorted(complete - {f"{p}/{c}" for p, c in by_cluster}):
+    for entry in sorted(complete - {where for where, _, _ in batches}):
         print(
             f"warning: complete_clusters entry {entry!r} matched no registered batch; "
             "entries are '<project>/<cluster>' and the absence rule did not run for it"
@@ -403,9 +420,9 @@ def cmd_register(args: argparse.Namespace) -> int:
         raise Failure(
             EXIT_POST_FAILED,
             failures,
-            f"The other {sent} did register and are in the queue. Write the report from the "
-            "scores you computed, and name the clusters above in the card summary as missing "
-            "from the queue.",
+            f"The other {sent} did register and are in the queue. The delivery job registers "
+            "this whole batch again from the agent pod when it delivers the report. Go on to "
+            "`select`, and name the clusters above in the card summary as not yet in the queue.",
         )
     return 0
 

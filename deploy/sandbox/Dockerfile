@@ -486,7 +486,9 @@ COPY agents/platform/governance/ /opt/defaults/governance/
 #                          chooses the report's items from the scores file.
 #                          `register` calls the queue on the agent pod's
 #                          loopback, which this container cannot reach, so it
-#                          exits 13 and the SOP goes on to `select`
+#                          exits 13, the SOP goes on to `select`, and
+#                          bootstrap_delivery.py registers the batch from the
+#                          agent pod
 #   findings_queue.py      imported by inventory_findings for the finding
 #                          schema it validates against. Its sqlite3 functions
 #                          take a connection the caller opens, and nothing here

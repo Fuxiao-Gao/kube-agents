@@ -39,13 +39,17 @@ Then nothing is printed; any failure prints the text. A failure after the reques
 sent may have posted, so that path can send the report twice; see
 ``_posted_as_blocks``.
 
-Between the claim and the first byte of stdout, the run marks the report's
-findings shown in the findings queue, as the paced publisher ``first_report``,
+Just before the claim, the run registers the sweep's findings in the
+findings queue from this pod, from the items and scores the prioritization
+worker left beside the report (``_register_findings`` says why the worker's
+own registration is not enough). Between the claim and the first byte of
+stdout, it marks the report's findings shown in the findings queue, as the paced publisher ``first_report``,
 from ``INVENTORY.shown.json`` (what ``inventory_findings.py select`` chose).
 That counts them against the day's limit and keeps the hourly findings nudge,
 whose hold ends at the claim, from announcing them again as new. The marks are
 best-effort: a missing file or an unreachable queue is logged to stderr and the
-report is delivered regardless.
+report is delivered regardless, and the registration is best-effort the
+same way.
 
 The claim is what makes "one delivery run per report" true rather than merely likely.
 ``.bootstrap_completed`` is created with ``O_CREAT | O_EXCL`` *before* anything
@@ -94,6 +98,15 @@ SHOWN_CLASS = "class"
 SHOWN_IDS = "ids"
 # A few ids per item; far above any real file.
 SHOWN_MAX_BYTES = 64 * 1024
+# The sweep's extracted findings and the worker's scores, which this run
+# registers in the queue: inventory_findings.py's DEFAULT_ITEMS_PATH and
+# DEFAULT_SCORES_PATH (test_bootstrap_onboarding_scripts.py holds them equal).
+ITEMS_NAME = "INVENTORY.items.json"
+SCORES_NAME = "INVENTORY.scores.json"
+ITEMS_KEY = "items"
+SCORES_KEY = "scores"
+# A few KB per finding; far above any fleet's sweep.
+BATCH_MAX_BYTES = 4 * 1024 * 1024
 
 # The findings queue on this pod's loopback, as findings_nudge.py reaches it.
 # The cron child inherits SESSION_KV_API_KEY (deploy/docker/plugins/verify_chat_relay.py).
@@ -241,17 +254,89 @@ def _archive(data_dir: Path, in_sandbox: bool, name: str = REPORT_NAME, archived
         )
 
 
-def _read_shown(data_dir: Path, in_sandbox: bool) -> bytes | None:
-    """``SHOWN_NAME``'s bytes where the report was read, or None if there is none."""
+def _read_beside(data_dir: Path, in_sandbox: bool, name: str, max_bytes: int) -> bytes | None:
+    """Up to ``max_bytes + 1`` bytes of ``name`` where the report was read, or None if there is none."""
     if in_sandbox:
         return sandbox_exec.read_bytes(
-            f"{SANDBOX_HOME}/{SHOWN_NAME}", max_bytes=SHOWN_MAX_BYTES + 1, timeout=SANDBOX_TIMEOUT_SECONDS
+            f"{SANDBOX_HOME}/{name}", max_bytes=max_bytes + 1, timeout=SANDBOX_TIMEOUT_SECONDS
         )
     try:
-        with open(data_dir / SHOWN_NAME, "rb") as handle:
-            return handle.read(SHOWN_MAX_BYTES + 1)
+        with open(data_dir / name, "rb") as handle:
+            return handle.read(max_bytes + 1)
     except FileNotFoundError:
         return None
+
+
+def _read_shown(data_dir: Path, in_sandbox: bool) -> bytes | None:
+    """``SHOWN_NAME``'s bytes where the report was read, or None if there is none."""
+    return _read_beside(data_dir, in_sandbox, SHOWN_NAME, SHOWN_MAX_BYTES)
+
+
+def _read_json_beside(data_dir: Path, in_sandbox: bool, name: str) -> dict | None:
+    """``name`` parsed where the report was read, or None if there is none. Raises on anything unusable."""
+    raw = _read_beside(data_dir, in_sandbox, name, BATCH_MAX_BYTES)
+    if raw is None:
+        return None
+    if len(raw) > BATCH_MAX_BYTES:
+        raise ValueError(f"{name} is larger than {BATCH_MAX_BYTES} bytes")
+    parsed = json.loads(raw.decode("utf-8"))
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{name} is not a JSON object")
+    return parsed
+
+
+def _findings_endpoint() -> str:
+    return (os.environ.get(FINDINGS_ENDPOINT_ENV) or DEFAULT_FINDINGS_ENDPOINT).rstrip("/")
+
+
+def _register_findings(data_dir: Path, in_sandbox: bool) -> None:
+    """Register every finding the sweep extracted in the findings queue, as
+    ``inventory_findings.py register`` does, from this pod.
+
+    The worker runs ``register`` through its terminal. With the shell sandbox
+    on, that terminal cannot reach the queue on this pod's loopback, so
+    ``register`` exits 13 and nothing reaches the queue; the findings the report
+    leaves out would then never reach the findings nudge, which reads only the
+    queue, and the report's marks would find no rows. This run can reach it.
+    Registering is an upsert, so a batch the worker did register is written
+    again unchanged.
+
+    Never raises. Runs before the claim, so it adds nothing to the claimed
+    run's work (``RETIRE_AFTER_SECONDS``), and the nudge holds until the claim.
+    """
+    try:
+        import inventory_findings  # beside this script in the pod
+
+        extracted = _read_json_beside(data_dir, in_sandbox, ITEMS_NAME)
+        if extracted is None:
+            sys.stderr.write(f"bootstrap_delivery: no {ITEMS_NAME}; registering nothing\n")
+            return
+        items = extracted[ITEMS_KEY]
+        if not items:
+            return  # a clean fleet: nothing to register, and no scores file
+        raw_scores = _read_json_beside(data_dir, in_sandbox, SCORES_NAME)
+        if raw_scores is None:
+            sys.stderr.write(f"bootstrap_delivery: no {SCORES_NAME}; registering nothing\n")
+            return
+        payloads = inventory_findings.build_payloads(items, raw_scores[SCORES_KEY])
+        batches = inventory_findings.cluster_batches(payloads, inventory_findings.complete_clusters(raw_scores))
+    except Exception as e:
+        detail = "; ".join(getattr(e, "errors", None) or [str(e)])
+        sys.stderr.write(f"bootstrap_delivery: could not read the sweep's findings; registering nothing: {detail}\n")
+        return
+    endpoint = _findings_endpoint()
+    for where, batch, scope in batches:
+        try:
+            inventory_findings.post_batch(endpoint, batch, scope)
+        except urllib.error.HTTPError as e:
+            # This cluster only.
+            sys.stderr.write(f"bootstrap_delivery: the findings queue refused {where}'s findings: {e.code}\n")
+        except Exception as e:
+            sys.stderr.write(
+                f"bootstrap_delivery: the findings queue at {endpoint} did not answer ({e}); "
+                "not registering the rest\n"
+            )
+            return
 
 
 def _post_surfaced(endpoint: str, finding_id: str, body: dict) -> None:
@@ -291,7 +376,7 @@ def _mark_shown(data_dir: Path, in_sandbox: bool) -> bool:
     except Exception as e:
         sys.stderr.write(f"bootstrap_delivery: {SHOWN_NAME} is not readable; marking nothing: {e}\n")
         return True
-    endpoint = (os.environ.get(FINDINGS_ENDPOINT_ENV) or DEFAULT_FINDINGS_ENDPOINT).rstrip("/")
+    endpoint = _findings_endpoint()
     run = datetime.now(timezone.utc).strftime(RUN_FORMAT)
     for added_class, ids in marks:
         body = {"publisher": PUBLISHER, "added_class": added_class, "run": run}
@@ -477,6 +562,10 @@ def main(data_dir: Path | None = None) -> int:
         )
         return 1
     content = raw.decode("utf-8", errors="replace")
+
+    # Before the claim, which ends the nudge's hold, so the rows exist when
+    # the marks below are sent.
+    _register_findings(data_dir, in_sandbox)
 
     # The cheap check above is advisory; this is the decision. Nothing may be
     # written to stdout before it succeeds.

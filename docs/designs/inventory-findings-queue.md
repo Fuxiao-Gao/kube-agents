@@ -601,7 +601,12 @@ back one field at a time and was abandoned; and one accepted call read as done. 
 judgement, so the findings travel as a machine-readable block, written by
 `bootstrap_handoff.py` from the Cluster Agents' structured results, and `agents/platform/scripts/inventory_findings.py` owns both ends —
 `extract` produces the numbered set, `register` refuses to send anything until every number carries
-a score. The stage's judgement is scoring, which is the part that needs a model.
+a score. The stage's judgement is scoring, which is the part that needs a model. The worker's
+terminal is the shell sandbox, which cannot reach the queue on the agent pod's loopback, so there
+`register` exits 13 having sent nothing; `bootstrap_delivery.py`, which runs in the agent pod, reads
+the same items and scores files out of the sandbox and registers the batch before it claims the
+report's delivery. Registration is an upsert, so where the worker's `register` did reach the queue
+the second pass changes nothing.
 
 **The event watcher.** [`k8s-event-watcher`](../../k8s-operator/cmd/k8s-event-watcher/) already
 POSTs to the same Session KV server, so registering a finding is one more call on a path that
