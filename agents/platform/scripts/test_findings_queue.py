@@ -936,15 +936,19 @@ class TestPacingSchema(unittest.TestCase):
         self.assertNotIn("absent_since", released)
         conn.execute(released)
         columns = "id, source, check_slug, project, cluster, object, title, severity, rank_score, rubric, recommendation, remediation, verification, state, surfaced_at, surface_count"
-        for rid, severity, state, surfaced_at, count in (
-            ("named-critical", "critical", "surfaced", "2026-10-05 12:00:01", 3),
-            ("pulled-major", "major", "surfaced", "2026-10-05 09:00:00", 1),
-            ("never-named", "critical", "queued", None, 0),
+        # The old nudge named the top two criticals each morning. A model
+        # answering a pull marked "pulled-critical" through the same route.
+        for rid, severity, score, state, surfaced_at, count in (
+            ("named-critical", "critical", 250, "surfaced", "2026-10-05 12:00:01", 3),
+            ("named-critical-2", "critical", 240, "surfaced", "2026-10-05 12:00:01", 3),
+            ("pulled-critical", "critical", 200, "surfaced", "2026-10-05 09:00:00", 1),
+            ("pulled-major", "major", 100, "surfaced", "2026-10-05 09:00:00", 1),
+            ("never-named", "critical", 100, "queued", None, 0),
         ):
             conn.execute(
-                f"INSERT INTO findings ({columns}) VALUES (?, 'inventory', ?, 'acme', 'prod', 'o', 't', ?, 240, "
+                f"INSERT INTO findings ({columns}) VALUES (?, 'inventory', ?, 'acme', 'prod', 'o', 't', ?, ?, "
                 "'{\"B\": 8, \"L\": 6, \"detect\": 3, \"recover\": 2, \"C\": 100}', '{}', '{}', '{}', ?, ?, ?)",
-                (rid, rid, severity, state, surfaced_at, count),
+                (rid, rid, severity, score, state, surfaced_at, count),
             )
         return conn
 
@@ -954,15 +958,24 @@ class TestPacingSchema(unittest.TestCase):
         fq.init_findings_schema(conn)
 
         rows = {f["id"]: f for f in fq.ranked_findings(conn)}
-        self.assertEqual(set(rows), {"named-critical", "pulled-major", "never-named"})
-        # The old nudge named this critical, so it is shown and keeps being
-        # reminded, but it is no addition: no day's budget is spent on it.
-        self.assertEqual(rows["named-critical"]["first_shown_at"], "2026-10-05 12:00:01")
-        self.assertIsNone(rows["named-critical"]["added_class"])
+        self.assertEqual(
+            set(rows), {"named-critical", "named-critical-2", "pulled-critical", "pulled-major", "never-named"}
+        )
+        # The old nudge named these criticals, so they are shown and keep being
+        # reminded, but they are no addition: no day's budget is spent on them.
+        for rid in ("named-critical", "named-critical-2"):
+            self.assertEqual(rows[rid]["first_shown_at"], "2026-10-05 12:00:01")
+            self.assertIsNone(rows[rid]["added_class"])
+        # Below the old nudge's top two, so a pull marked it: shown here, it
+        # would be pending without ever being added.
+        self.assertIsNone(rows["pulled-critical"]["first_shown_at"])
         # The old nudge never marked a non-critical, so whoever did was not a
         # paced publisher: shown here, it would stop every addition.
         self.assertIsNone(rows["pulled-major"]["first_shown_at"])
         self.assertIsNone(rows["never-named"]["first_shown_at"])
+        decision = fq.pace(fq.ranked_findings(conn), at(6, 12), fq.PacingLimits(), NONE_ADDED)
+        self.assertEqual(ids(decision.add), [["pulled-critical"], ["never-named"]])
+        self.assertEqual(ids(decision.remind), [["named-critical"], ["named-critical-2"]])
         self.assertEqual(fq.additions_on(conn, "2026-10-05"), {"day": "2026-10-05", "critical": 0, "noncritical": 0})
         self.assertEqual(fq.register_findings(conn, [sample()])["results"][0]["outcome"], "created")
 

@@ -408,17 +408,31 @@ _COLUMNS = (
 # pending until a complete sweep misses it again.
 PACING_COLUMNS = (("first_shown_at", "TIMESTAMP"), ("added_class", "TEXT"), ("absent_since", "TIMESTAMP"))
 
+# How many criticals the released nudge named each morning: its TOP_N. This
+# mirrors that released value and is not FINDINGS_DAILY_CRITICALS.
+OLD_NUDGE_TOP_N = 2
+
 # The criticals the old nudge named were shown, and it named them daily, so
 # they keep being reminded rather than coming back as new and taking a day's
 # budget. `surfaced_at` is when they were last named, which is close enough
 # for that. `added_class` stays NULL, so none of them counts as an addition.
-# Only criticals, because that is all the old nudge marked: a non-critical
-# with a surface count was marked by some other caller, and calling it shown
-# would make it pending and stop every addition.
-PACING_BACKFILL = (
-    "UPDATE findings SET first_shown_at = surfaced_at "
-    "WHERE surface_count > 0 AND surfaced_at IS NOT NULL AND severity = 'critical'"
-)
+# Nothing records who marked a row: the MCP tool marks after a pull with the
+# same update. So only the rows the old nudge would have named are backfilled:
+# the top OLD_NUDGE_TOP_N nameable criticals that were marked, in its ranked
+# order. Any other marked row, a non-critical or a critical a pull marked, is
+# left unshown and comes back once as new; calling it shown would make it
+# pending without it ever being added.
+PACING_BACKFILL = "UPDATE findings SET first_shown_at = surfaced_at WHERE id = ?"
+
+
+def _old_nudge_named(conn: sqlite3.Connection) -> list[str]:
+    marked = [
+        f["id"]
+        for f in ranked_findings(conn)
+        if f["severity"] == "critical" and not rolled_up(f) and f["surface_count"] > 0 and f["surfaced_at"]
+    ]
+    return marked[:OLD_NUDGE_TOP_N]
+
 
 _SELECT = f"SELECT {', '.join(_COLUMNS)} FROM findings"
 
@@ -444,7 +458,7 @@ def init_findings_schema(conn: sqlite3.Connection) -> None:
             if name not in columns:
                 conn.execute(f"ALTER TABLE findings ADD COLUMN {name} {kind}")
         if "first_shown_at" not in columns:
-            conn.execute(PACING_BACKFILL)
+            conn.executemany(PACING_BACKFILL, [(fid,) for fid in _old_nudge_named(conn)])
     conn.execute(PUBLICATIONS_SCHEMA)
     conn.execute(ADDITIONS_SCHEMA)
     for statement in FINDINGS_INDEXES:

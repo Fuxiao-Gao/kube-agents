@@ -909,7 +909,10 @@ one row per item added, with the class the item had when it was added, so neithe
 snoozing nor a recurrence (§5.2) refunds the budget, a line added twice in a day counts twice, and
 a later re-score cannot move an addition between the two counts. Only a paced publisher sets `first_shown_at`: the MCP tool
 `mark_finding_surfaced`, which a model calls after answering a pull, does not, so a pull is never
-an addition and never makes anything pending. A limit of 0 adds none of that kind, which is the
+an addition and never makes anything pending. The upgrade that adds `first_shown_at` marks as shown
+only the two criticals the old nudge named each morning (the top two nameable criticals that were
+marked, in ranked order), so they keep being reminded; any other row marked before the upgrade, such
+as one a pull marked, comes back once as new. A limit of 0 adds none of that kind, which is the
 opposite of what 0 means for the alert ceilings; a value that is not a whole number, is negative,
 or (for the hour) is not 0–23 falls back to its default with a line on stderr. The defaults live in
 `findings_queue.py` and nowhere else; the site's cron reference says where an install sets them.
