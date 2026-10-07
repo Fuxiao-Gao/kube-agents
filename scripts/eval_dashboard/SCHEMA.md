@@ -786,8 +786,10 @@ each `{build, job, head_sha, project, started, finished, duration_s, result,
 log_url, truncated, complete, counts{expected, recorded, passed, partial,
 failed, infra, missing}, missing[], newly_failing[], fixed[],
 previous_build, parts[], missing_parts[], running_parts[], cases[]}`. A
-night is one nightly run, or the main and writers parts' runs that started
-on one UTC date. A second run of the main part that date is a night of its
+night is one nightly run, or the main and writers parts' runs of one date:
+a run's date is the UTC date of its start plus 15 minutes
+(`NIGHT_START_GRACE`; both periodics start at 00:00 UTC, so a run that
+starts a moment early still joins its night). A second run of the main part that date is a night of its
 own; a second run of the writers part takes the writers part of the date's
 newest night;
 `build`, `job`, `head_sha`, `project`, `result` and `log_url` are the main
@@ -798,13 +800,14 @@ job, result, truncated, started, finished, duration_s, log_url, recorded}`
 with `part` `main` or `writers` and `recorded` the cases it recorded.
 `missing_parts[]` names a part the night should have and does not, and
 `running_parts[]` one that is still in flight (a `running[]` entry of that
-part first seen on the night's UTC date). A part that ran that date in
-another night is neither. The main part is expected beside a writers part;
-the writers part only once a writers run on record started on or before
-the night's date **and** the night is missing cases. So a night of the
-main job alone before the split has neither, and so does one after the
-main job runs the whole matrix again that records every case; one short of
-cases still reports the writers part missing. `cases[]` is every task row the night measured,
+part first seen on the night's date, dated the same way). A part that ran
+that date in another night is neither. The main part is expected beside a
+writers part; the writers part only when a case the night is missing is one
+a writers run of that date or earlier recorded. So a night of the main job
+alone before the split has neither; once the main job runs the whole matrix
+again, a night short of a main case is incomplete without naming a part,
+and one short of a former writers case reports the writers part missing.
+`cases[]` is every task row the night measured,
 sorted by domain then name, as `{case, domain, state, reps{pass, fail,
 infra}, reason, transcript_url}` with `state` in `pass|partial|fail|infra`
 by the strip's rule over the task's reps (no `reps` key: the task's result
@@ -821,11 +824,14 @@ no main part), so a writers part at its deadline leaves the main part's
 numbers standing. `complete` is no part
 truncated, no case missing, and no part missing or running. A case recorded
 by both parts counts once, as the main part recorded it. `newly_failing`
-is every `fail` tonight that was not `fail` on the night before it on
-record (the one past the window included; `previous_build` names its main
-part's build), `fixed` every
-`fail` then that is `pass` now; both `[]` on the first night, when
-`previous_build` is `null`. `log_url` and `transcript_url` point at
+is every `fail` tonight that was not `fail` the night before, `fixed` every
+`fail` then that is `pass` now. The night before is per part: each part's
+run from the newest earlier night on record that has that part (the one
+past the window included), and a case both of those runs recorded reads as
+the newer one did, or the main part on the same night; `previous_build`
+names the main part's build (the writers part's when no earlier night has a
+main part). `newly_failing` and `fixed` are both `[]` on the first night,
+when `previous_build` is `null`. `log_url` and `transcript_url` point at
 Spyglass under `logs/<job>/<build>`, a periodic's path, in the bucket the
 run's `runs[].log_url` names (without it: `gs://kube-agents-prow`, the
 bucket before 2026-09-15). The nights are

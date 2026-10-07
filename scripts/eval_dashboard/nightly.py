@@ -39,7 +39,9 @@ alone) and the writers part (``ci-kube-agents-eval-nightly-writers``, the
 cases that request a pull request: each resets and watches the project's
 one GitOps repo, so on a shared project they run one at a time after
 everything else). A build's part is read from its job name, and the builds
-that started on one UTC date are one night (``filed_nights``): its cases
+of one date are one night (``filed_nights``; a build is dated by its UTC
+start plus NIGHT_START_GRACE, so one that starts a moment before midnight
+joins the night it was meant for): its cases
 are the union of theirs, "incomplete" is judged against the whole matrix,
 and each part says for itself whether it was cut short (``parts[]``). The
 night is truncated when its main part is; a writers part at its deadline
@@ -96,6 +98,11 @@ RUNNING_MAX_AGE = datetime.timedelta(hours=9)
 # 9 AM the newest night is at most 13 hours old; 36 hours tolerates one
 # late or re-run night without reading the night before as last night.
 LAST_NIGHT_MAX_AGE = datetime.timedelta(hours=36)
+# A nightly build is dated by its start plus this. Both periodics start at
+# 00:00 UTC, so a slow clock or a cron a few minutes early must not move a
+# build into the night before. Kept short: a manual re-run started late in
+# the evening UTC belongs to its own date, not to the next night.
+NIGHT_START_GRACE = datetime.timedelta(minutes=15)
 # Where Prow's Spyglass shows a periodic's build and its artifacts. The
 # collector records it per nightly run (``runs[].log_url``, SCHEMA.md) from
 # the build directory it listed, so the link follows whichever bucket the
@@ -286,15 +293,19 @@ def pending_part(entry: dict) -> str:
     return PART_WRITERS if match and match.group("job") == NIGHTLY_WRITERS_JOB else PART_MAIN
 
 
+def night_day(moment: datetime.datetime | None) -> datetime.date | None:
+    """The night a moment belongs to: its UTC date after NIGHT_START_GRACE."""
+    return (moment + NIGHT_START_GRACE).date() if moment else None
+
+
 def night_date(run: dict) -> datetime.date | None:
-    started = parse_iso(run.get("started"))
-    return started.date() if started else None
+    return night_day(parse_iso(run.get("started")))
 
 
 def filed_nights(runs: list[dict]) -> list[tuple[dict[str, dict], list[dict]]]:
     """``runs`` (nightly, oldest first) as nights, oldest first, each
     ``({part: run}, every run filed under the night)``. A run joins the
-    oldest night of its UTC start date that does not have its part yet.
+    oldest night of its date (``night_date``) that does not have its part yet.
     Failing that, a main build opens a night of its own, so one job alone
     is one build per night as before and a same-day re-run of the main job
     is a night of its own. A writers build instead takes the writers part
@@ -359,8 +370,8 @@ def night_builds(data: dict) -> dict[str, str]:
 
 
 def parts_by_date(data: dict) -> dict[datetime.date, set[str]]:
-    """``{UTC date: the parts of the nightly runs that started on it}``,
-    across every night of that date."""
+    """``{night date: the parts of the nightly runs dated to it}``
+    (``night_date``), across every night of that date."""
     out: dict[datetime.date, set[str]] = {}
     for run in sorted_nightly_runs(data):
         day = night_date(run)
@@ -369,11 +380,14 @@ def parts_by_date(data: dict) -> dict[datetime.date, set[str]]:
     return out
 
 
-def writers_since(data: dict) -> datetime.date | None:
-    """The UTC date of the first writers build on record, or None."""
-    days = [night_date(r) for r in sorted_nightly_runs(data) if night_part(r) == PART_WRITERS]
-    days = [d for d in days if d]
-    return min(days) if days else None
+def writers_cases(data: dict, day: datetime.date | None) -> set[str]:
+    """The cases a writers build dated on or before ``day`` recorded."""
+    out: set[str] = set()
+    for run in sorted_nightly_runs(data):
+        dated = night_date(run)
+        if night_part(run) == PART_WRITERS and day and dated and dated <= day:
+            out.update(c["case"] for c in night_cases(run, {}))
+    return out
 
 
 def run_duration(run: dict) -> int | float | None:
@@ -401,30 +415,29 @@ def part_document(part: str, run: dict, cases: list[dict]) -> dict:
     }
 
 
-def absent_parts(night: dict[str, dict], missing_cases: list[str], since: datetime.date | None, running: list[dict], dated: set[str] = frozenset()) -> tuple[list[str], list[str]]:
+def absent_parts(night: dict[str, dict], missing_cases: list[str], writers: set[str], running: list[dict], dated: set[str] = frozenset()) -> tuple[list[str], list[str]]:
     """``(missing parts, running parts)`` of a night: the parts it should
     have and has not, each either still in flight -- a running build of
-    that part first seen on the night's UTC date -- or missing. ``dated``
-    is ``parts_by_date`` for the night's date: a part that ran that date
-    in another night (beside a same-day re-run of the main job) is not
-    missing.
+    that part first seen on the night's date (``night_day``) -- or missing.
+    ``dated`` is ``parts_by_date`` for the night's date: a part that ran
+    that date in another night (beside a same-day re-run of the main job)
+    is not missing.
 
     The main part is expected beside any writers part: it is the job that
-    always runs. The writers part is expected only once writers builds
-    have started appearing (``since``: none on or before this night's date,
-    none expected) AND the night is short of cases. The first keeps every
-    night before the split, and every night while the main job runs alone,
-    looking exactly as it did. The second keeps a night quiet once the main
-    job runs the whole matrix again (the split undone) and records every
-    case; such a night cut short of cases still names the writers part
-    missing."""
+    always runs. The writers part is expected only when a case the night is
+    missing is one a writers build recorded on or before the night's date
+    (``writers``, ``writers_cases``). So every night before the split, and
+    every night while the main job runs alone, looks exactly as it did; and
+    once the main job runs the whole matrix again (the split undone), a
+    night short of a main case is incomplete without naming the writers
+    part, while one short of a former writers case still names it."""
     present = night_parts(night)
     day = night_date(present[0])
-    in_flight = {pending_part(e) for e in running if parse_iso(e.get("first_seen")) and parse_iso(e["first_seen"]).date() == day}
+    in_flight = {pending_part(e) for e in running if day and night_day(parse_iso(e.get("first_seen"))) == day}
     expected = []
     if PART_MAIN not in night and PART_MAIN not in dated:
         expected.append(PART_MAIN)
-    elif PART_WRITERS not in night and PART_WRITERS not in dated and since is not None and day is not None and since <= day and missing_cases:
+    elif PART_WRITERS not in night and PART_WRITERS not in dated and writers.intersection(missing_cases):
         expected.append(PART_WRITERS)
     missing = [p for p in expected if p not in in_flight]
     still = [p for p in expected if p in in_flight]
@@ -442,9 +455,11 @@ def night_document(run: dict, data: dict, previous: dict | None) -> dict:
 def joined_night_document(night: dict[str, dict], data: dict, previous: dict[str, dict] | None, running: list[dict] = ()) -> dict:
     """One night, ``{part: run}``, as the page and the digest read it
     (SCHEMA.md, "brief.json": ``nightly.nights[]``). ``previous`` is the
-    night before it on record, ``None`` on the first night; ``running`` is
-    ``running_nights``, which says whether a part the night lacks is still
-    in flight. The night-wide fields that name one build (``build``,
+    night before it on record, ``{part: run}``, ``None`` on the first
+    night (``night_reports`` builds it per part); a case more than one of
+    its runs recorded reads as the first of them, in dict order, did.
+    ``running`` is ``running_nights``, which says whether a part the night
+    lacks is still in flight. The night-wide fields that name one build (``build``,
     ``job``, ``result``, ``log_url`` ...) are the main part's, or the
     writers part's when the main one is absent; ``parts[]`` has each."""
     domain_of = domains(data)
@@ -464,10 +479,10 @@ def joined_night_document(night: dict[str, dict], data: dict, previous: dict[str
     cases.sort(key=lambda c: (c["domain"], c["case"]))
     recorded = {c["case"] for c in cases}
     now_states = states_of(cases)
-    # The night before, read the way tonight reads a case both its parts
-    # recorded: as the main part recorded it.
+    # The night before, each case as the first run of ``previous`` that
+    # recorded it.
     before: dict[str, str] = {}
-    for run in night_parts(previous) if previous else []:
+    for run in (previous or {}).values():
         for c in night_cases(run, domain_of):
             before.setdefault(c["case"], c["state"])
     failing = sorted(name for name, state in now_states.items() if state == STATE_FAIL)
@@ -475,7 +490,7 @@ def joined_night_document(night: dict[str, dict], data: dict, previous: dict[str
     fixed = sorted(name for name, state in before.items() if state == STATE_FAIL and now_states.get(name) == STATE_PASS)
     missing = [name for name in expected if name not in recorded]
     day = night_date(runs[0])
-    missing_parts, running_parts = absent_parts(night, missing, writers_since(data), list(running), parts_by_date(data).get(day, set()) if day else set())
+    missing_parts, running_parts = absent_parts(night, missing, writers_cases(data, day), list(running), parts_by_date(data).get(day, set()) if day else set())
     # The night is cut short as a whole when its main part was (the part
     # that holds nearly every case), or every part when it has no main one.
     # A writers part at its deadline alone is that part's ``truncated``: the
@@ -485,7 +500,7 @@ def joined_night_document(night: dict[str, dict], data: dict, previous: dict[str
     finishes = [parse_iso(p["finished"]) for p in parts if p["finished"]]
     durations = [p["duration_s"] for p in parts if p["duration_s"] is not None]
     primary = runs[0]
-    previous_primary = night_parts(previous)[0] if previous else None
+    previous_primary = (previous.get(PART_MAIN) or next(iter(previous.values()))) if previous else None
     return {
         "build": primary.get("build_id") if isinstance(primary.get("build_id"), str) else None,
         "job": primary.get("job") if isinstance(primary.get("job"), str) else None,
@@ -538,17 +553,25 @@ def by_start(runs: list[dict]) -> list[dict]:
 def night_reports(data: dict, limit: int = NIGHTS_ON_RECORD, running: list[dict] = ()) -> list[dict]:
     """The last ``limit`` nights, **newest first**, each compared with the
     night before it on record (the one older than the window included, so
-    the oldest listed night still has its "newly failing"). A night before
-    that lacks its main part is passed over for the newest earlier one that
-    has it, when there is one: compared with the writers' cases alone, every
-    main case failing tonight would read as newly failing. ``running`` is
-    ``running_nights``, for a night with a part still in flight."""
+    the oldest listed night still has its "newly failing"). "The night
+    before" is per part: each part's run from the newest earlier night that
+    has that part, so a night that lacks one part does not make every case
+    of that part failing tonight read as newly failing. A case both runs
+    recorded reads as the newer night recorded it, as the main part did
+    when they are one night. ``running`` is ``running_nights``, for a night
+    with a part still in flight."""
     nights = group_nights(sorted_nightly_runs(data))
     out = []
     for index in range(len(nights) - 1, max(-1, len(nights) - 1 - limit), -1):
-        earlier = nights[:index]
-        previous = next((n for n in reversed(earlier) if PART_MAIN in n), earlier[-1] if earlier else None)
-        out.append(joined_night_document(nights[index], data, previous, running))
+        sources = []
+        for part in PARTS:
+            at = next((i for i in range(index - 1, -1, -1) if part in nights[i]), None)
+            if at is not None:
+                sources.append((at, part))
+        # Newest night first; the sort is stable, so main first on a tie.
+        sources.sort(key=lambda source: -source[0])
+        previous = {part: nights[at][part] for at, part in sources}
+        out.append(joined_night_document(nights[index], data, previous or None, running))
     return out
 
 
@@ -679,6 +702,11 @@ def digest_line(data: dict | None, now: datetime.datetime, clock=None) -> str:
     took = duration_text(night["duration_s"]) if night.get("duration_s") is not None else "unknown wall clock"
     recorded = f"{counts['recorded']} of {counts['expected']} cases recorded" if counts["expected"] else f"{counts['recorded']} cases recorded"
     if night["truncated"]:
+        # A night is cut short by its main part when it has one: that
+        # part's wall clock, not the longest part's.
+        main = next((p for p in night.get("parts") or [] if p.get("part") == PART_MAIN), None)
+        if main is not None:
+            took = duration_text(main["duration_s"]) if main.get("duration_s") is not None else "unknown wall clock"
         notes = "".join(f"{SEP}{note}" for note in part_notes(night, cut=False))
         return f"{DIGEST_GLYPH} Nightly: truncated after {took}{SEP}{recorded}{notes}{SEP}the night's numbers are not comparable"
     parts = [f"{counts['recorded']} cases", f"{counts['passed']} passed all reps", f"{counts['partial']} partial", f"{counts['failed']} failed"]
