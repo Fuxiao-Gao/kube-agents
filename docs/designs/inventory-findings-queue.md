@@ -801,7 +801,7 @@ publishers reading `GET /v1/findings/ranked` (§6.2). Three ship:
 | publisher       | what it is                                                 | cadence                                     |
 | --------------- | ---------------------------------------------------------- | ------------------------------------------- |
 | **the backlog** | the whole ranked list, as one document, rewritten in place | after every sweep and every daily run       |
-| **the nudge**   | a three-line chat message: count, top three, link          | hourly, paced (§7.2)                        |
+| **the nudge**   | paced chat additions, daily reminders, a stop-add notice   | hourly, paced (§7.2)                        |
 | **the alarm**   | a chat message about one finding that is failing now       | the run that finds it crossing §4.2's floor |
 
 **The backlog is the queue; chat is how you hear about it.** That split is the whole of §7, and it
