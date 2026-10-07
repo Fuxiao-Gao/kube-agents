@@ -1127,6 +1127,16 @@ class TestAdditions(QueueTestCase):
         fq.mark_surfaced(self.conn, fq.validate_finding(joined)["id"], publisher="nudge")
         self.assertEqual(fq.additions_on(self.conn, self.DAY), {"day": self.DAY, "critical": 0, "noncritical": 0})
 
+    def test_the_first_report_is_a_paced_publisher(self):
+        # bootstrap_delivery.py marks each row of the report's items with one run.
+        members = [sample(object=f"Deployment/d{i}", rubric=CRITICAL_RUBRIC) for i in range(2)]
+        self.register(*members)
+        for member in members:
+            fid = fq.validate_finding(member)["id"]
+            fq.mark_surfaced(self.conn, fid, publisher="first_report", added_class="critical", run="2026-10-07T09:00:00Z")
+            self.assertIsNotNone(fq.get_finding(self.conn, fid)["first_shown_at"])
+        self.assertEqual(fq.additions_on(self.conn, self.DAY), {"day": self.DAY, "critical": 1, "noncritical": 0})
+
     def test_a_day_must_be_a_date(self):
         for day in ("", "yesterday", "2026-10-06T00:00:00", None, "2026-99-99", "2026-02-30", "20261006", "٢٠٢٦-١٠-٠٦"):
             with self.assertRaises(fq.FindingError):

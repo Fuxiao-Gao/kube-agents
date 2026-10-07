@@ -91,8 +91,10 @@ PUBLICATION_TARGET_KINDS = ("github-issue", "repo-file", "chat")
 
 # Pacing (§7.2). Only these publishers may mark a row shown, which is what
 # makes it count against a day's limit and, while it waits for a decision,
-# pending. A model naming a finding in answer to a pull is not one of them.
-PACED_PUBLISHERS = ("nudge",)
+# pending: the nudge, and the first inventory report (`bootstrap_delivery.py`
+# marks what `inventory_findings.py select` chose once it is delivered). A
+# model naming a finding in answer to a pull is not one of them.
+PACED_PUBLISHERS = ("nudge", "first_report")
 # The two classes an item is counted under when it is added. Stored with the
 # addition so a later re-score cannot move it from one day's count to the other.
 ITEM_CLASSES = ("critical", "noncritical")

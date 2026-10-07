@@ -39,6 +39,14 @@ Then nothing is printed; any failure prints the text. A failure after the reques
 sent may have posted, so that path can send the report twice; see
 ``_posted_as_blocks``.
 
+Between the claim and the first byte of stdout, the run marks the report's
+findings shown in the findings queue, as the paced publisher ``first_report``,
+from ``INVENTORY.shown.json`` (what ``inventory_findings.py select`` chose).
+That counts them against the day's limit and keeps the hourly findings nudge,
+whose hold ends at the claim, from announcing them again as new. The marks are
+best-effort: a missing file or an unreachable queue is logged to stderr and the
+report is delivered regardless.
+
 The claim is what makes "one delivery run per report" true rather than merely likely.
 ``.bootstrap_completed`` is created with ``O_CREAT | O_EXCL`` *before* anything
 reaches stdout, so of two runs racing on the same report — a scheduled tick and
@@ -54,10 +62,15 @@ what the user sees, verbatim or, on Slack with the flag on, laid out again by
 (``INVENTORY.raw.md``) and are never delivered from here.
 """
 
+import json
 import os
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 import sandbox_exec
@@ -70,6 +83,34 @@ DELIVERY_JOB_ID = "bootstrap-inventory-delivery"
 # is easy to lose; keeping it means a re-send is a `cat`, not a re-scan.
 DELIVERED_REPORT_NAME = "INVENTORY.delivered.md"
 REPORT_NAME = "INVENTORY.md"
+
+# The items the report lists, written by ``inventory_findings.py select``
+# (its DEFAULT_SHOWN_PATH and the keys below; test_bootstrap_onboarding_scripts.py
+# holds the copies equal), and set aside beside the delivered report once read.
+SHOWN_NAME = "INVENTORY.shown.json"
+DELIVERED_SHOWN_NAME = "INVENTORY.shown.delivered.json"
+SHOWN_ITEMS = "items"
+SHOWN_CLASS = "class"
+SHOWN_IDS = "ids"
+# A few ids per item; far above any real file.
+SHOWN_MAX_BYTES = 64 * 1024
+
+# The findings queue on this pod's loopback, as findings_nudge.py reaches it.
+# The cron child inherits SESSION_KV_API_KEY (deploy/docker/plugins/verify_chat_relay.py).
+FINDINGS_ENDPOINT_ENV = "SESSION_KV_ENDPOINT"
+SESSION_KV_AUTH_ENV = "SESSION_KV_API_KEY"
+DEFAULT_FINDINGS_ENDPOINT = "http://127.0.0.1:8699"
+SURFACED_PATH = "/v1/findings/{id}/surfaced"
+JSON_HEADERS = {"Content-Type": "application/json"}
+AUTH_HEADER = "Authorization"
+BEARER_PREFIX = "Bearer "
+# The paced publisher this report marks as (findings_queue.PACED_PUBLISHERS).
+PUBLISHER = "first_report"
+# One run id per delivery, so the rows of one item are one addition.
+RUN_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+# Short: the report waits on these. A queue that does not answer one mark is
+# not asked for the rest.
+MARK_TIMEOUT_SECONDS = 5
 
 # The sandbox's data volume, whatever HERMES_HOME says on this side: the same
 # path by construction (deploy/sandbox/Dockerfile), and a separate constant
@@ -85,8 +126,9 @@ SANDBOX_TIMEOUT_SECONDS = 30
 # How old ``.bootstrap_completed`` must be before a run removes the jobs. A
 # younger marker may belong to a racing run that is still delivering (see the
 # claim in the module docstring), and removing the delivery job under it would discard its
-# report. Far above that run's post-claim work: a stdout write and one archive
-# over ssh bounded by SANDBOX_TIMEOUT_SECONDS.
+# report. Far above that run's post-claim work: one read and two archives over
+# ssh, each bounded by SANDBOX_TIMEOUT_SECONDS, marks that stop at the first
+# MARK_TIMEOUT_SECONDS timeout, and a stdout write.
 RETIRE_AFTER_SECONDS = 300
 
 # By absolute path, so no PATH entry picks the binary. A function defined under
@@ -171,35 +213,103 @@ def _claim_delivery(data_dir: Path) -> bool:
     return True
 
 
-def _archive_report(data_dir: Path, in_sandbox: bool) -> None:
-    """Rename the delivered report to ``DELIVERED_REPORT_NAME`` where it was read."""
+def _archive(data_dir: Path, in_sandbox: bool, name: str = REPORT_NAME, archived: str = DELIVERED_REPORT_NAME) -> None:
+    """Rename ``name`` to ``archived`` where it was read."""
     if not in_sandbox:
         try:
-            report = data_dir / REPORT_NAME
-            if report.exists():
-                report.replace(data_dir / DELIVERED_REPORT_NAME)
+            source = data_dir / name
+            if source.exists():
+                source.replace(data_dir / archived)
         except OSError as e:
-            sys.stderr.write(f"bootstrap_delivery: could not archive INVENTORY.md: {e}\n")
+            sys.stderr.write(f"bootstrap_delivery: could not archive {name}: {e}\n")
         return
     # As the terminal's login: the sandbox's /opt/data is that account's and
     # mode 755, so the default login cannot rename inside it.
     try:
         moved = sandbox_exec.run(
-            [REMOTE_MV, "-f", "--", f"{SANDBOX_HOME}/{REPORT_NAME}", f"{SANDBOX_HOME}/{DELIVERED_REPORT_NAME}"],
+            [REMOTE_MV, "-f", "--", f"{SANDBOX_HOME}/{name}", f"{SANDBOX_HOME}/{archived}"],
             principal=sandbox_exec.TERMINAL_PRINCIPAL,
             timeout=SANDBOX_TIMEOUT_SECONDS,
         )
     except Exception as e:
-        sys.stderr.write(f"bootstrap_delivery: could not archive INVENTORY.md in the sandbox: {e}\n")
+        sys.stderr.write(f"bootstrap_delivery: could not archive {name} in the sandbox: {e}\n")
         return
     if moved.returncode != 0:
         sys.stderr.write(
-            "bootstrap_delivery: could not archive INVENTORY.md in the sandbox: "
+            f"bootstrap_delivery: could not archive {name} in the sandbox: "
             f"{(moved.stderr or '').strip()}\n"
         )
 
 
-def _cleanup(data_dir: Path, in_sandbox: bool) -> None:
+def _read_shown(data_dir: Path, in_sandbox: bool) -> bytes | None:
+    """``SHOWN_NAME``'s bytes where the report was read, or None if there is none."""
+    if in_sandbox:
+        return sandbox_exec.read_bytes(
+            f"{SANDBOX_HOME}/{SHOWN_NAME}", max_bytes=SHOWN_MAX_BYTES + 1, timeout=SANDBOX_TIMEOUT_SECONDS
+        )
+    try:
+        with open(data_dir / SHOWN_NAME, "rb") as handle:
+            return handle.read(SHOWN_MAX_BYTES + 1)
+    except FileNotFoundError:
+        return None
+
+
+def _post_surfaced(endpoint: str, finding_id: str, body: dict) -> None:
+    headers = dict(JSON_HEADERS)
+    token = (os.environ.get(SESSION_KV_AUTH_ENV) or "").strip()
+    if token:
+        headers[AUTH_HEADER] = f"{BEARER_PREFIX}{token}"
+    path = SURFACED_PATH.format(id=urllib.parse.quote(finding_id, safe=""))
+    request = urllib.request.Request(
+        f"{endpoint}{path}", data=json.dumps(body).encode("utf-8"), headers=headers, method="POST"
+    )
+    with urllib.request.urlopen(request, timeout=MARK_TIMEOUT_SECONDS) as response:
+        response.read()
+
+
+def _mark_shown(data_dir: Path, in_sandbox: bool) -> bool:
+    """Mark every row of every item the report lists shown, as ``PUBLISHER``.
+
+    Returns whether there was a shown file to archive. Never raises: the
+    claim is taken, so nothing here may stop the report going out.
+    """
+    try:
+        raw = _read_shown(data_dir, in_sandbox)
+    except Exception as e:
+        sys.stderr.write(f"bootstrap_delivery: could not read {SHOWN_NAME}; marking nothing: {e}\n")
+        return False
+    if raw is None:
+        sys.stderr.write(f"bootstrap_delivery: no {SHOWN_NAME}; marking nothing\n")
+        return False
+    try:
+        if len(raw) > SHOWN_MAX_BYTES:
+            raise ValueError(f"larger than {SHOWN_MAX_BYTES} bytes")
+        items = json.loads(raw.decode("utf-8"))[SHOWN_ITEMS]
+        marks = [(str(item[SHOWN_CLASS]), [str(fid) for fid in item[SHOWN_IDS]]) for item in items]
+    except Exception as e:
+        sys.stderr.write(f"bootstrap_delivery: {SHOWN_NAME} is not readable; marking nothing: {e}\n")
+        return True
+    endpoint = (os.environ.get(FINDINGS_ENDPOINT_ENV) or DEFAULT_FINDINGS_ENDPOINT).rstrip("/")
+    run = datetime.now(timezone.utc).strftime(RUN_FORMAT)
+    for added_class, ids in marks:
+        body = {"publisher": PUBLISHER, "added_class": added_class, "run": run}
+        for finding_id in ids:
+            try:
+                _post_surfaced(endpoint, finding_id, body)
+            except urllib.error.HTTPError as e:
+                # This row only: an unregistered one is a 404.
+                detail = e.read().decode("utf-8", "replace").strip()
+                sys.stderr.write(f"bootstrap_delivery: could not mark {finding_id} shown: {e.code} {detail}\n")
+            except Exception as e:
+                sys.stderr.write(
+                    f"bootstrap_delivery: the findings queue at {endpoint} did not answer ({e}); "
+                    "not marking the rest\n"
+                )
+                return True
+    return True
+
+
+def _cleanup(data_dir: Path, in_sandbox: bool, shown: bool = False) -> None:
     """Tidy up after the report has been posted as blocks or emitted to stdout.
 
     Onboarding is already marked complete by the delivery claim, so everything
@@ -210,9 +320,12 @@ def _cleanup(data_dir: Path, in_sandbox: bool) -> None:
     it out of the way still matters: the sweep and prioritization SOPs, which
     run where the report is, treat a present ``INVENTORY.md`` as "already done",
     so leaving it in place would make a later, deliberate re-run of onboarding a
-    no-op.
+    no-op. ``shown`` sets the shown file aside beside it, so a later report
+    whose worker never ran ``select`` is not marked with this one's items.
     """
-    _archive_report(data_dir, in_sandbox)
+    _archive(data_dir, in_sandbox)
+    if shown:
+        _archive(data_dir, in_sandbox, SHOWN_NAME, DELIVERED_SHOWN_NAME)
 
 
 def _retire_jobs() -> None:
@@ -364,13 +477,17 @@ def main(data_dir: Path | None = None) -> int:
     if not _claim_delivery(data_dir):
         return 0  # another run is delivering this report — stay silent
 
+    # Right after the claim, which ends the nudge's hold, so a nudge run has
+    # the shortest window in which to announce these findings as new.
+    shown = _mark_shown(data_dir, in_sandbox)
+
     if not _posted_as_blocks(content):
         sys.stdout.write(_presented(content))
         sys.stdout.flush()
 
     # Cleanup runs only after the report is posted or safely on stdout (already
     # captured by the scheduler), so removing INVENTORY.md here cannot truncate delivery.
-    _cleanup(data_dir, in_sandbox)
+    _cleanup(data_dir, in_sandbox, shown)
     return 0
 
 
