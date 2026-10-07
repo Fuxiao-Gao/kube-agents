@@ -1159,6 +1159,16 @@ class ContentWorkspaceStore:
                     workspace.started_from = f"origin/{branch}"
                     workspace.opened_branch = branch
                     workspace.branch_sha = self._sha(workspace, f"origin/{branch}")
+                elif depth is None and workspace.base != workspace.default_branch:
+                    # A full clone comes down on the remote's default, and
+                    # `read`, `list` and `grep` read the tree, so a base other
+                    # than the default (named, or pinned) is checked out here.
+                    # After the clone rather than as its `--branch`, so a base
+                    # the probe could not ask about still gets the 409 above.
+                    self._git(
+                        workspace,
+                        ["checkout", "--force", "-B", workspace.base, workspace.started_from],
+                    )
             except BaseException:
                 _remove_tree(tree)
                 raise

@@ -1202,6 +1202,32 @@ class RealGitTest(unittest.TestCase):
                     self.store.push(self.workspace.handle, branch)
                 self.assertIn("is a rollout, base, or run branch", str(ctx.exception))
 
+    def test_a_full_open_reads_the_base_not_the_remote_default(self):
+        # `open` composes an https URL by design; this runner points that one
+        # URL at the local remote, so the open itself runs against real git.
+        seed = self.base / "seed-release"
+        real_git_runner(["git", "clone", str(self.remote), str(seed)], self.base)
+        real_git_runner(["git", "switch", "-c", "release"], seed)
+        (seed / "manifests" / "existing.yaml").write_text("kind: Secret\n")
+        real_git_runner(["git", "commit", "-am", "release"], seed)
+        real_git_runner(["git", "push", "origin", "release"], seed)
+        url = "https://github.com/acme/fleet.git"
+
+        def runner(argv, cwd):
+            return real_git_runner([str(self.remote) if a == url else a for a in argv], cwd)
+
+        for name, pins, base in (
+            ("pinned", {("github.com", "acme/fleet"): "release"}, None),
+            ("named", None, "release"),
+        ):
+            with self.subTest(name):
+                store = ContentWorkspaceStore(
+                    self.base / f"trees-{name}", self.agent, runner, pinned_bases=pins
+                )
+                workspace = store.open("acme/fleet", base)
+                self.assertEqual("release", workspace.base)
+                self.assertEqual(b"kind: Secret\n", store.read(workspace.handle, "manifests/existing.yaml"))
+
     def test_a_pin_is_protected_under_the_name_it_is_stored_by(self):
         # The stored pin is the branch proposals are told to target, so it is
         # protected as it is, not read again as another branch. Boot refuses
