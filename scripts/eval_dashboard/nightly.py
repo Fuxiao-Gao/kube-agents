@@ -46,8 +46,10 @@ are the union of theirs, "incomplete" is judged against the whole matrix,
 and each part says for itself whether it was cut short (``parts[]``). The
 night is truncated when its main part is; a writers part at its deadline
 does not hide or relabel the main part's results. A night with one part
-says which part is missing, or still running; one job alone is one build
-per night, exactly as before.
+says which part is missing, or still running; a same-day re-run of the
+main job reports its date's writers part as its own (``lent_writers``),
+while every reader that counts runs counts that build once. One job alone
+is one build per night, exactly as before.
 
 Only stdlib, like ``tiers.py``: ``post_health.py`` imports it and must stay
 free of third-party dependencies.
@@ -103,7 +105,7 @@ LAST_NIGHT_MAX_AGE = datetime.timedelta(hours=36)
 # build into the night before. Kept short: only a build started in the
 # last 15 minutes before midnight UTC moves to the next date, and a main
 # re-run started then is a night of its own there; it does not take the
-# cron night's writers part (filed_nights).
+# cron night's writers part, only reports it (filed_nights, lent_writers).
 NIGHT_START_GRACE = datetime.timedelta(minutes=15)
 # Where Prow's Spyglass shows a periodic's build and its artifacts. The
 # collector records it per nightly run (``runs[].log_url``, SCHEMA.md) from
@@ -313,14 +315,18 @@ def filed_nights(runs: list[dict]) -> list[tuple[dict[str, dict], list[dict]]]:
     night of its own. A writers build joins, among the nights of its date
     that have no writers part yet, the one whose main part started closest
     to it (the newer on a tie), so a main re-run started late the evening
-    before does not take the cron night's writers part. Failing that, it
-    takes the writers part of the date's newest night if it recorded at
-    least as many cases as the part it replaces: the writers part is the
-    short one, the one re-run after a flake, and its newest build stands
-    for the night unless that build recorded less (one that died in setup
-    does not wipe the night's results). Either way the build left out of
-    the night stays filed under it, so a reader keyed by build still finds
-    it there. A run with no start time stands alone."""
+    before does not take the cron night's writers part; a writers re-run
+    joins one only if ``replaces`` says it beats the date's writers part
+    already filed. Failing that, it
+    takes the writers part of the date's newest night when ``replaces``
+    says so: the writers part is the short one, the one re-run after a
+    flake, and its newest build stands for the night unless that build
+    graded less (one that died in setup or lost every case to quota does
+    not wipe the night's verdicts). Either way the build left out of the
+    night stays filed under it, so a reader keyed by build still finds it
+    there. A run with no start time stands alone. A night left without a
+    writers part beside a main re-run borrows one for its report only
+    (``lent_writers``); it is filed here once."""
     nights: list[tuple[dict[str, dict], list[dict]]] = []
     by_date: dict[datetime.date, list[tuple[dict[str, dict], list[dict]]]] = {}
     for run in runs:
@@ -328,13 +334,21 @@ def filed_nights(runs: list[dict]) -> list[tuple[dict[str, dict], list[dict]]]:
         dated = by_date.get(day, []) if day else []
         open_nights = [n for n in dated if part not in n[0]]
         if part == PART_WRITERS and open_nights:
+            # A re-run that would not take the date's writers part from the
+            # build that has it does not become a re-run night's own part
+            # either: it stays filed under that build's night, and the open
+            # night borrows the better part for its report.
+            holders = [n for n in dated if PART_WRITERS in n[0]]
+            if holders and not replaces(run, holders[-1][0][PART_WRITERS]):
+                holders[-1][1].append(run)
+                continue
             started = parse_iso(run.get("started"))
             filed = min(reversed(open_nights), key=lambda n: abs(parse_iso(n[0][PART_MAIN].get("started")) - started))
         else:
             filed = open_nights[0] if open_nights else None
         if filed is None and part == PART_WRITERS and dated:
             filed = dated[-1]
-            if len(night_cases(run, {})) < len(night_cases(filed[0][part], {})):
+            if not replaces(run, filed[0][part]):
                 filed[1].append(run)
                 continue
         if filed is None:
@@ -347,10 +361,44 @@ def filed_nights(runs: list[dict]) -> list[tuple[dict[str, dict], list[dict]]]:
     return nights
 
 
+def graded_cases(run: dict) -> int:
+    """How many cases the run graded: state pass, partial or fail."""
+    return sum(1 for c in night_cases(run, {}) if c["state"] != STATE_INFRA)
+
+
+def run_truncated(run: dict) -> bool:
+    return night_truncated(run, str(run.get("result") or "").upper() or None)
+
+
+def replaces(newcomer: dict, incumbent: dict) -> bool:
+    """Whether a writers re-run takes the night's writers part from the
+    build that has it: it graded more cases (an infra-only or unrecorded
+    case is no verdict), or as many and was not cut short where the
+    incumbent finished."""
+    new, old = graded_cases(newcomer), graded_cases(incumbent)
+    return new > old or (new == old and (run_truncated(incumbent) or not run_truncated(newcomer)))
+
+
 def group_nights(runs: list[dict]) -> list[dict[str, dict]]:
     """``runs`` (nightly, oldest first) as nights, oldest first, each
     ``{part: run}`` (``filed_nights``)."""
     return [night for night, _ in filed_nights(runs)]
+
+
+def lent_writers(nights: list[dict[str, dict]]) -> dict[int, int]:
+    """``{index: lender index}`` over ``group_nights``: a night with a main
+    part and no writers part -- a same-day re-run of the main job -- reports
+    the writers part of the newest other night of its date that has one,
+    the writers build filed for that date. Only the report borrows it: the
+    build stays filed under its own night (``filed_nights``), so a reader
+    that counts runs counts it once."""
+    out = {}
+    for index, night in enumerate(nights):
+        day = night_date(night[PART_MAIN]) if PART_MAIN in night and PART_WRITERS not in night else None
+        lenders = [i for i, other in enumerate(nights) if day and PART_WRITERS in other and night_date(other[PART_WRITERS]) == day]
+        if lenders:
+            out[index] = lenders[-1]
+    return out
 
 
 def night_parts(night: dict[str, dict]) -> list[dict]:
@@ -414,7 +462,7 @@ def run_duration(run: dict) -> int | float | None:
     return int((finished - started).total_seconds()) if started and finished else None
 
 
-def part_document(part: str, run: dict, cases: list[dict]) -> dict:
+def part_document(part: str, run: dict, cases: list[dict], from_night: str | None = None) -> dict:
     result = str(run.get("result") or "").upper() or None
     started, finished = parse_iso(run.get("started")), parse_iso(run.get("finished"))
     return {
@@ -428,6 +476,7 @@ def part_document(part: str, run: dict, cases: list[dict]) -> dict:
         "duration_s": run_duration(run),
         "log_url": build_url(run),
         "recorded": len(cases),
+        "from_night": from_night,
     }
 
 
@@ -468,16 +517,20 @@ def night_document(run: dict, data: dict, previous: dict | None) -> dict:
     return joined_night_document({night_part(run): run}, data, {night_part(previous): previous} if previous else None)
 
 
-def joined_night_document(night: dict[str, dict], data: dict, previous: dict[str, dict] | None, running: list[dict] = ()) -> dict:
+def joined_night_document(night: dict[str, dict], data: dict, previous: dict[str, dict] | None, running: list[dict] = (), borrowed: dict[str, str] | None = None) -> dict:
     """One night, ``{part: run}``, as the page and the digest read it
     (SCHEMA.md, "brief.json": ``nightly.nights[]``). ``previous`` is the
     night before it on record, ``{part: run}``, ``None`` on the first
     night (``night_reports`` builds it per part); a case more than one of
     its runs recorded reads as the first of them, in dict order, did.
     ``running`` is ``running_nights``, which says whether a part the night
-    lacks is still in flight. The night-wide fields that name one build (``build``,
+    lacks is still in flight. ``borrowed`` is ``{part: build of the night
+    it is filed under}`` for a part ``night`` borrows (``lent_writers``):
+    it counts as the night's own, but the night's wall clock is its own
+    builds'. The night-wide fields that name one build (``build``,
     ``job``, ``result``, ``log_url`` ...) are the main part's, or the
     writers part's when the main one is absent; ``parts[]`` has each."""
+    borrowed = borrowed or {}
     domain_of = domains(data)
     expected = expected_cases(data)
     runs = night_parts(night)
@@ -491,7 +544,7 @@ def joined_night_document(night: dict[str, dict], data: dict, previous: dict[str
         seen = {c["case"] for c in cases}
         mine = [c for c in night_cases(night[part], domain_of) if c["case"] not in seen]
         cases.extend(mine)
-        parts.append(part_document(part, night[part], mine))
+        parts.append(part_document(part, night[part], mine, borrowed.get(part)))
     cases.sort(key=lambda c: (c["domain"], c["case"]))
     recorded = {c["case"] for c in cases}
     now_states = states_of(cases)
@@ -512,9 +565,10 @@ def joined_night_document(night: dict[str, dict], data: dict, previous: dict[str
     # A writers part at its deadline alone is that part's ``truncated``: the
     # main part's results stand, and the night is not complete.
     truncated = parts[0]["truncated"] if PART_MAIN in night else all(p["truncated"] for p in parts)
-    starts = [parse_iso(p["started"]) for p in parts if p["started"]]
-    finishes = [parse_iso(p["finished"]) for p in parts if p["finished"]]
-    durations = [p["duration_s"] for p in parts if p["duration_s"] is not None]
+    own = [p for p in parts if p["part"] not in borrowed]
+    starts = [parse_iso(p["started"]) for p in own if p["started"]]
+    finishes = [parse_iso(p["finished"]) for p in own if p["finished"]]
+    durations = [p["duration_s"] for p in own if p["duration_s"] is not None]
     primary = runs[0]
     previous_primary = (previous.get(PART_MAIN) or next(iter(previous.values()))) if previous else None
     return {
@@ -575,19 +629,27 @@ def night_reports(data: dict, limit: int = NIGHTS_ON_RECORD, running: list[dict]
     of that part failing tonight read as newly failing. A case both runs
     recorded reads as the newer night recorded it, as the main part did
     when they are one night. ``running`` is ``running_nights``, for a night
-    with a part still in flight."""
+    with a part still in flight. A main re-run's night reports its date's
+    writers part (``lent_writers``), compared with the writers part before
+    that one."""
     nights = group_nights(sorted_nightly_runs(data))
+    lent = lent_writers(nights)
     out = []
     for index in range(len(nights) - 1, max(-1, len(nights) - 1 - limit), -1):
+        night, borrowed = nights[index], {}
+        if index in lent:
+            lender = nights[lent[index]]
+            night = {**night, PART_WRITERS: lender[PART_WRITERS]}
+            borrowed = {PART_WRITERS: night_parts(lender)[0].get("build_id")}
         sources = []
         for part in PARTS:
-            at = next((i for i in range(index - 1, -1, -1) if part in nights[i]), None)
+            at = next((i for i in range(index - 1, -1, -1) if part in nights[i] and nights[i][part] is not night.get(part)), None)
             if at is not None:
                 sources.append((at, part))
         # Newest night first; the sort is stable, so main first on a tie.
         sources.sort(key=lambda source: -source[0])
         previous = {part: nights[at][part] for at, part in sources}
-        out.append(joined_night_document(nights[index], data, previous or None, running))
+        out.append(joined_night_document(night, data, previous or None, running, borrowed))
     return out
 
 

@@ -790,16 +790,27 @@ night is one nightly run, or the main and writers parts' runs of one date:
 a run's date is the UTC date of its start plus 15 minutes
 (`NIGHT_START_GRACE`; both periodics start at 00:00 UTC, so a run that
 starts a moment early still joins its night). A second run of the main part that date is a night of its
-own. A writers run joins the night of its date, still without a writers
-part, whose main part started closest to it; a second run of the writers
-part takes the writers part of the date's newest night if it recorded at
-least as many cases;
+own, and reports as its writers part the writers run of the newest other
+night of its date that has one (`parts[].from_night`), counted in its
+`cases[]`, `counts`, `missing[]`, `newly_failing`, `fixed` and `complete`
+as its own and compared with the writers run before that one; the
+borrowed run stays filed under its own night, so every reader that counts
+runs (the Cases page's rates and last failure, the Trend page's nights)
+counts it once. A writers run joins the night of its date, still without
+a writers part, whose main part started closest to it; a second run of
+the writers part does that, or takes the writers part of the date's
+newest night, only if it beats the date's writers run already filed: it
+graded more cases (`pass`, `partial` or `fail`; an `infra` case is no
+verdict), or as many and was not cut short where the incumbent finished;
 `build`, `job`, `head_sha`, `project`, `result` and `log_url` are the main
 part's (the writers part's when there is no main part), `started` and
 `finished` the earliest and latest of the parts, `duration_s` the longest
-part's. `parts[]` is each run the night has, main first, as `{part, build,
-job, result, truncated, started, finished, duration_s, log_url, recorded}`
-with `part` `main` or `writers` and `recorded` the cases it recorded.
+part's, a borrowed part left out of all three. `parts[]` is each run the
+night has, main first, as `{part, build, job, result, truncated, started,
+finished, duration_s, log_url, recorded, from_night}` with `part` `main`
+or `writers`, `recorded` the cases it recorded, and `from_night` the
+`build` of the night a borrowed part is filed under (`null` for the
+night's own).
 `missing_parts[]` names a part the night should have and does not, and
 `running_parts[]` one that is still in flight (a `running[]` entry of that
 part first seen on the night's date, dated the same way). A part that ran
