@@ -949,8 +949,8 @@ nudge adds the rest. The limit is the value the onboarding hand-off read when it
 card, written to `/opt/data/INVENTORY.limits.json`. `select` also writes the listed rows' ids to
 `/opt/data/INVENTORY.shown.json`, and `bootstrap_delivery.py` marks each of them shown, with
 publisher `first_report` and class `critical`, right after it claims delivery and before it posts.
-The items count as shown when the report is delivered, not when it is written, so a report nobody
-receives leaves them new for the nudge. The claim ends the nudge's hold, so a nudge run in the
+The items count as shown when the report's delivery is claimed, not when it is written, so a report
+that is never claimed leaves them new for the nudge; one claimed and then lost in posting does not. The claim ends the nudge's hold, so a nudge run in the
 moment between the claim and the marks can announce the report's items as new. Marking never holds
 delivery back: a row the queue refuses, such as one it never registered, is skipped, a queue that
 does not answer ends the marking for that delivery, and either goes to the delivery run's stderr. An
