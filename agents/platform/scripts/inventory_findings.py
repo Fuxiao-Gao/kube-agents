@@ -5,8 +5,8 @@ The onboarding hand-off (bootstrap_handoff.py) writes a ```findings block into
 the raw file; this script
 reads it and owns every deterministic step of the prioritization stage:
 `extract` produces the authoritative item list, `register` refuses to send
-anything until every one of those items carries a score, `ranked` reads back
-the queue's order, and `select` chooses the items the first report lists.
+anything until every one of those items carries a score, and `select` chooses
+the items the first report lists.
 
 The stage used to ask the worker to enumerate the findings from prose and call
 `register_findings` itself, and it lost findings three ways at once. It decided
@@ -311,10 +311,6 @@ def post_batch(endpoint: str, findings: list[dict], scope: dict | None) -> dict:
     return _request(endpoint, "/v1/findings", body)
 
 
-def fetch_ranked(endpoint: str) -> list[dict]:
-    return _request(endpoint, "/v1/findings/ranked").get("findings") or []
-
-
 def _read_json(path: str, what: str) -> dict:
     """The scores file is hand-written each run, so a trailing comma is likely."""
     try:
@@ -411,42 +407,6 @@ def cmd_register(args: argparse.Namespace) -> int:
             "scores you computed, and name the clusters above in the card summary as missing "
             "from the queue.",
         )
-    return 0
-
-
-# --------------------------------------------------------------------------
-# ranked
-# --------------------------------------------------------------------------
-
-
-def cmd_ranked(args: argparse.Namespace) -> int:
-    try:
-        ranked = fetch_ranked(args.endpoint)
-    except (urllib.error.URLError, OSError, ValueError) as exc:
-        raise Failure(
-            EXIT_POST_FAILED,
-            [str(exc)],
-            "Rank by the scores you computed instead, and say so in the card summary.",
-        ) from None
-
-    for index, finding in enumerate(ranked, 1):
-        where = "/".join(
-            x
-            for x in (finding.get("project"), finding.get("cluster"), finding.get("namespace"), finding.get("object"))
-            if x
-        )
-        flags = []
-        if finding.get("provider_managed"):
-            flags.append("provider_managed")
-        if not finding.get("actionable", True):
-            flags.append("not_actionable")
-        suffix = f"  [{','.join(flags)}]" if flags else ""
-        print(
-            f"{index:>3}. {finding.get('rank_score'):>4} {finding.get('severity'):<8} "
-            f"{finding.get('check')}  {where}{suffix}\n     {finding.get('title')}"
-        )
-    print(f"\ntotal: {len(ranked)}")
-    print("The roll-up count is this total minus the rows you show or gather into a shown line.")
     return 0
 
 
@@ -608,10 +568,6 @@ def main(argv: list[str] | None = None) -> int:
     register.add_argument("--endpoint", default=os.environ.get("FINDINGS_ENDPOINT", DEFAULT_ENDPOINT))
     register.add_argument("--dry-run", action="store_true")
     register.set_defaults(func=cmd_register)
-
-    ranked = sub.add_parser("ranked", help="the queue's order, and the authoritative total")
-    ranked.add_argument("--endpoint", default=os.environ.get("FINDINGS_ENDPOINT", DEFAULT_ENDPOINT))
-    ranked.set_defaults(func=cmd_ranked)
 
     select = sub.add_parser("select", help="choose the items the first report lists")
     select.add_argument("--items", default=DEFAULT_ITEMS_PATH)

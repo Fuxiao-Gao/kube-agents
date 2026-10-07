@@ -342,57 +342,6 @@ class RegisterTests(unittest.TestCase):
         self.assertEqual(self.sent, [])
 
 
-class RankedTests(unittest.TestCase):
-    def setUp(self):
-        self.real = inv.fetch_ranked
-        self.addCleanup(setattr, inv, "fetch_ranked", self.real)
-
-    def test_the_order_and_the_total_are_printed(self):
-        inv.fetch_ranked = lambda endpoint: [
-            {
-                "rank_score": 90,
-                "severity": "major",
-                "check": "probes-readiness",
-                "project": "acme",
-                "cluster": "prod",
-                "namespace": "payments",
-                "object": "api",
-                "title": "no readinessProbe",
-                "actionable": True,
-            }
-        ]
-        with unittest.mock.patch("sys.stdout", new_callable=io.StringIO) as out:
-            self.assertEqual(inv.main(["ranked"]), 0)
-        self.assertIn("total: 1", out.getvalue())
-        self.assertIn("acme/prod/payments/api", out.getvalue())
-
-    def test_the_flags_the_report_rules_key_off_are_shown(self):
-        inv.fetch_ranked = lambda endpoint: [
-            {
-                "rank_score": 3,
-                "severity": "minor",
-                "check": "no-memory-limit",
-                "project": "acme",
-                "cluster": "prod",
-                "namespace": "kube-system",
-                "object": "kube-dns",
-                "title": "no limit",
-                "provider_managed": True,
-                "actionable": False,
-            }
-        ]
-        with unittest.mock.patch("sys.stdout", new_callable=io.StringIO) as out:
-            inv.main(["ranked"])
-        self.assertIn("provider_managed,not_actionable", out.getvalue())
-
-    def test_an_unreachable_queue_exits_5_rather_than_tracing(self):
-        def boom(endpoint):
-            raise OSError("connection refused")
-
-        inv.fetch_ranked = boom
-        self.assertEqual(inv.main(["ranked"]), inv.EXIT_POST_FAILED)
-
-
 # 288 critical; 90 critical by the floor; 120 major; 90 major; 36 critical by the floor.
 CRITICAL = {"B": 8, "L": 6, "detect": 3, "recover": 3, "C": 1.0}
 FLOORED = {"B": 3, "L": 10, "detect": 1, "recover": 2, "C": 1.0}

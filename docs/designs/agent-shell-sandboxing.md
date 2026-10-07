@@ -1791,10 +1791,10 @@ wrong thing for a reviewer to find even though it is inert there. So the image g
 explicit allowlist: `sandbox_exec.py`, `forge.py`, `pr_triggers.py`,
 `github_token_refresh.py`, `gitops_workspace.py`, `gke_endpoint.py`, `cluster_preflight.sh`,
 `stall_report.py` and `inventory_findings.py` — the entry points an agent is told to run,
-plus the transitive closure of what they import. Only `inventory_findings.py extract` works
-there: `register` and `ranked` call the Session KV server on the agent pod's loopback and
-exit 13 from the sandbox, and the prioritization SOP answers that exit by ranking from its own
-scores and writing the report without the findings queue.
+plus the transitive closure of what they import. `inventory_findings.py extract` and `select`
+work there, and `select` chooses the report's items from the scores file alone. `register` calls
+the Session KV server on the agent pod's loopback and exits 13 from the sandbox, and the
+prioritization SOP answers that exit by going on to `select` and writing the report.
 
 **The test for whether a script qualifies is what it needs, not how it is called.** An
 earlier version of this proposed "shell call sites, and absent from every `jobs.json`",
