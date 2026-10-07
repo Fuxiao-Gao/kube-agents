@@ -16,7 +16,7 @@ import re
 import sqlite3
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Iterable, Mapping
 
 __all__ = [
@@ -100,7 +100,7 @@ ITEM_CLASSES = ("critical", "noncritical")
 # after the last daily audit, and not the middle of the night in the US.
 REMIND_HOUR = 12
 HOURS_PER_DAY = 24
-DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
+DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z", re.ASCII)
 
 # The limits' defaults, here and nowhere else, and the environment variables
 # that override them. 0 means "add none of that kind", not "no limit".
@@ -1075,6 +1075,10 @@ def additions_on(conn: sqlite3.Connection, day: str) -> dict:
     """
     if not isinstance(day, str) or not DAY_RE.match(day):
         raise FindingError(f"day is {_brief(day)}; must be a UTC date, YYYY-MM-DD")
+    try:
+        date.fromisoformat(day)
+    except ValueError:
+        raise FindingError(f"day is {_brief(day)}; must be a UTC date, YYYY-MM-DD") from None
     counts = {added_class: 0 for added_class in ITEM_CLASSES}
     for added_class, count in conn.execute(
         "SELECT added_class, COUNT(*) FROM findings_additions WHERE day = ? GROUP BY added_class", (day,)

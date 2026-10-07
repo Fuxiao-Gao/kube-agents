@@ -4299,7 +4299,8 @@ class TestFindingsQueueApi(unittest.TestCase):
         self.assertEqual(self.client.get("/v1/findings/ranked").json()["findings"], [])
 
     def test_additions_refuse_a_day_that_is_not_a_date(self):
-        self.assertEqual(self.client.get("/v1/findings/additions?day=yesterday").status_code, 400)
+        for day in ("yesterday", "2026-99-99"):
+            self.assertEqual(self.client.get(f"/v1/findings/additions?day={day}").status_code, 400, day)
 
     def test_unknown_findings_are_404(self):
         self.assertEqual(self.client.post("/v1/findings/nope/surfaced", json={}).status_code, 404)

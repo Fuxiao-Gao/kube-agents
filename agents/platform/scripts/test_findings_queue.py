@@ -1117,7 +1117,7 @@ class TestAdditions(QueueTestCase):
         self.assertEqual(fq.additions_on(self.conn, today), {"day": today, "critical": 0, "noncritical": 0})
 
     def test_a_day_must_be_a_date(self):
-        for day in ("", "yesterday", "2026-10-06T00:00:00", None):
+        for day in ("", "yesterday", "2026-10-06T00:00:00", None, "2026-99-99", "2026-02-30", "20261006", "٢٠٢٦-١٠-٠٦"):
             with self.assertRaises(fq.FindingError):
                 fq.additions_on(self.conn, day)
 
