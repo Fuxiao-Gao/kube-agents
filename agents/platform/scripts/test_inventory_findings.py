@@ -588,7 +588,22 @@ class SelectCommandTests(unittest.TestCase):
         self.assertIn("f001", out)
         self.assertIn("f004", out)
         self.assertIn("roll-up: 1 more item, 1 of them critical", out)
+        # The two listed fill the delivery day's allowance of 2.
+        self.assertIn(
+            "pace: the critical items not listed are added in chat from 12:00 UTC the day after the report "
+            "arrives, at most 2 a day",
+            out,
+        )
+
+    def test_criticals_left_out_start_the_same_day_while_the_allowance_lasts(self):
+        _, out, _ = self.run_select(criticals(3), {"first_report_criticals": 1, "daily_criticals": 2})
         self.assertIn("pace: the critical items not listed are added in chat from 12:00 UTC, at most 2 a day", out)
+
+    def test_a_daily_limit_of_zero_gives_no_arrival_time(self):
+        _, out, _ = self.run_select(criticals(3), {"daily_criticals": 0})
+        self.assertIn("pace: the critical items not listed are not added in chat; the daily limit is 0", out)
+        _, out, _ = self.run_select([(MAJOR, {"check": "a"})], {"noncritical_max": 0})
+        self.assertIn("pace: non-critical items are not added in chat; the daily limit is 0", out)
 
     def test_no_critical_says_so_and_when_the_rest_arrives(self):
         code, out, _ = self.run_select(

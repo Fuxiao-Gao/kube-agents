@@ -539,16 +539,26 @@ def describe_selection(
         out.append(f"\nroll-up: {_plural(remaining, 'more item', 'more items')}{critical_part}")
     else:
         out.append("\nroll-up: none; the report has no roll-up line")
+    # The listed items count against the delivery day's critical allowance
+    # (bootstrap_delivery.py marks them), so when they fill it the rest start
+    # the next day. A limit of 0 adds none of that kind at all.
     if deferred:
-        out.append(
-            f"pace: the critical items not listed are added in chat from {fq.REMIND_HOUR}:00 UTC, "
-            f"at most {limits.daily_criticals} a day"
-        )
+        if not limits.daily_criticals:
+            out.append("pace: the critical items not listed are not added in chat; the daily limit is 0")
+        else:
+            start = " the day after the report arrives" if len(shown) >= limits.daily_criticals else ""
+            out.append(
+                f"pace: the critical items not listed are added in chat from {fq.REMIND_HOUR}:00 UTC{start}, "
+                f"at most {limits.daily_criticals} a day"
+            )
     elif not shown and others:
-        out.append(
-            f"pace: non-critical items are added in chat from {limits.noncritical_after_hour}:00 UTC, "
-            f"at most {limits.noncritical_max} a day"
-        )
+        if not limits.noncritical_max:
+            out.append("pace: non-critical items are not added in chat; the daily limit is 0")
+        else:
+            out.append(
+                f"pace: non-critical items are added in chat from {limits.noncritical_after_hour}:00 UTC, "
+                f"at most {limits.noncritical_max} a day"
+            )
     return "\n".join(out)
 
 
