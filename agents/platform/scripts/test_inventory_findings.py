@@ -622,6 +622,18 @@ class SelectCommandTests(unittest.TestCase):
         self.assertIn("list exactly 1 critical item,", out)
         self.assertNotIn("f001", out)
 
+    def test_a_clean_fleet_needs_no_scores_file(self):
+        # Step 2 sends a clean fleet past scoring, so no scores file exists.
+        (self.dir / "items.json").write_text(json.dumps({"items": []}), encoding="utf-8")
+        with unittest.mock.patch("sys.stdout", new_callable=io.StringIO) as out, \
+                unittest.mock.patch("sys.stderr", new_callable=io.StringIO):
+            code = inv.main(["select", "--items", str(self.dir / "items.json"),
+                             "--scores", str(self.dir / "absent.json"), "--out", str(self.shown)])
+        self.assertEqual(code, 0)
+        self.assertIn("list no item; there are no critical findings", out.getvalue())
+        self.assertIn("roll-up: none", out.getvalue())
+        self.assertEqual(json.loads(self.shown.read_text(encoding="utf-8")), {"items": []})
+
     def test_an_incomplete_score_set_writes_nothing(self):
         items, scores = batch(*criticals(2))
         del scores["f001"]

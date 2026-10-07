@@ -328,21 +328,31 @@ def _read_json(path: str, what: str) -> dict:
         ) from None
 
 
-def _read_batch(items_path: str, scores_path: str) -> tuple[list, dict]:
-    """`extract`'s items and the scores file, each checked for its shape."""
+def _read_items(items_path: str) -> list:
+    """`extract`'s items, checked for their shape."""
     items = _read_json(items_path, "items").get("items")
     if not isinstance(items, list):
         raise Failure(
             EXIT_INCOMPLETE,
             [f"{items_path} has no `items` list -- run `extract` first, or point --items at its output"],
         )
+    return items
+
+
+def _read_scores(scores_path: str) -> dict:
+    """The scores file, checked for its shape."""
     raw_scores = _read_json(scores_path, "scores")
     if not isinstance(raw_scores, dict) or not isinstance(raw_scores.get("scores"), dict):
         raise Failure(
             EXIT_INCOMPLETE,
             ["the scores file must be an object with a `scores` map keyed by finding id"],
         )
-    return items, raw_scores
+    return raw_scores
+
+
+def _read_batch(items_path: str, scores_path: str) -> tuple[list, dict]:
+    """`extract`'s items and the scores file, each checked for its shape."""
+    return _read_items(items_path), _read_scores(scores_path)
 
 
 def cmd_register(args: argparse.Namespace) -> int:
@@ -543,11 +553,13 @@ def describe_selection(
 
 
 def cmd_select(args: argparse.Namespace) -> int:
-    items, raw_scores = _read_batch(args.items, args.scores)
+    items = _read_items(args.items)
+    # A clean fleet has nothing to score, so the SOP writes no scores file for it.
+    scores = _read_scores(args.scores)["scores"] if items else {}
     limits = read_limits(args.limits)
     try:
         shown, deferred, others = select_items(
-            items, raw_scores["scores"], limits.first_report_criticals, frozenset(args.exclude or ())
+            items, scores, limits.first_report_criticals, frozenset(args.exclude or ())
         )
     except Failure as failure:
         failure.hint = "Nothing was selected. Fix all of these, then re-run."
