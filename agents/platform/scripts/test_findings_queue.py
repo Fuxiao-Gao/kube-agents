@@ -1357,6 +1357,16 @@ class TestPace(unittest.TestCase):
         plan = fq.pace(rows[1:2] + rows[3:], at(6, 16), self.LIMITS, NONE_ADDED, announced=announced[:1])
         self.assertEqual(plan.add, [])
 
+    def test_an_announced_but_unrecorded_noncritical_stops_every_addition(self):
+        rows = [row("c-new", score=400), row("m0", "major")]
+        plan = fq.pace(rows, at(6, 17), self.LIMITS, NONE_ADDED, announced=[fq.item_key(rows[1])])
+        self.assertEqual(plan.add, [])
+        self.assertEqual(plan.blocking, [])
+        self.assertEqual(ids(plan.waiting), [["c-new"]])
+        # As when its mark succeeded and it is pending.
+        rows[1] = row("m0", "major", state="surfaced", shown=at(6, 16))
+        self.assertEqual(fq.pace(rows, at(6, 17), self.LIMITS, NONE_ADDED).add, [])
+
     def test_a_pending_critical_holds_back_noncriticals(self):
         rows = [row("c0", state="surfaced", shown=at(5, 12)), row("m0", "major")]
         plan = self.pace(rows, at(6, 16))

@@ -1249,8 +1249,9 @@ def pace(
     report is on its way).
 
     `announced` is the keys of the items already added today. One that is
-    still new (every mark of it failed) is not added again and counts as an
-    addition of its class, as if `added_today` held it.
+    still new (every mark of it failed) is not added again, counts as an
+    addition of its class, as if `added_today` held it, and holds additions
+    back as a pending item of its class would.
     """
     now = (now if now.tzinfo else now.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
     items, managed = _gather(rows)
@@ -1269,8 +1270,11 @@ def pace(
     pending_critical = [item for item in pending if item.item_class == critical]
     remind = [item for item in pending_critical if item.first_shown.date() != now.date()][: limits.daily_criticals]
 
+    # An unrecorded non-critical stops every addition, as a pending one does.
+    # It is not in `blocking`, which the caller marks and names daily.
+    noncritical_unrecorded = any(item.item_class == noncritical for item in unrecorded)
     add: list[Item] = []
-    if may_add and not blocking:
+    if may_add and not blocking and not noncritical_unrecorded:
         new_critical = [item for item in new if item.item_class == critical]
         if now.hour >= REMIND_HOUR:
             budget = max(0, limits.daily_criticals - spent(critical))
