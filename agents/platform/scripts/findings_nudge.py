@@ -28,8 +28,9 @@ formatting and bookkeeping. Each run:
    the line says how many of them there are.
 4. Prints, records the day's state (the daily part sent, the items announced
    today) in a file in the profile home, then marks every named row surfaced
-   as the paced publisher, which is what makes an addition count against the
-   day and become pending.
+   as the paced publisher, which is what makes an addition pending and
+   records it against the day. An announced item counts against the day from
+   the state file alone while its marks have not landed.
 
 Nothing is added before the first inventory report's delivery is claimed, so
 that report is the first thing onboarding says about the fleet. The hold ends
@@ -43,7 +44,9 @@ exit 0.
 
 The bookkeeping is best-effort, and what a failed write costs: an addition
 whose mark fails is not offered again the same day (the state file remembers
-it), but is offered as new the next day. If the state file cannot be written
+it), still counts against that day's limit, and holds additions back as a
+pending item of its class would, though the stop-add notice does not name it.
+It is offered as new the next day. If the state file cannot be written
 either, the same additions and the daily part are posted again every hour.
 """
 
@@ -86,7 +89,8 @@ STATE_FILE = ".findings_nudge_state.json"
 DAILY_KEY = "daily_section"
 FAILURE_KEY = "failure_reported"
 # {"day": <UTC date>, "keys": [<item key>, ...]}: what was added today, so a
-# mark that failed does not announce the same item again an hour later.
+# mark that failed does not announce the same item again an hour later, and
+# the item still counts against the day and holds additions back (`pace`).
 ANNOUNCED_KEY = "announced"
 # The run id sent with an addition's marks: one per run, so the members of an
 # item marked one by one are one addition.
