@@ -185,8 +185,10 @@ kanban:
   # t_c31a1f00, for nothing. Worse than nothing, now: the answer the notifier
   # posts is verbatim, and a paraphrase of it can only lose detail.
   #
-  # The failure kinds stay: they deliver a terse status line and no more, and
-  # the front door genuinely has to decide what to do about them.
+  # The failure kinds stay: they deliver a terse status line at most (none in
+  # Slack with KAGE_SLACK_UX on, where the woken turn tells the failure, or a
+  # blocked card's question posts instead), and the front door genuinely has
+  # to decide what to do about them.
   #
   # This key governs push-capable adapters only. The notifier skips its own
   # send() for an adapter with no push channel (the API server) because that
@@ -406,3 +408,16 @@ plugins:
 # the same value. A key this file adds reaches an existing install through step
 # 2d's back-fill.
 context_file_max_chars: 100000
+
+# Auxiliary tasks: disable Hermes auxiliary title generation (issue #2523).
+# After turn 1, Hermes fires a background _generate_session_title call with
+# reasoning_config: {enabled: false} (reasoning_effort: "minimal"). On Vertex AI
+# Gemini 3.x Flash, LiteLLM maps this to thinkingLevel: "minimal", which Vertex
+# rejects with HTTP 400 (unsupported thinking level). On Claude models, LiteLLM
+# maps "minimal" to thinking budget 1024, burning reasoning tokens on every session.
+# While the admin console Chat page and Hermes dashboard sidecar display session
+# titles when available (falling back to user message preview), disabling titling
+# avoids runtime 400 errors and token waste across all profiles.
+auxiliary:
+  title_generation:
+    enabled: false

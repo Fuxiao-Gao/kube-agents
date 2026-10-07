@@ -385,6 +385,18 @@ class MetricsListenerTest(unittest.TestCase):
             urllib.request.urlopen(self.endpoint + "/metrics").read()
         self.assertEqual("", captured.getvalue())
 
+    def test_the_process_start_time_is_exported_once_and_never_moves(self):
+        """The gauge the operator's usage poller reads: a plausible time, typed, constant across scrapes."""
+        first = _parse(urllib.request.urlopen(self.endpoint + "/metrics").read().decode("utf-8"))
+        second = _parse(urllib.request.urlopen(self.endpoint + "/metrics").read().decode("utf-8"))
+        start = _series(first, credential_proxy.PROCESS_START_TIME_METRIC)
+        self.assertIsNotNone(start, "no process_start_time_seconds line")
+        self.assertEqual(start, credential_proxy.PROCESS_START_TIME_SECONDS)
+        self.assertEqual(start, _series(second, credential_proxy.PROCESS_START_TIME_METRIC))
+        self.assertLess(abs(time.time() - start), 24 * 3600, "the start time is not this process's")
+        body = urllib.request.urlopen(self.endpoint + "/metrics").read().decode("utf-8")
+        self.assertIn(f"# TYPE {credential_proxy.PROCESS_START_TIME_METRIC} gauge", body)
+
     def test_two_scrapes_of_an_idle_registry_are_identical(self):
         first = urllib.request.urlopen(self.endpoint + "/metrics").read()
         second = urllib.request.urlopen(self.endpoint + "/metrics").read()
@@ -787,7 +799,7 @@ class FaultOutcomeTest(unittest.TestCase):
             return error.code, json.loads(error.read())
 
     def test_a_pool_refusal_counts_as_blocked(self):
-        status, body = self._post_with(scoped_sa_pool.PoolRefusal("no member covers the scope"))
+        status, body = self._post_with(scoped_sa_pool.PoolRefusal("no scoped service account for project p (cluster projects/p/locations/l/clusters/c): refused; the broker will not fall back to the ambient credential. Declare the project in spec.scope and apply, or exclude the cluster."))
         self.assertEqual(403, status)
         self.assertEqual("gcp.scoped-sa.unmapped-scope", body.get("rule"))
         families = _parse(CredentialProxyHandler.metrics.render())

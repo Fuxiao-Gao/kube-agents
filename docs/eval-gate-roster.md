@@ -14,8 +14,8 @@ carries the rule: `hack/eval/nightly-cases.txt`, `hack/eval/inject-lane-exclusio
 `hack/eval/inject-lane-safeguards.yaml`, a new
 case directory under `bench/tasks/` and the script itself need only the normal approvers
 ([#1546](https://github.com/gke-labs/kube-agents/issues/1546), decided 2026-09-15). This
-page lives under `docs/` on purpose: the script's step-0 revalidation treats `docs/` as
-inert (and the Prow path filter in `oss-test-infra` does today too), so a review finding
+page lives under `docs/` on purpose: the presubmit's step 0 (`hack/ci-revalidate.sh`) treats
+`docs/` as inert (and the Prow path filter in `oss-test-infra` does today too), so a review finding
 against this prose costs no eval run
 ([#1179](https://github.com/gke-labs/kube-agents/issues/1179)), which is exactly what
 roster-comment edits used to cost.
@@ -390,8 +390,9 @@ path, and grading its answer alone would pass a premise the case does not have t
 the log; on the api lane the file changes nothing. Each entry carries its reason as the comment
 block above it, naming the issue that decides when it goes, and `scripts/test_eval_rosters.py`
 holds every entry to that, the way the validator's `FIXTURE_NOT_READY` holds a case with no
-fixture to an issue. An entry is not a demotion: the case stays in `presubmit-cases.txt` and on
-the blocking roster, runs on every pull request over the api transport, and can still red one.
+fixture to an issue. An entry is not a demotion: the case keeps its api-lane seat, so a
+presubmit case stays in `presubmit-cases.txt` and on the blocking roster, runs on every pull
+request over the api transport, and can still red one, and a nightly case still runs every night.
 The file needs the normal approvers, not the eval-crew rule, for the same reason
 `nightly-cases.txt` does — it changes what one lane runs, not what can red a pull request.
 

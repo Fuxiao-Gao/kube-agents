@@ -342,24 +342,17 @@ module "gke_backup_plan" {
   encryption_key      = var.backup_encryption_key
 }
 
-locals {
-  # Indexed by the same key the kube-agents-iam module uses, so the emails
-  # coming back out of the module can be rejoined with the tuple that produced
-  # them without re-deriving anything.
-  scoped_pool_entries = {
-    for cluster in var.scoped_clusters :
-    "projects/${cluster.project_id}/locations/${cluster.location}/clusters/${cluster.cluster_name}" => cluster
-  }
-}
-
 # The two scope selectors that are not containers, resolved to projects at
-# plan time. Called with no depends_on and no input a managed resource
-# produces, on purpose: module.kube_agents_iam below carries a module-level
-# depends_on, which would defer a data source inside it to apply time on a
-# first install or on any upgrade that enables an API, and the bindings keyed
-# on the resolved projects would then fail the plan as unknown. Here the reads
-# happen on every plan, and a read the planning identity cannot make fails
-# the plan with the selector named, before anything is applied.
+# plan time, and -- while the scoped service account pool is armed -- each
+# declared folder's and organisation's members, listed for the pool with the
+# reconcile's own Asset Inventory search. Called with no depends_on and no
+# input a managed resource produces, on purpose: module.kube_agents_iam below
+# carries a module-level depends_on, which would defer a data source inside it
+# to apply time on a first install or on any upgrade that enables an API, and
+# the bindings keyed on the resolved projects would then fail the plan as
+# unknown. Here the reads happen on every plan, and a read the planning
+# identity cannot make fails the plan with the selector or container named,
+# before anything is applied.
 module "scope_resolver" {
   source = "../../modules/kube-agents-scope-resolver"
 
@@ -367,6 +360,12 @@ module "scope_resolver" {
   metrics_scopes   = var.scope.metrics_scopes
   exclude_projects = var.scope.exclude.projects
   member_cap       = var.scope.max_projects
+  # The containers are read for the pool alone (their grant is on the
+  # container and inherited, so nothing is bound per member): listed only
+  # while the pool is armed, and no container is read while it is off.
+  folders                = var.scope.folders
+  organizations          = var.scope.organizations
+  list_container_members = var.scoped_pool_enabled
   # The consumer project of the reads: the management project, whose APIs
   # this composition enables (and install.sh pre-enables before a first apply,
   # since the reads run in the plan).
@@ -376,15 +375,23 @@ module "scope_resolver" {
 module "kube_agents_iam" {
   source = "../../modules/kube-agents-iam"
 
-  project_id      = var.project_id
-  namespace       = var.namespace
-  project_roles   = local.agent_project_roles
-  scoped_clusters = var.scoped_clusters
-  scope           = var.scope
+  project_id    = var.project_id
+  namespace     = var.namespace
+  project_roles = local.agent_project_roles
+  scope         = var.scope
+  # The scoped service account pool, derived in the module from the same
+  # scope object: armed by the switch alone, never by the scope.
+  scoped_pool_enabled      = var.scoped_pool_enabled
+  scoped_pool_max_accounts = var.scoped_pool_max_accounts
   # What the selectors resolved to, from the module above; the IAM module
   # binds these and refuses a selector with no entry.
   scope_selector_members = module.scope_resolver.members
-  service_account_id     = var.agent_service_account_id
+  # What each declared container held while the pool is armed, from the same
+  # module; the IAM module gives each a pool account and nothing else, and
+  # refuses an armed pool beside a container with no entry. Empty while the
+  # pool is off.
+  scope_container_members = module.scope_resolver.container_members
+  service_account_id      = var.agent_service_account_id
   # The KSA half of the Workload Identity member; the same variable is the
   # chart's platformAgent.security.serviceAccountName below. The variable's
   # description in variables.tf says why it exists and what bounds it.
@@ -493,6 +500,7 @@ module "drift_pubsub" {
   topic_name                     = var.drift_pubsub_topic
   subscription_name              = var.drift_pubsub_subscription
   sink_name                      = var.drift_pubsub_sink
+  topic_publishers               = var.drift_pubsub_topic_publishers
 
   depends_on = [google_project_service.required]
 }
@@ -790,19 +798,22 @@ resource "helm_release" "kube_agents" {
         serviceAccountAnnotations = {
           "iam.gke.io/gcp-service-account" = module.kube_agents_iam.service_account_email
         }
-        # The mapping the credential broker selects from. It has to reach the
-        # cluster as data rather than being recomputed there: the broker refuses
-        # a scope it has no entry for, so a second implementation of the naming
-        # rule would turn a mismatch into a refusal at request time instead of a
-        # diff at plan time.
-        scopedServiceAccounts = [
-          for key in sort(keys(module.kube_agents_iam.scoped_service_accounts)) : {
-            projectId           = local.scoped_pool_entries[key].project_id
-            location            = local.scoped_pool_entries[key].location
-            clusterName         = local.scoped_pool_entries[key].cluster_name
-            serviceAccountEmail = module.kube_agents_iam.scoped_service_accounts[key]
-          }
-        ]
+        # The mapping the credential broker selects from, one row per project
+        # the module provisioned a member for. It has to reach the cluster as
+        # data rather than being recomputed there: the broker refuses a
+        # project it has no entry for, so a second implementation of the
+        # naming rule would turn a mismatch into a refusal at request time
+        # instead of a diff at plan time. `enabled` is the arming switch the
+        # operator reads; the list is empty while it is false.
+        scopedServiceAccountPool = {
+          enabled = var.scoped_pool_enabled
+          serviceAccounts = [
+            for project_id in sort(keys(module.kube_agents_iam.scoped_service_accounts)) : {
+              projectId           = project_id
+              serviceAccountEmail = module.kube_agents_iam.scoped_service_accounts[project_id]
+            }
+          ]
+        }
       }
       # The same object the IAM module bound above, so the CR declares no
       # project the module did not also bind. Always rendered, empty lists

@@ -1898,7 +1898,7 @@ class GitopsDeclarationNoteTest(unittest.TestCase):
             "no declares": "has no `declares` list",
             "other object": "no declares item is check no-pdb",
             "strings but no structure": "not valid YAML",
-            "empty cluster": "the parser skipped every item",
+            "empty cluster": "no declares item is check no-pdb for Deployment/notification-relay in seeded-intent",
             "another cluster": "name cluster seeded-b",
             "unquoted impossible date": "not valid YAML (ValueError)",
             "null declares": "has no `declares` list",
@@ -1913,8 +1913,12 @@ class GitopsDeclarationNoteTest(unittest.TestCase):
                 run.side_effect = [_ok(self._contents(body, sha="deadbeef"))]
                 result = checker.check_gitops_declaration("kube-agents-evals-3")
                 self.assertFalse(result.passed, label)
-                self.assertIn("the audit reads no declaration from it", result.message)
+                self.assertIn("the audits do not read every declaration the fixture needs from it", result.message)
                 self.assertIn(reasons[label], result.message, label)
+                if label == "empty cluster":
+                    # One item skipped, the other parsed: the diagnosis names
+                    # the missing item, never the whole-note fallback.
+                    self.assertNotIn("skipped every item", result.message)
                 self.assertIn("-f sha=deadbeef", result.message)
         # And what the audit accepts, this accepts: the `...` closer and the
         # spellings the join key folds to one.
@@ -2018,11 +2022,27 @@ class GitopsDeclarationNoteTest(unittest.TestCase):
         self.assertEqual(checker.GITOPS_INTENT_NOTE_CONTENT + "\n", body)
         self.assertIsNone(checker._note_declaration_problem(body, "gke-agentic/kube-agents-evals-3-infra"))
 
-    def test_the_declarable_set_is_the_audits(self):
-        # The check asks the audit which slugs a note may justify; the fixture's
-        # check has to be one of them, or the note it seeds declares nothing.
+    def test_the_declarable_sets_are_the_audits(self):
+        # The check asks each audit which slugs a note may justify; every
+        # fixture declaration's check has to be in its stream's set, or the
+        # note it seeds declares nothing there.
         audit = checker._load_audit_report()
-        self.assertIn(checker.GITOPS_INTENT_NOTE_DECLARATION["check"], audit.audit_declarable_checks(checker.GITOPS_INTENT_NOTE_AUDIT))
+        for stream, item in checker.GITOPS_INTENT_NOTE_DECLARATIONS:
+            with self.subTest(stream):
+                self.assertIn(item["check"], audit.audit_declarable_checks(stream))
+
+    def test_a_note_missing_one_of_its_declarations_fails(self):
+        # The fixture rests on four postures in one note; a note that declares
+        # only the budget leaves the compliance case failing on that project.
+        good = checker.GITOPS_INTENT_NOTE_CONTENT
+        only_pdb = good.replace("  - check: netpol-missing\n    namespace: seeded-intent\n    object: Namespace/seeded-intent\n", "")
+        self.assertNotEqual(good, only_pdb)
+        with mock.patch.object(checker, "run_cmd") as run:
+            run.side_effect = [_ok(self._contents(only_pdb, sha="deadbeef"))]
+            result = checker.check_gitops_declaration("kube-agents-evals-3")
+        self.assertFalse(result.passed)
+        self.assertIn("no declares item is check netpol-missing for Namespace/seeded-intent in seeded-intent", result.message)
+        self.assertIn("-f sha=deadbeef", result.message)
 
     def test_the_note_the_verifier_names_is_the_one_provisioning_seeds(self):
         # One note, defined twice: the script seeds it, the verifier reads it
@@ -3076,15 +3096,23 @@ class LedgerCredentialMatchesCiEvalPrTest(unittest.TestCase):
     """This check must attest the credential hack/ci-eval-pr.sh actually mints.
 
     The App, its installation, and the variable the token lands in are written
-    in three files that do not read each other -- here, hack/ci-eval-pr.sh, and
+    in four files that do not read each other -- here, hack/ci-eval-pr.sh,
+    hack/ledger_token_mint.py (whose defaults are what step 0 mints with, since
+    hack/ci-revalidate.sh exports neither id), and
     bench/kube_agents_bench/verifiers.py. Change one and this check goes on
     reporting a project healthy against a credential CI no longer uses. Parsed
     rather than imported: the verifier is deliberately dependency-free, bench is
-    an installable package, and the third file is shell.
+    an installable package, one file is shell, and the mint runs at import.
     """
 
     def setUp(self):
         self.script = (checker._ROOT / "hack" / "ci-eval-pr.sh").read_text()
+        self.mint = (checker._ROOT / "hack" / "ledger_token_mint.py").read_text()
+
+    def _module_default(self, name):
+        m = re.search(rf'^{name} = "([^"]+)"$', self.mint, re.M)
+        self.assertIsNotNone(m, f"could not find {name} in hack/ledger_token_mint.py")
+        return m.group(1)
 
     def _default(self, name):
         m = re.search(rf'^export {name}="\$\{{{name}:-([^}}]+)\}}"', self.script, re.M)
@@ -3095,6 +3123,12 @@ class LedgerCredentialMatchesCiEvalPrTest(unittest.TestCase):
         self.assertEqual(str(checker.LEDGER_APP_ID), self._default("EVAL_LEDGER_APP_ID"))
         self.assertEqual(
             str(checker.LEDGER_INSTALLATION_ID), self._default("EVAL_LEDGER_INSTALLATION_ID")
+        )
+
+    def test_the_app_and_installation_match_the_mint_modules_defaults(self):
+        self.assertEqual(str(checker.LEDGER_APP_ID), self._module_default("DEFAULT_LEDGER_APP_ID"))
+        self.assertEqual(
+            str(checker.LEDGER_INSTALLATION_ID), self._module_default("DEFAULT_LEDGER_INSTALLATION_ID")
         )
 
     def test_the_probe_asks_for_the_reads_the_grading_mint_asks_for(self):

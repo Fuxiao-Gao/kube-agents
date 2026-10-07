@@ -154,6 +154,7 @@ class InstallerCommonTest(unittest.TestCase):
         describe_stub='echo "ERROR: (gcloud.container.clusters.describe) NOT_FOUND" >&2; exit 1',
         kms_versions="",
         sa_describe_stub="exit 1",
+        sa_list_stub="exit 1",
         gcloud_stderr=None,
         gcloud_extra_cases="",
         get_credentials_stub=None,
@@ -197,6 +198,7 @@ class InstallerCommonTest(unittest.TestCase):
                 f"{get_cred_case}"
                 f"  *\"keys versions list\"*) printf '%s' '{kms_versions}'; exit 0 ;;\n"
                 f"  *\"service-accounts describe\"*) {sa_describe_stub} ;;\n"
+                f"  *\"service-accounts list\"*) {sa_list_stub} ;;\n"
                 "esac\n"
                 f"printf '%s' '{gcloud_stderr}' >&2\n"
                 f"[ -f '{state_file}' ] && cat '{state_file}'\n"
@@ -228,6 +230,14 @@ class InstallerCommonTest(unittest.TestCase):
                     # Blanking it is "unset", which that arm wants: `:-` takes
                     # the default for an empty value as well as an absent one.
                     "ENABLE_DRIFT_DETECTOR": "",
+                    # Same again for the scoped pool's two keys, read as
+                    # ${VAR:-} and refused (rc=1, no tfvars) on a malformed
+                    # value: a shell exporting SCOPED_SA_POOL_MAX_ACCOUNTS=0
+                    # would otherwise fail every generator case that does not
+                    # set them, and SCOPED_SA_POOL_ENABLED=true would arm the
+                    # pool in every file the cases read.
+                    "SCOPED_SA_POOL_ENABLED": "",
+                    "SCOPED_SA_POOL_MAX_ACCOUNTS": "",
                     **(env or {}),
                 },
                 bin_dir=str(bin_dir),
@@ -707,6 +717,23 @@ class InstallerCommonTest(unittest.TestCase):
             proc = self._run(f'load_install_env "{env_file}"; {probe}', env=stray)
             self.assertIn("P=from-the-file X=unset C=unset M=300", proc.stdout, proc.stderr)
 
+    def test_load_install_env_drops_a_shell_exported_pool_switch(self):
+        # Same rule as the scope keys: the pool's switch renders into the
+        # PlatformAgent and arms the broker, and a pre-change install.env
+        # records neither key, so an inherited SCOPED_SA_POOL_ENABLED=true
+        # would arm the pool for one upgrade.sh run on accounts the next run
+        # from a clean shell deletes again.
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = pathlib.Path(tmp) / "install.env"
+            env_file.write_text("PROJECT_ID=p\n")
+            stray = {"SCOPED_SA_POOL_ENABLED": "true", "SCOPED_SA_POOL_MAX_ACCOUNTS": "250"}
+            probe = 'echo "E=${SCOPED_SA_POOL_ENABLED:-unset} N=${SCOPED_SA_POOL_MAX_ACCOUNTS:-unset}"'
+            proc = self._run(f'load_install_env "{env_file}"; {probe}', env=stray)
+            self.assertIn("E=unset N=unset", proc.stdout, proc.stderr)
+            env_file.write_text("PROJECT_ID=p\nSCOPED_SA_POOL_ENABLED=false\nSCOPED_SA_POOL_MAX_ACCOUNTS=120\n")
+            proc = self._run(f'load_install_env "{env_file}"; {probe}', env=stray)
+            self.assertIn("E=false N=120", proc.stdout, proc.stderr)
+
     def test_service_account_ownership_still_refuses_on_a_clean_absence(self):
         proc = self._run(
             self._SHOW_REMEDY,
@@ -754,6 +781,59 @@ class InstallerCommonTest(unittest.TestCase):
         )
         self.assertIn("rc=1", proc.stdout, proc.stderr)
         self.assertIn("LITELLM_GSA_NAME", proc.stderr)
+
+    # A `service-accounts list` stub that answers only a filter carrying this
+    # install's marker, the way the real API applies the --filter: a member
+    # whose description names another install's agent is never listed.
+    _POOL_MEMBER_EMAIL = "ka-team-alpha-0ed42166@test-project.iam.gserviceaccount.com"
+    _POOL_LIST_STUB = (
+        '[[ "$*" == *"email:ka-*"* && "$*" == *"Pool member of kubeagents-platform-gsa for "* ]]'
+        f' && {{ echo "{_POOL_MEMBER_EMAIL}"; exit 0; }}; exit 0'
+    )
+
+    def test_service_account_ownership_refuses_a_pool_member_this_state_does_not_own(self):
+        # The lost-state re-install: the agent's account is gone (describe
+        # misses) but the pool members it derived are still there, so the
+        # refusal lists them by the marker their description carries.
+        proc = self._run(
+            self._SHOW_REMEDY,
+            gcloud_exit=1,
+            sa_list_stub=self._POOL_LIST_STUB,
+        )
+        self.assertIn("rc=1", proc.stdout, proc.stderr)
+        self.assertIn("a scoped pool member", proc.stderr)
+        self.assertIn(f"gcloud iam service-accounts delete {self._POOL_MEMBER_EMAIL}", proc.stderr)
+        self.assertIn("PLATFORM_AGENT_GSA_NAME", proc.stderr)
+
+    def test_service_account_ownership_passes_a_pool_member_this_state_owns(self):
+        proc = self._run(
+            'check_service_account_ownership; echo "rc=$?"',
+            gcloud_stdout=_service_account_state("kubeagents-platform-gsa", "ka-team-alpha-0ed42166"),
+            sa_describe_stub="exit 0",
+            sa_list_stub=self._POOL_LIST_STUB,
+        )
+        self.assertIn("rc=0", proc.stdout, proc.stderr)
+
+    def test_service_account_ownership_ignores_another_installs_pool_members(self):
+        # The filter names this install's agent, so a member marked for
+        # kubeagents-platform-gsa is not this install's business.
+        proc = self._run(
+            'check_service_account_ownership; echo "rc=$?"',
+            gcloud_exit=1,
+            sa_list_stub=self._POOL_LIST_STUB,
+            env={"PLATFORM_AGENT_GSA_NAME": "other-agent-gsa"},
+        )
+        self.assertIn("rc=0", proc.stdout, proc.stderr)
+        self.assertNotIn("ka-team-alpha", proc.stderr)
+
+    def test_service_account_ownership_treats_a_failing_list_as_no_members(self):
+        proc = self._run(
+            'check_service_account_ownership; echo "rc=$?"',
+            gcloud_exit=1,
+            sa_list_stub='echo "ERROR: (gcloud.iam.service-accounts.list) PERMISSION_DENIED" >&2; exit 1',
+        )
+        self.assertIn("rc=0", proc.stdout, proc.stderr)
+        self.assertNotIn("ERROR: Service account", proc.stderr)
 
     # ── hcl_csv_list: --custom-roles documents "space- or comma-separated" ──
 
@@ -1063,6 +1143,78 @@ class InstallerCommonTest(unittest.TestCase):
                     )
                     self.assertIn("rc=0", proc.stdout, proc.stderr)
                     self.assertIn(expected, dest.read_text())
+
+    def test_tfvars_carry_the_scoped_sa_pool(self):
+        # The switch is always written, false by default, so the file states
+        # whether the pool is armed; the cap only when set, like the scope's.
+        with tempfile.TemporaryDirectory() as out_dir:
+            dest = pathlib.Path(out_dir) / "terraform.tfvars"
+            for env, expected, absent in (
+                ({}, "scoped_pool_enabled      = false\n", "scoped_pool_max_accounts"),
+                ({"SCOPED_SA_POOL_ENABLED": "off", "SCOPED_SA_POOL_MAX_ACCOUNTS": "50"},
+                 "scoped_pool_enabled      = false\nscoped_pool_max_accounts = 50\n", None),
+                ({"SCOPED_SA_POOL_ENABLED": "yes", "SCOPED_SA_POOL_MAX_ACCOUNTS": "250"},
+                 "scoped_pool_enabled      = true\nscoped_pool_max_accounts = 250\n", None),
+                ({"SCOPED_SA_POOL_ENABLED": "true"},
+                 "scoped_pool_enabled      = true\n", "scoped_pool_max_accounts"),
+            ):
+                with self.subTest(env=env):
+                    proc = self._run(
+                        f'write_tfvars_from_state "{dest}"; echo "rc=$?"',
+                        env={"API_SERVER_KEY": "k", **env},
+                        describe_stub="printf '\\n'; exit 0",
+                    )
+                    self.assertIn("rc=0", proc.stdout, proc.stderr)
+                    content = dest.read_text()
+                    self.assertIn(expected, content)
+                    if absent:
+                        self.assertNotIn(absent, content)
+
+    def test_tfvars_refuse_scoped_sa_pool_values_terraform_cannot_take(self):
+        # upgrade.sh regenerates from install.env without install.sh's checks,
+        # so the generator names the key and writes nothing; a misspelt switch
+        # is refused rather than read as off.
+        with tempfile.TemporaryDirectory() as out_dir:
+            dest = pathlib.Path(out_dir) / "terraform.tfvars"
+            for key, value, message in (
+                ("SCOPED_SA_POOL_ENABLED", "ture", "is neither true nor false"),
+                ("SCOPED_SA_POOL_ENABLED", "armed", "is neither true nor false"),
+                ("SCOPED_SA_POOL_MAX_ACCOUNTS", "0", "is not a whole number of at least 1"),
+                ("SCOPED_SA_POOL_MAX_ACCOUNTS", "lots", "is not a whole number of at least 1"),
+                ("SCOPED_SA_POOL_MAX_ACCOUNTS", "2.5", "is not a whole number of at least 1"),
+            ):
+                with self.subTest(key=key, value=value):
+                    proc = self._run(
+                        f'rc=0; write_tfvars_from_state "{dest}" || rc=$?; echo "rc=$rc"',
+                        env={"API_SERVER_KEY": "k", key: value},
+                        describe_stub="printf '\\n'; exit 0",
+                    )
+                    self.assertIn("rc=1", proc.stdout, proc.stderr)
+                    self.assertIn(f"{key}='{value}'", proc.stderr + proc.stdout)
+                    self.assertIn(message, proc.stderr + proc.stdout)
+                    self.assertFalse(dest.exists(), "no tfvars is written for a value Terraform would refuse")
+
+    def test_the_scoped_sa_pool_cap_is_a_whole_number_of_at_least_one(self):
+        for bad in ("0", "00", "abc", "2.5", "-3", " 12", "1e3"):
+            with self.subTest(bad=bad):
+                proc = subprocess.run(
+                    ["bash", "-c",
+                     'print_error() { echo "ERROR: $*"; }; print_info() { :; }; print_warning() { :; }; print_success() { :; }\n'
+                     f'source "{_INSTALLER_COMMON}"\nrequire_scoped_sa_pool_max_accounts {shlex.quote(bad)}; echo "rc=$?"'],
+                    capture_output=True, text=True, env=get_isolated_test_env(), cwd=str(_REPO_ROOT),
+                )
+                self.assertIn("rc=1", proc.stdout, proc.stdout + proc.stderr)
+                self.assertIn(f"SCOPED_SA_POOL_MAX_ACCOUNTS='{bad}' is not a whole number of at least 1", proc.stdout)
+                self.assertIn("default (100)", proc.stdout)
+        for good in ("", "1", "100", "0250", "5000"):
+            with self.subTest(good=good):
+                proc = subprocess.run(
+                    ["bash", "-c",
+                     'print_error() { echo "ERROR: $*"; }; print_info() { :; }; print_warning() { :; }; print_success() { :; }\n'
+                     f'source "{_INSTALLER_COMMON}"\nrequire_scoped_sa_pool_max_accounts {shlex.quote(good)}; echo "rc=$?"'],
+                    capture_output=True, text=True, env=get_isolated_test_env(), cwd=str(_REPO_ROOT),
+                )
+                self.assertIn("rc=0", proc.stdout, proc.stdout + proc.stderr)
 
     def test_tfvars_escape_litellm_redaction_rules_for_hcl(self):
         # A regular expression may hold ${ or %{, which HCL reads as a
@@ -3150,7 +3302,10 @@ class PreApplyScopeCheckTest(unittest.TestCase):
             env = {"PROJECT_ID": "test-project", "CLUSTER_NAME": "test-cluster", "REGION": "us-central1",
                    "SCOPE_PROJECTS": "", "SCOPE_FOLDERS": "", "SCOPE_ORGANIZATIONS": "",
                    "SCOPE_SHARED_VPC_HOSTS": "", "SCOPE_METRICS_SCOPES": "",
-                   "SCOPE_EXCLUDE_PROJECTS": "", "SCOPE_EXCLUDE_CLUSTERS": ""}
+                   "SCOPE_EXCLUDE_PROJECTS": "", "SCOPE_EXCLUDE_CLUSTERS": "",
+                   # Read as ${VAR:-} like the scope keys: a developer's exported
+                   # switch must not arm the declaration a case compares against.
+                   "SCOPED_SA_POOL_ENABLED": ""}
             env.update(keys or {})
             body = (
                 "set -u\n"
@@ -3242,6 +3397,60 @@ class PreApplyScopeCheckTest(unittest.TestCase):
                                                            "SCOPE_MAX_PROJECTS": "250"})
         self._assert_rc(proc, 1)
         self.assertIn('INFO:   SCOPE_MAX_PROJECTS=""', proc.stdout)
+
+    def test_an_armed_pool_alone_on_a_scope_less_cr_is_a_hand_edit(self):
+        # spec.security.scopedServiceAccountPool.enabled is part of the declaration the
+        # apply replaces: the generator writes scoped_pool_enabled from
+        # SCOPED_SA_POOL_ENABLED alone, false when the key is absent, so a live true
+        # the key does not record is disarmed by the next full apply -- its members
+        # destroyed and the broker put on the ambient credential. It is refused with
+        # the key among the lines, and an armed pool alone is not "nothing live to
+        # protect" even with no scope block beside it. The members list is derived
+        # from the scope, so only the switch is compared.
+        armed_only = ('{"items":[{"metadata":{"name":"platform-agent"},"spec":{"security":{"scopedServiceAccountPool":'
+                      '{"enabled":true,"serviceAccounts":[{"projectId":"p2-project","serviceAccountEmail":"ka-x@p.iam.gserviceaccount.com"}]}}}}]}')
+        proc = self._run(armed_only, "norelease")
+        self._assert_rc(proc, 1)
+        self.assertIn('INFO:   SCOPE_PROJECTS=""', proc.stdout)
+        self.assertIn('INFO:   SCOPED_SA_POOL_ENABLED="true"', proc.stdout)
+        self._assert_rc(self._run(armed_only, "norelease", keys={"SCOPED_SA_POOL_ENABLED": "true"}), 0)
+        self._assert_rc(self._run(armed_only, "norelease", keys={"SCOPED_SA_POOL_ENABLED": "yes"}), 0)
+        for label, disarmed in (
+            ("enabled false", armed_only.replace('"enabled":true', '"enabled":false')),
+            ("an empty pool block", '{"items":[{"metadata":{"name":"platform-agent"},"spec":{"security":{"scopedServiceAccountPool":{}}}}]}'),
+            ("no security block", '{"items":[{"metadata":{"name":"platform-agent"},"spec":{}}]}'),
+        ):
+            with self.subTest(case=label):
+                proc = self._run(disarmed, "norelease")
+                self._assert_rc(proc, 0)
+                self.assertNotIn("ERROR", proc.stdout)
+                self.assertNotIn("WARN", proc.stdout)
+
+    def test_an_armed_pool_beside_a_scope_is_a_hand_edit_until_the_key_records_it(self):
+        # The switch is weighed with the lists and the cap: a CR armed by hand beside a
+        # scope the record accounts for is refused on the switch alone, passes once the
+        # key records it, and passes when the record carries it (the installer armed it).
+        armed = _LIVE_SCOPE_CR.replace('"spec":{"scope"', '"spec":{"security":{"scopedServiceAccountPool":{"enabled":true}},"scope"')
+        record = ('{"platformAgent":{"scope":{"projects":["p2-project","p3-project"],"exclude":{"projects":[],'
+                  '"clusters":[{"projectId":"p2-project","location":"us-central1","clusterName":"c1"}]}}}}')
+        scope_keys = {"SCOPE_PROJECTS": "p2-project p3-project", "SCOPE_EXCLUDE_CLUSTERS": "p2-project/us-central1/c1"}
+        proc = self._run(armed, record)
+        self._assert_rc(proc, 1)
+        self.assertIn('INFO:   SCOPED_SA_POOL_ENABLED="true"', proc.stdout)
+        self._assert_rc(self._run(armed, record, keys={**scope_keys, "SCOPED_SA_POOL_ENABLED": "true"}), 0)
+        armed_record = record.replace('{"platformAgent":{', '{"platformAgent":{"security":{"scopedServiceAccountPool":{"enabled":true}},')
+        self._assert_rc(self._run(armed, armed_record), 0)
+        # A record and keys that arm it beside a CR disarmed by hand refuse on the switch
+        # alone, and the line is blank: the lines never reproduce the false the apply
+        # would render, nor the true that was refused.
+        proc = self._run(_LIVE_SCOPE_CR, armed_record, keys={**scope_keys, "SCOPED_SA_POOL_ENABLED": "true"})
+        self._assert_rc(proc, 1)
+        self.assertIn('INFO:   SCOPED_SA_POOL_ENABLED=""', proc.stdout)
+        # And the switch is among the lines of every refusal, blank when the live
+        # pool is off, beside the cap.
+        proc = self._run(_LIVE_SCOPE_CR, "norelease")
+        self._assert_rc(proc, 1)
+        self.assertIn('INFO:   SCOPED_SA_POOL_ENABLED=""', proc.stdout)
 
     def test_a_scope_the_installer_wrote_may_be_changed_or_emptied(self):
         # L == R: the record shows the installer rendered it; the keys are the
@@ -3414,9 +3623,13 @@ class ScopeSelectorApisTest(unittest.TestCase):
     APIs the plan-time resolution of that selector reads is off (Resource
     Manager and Monitoring for a Metrics Scope, Compute for a Shared VPC host,
     the composition's own split), since the reads run in the plan and the
-    composition enables the APIs only in the apply that follows. Nothing is
-    called when they are on; a listing that fails enables every API the
-    declared selectors read; an enable that fails is a warning, not an abort."""
+    composition enables the APIs only in the apply that follows. The scoped
+    service account pool armed beside a folder or organisation counts as a
+    third kind: the plan lists the container's members through the Asset API,
+    so that API is enabled first too, with the pool's listing as the reason.
+    Nothing is called when they are on; a listing that fails enables every
+    API the declared selectors and the pool read; an enable that fails is a
+    warning, not an abort."""
 
     ALL = "cloudresourcemanager.googleapis.com monitoring.googleapis.com compute.googleapis.com"
 
@@ -3435,7 +3648,12 @@ class ScopeSelectorApisTest(unittest.TestCase):
                 "esac\nexit 1\n"
             )
             (bin_dir / "gcloud").chmod(0o755)
+            # Every key the helper reads is blanked here, the pool's switch and
+            # the container keys beside the selectors', so a developer's shell
+            # (`set -a; source install.env`) cannot arm the pool in a case that
+            # did not; each case sets its own.
             env = {"PROJECT_ID": "test-project", "SCOPE_SHARED_VPC_HOSTS": "", "SCOPE_METRICS_SCOPES": "",
+                   "SCOPE_FOLDERS": "", "SCOPE_ORGANIZATIONS": "", "SCOPED_SA_POOL_ENABLED": "",
                    "GCLOUD_LOG": str(log)}
             env.update(keys)
             body = (
@@ -3499,24 +3717,100 @@ class ScopeSelectorApisTest(unittest.TestCase):
         self.assertIn("WARN: Could not enable cloudresourcemanager.googleapis.com in project 'test-project'", proc.stdout)
         self.assertIn("gcloud services enable cloudresourcemanager.googleapis.com --project=test-project", proc.stdout)
 
+    # The scoped service account pool lists a declared folder's or
+    # organisation's members at plan time through the Asset API, which the
+    # composition enables only in the apply that follows, so the pool armed
+    # beside a container is the third reason the plan needs an API on first.
+    POOL_REASON = "lists the declared folder's or organisation's members for the scoped service account pool"
+
+    def test_the_pool_armed_beside_a_container_enables_the_asset_api_and_names_the_pool(self):
+        for keys in ({"SCOPED_SA_POOL_ENABLED": "true", "SCOPE_FOLDERS": "123456789012"},
+                     {"SCOPED_SA_POOL_ENABLED": "yes", "SCOPE_ORGANIZATIONS": "987654321098"},
+                     {"SCOPED_SA_POOL_ENABLED": "True", "SCOPE_FOLDERS": " 123456789012, 123456789013 "}):
+            with self.subTest(keys=keys):
+                proc, calls = self._run(keys)
+                self.assertIn("rc=0", proc.stdout, proc.stderr)
+                self.assertEqual(calls, "services enable cloudasset.googleapis.com --project=test-project\n")
+                self.assertIn("INFO: Enabling cloudasset.googleapis.com in project 'test-project'", proc.stdout)
+                self.assertIn(self.POOL_REASON, proc.stdout)
+                self.assertNotIn("Shared VPC host", proc.stdout)
+
+    def test_the_pool_armed_beside_a_container_and_a_selector_enables_both_and_names_both(self):
+        proc, calls = self._run({"SCOPED_SA_POOL_ENABLED": "true", "SCOPE_FOLDERS": "123456789012",
+                                 "SCOPE_SHARED_VPC_HOSTS": "shared-net-host"}, enabled="monitoring.googleapis.com")
+        self.assertIn("rc=0", proc.stdout, proc.stderr)
+        self.assertEqual(calls, "services enable compute.googleapis.com cloudasset.googleapis.com --project=test-project\n")
+        self.assertIn("INFO: Enabling compute.googleapis.com, cloudasset.googleapis.com in project 'test-project'", proc.stdout)
+        self.assertIn("Shared VPC host or Metrics Scope", proc.stdout)
+        self.assertIn(self.POOL_REASON, proc.stdout)
+
+    def test_the_pool_armed_beside_a_container_with_the_asset_api_on_calls_nothing(self):
+        proc, calls = self._run({"SCOPED_SA_POOL_ENABLED": "true", "SCOPE_FOLDERS": "123456789012"},
+                                enabled="cloudasset.googleapis.com")
+        self.assertIn("rc=0", proc.stdout, proc.stderr)
+        self.assertEqual(calls, "")
+        self.assertNotIn("INFO", proc.stdout)
+
+    def test_a_listing_that_fails_with_the_pool_armed_beside_a_container_enables_the_asset_api(self):
+        proc, calls = self._run({"SCOPED_SA_POOL_ENABLED": "true", "SCOPE_FOLDERS": "123456789012"}, list_fails=True)
+        self.assertIn("rc=0", proc.stdout, proc.stderr)
+        self.assertEqual(calls, "services enable cloudasset.googleapis.com --project=test-project\n")
+        self.assertIn("could not be listed", proc.stdout)
+        self.assertIn(self.POOL_REASON, proc.stdout)
+
+    def test_the_pool_armed_without_a_container_calls_nothing(self):
+        # Explicit projects and selector members need no Asset read: the
+        # resolver lists a selector through its own API, and a project is
+        # named already.
+        for keys in ({"SCOPED_SA_POOL_ENABLED": "true", "SCOPE_PROJECTS": "p2-project"},
+                     {"SCOPED_SA_POOL_ENABLED": "true"},
+                     {"SCOPED_SA_POOL_ENABLED": "true", "SCOPE_FOLDERS": " , "}):
+            with self.subTest(keys=keys):
+                proc, calls = self._run(keys, list_fails=True)
+                self.assertIn("rc=0", proc.stdout, proc.stderr)
+                self.assertEqual(calls, "")
+                self.assertNotIn("INFO", proc.stdout)
+
+    def test_a_container_with_the_pool_off_calls_nothing(self):
+        # The composition enables the Asset API for the reconcile's container
+        # search in the apply; the plan reads nothing under a container unless
+        # the pool is armed, so there is nothing to enable first.
+        for keys in ({"SCOPED_SA_POOL_ENABLED": "false", "SCOPE_FOLDERS": "123456789012"},
+                     {"SCOPED_SA_POOL_ENABLED": "", "SCOPE_ORGANIZATIONS": "987654321098"},
+                     {"SCOPE_FOLDERS": "123456789012", "SCOPE_ORGANIZATIONS": "987654321098"}):
+            with self.subTest(keys=keys):
+                proc, calls = self._run(keys, list_fails=True)
+                self.assertIn("rc=0", proc.stdout, proc.stderr)
+                self.assertEqual(calls, "")
+                self.assertNotIn("INFO", proc.stdout)
+
 
 class ScopeContainerPreflightTest(unittest.TestCase):
     """check_scope_container_access: silent with no container; with one, the
     Asset API must be enabled in the host project or no effective policy may
     deny it, and the applying identity must hold setIamPolicy on every
-    container, asked through testIamPermissions. Every failure is named
-    before the refusal; a probe that cannot decide warns and lets the apply
-    speak; "warn" turns the refusal into a warning."""
+    container, asked through testIamPermissions, and, while the scoped
+    service account pool is armed, cloudasset.assets.searchAllResources there
+    too, since the plan lists the container's members for the pool. Every
+    failure is named before the refusal; a probe that cannot decide warns and
+    lets the apply speak; "warn" turns the refusal into a warning."""
 
     def _run(self, keys=None, mode="", api_enabled=True, policy=None, policy_error=False,
-             probe=None, token=True, curl_present=True, strict=False, env_extra=None, policy_garbage=False):
+             probe=None, token=True, curl_present=True, strict=False, env_extra=None, policy_garbage=False,
+             search_probe=None):
         """probe: a dict from resource ("folders/1") to what curl answers:
         "granted", "denied", "forbidden", "service-disabled", "missing",
-        "garbage", "down". The stubs record what they saw in a log the test
-        folds into proc.stderr: the bearer curl read from its stdin (-H @-),
-        the impersonation flag gcloud saw, the first bytes of a key file it
-        was pointed at, and any CLOUDSDK_AUTH_* override that reached it."""
+        "garbage", "down". search_probe: the same, answered only to a request
+        for the pool's cloudasset.assets.searchAllResources on that resource
+        ("granted" or "denied"); a resource absent from it answers from
+        probe, whose granted body holds setIamPolicy alone. The stubs record
+        what they saw in a log the test folds into proc.stderr: the bearer
+        curl read from its stdin (-H @-), every permission it was asked
+        (PROBED:<permission>), the impersonation flag gcloud saw, the first
+        bytes of a key file it was pointed at, and any CLOUDSDK_AUTH_*
+        override that reached it."""
         probe = probe or {}
+        search_probe = search_probe or {}
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = pathlib.Path(tmp) / "bin"
             bin_dir.mkdir()
@@ -3547,6 +3841,12 @@ class ScopeContainerPreflightTest(unittest.TestCase):
             )
             if curl_present:
                 cases = []
+                # The request body (-d) precedes the URL on curl's argv, so a
+                # search case matches the permission then the resource, and
+                # sits before the resource-only cases.
+                for resource, answer in search_probe.items():
+                    body = {"granted": '{"permissions":["cloudasset.assets.searchAllResources"]}', "denied": "{}"}[answer]
+                    cases.append(f"  *\"cloudasset.assets.searchAllResources\"*\"/{resource}:testIamPermissions\"*) printf '%s\\n%s' '{body}' 200; exit 0 ;;")
                 for resource, answer in probe.items():
                     body, status = {
                         "granted": ('{"permissions":["%s"]}' % ("resourcemanager.folders.setIamPolicy" if resource.startswith("folders") else "resourcemanager.organizations.setIamPolicy"), 200),
@@ -3567,7 +3867,7 @@ class ScopeContainerPreflightTest(unittest.TestCase):
                 (bin_dir / "curl").write_text(
                     "#!/usr/bin/env bash\n"
                     'case "$*" in *"Bearer "*) echo "TOKEN-ON-ARGV" >>"$SCOPE_PROBE_LOG"; exit 99 ;; esac\n'
-                    'for a in "$@"; do case "$a" in @-) echo "BEARER:$(sed -n \'s/^Authorization: Bearer //p\')" >>"$SCOPE_PROBE_LOG" ;; @*) echo "BEARER-FROM-FILE" >>"$SCOPE_PROBE_LOG" ;; esac; done\n'
+                    'for a in "$@"; do case "$a" in @-) echo "BEARER:$(sed -n \'s/^Authorization: Bearer //p\')" >>"$SCOPE_PROBE_LOG" ;; @*) echo "BEARER-FROM-FILE" >>"$SCOPE_PROBE_LOG" ;; "{\\"permissions\\""*) echo "PROBED:$(printf \'%s\' "$a" | sed \'s/.*\\["\\(.*\\)"\\].*/\\1/\')" >>"$SCOPE_PROBE_LOG" ;; esac; done\n'
                     "case \"$*\" in\n" + "\n".join(cases) + "\nesac\nexit 22\n")
             # env is an external binary whose argv any local user can read: the
             # stub records what it was handed, then hands over to the real one.
@@ -3587,7 +3887,7 @@ class ScopeContainerPreflightTest(unittest.TestCase):
             # gcloud's credential variables straight from the environment, so a
             # developer's shell must not reach them; each case sets its own.
             env = {"PROJECT_ID": "test-project", "SCOPE_FOLDERS": "", "SCOPE_ORGANIZATIONS": "",
-                   "SCOPE_PROBE_LOG": str(probe_log)}
+                   "SCOPED_SA_POOL_ENABLED": "", "SCOPE_PROBE_LOG": str(probe_log)}
             env.update({name: "" for name in _GOOGLE_CREDENTIAL_VARIABLES})
             env.update(keys or {})
             env.update(env_extra or {})
@@ -3641,6 +3941,50 @@ class ScopeContainerPreflightTest(unittest.TestCase):
         self.assertIn("INFO: Nothing was changed.", proc.stdout)
         # An organisation is always warned about, bindable or not.
         self.assertIn("WARN: SCOPE_ORGANIZATIONS binds the agent's read roles on the whole organisation", proc.stdout)
+
+    def test_the_pool_armed_beside_a_folder_the_identity_cannot_search_names_the_viewer_role(self):
+        # The plan lists the folder's members for the pool, so setIamPolicy
+        # alone is not enough: the search permission is probed too, and a
+        # folder lacking it is reported with the role that grants it.
+        proc = self._run(keys={"SCOPE_FOLDERS": "123456789012", "SCOPED_SA_POOL_ENABLED": "true"},
+                         probe={"folders/123456789012": "granted"},
+                         search_probe={"folders/123456789012": "denied"})
+        self._assert_rc(proc, 1)
+        self.assertIn("ERROR: Refusing to apply: the Application Default Credentials (the identity Terraform applies with) cannot list the members of folders/123456789012 (cloudasset.assets.searchAllResources)", proc.stdout)
+        self.assertIn("roles/cloudasset.viewer on the folder for that identity", proc.stdout)
+        self.assertIn("scoped service account pool", proc.stdout)
+        self.assertNotIn("cannot set IAM policy on folders/123456789012", proc.stdout)
+        self.assertIn("PROBED:resourcemanager.folders.setIamPolicy\n", proc.stderr)
+        self.assertIn("PROBED:cloudasset.assets.searchAllResources\n", proc.stderr)
+        # An organisation reads the same way, and the warn mode warns instead.
+        proc = self._run(keys={"SCOPE_ORGANIZATIONS": "987654321098", "SCOPED_SA_POOL_ENABLED": "yes"}, mode="warn",
+                         probe={"organizations/987654321098": "granted"},
+                         search_probe={"organizations/987654321098": "denied"})
+        self._assert_rc(proc, 0)
+        self.assertIn("WARN: An applying run would be refused: the Application Default Credentials (the identity Terraform applies with) cannot list the members of organizations/987654321098 (cloudasset.assets.searchAllResources)", proc.stdout)
+        self.assertIn("roles/cloudasset.viewer on the organisation for that identity", proc.stdout)
+
+    def test_the_pool_armed_beside_a_folder_the_identity_can_bind_and_search_passes_silently(self):
+        proc = self._run(keys={"SCOPE_FOLDERS": "123456789012", "SCOPED_SA_POOL_ENABLED": "true"},
+                         probe={"folders/123456789012": "granted"},
+                         search_probe={"folders/123456789012": "granted"})
+        self._assert_rc(proc, 0)
+        self.assertNotIn("WARN", proc.stdout)
+        self.assertNotIn("ERROR", proc.stdout)
+        self.assertIn("PROBED:cloudasset.assets.searchAllResources\n", proc.stderr)
+
+    def test_the_pool_off_never_probes_the_search_permission(self):
+        # With the pool off the plan reads no container, so the only
+        # permission asked is setIamPolicy, whatever the search probe would say.
+        for armed in ("false", ""):
+            with self.subTest(armed=armed):
+                proc = self._run(keys={"SCOPE_FOLDERS": "123456789012", "SCOPED_SA_POOL_ENABLED": armed},
+                                 probe={"folders/123456789012": "granted"},
+                                 search_probe={"folders/123456789012": "denied"})
+                self._assert_rc(proc, 0)
+                self.assertNotIn("ERROR", proc.stdout)
+                probed = [line for line in proc.stderr.splitlines() if line.startswith("PROBED:")]
+                self.assertEqual(["PROBED:resourcemanager.folders.setIamPolicy"], probed, proc.stderr)
 
     def test_the_probe_uses_the_credentials_the_provider_would(self):
         # GOOGLE_OAUTH_ACCESS_TOKEN as is; GOOGLE_IMPERSONATE_SERVICE_ACCOUNT

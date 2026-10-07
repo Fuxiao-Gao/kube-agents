@@ -39,6 +39,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/utils/ptr"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/yaml"
@@ -80,6 +81,25 @@ const (
 	// on the HERMES_HOME_MODE env var for why 0700 does not work here and why a chmod
 	// is not an alternative.
 	hermesHomeMode = "2770"
+	// auditFileName is the file the tool_call_audit plugin and the chat_message_audit
+	// hook append their records to under a profile's logs/ directory: AUDIT_FILE_NAME
+	// in agents/chat/defaults/plugins/common/audit_sink.py, which
+	// TestFluentBitAuditFileNameMatchesTheEmitters holds to this value. The sidecar
+	// tails it at fluentBitAuditTailPath.
+	auditFileName = "audit.jsonl"
+	// fluentBitDataMount is where the fluent-bit sidecar mounts the agent's data
+	// volume, read-only: the sidecar container's MountPath and the root of both tail
+	// paths, so the two cannot diverge. It is the path the agent mounts the same claim
+	// at by default (defaultAgentHome) and stays the sidecar's view of the volume root
+	// wherever a CR moves the agent's home: the files are at logs/ and
+	// profiles/<name>/logs/ relative to the claim either way.
+	fluentBitDataMount = defaultAgentHome
+	// fluentBitAuditTailPath is the Path of the sidecar's audit tail input: the front
+	// door's file, whose home is the volume root, and one per named profile under
+	// profiles/. Every profile's file is matched whether or not that profile emits
+	// records today, so turning an emitter on for a profile needs no change here.
+	fluentBitAuditTailPath = fluentBitDataMount + "/logs/" + auditFileName + "," +
+		fluentBitDataMount + "/profiles/*/logs/" + auditFileName
 	// agentDataStorageSize sizes the agent's own /opt/data claim, and through
 	// shell_sandbox_manifests.go the sandbox's claim at the same path.
 	//
@@ -91,6 +111,12 @@ const (
 	// any install whose working directories were larger than the guess.
 	agentDataStorageSize = "10Gi"
 	credentialProxyPort  = 8765
+	// The Chat consumers' broker env: the project id both carry, the legacy
+	// consumer's subscription name, and the fully qualified subscription
+	// form both consumers' env carries.
+	googleChatProjectIDEnvVar          = "GOOGLE_CHAT_PROJECT_ID"
+	legacyGoogleChatSubscriptionEnvVar = "GOOGLE_CHAT_SUBSCRIPTION_NAME"
+	googleChatSubscriptionFormat       = "projects/%s/subscriptions/%s"
 	// credentialProxyMetricsPort is the broker's metrics-only listener, beside
 	// Envoy's credentialProxyPort. Its own port so that the managed-Prometheus
 	// collector is admitted to a listener that serves counters and nothing
@@ -123,6 +149,18 @@ const (
 	eventWatcherMetricsPort     int32 = 9095
 	eventWatcherMetricsPortName       = "event-metrics"
 	eventWatcherMetricsPortEnv        = "EVENT_WATCHER_METRICS_PORT"
+
+	// OperatorNamespaceEnv is the variable both install paths set on the
+	// manager container from the Downward API (the chart's operator
+	// Deployment and config/manager/manager.yaml); main.go reads it into
+	// PlatformAgentReconciler.OperatorNamespace. operatorPodNameLabel and
+	// operatorPodNameValue are the label both paths put on the operator's
+	// pods, the chart through operatorSelectorLabels; together with the
+	// namespace they are the peer the gateway and broker policies admit on
+	// the metrics ports, for the usage counters poller.
+	OperatorNamespaceEnv = "POD_NAMESPACE"
+	operatorPodNameLabel = "app.kubernetes.io/name"
+	operatorPodNameValue = "kube-agents-operator"
 
 	// sandboxUID is the canonical unprivileged 'hermes' runtime user created in
 	// the upstream NousResearch/hermes-agent Dockerfile (line 92). Everything the
@@ -648,7 +686,11 @@ func renderManagedEnv(agent *agentv1alpha1.PlatformAgent) string {
 	// records where it started rather than testing `lines` for emptiness.
 	platformStart := len(lines)
 
-	if gchat := integration.GoogleChat; gchat != nil && gchat.Enabled != nil && *gchat.Enabled {
+	// legacyChatConsumer rather than the enabled flag: under next the A2A
+	// gateway takes Chat and the Hermes platform is off, so its pins would
+	// pin a platform that does not run. The two predicates are complements;
+	// see a2aChatArmed.
+	if gchat := integration.GoogleChat; legacyChatConsumer(agent) {
 		add("GOOGLE_CHAT_RELAY_URL", credentialProxyBaseURL(agent))
 		add("GOOGLE_CHAT_PROJECT_ID", gchat.ProjectID)
 		add("GOOGLE_CHAT_SUBSCRIPTION_NAME", fmt.Sprintf("projects/%s/subscriptions/%s", gchat.ProjectID, gchat.SubscriptionName))
@@ -656,7 +698,9 @@ func renderManagedEnv(agent *agentv1alpha1.PlatformAgent) string {
 		add("GOOGLE_CHAT_ALLOW_ALL_USERS", strconv.FormatBool(allowAllUsers(gchat.AllowedUsers)))
 	}
 
-	if slack := integration.Slack; slack != nil && slack.Enabled != nil && *slack.Enabled {
+	// legacySlackConsumer, for Chat's reason above: under next the A2A
+	// gateway takes Slack and the Hermes platform is off; see a2aSlackArmed.
+	if slack := integration.Slack; legacySlackConsumer(agent) {
 		add("SLACK_RELAY_URL", credentialProxyBaseURL(agent))
 		add("SLACK_ALLOWED_USERS", strings.Join(slack.AllowedUsers, ","))
 		add("SLACK_ALLOW_ALL_USERS", strconv.FormatBool(allowAllUsers(slack.AllowedUsers)))
@@ -1808,6 +1852,10 @@ func renderConfigYAML(agent *agentv1alpha1.PlatformAgent, agentPlugins []*agentv
 		// opt back into the mode that corrupts the file every other profile shares
 		// the volume with.
 		Database *managedDatabaseConfig `json:"database,omitempty"`
+		// Hooks carries the bridge activity door's pod-wide entry under
+		// mode next with a bridge declared (a2aActivityHook); absent
+		// otherwise, so a default install's config is unchanged.
+		Hooks *managedHooks `json:"hooks,omitempty"`
 	}{}
 
 	// Model. The endpoint every profile in the pod reasons through, and the setting
@@ -1858,6 +1906,8 @@ func renderConfigYAML(agent *agentv1alpha1.PlatformAgent, agentPlugins []*agentv
 		cfg.Database = &managedDatabaseConfig{JournalMode: sqliteJournalModeDelete}
 	}
 
+	cfg.Hooks = a2aActivityHook(agent)
+
 	cfg.Display.Platforms = map[string]map[string]any{}
 
 	// Render outbound Slack messages as Block Kit rather than one flat mrkdwn
@@ -1881,18 +1931,21 @@ func renderConfigYAML(agent *agentv1alpha1.PlatformAgent, agentPlugins []*agentv
 
 	if agent.Spec.Integration != nil {
 		if gchat := agent.Spec.Integration.GoogleChat; gchat != nil {
-			if gchat.Enabled != nil {
-				cfg.Platforms.GoogleChat.Enabled = *gchat.Enabled
-				if *gchat.Enabled {
-					// Rebrand the Google Chat "thinking" marker card from the
-					// upstream default ("Hermes is thinking…") to our product name.
-					cfg.Platforms.GoogleChat.TypingStatusText = "Kage is thinking…"
-				}
+			// The platform is on only while Hermes is the Chat consumer;
+			// under next the A2A gateway is, and this platform would pull
+			// the same subscription beside it.
+			cfg.Platforms.GoogleChat.Enabled = legacyChatConsumer(agent)
+			if cfg.Platforms.GoogleChat.Enabled {
+				// Rebrand the Google Chat "thinking" marker card from the
+				// upstream default ("Hermes is thinking…") to our product name.
+				cfg.Platforms.GoogleChat.TypingStatusText = "Kage is thinking…"
 			}
 			cfg.Display.Platforms["google_chat"] = resolveGoogleChatDisplayConfig(gchat.Mode)
 		}
 		if slack := agent.Spec.Integration.Slack; slack != nil && slack.Enabled != nil {
-			cfg.Platforms.Slack.Enabled = *slack.Enabled
+			// On only while Hermes is the Slack consumer; under next the A2A
+			// gateway is, see a2aSlackArmed.
+			cfg.Platforms.Slack.Enabled = legacySlackConsumer(agent)
 		}
 		if teams := agent.Spec.Integration.Teams; teams != nil && teams.Enabled != nil {
 			cfg.Platforms.Teams.Enabled = *teams.Enabled
@@ -2656,7 +2709,9 @@ func buildPodTemplateSpec(agent *agentv1alpha1.PlatformAgent, configHash, fluent
 	}
 
 	if integration := agent.Spec.Integration; integration != nil {
-		if gchat := integration.GoogleChat; gchat != nil && gchat.Enabled != nil && *gchat.Enabled {
+		// The legacy relay env; under next the A2A gateway carries Chat
+		// instead, see a2aChatArmed.
+		if gchat := integration.GoogleChat; legacyChatConsumer(agent) {
 			envVars = append(envVars, []corev1.EnvVar{
 				{
 					Name:  "GOOGLE_CHAT_RELAY_URL",
@@ -2687,7 +2742,9 @@ func buildPodTemplateSpec(agent *agentv1alpha1.PlatformAgent, configHash, fluent
 				Value: strconv.FormatBool(allowAllUsers(gchat.AllowedUsers)),
 			})
 		}
-		if slack := integration.Slack; slack != nil && slack.Enabled != nil && *slack.Enabled {
+		// The legacy relay env; under next the A2A gateway carries Slack
+		// instead, see a2aSlackArmed.
+		if slack := integration.Slack; legacySlackConsumer(agent) {
 			envVars = append(envVars, []corev1.EnvVar{
 				{
 					Name:  "SLACK_RELAY_URL",
@@ -2890,18 +2947,19 @@ func buildPodTemplateSpec(agent *agentv1alpha1.PlatformAgent, configHash, fluent
 		Name:  "HERMES_HOME_MODE",
 		Value: hermesHomeMode,
 	})
-	// The Hermes base image sets HERMES_WRITE_SAFE_ROOT=/opt/data, which is the agent's
-	// own home while the shell is local. agent/file_safety.py checks the path prefix in
-	// the agent process before the write is routed anywhere, so with the shell in the
-	// sandbox this has to name sandbox paths or write_file and patch return "Write
-	// denied" for everything — which is how the earlier value was found wrong on a
-	// live install. The sandbox's data volume carries the same /opt/data path
-	// deliberately. /home/agent is listed too, but current sandbox images make it
-	// root-owned (deploy/sandbox/Dockerfile), so a write there passes this check and
-	// then fails on the directory's mode. The value is written out rather than left
-	// to the image default so the policy is visible in the pod spec. It gives up no
-	// isolation: with backend: ssh
-	// the file tools cannot reach the agent's own filesystem to begin with.
+	// The Hermes base image sets HERMES_WRITE_SAFE_ROOT=/opt/data, which matches
+	// the sandbox data volume path (shellSandboxDataPath). agent/file_safety.py
+	// checks the path prefix in the agent process before the write is routed
+	// anywhere. The ephemeral sandbox home (/home/agent) is root-owned in the
+	// container image (deploy/sandbox/Dockerfile, #2245) and is not a durable write
+	// destination, so it is omitted here (#2284): write attempts naming
+	// /home/agent/... fail fast with "outside HERMES_WRITE_SAFE_ROOT" at the
+	// gateway's prefix check rather than failing on directory mode in the sandbox.
+	// (Writes to `~` expand in the agent process against HOME under the data volume
+	// — by default /opt/data/home — and are admitted under /opt/data).
+	// The value is written out rather than left to the image default so the policy is
+	// visible in the pod spec. It gives up no isolation: with backend: ssh the file
+	// tools cannot reach the agent's own filesystem to begin with.
 	//
 	// TERMINAL_CWD is what stops the agent working in a directory that does not
 	// survive a restart. Hermes' ssh backend defaults cwd to `~`
@@ -2914,7 +2972,7 @@ func buildPodTemplateSpec(agent *agentv1alpha1.PlatformAgent, configHash, fluent
 	// for. A managed-scope value could not be narrowed by anything.
 	envVars = append(envVars, corev1.EnvVar{
 		Name:  "HERMES_WRITE_SAFE_ROOT",
-		Value: strings.Join([]string{shellSandboxDataPath, shellSandboxHomePath}, ":"),
+		Value: shellSandboxDataPath,
 	})
 	envVars = append(envVars, corev1.EnvVar{
 		Name:  "TERMINAL_CWD",
@@ -2995,6 +3053,9 @@ func buildPodTemplateSpec(agent *agentv1alpha1.PlatformAgent, configHash, fluent
 				Value: a2aAgentBusUser,
 			},
 		)
+	}
+	if a2aActivityHookWanted(agent) {
+		envVars = append(envVars, a2aActivitySecretEnv(agent))
 	}
 	envVars = append(envVars, corev1.EnvVar{
 		Name:  "PATH",
@@ -3505,12 +3566,31 @@ const scopedSAPoolKey = "scoped-sa-pool.json"
 
 const scopedSAPoolMountPath = "/etc/credential-proxy/" + scopedSAPoolKey
 
+// scopedSAPoolVersion is the pool-file format the broker's `parse_pool`
+// accepts. Version 2 keys each member on the bare project id; version 1
+// carried a cluster tuple, and the broker refuses it by name rather than
+// matching nothing, so a stale operator against a new broker is a startup
+// error that says "version 2" instead of a refusal on every request.
+const scopedSAPoolVersion = 2
+
 // scopedSAPoolJSON renders the mapping the broker consumes, or "" when the
-// agent has none configured.
+// pool is not armed.
 //
-// Sorted by the scope key. The CR is a list and Kubernetes preserves its order,
+// Keyed on `enabled`, not on the list: a non-empty list with the pool off
+// renders nothing, so a file nothing reads is never written, and an armed
+// pool with an empty list (which admission refuses, but a CR applied before
+// the rule or with validation off still reaches here) renders the empty
+// document rather than nothing. The three things that have to agree — flag,
+// ConfigMap key, SubPath mount — then agree on every shape, and the failure
+// an empty armed pool produces is the broker's own "empty pool" refusal,
+// which names the cause, rather than a SubPath on a missing key, which
+// does not.
+//
+// Sorted by projectId. The CR is a list and Kubernetes preserves its order,
 // so an operator reordering two entries would otherwise rewrite the ConfigMap,
-// change its hash and roll the broker for no change in meaning.
+// change its hash and roll the broker for no change in meaning. Byte order is
+// what `sort(keys(...))` in the Terraform composition and `sorted()` in the
+// broker produce, so all three renderings of the list agree.
 //
 // No error return, because there is no failure to report: the document is a
 // struct of strings and ints, which json.Marshal cannot fail on. An error
@@ -3518,45 +3598,38 @@ const scopedSAPoolMountPath = "/etc/credential-proxy/" + scopedSAPoolKey
 // that has nowhere to put it, and a swallowed one would leave the broker armed
 // by its environment variable with no mapping file to read.
 func scopedSAPoolJSON(agent *agentv1alpha1.PlatformAgent) string {
-	if agent.Spec.Security == nil || len(agent.Spec.Security.ScopedServiceAccounts) == 0 {
+	if !scopedSAPoolEnabled(agent) {
 		return ""
 	}
 	type entry struct {
 		ProjectID           string `json:"projectId"`
-		Location            string `json:"location"`
-		ClusterName         string `json:"clusterName"`
 		ServiceAccountEmail string `json:"serviceAccountEmail"`
 	}
-	entries := make([]entry, 0, len(agent.Spec.Security.ScopedServiceAccounts))
-	for _, account := range agent.Spec.Security.ScopedServiceAccounts {
+	members := agent.Spec.Security.ScopedServiceAccountPool.ServiceAccounts
+	entries := make([]entry, 0, len(members))
+	for _, account := range members {
 		entries = append(entries, entry{
 			ProjectID:           account.ProjectID,
-			Location:            account.Location,
-			ClusterName:         account.ClusterName,
 			ServiceAccountEmail: account.ServiceAccountEmail,
 		})
 	}
 	sort.Slice(entries, func(i, j int) bool {
-		return scopedSAPoolScopeKey(entries[i].ProjectID, entries[i].Location, entries[i].ClusterName) <
-			scopedSAPoolScopeKey(entries[j].ProjectID, entries[j].Location, entries[j].ClusterName)
+		return entries[i].ProjectID < entries[j].ProjectID
 	})
 	document, _ := json.Marshal(struct {
 		Version         int     `json:"version"`
 		ServiceAccounts []entry `json:"serviceAccounts"`
-	}{Version: 1, ServiceAccounts: entries})
+	}{Version: scopedSAPoolVersion, ServiceAccounts: entries})
 	return string(document)
 }
 
-// scopedSAPoolScopeKey is the GKE resource name. Written here as well as in the
-// broker and in Terraform because all three have to agree; the broker's
-// `scoped_sa_pool.scope_key` and the key the Terraform module files each pool
-// member under are the other two, and tests compare them.
-func scopedSAPoolScopeKey(project, location, cluster string) string {
-	return fmt.Sprintf("projects/%s/locations/%s/clusters/%s", project, location, cluster)
-}
-
+// scopedSAPoolEnabled is the arming rule: the explicit switch, and only the
+// switch. The list arms nothing on its own (see ScopedServiceAccountPool on
+// the CRD for why), and declaring a project in spec.scope arms nothing either.
 func scopedSAPoolEnabled(agent *agentv1alpha1.PlatformAgent) bool {
-	return agent.Spec.Security != nil && len(agent.Spec.Security.ScopedServiceAccounts) > 0
+	return agent.Spec.Security != nil &&
+		agent.Spec.Security.ScopedServiceAccountPool != nil &&
+		agent.Spec.Security.ScopedServiceAccountPool.Enabled
 }
 
 func buildCredentialProxyPolicyConfigMap(agent *agentv1alpha1.PlatformAgent) *corev1.ConfigMap {
@@ -3957,25 +4030,30 @@ func buildCredentialProxyEnv(agent *agentv1alpha1.PlatformAgent) []corev1.EnvVar
 		//
 		// Which is what ties this figure to the proxy container's own memory
 		// limit (buildCredentialProxyContainer) rather than to anything about
-		// the fleet. Concurrency is bounded inside the broker at the value set
-		// just below, and a request holds its slot until its response is
-		// written, so the burst is six times the cap times that: at 8 MiB and
-		// eight slots, 384 MiB on top of the 256Mi the container requests at
-		// rest, which its 1Gi limit absorbs. The limit must also hold the
-		// child processes themselves, one kubectl or gcloud per in-flight
-		// request, and a kubectl listing thousands of objects runs to hundreds
-		// of MiB on its own; that term is outside this arithmetic and is what
-		// the rest of the limit is for. Raising either cap means raising the
-		// limit with it, which is why both are set here and so reserved rather
-		// than left to spec.deployment.env: the limit is not a CR field, and a
-		// CR that could raise a cap could not raise what holds it. The cap
-		// test asserts the three from the rendered env, so believe it over
-		// this paragraph if they ever disagree.
+		// the fleet. Concurrency is bounded inside the broker at the slot cap
+		// set just below and, within it, by the child memory budget the
+		// broker derives from the limit it reads through
+		// credentialProxyMemoryLimitEnv: each admitted request is charged six
+		// times this cap for the broker's own copies plus a fixed reserve for
+		// its child process (credential_proxy_manifests.go has the terms).
+		// Raising this cap lowers how many requests the same limit admits,
+		// which is why it is set here and so reserved rather than left to
+		// spec.deployment.env. The cap test asserts the arithmetic from the
+		// rendered env, so believe it over this paragraph if they ever
+		// disagree.
 		{Name: "CREDENTIAL_PROXY_MAX_OUTPUT_BYTES", Value: credentialProxyMaxOutputBytes},
-		// How many brokered commands run at once. The broker's own default is
-		// the same figure; setting it here is what makes it the operator's to
-		// move, together with the limit above.
+		// The most brokered commands that run at once; the child memory budget
+		// decides how many of them the limit admits. The broker's own default
+		// is the same figure; setting it here is what makes it the operator's.
 		{Name: "CREDENTIAL_PROXY_MAX_CONCURRENT_COMMANDS", Value: credentialProxyMaxConcurrentCommands},
+		// The container's own memory limit, for the broker's child memory
+		// budget. See credentialProxyMemoryLimitEnv for why it is a
+		// resourceFieldRef and why it is reserved.
+		{Name: credentialProxyMemoryLimitEnv, ValueFrom: &corev1.EnvVarSource{ResourceFieldRef: &corev1.ResourceFieldSelector{
+			ContainerName: credentialProxyContainerName,
+			Resource:      containerMemoryLimitResource,
+			Divisor:       resource.MustParse("1"),
+		}}},
 		{Name: "CREDENTIAL_PROXY_STATE_DIR", Value: "/var/lib/credential-proxy"},
 		{Name: "CREDENTIAL_PROXY_UNIX_SOCKET", Value: "/var/run/credential-proxy/backend.sock"},
 		// The credentialed port, the same constant the container port and the
@@ -4103,10 +4181,29 @@ kubectl config set-context "$KUBE_CONTEXT_NAME" --namespace="$KUBE_DEFAULT_NAMES
 		)
 	}
 	if integration := agent.Spec.Integration; integration != nil {
-		if gchat := integration.GoogleChat; gchat != nil && gchat.Enabled != nil && *gchat.Enabled {
-			envVars = append(envVars, corev1.EnvVar{Name: "GOOGLE_CHAT_PROJECT_ID", Value: gchat.ProjectID}, corev1.EnvVar{Name: "GOOGLE_CHAT_SUBSCRIPTION_NAME", Value: fmt.Sprintf("projects/%s/subscriptions/%s", gchat.ProjectID, gchat.SubscriptionName)})
+		if gchat := integration.GoogleChat; googleChatEnabled(agent) {
+			subscription := fmt.Sprintf(googleChatSubscriptionFormat, gchat.ProjectID, gchat.SubscriptionName)
+			envVars = append(envVars, corev1.EnvVar{Name: googleChatProjectIDEnvVar, Value: gchat.ProjectID})
+			if a2aChatArmed(agent) {
+				// The next stack takes Chat: the install's one subscription
+				// goes to the A2A relay instance and the legacy instance is
+				// not built, so one consumer pulls it. The audience is what
+				// the broker confers the a2a-chat role by; the legacy chat
+				// caller's audience must not reach the A2A event routes.
+				envVars = append(envVars,
+					corev1.EnvVar{Name: a2aGoogleChatSubscriptionEnvVar, Value: subscription},
+					corev1.EnvVar{Name: credentialProxyA2AChatAudienceEnvVar, Value: credentialProxyA2AChatAudience},
+				)
+			} else {
+				envVars = append(envVars, corev1.EnvVar{Name: legacyGoogleChatSubscriptionEnvVar, Value: subscription})
+			}
 		}
-		if slack := integration.Slack; slack != nil && slack.Enabled != nil && *slack.Enabled {
+		// The pair arms the broker's own Socket Mode connection
+		// (credential_proxy.py, serve: SlackRelay), the legacy consumer.
+		// Under next the A2A gateway opens the app's connection on the same
+		// refs, and Slack spreads an app's events across every connection it
+		// has open, so the broker is not handed the pair; see a2aSlackArmed.
+		if slack := integration.Slack; legacySlackConsumer(agent) {
 			envVars = append(envVars,
 				corev1.EnvVar{Name: "SLACK_BOT_TOKEN", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: defaultSecretRef(slack.BotTokenSecretRef, defaultPlatformAgentSecrets, "SLACK_BOT_TOKEN")}},
 				corev1.EnvVar{Name: "SLACK_APP_TOKEN", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: defaultSecretRef(slack.AppTokenSecretRef, defaultPlatformAgentSecrets, "SLACK_APP_TOKEN")}},
@@ -4152,8 +4249,8 @@ func mergeCredentialProxyEnv(managed, custom []corev1.EnvVar) []corev1.EnvVar {
 		// audience would collapse the two roles into one, which is how the
 		// broker spells "no split".
 		"CREDENTIAL_PROXY_CHAT_AUDIENCE",
-		// The A2A gateway's audience and subscription are reserved before the
-		// operator renders them, for the same reason: one that could set the
+		// The A2A gateway's audience and subscription are reserved for the
+		// same reason: one that could set the
 		// audience would decide who holds the a2a-chat role, and one that
 		// could set the subscription would arm a second Chat consumer on
 		// whatever the broker's credential can pull.
@@ -4165,6 +4262,11 @@ func mergeCredentialProxyEnv(managed, custom []corev1.EnvVar) []corev1.EnvVar {
 		// ServiceAccount from its audience, or bind another to it.
 		"CREDENTIAL_PROXY_SESSION_CALLERS",
 		"A2A_GOOGLE_CHAT_SUBSCRIPTION_NAME",
+		// And the legacy subscription name by name, not only as a managed
+		// name: under next with Chat the render no longer sets it, and a
+		// CR that could would arm a second relay instance beside the A2A
+		// one, or, naming the same subscription, refuse the broker's start.
+		legacyGoogleChatSubscriptionEnvVar,
 		"CREDENTIAL_PROXY_BOOTSTRAP_COMMAND",
 		// The listen address is reserved for the placements as well as for the
 		// authentication: it is appended after this merge in every container
@@ -4231,6 +4333,16 @@ func mergeCredentialProxyEnv(managed, custom []corev1.EnvVar) []corev1.EnvVar {
 		driftDetectorClusterNameEnv,
 		driftDetectorSubscriptionEnv,
 		driftDetectorGitopsManagersEnv,
+		// Not every DRIFT_DETECTOR_* name belongs on this list, and the six
+		// above are not here for being drift variables. They are here because
+		// buildAgentAPIAuthSidecar appends each one after this merge, so an
+		// unreserved name would duplicate and stall the apply, as the note
+		// above says. DRIFT_DETECTOR_LOG_DROPPED is read by
+		// deploy/shared/start-services.sh and written by nothing, so it is
+		// absent on purpose: adding it for symmetry with its siblings is the
+		// one edit that stops an operator setting it through
+		// spec.deployment.env from reaching the detector at all, and nothing
+		// in the render would fail to say so.
 		"KSA_TOKEN_FILE",
 		"TOKEN_BROKER_URL",
 	} {
@@ -4258,10 +4370,10 @@ func mergeCredentialProxyEnv(managed, custom []corev1.EnvVar) []corev1.EnvVar {
 func safeSandboxEnvOverrides(custom []corev1.EnvVar) []corev1.EnvVar {
 	// An allowlist, not a denylist: this env reaches the agent sandbox, so a
 	// variable earns a place here only if an arbitrary value for it cannot
-	// redirect state, grant access, or change what code runs. Telemetry
-	// destinations qualify, and so do the alert ceilings — they bound how many
-	// notifications the session server posts in a day and nothing else. A
-	// path, a credential or an image reference would not.
+	// redirect state, grant access, or run code the image does not already
+	// ship. Telemetry destinations qualify, and so do the alert ceilings —
+	// they bound how many notifications the session server posts in a day
+	// and nothing else. A path, a credential or an image reference would not.
 	//
 	// EOD_EXCLUDE_NAMESPACES is the end-of-day recap's only tunable. It
 	// narrows what its listing prints and reaches nothing the notifier does: no
@@ -4297,17 +4409,53 @@ func safeSandboxEnvOverrides(custom []corev1.EnvVar) []corev1.EnvVar {
 	// one message and its own failure report.
 	//
 	// KAGE_SLACK_UX switches between code paths already in the image, all of
-	// them about Slack: which reaction goes on an ask and when it settles, how
-	// much of a delegated card's delivery posts in the thread, whether a
-	// thread's cards show as one plan message, the session status and title
-	// Slack shows on the thread, and whether the harness's own Slack messages
-	// (the scheduled-report wrapper, the heartbeat, restart and shutdown
-	// notices, command and system replies) are reworded or left out. It is
-	// compared against `FLAG_ON_VALUES` in `slack_presenter.py`; any other
-	// value is off, the image default. It names no path, URL, credential or
-	// image, and no value of it adds a destination or a credential: its writes
-	// go only to Slack, in the channels and threads the gateway already
-	// serves.
+	// them about Slack. It is compared against `FLAG_ON_VALUES` in
+	// `slack_presenter.py`; any other value is off, the image default. It names
+	// no path, URL, credential or image, and no value of it adds a destination
+	// or a credential. Its writes go only to Slack, in the channels and threads
+	// the gateway already serves, among them a reaction on an ask, a click's
+	// rewrite of the clicked message (or, when Slack refuses it, the same
+	// answered line posted in the thread), and an incident alert's edit into
+	// its options, apart from one: the title of an event alert's thread,
+	// recorded on that alert's own routing row in the local Session KV
+	// database. Each effect it switches, one per change that ships it:
+	//
+	//   - Clicks: a click on a choice runs as the clicker's turn under the
+	//     adapter's own authorization, and the clicked message is rewritten to
+	//     name who chose what.
+	//   - Incident alerts: a crashloop alert posts to Slack as a one-line
+	//     headline, and the event watcher records a title for the alert's
+	//     thread on its routing row, which the thread status reads; an
+	//     incident alert's triage options post as an edit of the alert, with a
+	//     button per option and the report folded; the Session KV database is
+	//     otherwise read, read-only, to tell an alert's thread from any other
+	//     and to read that title; and before an option click counts, the alert's
+	//     thread is read once (conversations.replies, the existing token and
+	//     scopes) to see whether someone the agent answers typed apply since
+	//     the options appeared, which drops the click.
+	//   - Pull requests and questions: an opened pull request and a question a
+	//     card waits on post in the thread as messages of their own, with
+	//     buttons; the wake for a question already posted carries a note
+	//     telling the Planning Agent not to ask it again, nor to reply after
+	//     carrying the answer to the card, the one effect that reaches a
+	//     model; once the card resumes, the question's thread is read once
+	//     (conversations.replies, the existing token and scopes) for the first
+	//     reply a person typed, and the names it shows are looked up with
+	//     users.info, cached per user, so the settled question shows who answered.
+	//   - Reactions: which reaction goes on an ask and when it settles.
+	//   - Reports: a fleet-audit cron report and the first inventory report
+	//     post as Block Kit, laid out again as a headline and the top findings
+	//     (the audit's rest counted and left to its ledger, the inventory's
+	//     behind a "See all" button), through the credential
+	//     proxy's Slack relay to the channel or thread the report was already
+	//     bound for; the audit's counts come from its ledger issue, read
+	//     through the forge broker.
+	//   - Thread status: less of a delegated card's delivery posts in the
+	//     thread, the thread's cards show as one plan message, and Slack shows
+	//     a session status and title on the thread.
+	//   - Harness messages: the harness's own Slack messages (the
+	//     scheduled-report wrapper, the heartbeat, restart and shutdown
+	//     notices, command and system replies) are reworded or left out.
 	allowed := map[string]struct{}{
 		"ALERT_DAILY_LIMIT_CRITICAL": {},
 		// Not a severity, unlike its three neighbours: the drift detector's
@@ -4316,9 +4464,16 @@ func safeSandboxEnvOverrides(custom []corev1.EnvVar) []corev1.EnvVar {
 		// tunes it (DRIFT_QUOTA_KEY in session_kv_server.py). It earns the same
 		// place here for the same reason the others do — it bounds a count of
 		// chat messages and reaches nothing else.
-		"ALERT_DAILY_LIMIT_DRIFT":     {},
-		"ALERT_DAILY_LIMIT_INFO":      {},
-		"ALERT_DAILY_LIMIT_WARNING":   {},
+		"ALERT_DAILY_LIMIT_DRIFT":   {},
+		"ALERT_DAILY_LIMIT_INFO":    {},
+		"ALERT_DAILY_LIMIT_WARNING": {},
+		// Deliberately no DRIFT_DETECTOR_LOG_DROPPED here, though
+		// deploy/shared/start-services.sh reads it. This list governs the agent
+		// sandbox container; the detector runs in the credential-proxy sidecar
+		// (deploy/docker/Dockerfile), which takes spec.deployment.env through
+		// mergeCredentialProxyEnv instead — a denylist, so an unreserved name
+		// passes through without being named anywhere. An entry here would copy
+		// the variable into a container that never reads it.
 		"EOD_EXCLUDE_NAMESPACES":      {},
 		"FEEDBACK_PROMPT_DELAY":       {},
 		"FEEDBACK_PROMPT_ENABLED":     {},
@@ -4921,7 +5076,7 @@ func buildBaseContainers(agent *agentv1alpha1.PlatformAgent, image string, envVa
 		VolumeMounts: []corev1.VolumeMount{
 			{
 				Name:      "platform-agent-data-vol",
-				MountPath: "/opt/data",
+				MountPath: fluentBitDataMount,
 				ReadOnly:  true,
 			},
 			{
@@ -5243,25 +5398,33 @@ func getConfigMapHash(configMap *corev1.ConfigMap) (string, error) {
 
 // buildFluentBitConfigMap generates the ConfigMap manifest containing fluent-bit.conf.
 //
-// Three parser passes run over every line the sidecar tails. gchat_event lifts
-// the chat user and session out of the gateway's own lines. The other two are
-// the audit trail's: hermes_audit_line recognises a line the tool_call_audit
-// plugin or the chat_message_audit hook wrote — Hermes' timestamp, level and
-// logger name, then one JSON object — and captures the object as audit_json;
-// audit_json then decodes it into top-level fields and drops the capture. A
-// line neither parser matches passes through untouched, and the raw line stays
-// under `log` either way, so Cloud Logging carries the record's fields as its
-// own jsonPayload keys (event_type, tool, status, ...) beside the text every
-// existing reader still greps. The lift is what makes an audit record
-// filterable without a regex; the record's shape is common/audit_schema.py's.
+// Two tail inputs. agent.logs is Hermes' own log files under the front door's
+// logs/, read as text: gchat_event lifts the chat user and session out of the
+// gateway's lines, and a line it does not match passes through untouched under
+// `log`. agent.audit is the audit trail: the file the tool_call_audit plugin and
+// the chat_message_audit hook append to, one JSON object per line
+// (agents/chat/defaults/plugins/common/audit_sink.py), tailed with the audit_json
+// parser on the input itself. Each line arrives as the record's own fields —
+// event_type, tool, status, ... in the shape common/audit_schema.py gives it —
+// and Cloud Logging carries them as jsonPayload keys a SIEM filters on without a
+// regex. Path_Key names the file, and so the profile, a record came from.
 //
-// The line prefix the regex reads is Hermes' own log format, which this
-// repository does not own: `%(asctime)s %(levelname)s%(session_tag)s %(name)s:
-// %(message)s` in the pinned image's hermes_logging.py, where session_tag is
-// ` [<session id>]` on a record emitted on a thread that holds a session
-// context and empty otherwise. Both forms have to match, or the records of
-// tools Hermes runs inline on the turn thread would pass through unlifted and
-// silently. TestFluentBitLiftsAuditRecordsIntoFields carries a sample of each.
+// The trail used to be lifted out of agent.log with a regex over Hermes' line
+// prefix (timestamp, level, session tag, logger name). That prefix was Hermes'
+// to change — a bump that changed it would have left every record as text,
+// silently — and a logger writing untrusted text could have planted a line
+// shaped like a record. Tailing a file of the emitters' own, as JSON, removes
+// both for the trail: no audit record is lifted from a Hermes line, so a prefix
+// bump cannot silently drop one and logged text cannot forge one. gchat_event
+// still reads the gateway's lines, but only to enrich the agent.logs stream —
+// it matches agent.logs, never agent.audit, and builds no record. What remains
+// is a write to the file itself, which any process under the agent's uid with a
+// path to the profile's logs/ can make; that is the volume's boundary, not this
+// configuration's.
+//
+// The audit input matches every profile's file (fluentBitAuditTailPath), not
+// only the profiles that emit today. The agent.logs input is unchanged and still
+// reads the front door's logs/ alone.
 func buildFluentBitConfigMap(agent *agentv1alpha1.PlatformAgent) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
 		TypeMeta: metav1.TypeMeta{
@@ -5282,8 +5445,21 @@ func buildFluentBitConfigMap(agent *agentv1alpha1.PlatformAgent) *corev1.ConfigM
 [INPUT]
     Name              tail
     Tag               agent.logs
-    Path              /opt/data/logs/*.log
+    Path              ` + fluentBitDataMount + `/logs/*.log
     DB                /fluent-bit/state/fluent-bit.db
+    Refresh_Interval  5
+    Rotate_Wait       30
+    Mem_Buf_Limit     20MB
+    Skip_Long_Lines   On
+    Read_from_Head    On
+    Path_Key          file_path
+
+[INPUT]
+    Name              tail
+    Tag               agent.audit
+    Path              ` + fluentBitAuditTailPath + `
+    Parser            audit_json
+    DB                /fluent-bit/state/fluent-bit-audit.db
     Refresh_Interval  5
     Rotate_Wait       30
     Mem_Buf_Limit     20MB
@@ -5300,41 +5476,20 @@ func buildFluentBitConfigMap(agent *agentv1alpha1.PlatformAgent) *corev1.ConfigM
     Preserve_Key  On
 
 [FILTER]
-    Name          parser
-    Match         agent.logs
-    Key_Name      log
-    Parser        hermes_audit_line
-    Reserve_Data  On
-    Preserve_Key  On
-
-[FILTER]
-    Name          parser
-    Match         agent.logs
-    Key_Name      audit_json
-    Parser        audit_json
-    Reserve_Data  On
-    Preserve_Key  Off
-
-[FILTER]
     Name              record_modifier
-    Match             agent.logs
+    Match             agent.*
     Record            app agent
     Record            log_source agent-file
 
 [OUTPUT]
     Name              stdout
-    Match             agent.logs
+    Match             agent.*
     Format            json_lines
 `,
 			"parsers.conf": `[PARSER]
     Name    gchat_event
     Format  regex
     Regex   User=(?<gchat_user>[^,\s]+),\s*Session=(?<gchat_session>[^,\s]+)
-
-[PARSER]
-    Name    hermes_audit_line
-    Format  regex
-    Regex   ^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} [A-Z]+(?: \[[^\]]*\])? hermes\.(?:plugin\.tool_call_audit|hook\.chat_message_audit): (?<audit_json>\{.*\})$
 
 [PARSER]
     Name    audit_json
@@ -5818,6 +5973,47 @@ func clusterDNSPeers(dnsIPs []string) []networkingv1.NetworkPolicyPeer {
 	return append(peers, peersNotAlreadyPresent(peers, dnsIPPeers)...)
 }
 
+// operatorMetricsIngressRule admits the operator's pods, in operatorNamespace,
+// on port: the usage counters poller's scrape of a metrics listener. The same
+// shape as the collector's rule beside it, narrowed to a pod selector so that
+// the listener reaches the collector and the operator, both readers of
+// counters, and nothing else in either namespace. False when the namespace is
+// unknown, off the cluster, where nothing could reach a pod IP in any case, and
+// when it is not a DNS-1123 label: the value becomes kubernetes.io/metadata.name,
+// which the API server only ever sets to a namespace's own (DNS-1123) name, so a
+// value carrying anything else matches no namespace -- and one the selector
+// cannot even carry would have the API server reject the whole policy.
+func operatorMetricsIngressRule(operatorNamespace string, port int32) (networkingv1.NetworkPolicyIngressRule, bool) {
+	if operatorNamespace == "" {
+		return networkingv1.NetworkPolicyIngressRule{}, false
+	}
+	if errs := validation.IsDNS1123Label(operatorNamespace); len(errs) > 0 {
+		manifestsLog.Info("the operator's namespace is not a valid namespace name (DNS-1123 label); the agent policy will not admit the operator on the metrics port", "value", operatorNamespace)
+		return networkingv1.NetworkPolicyIngressRule{}, false
+	}
+	return networkingv1.NetworkPolicyIngressRule{
+		From: []networkingv1.NetworkPolicyPeer{{
+			NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{labelMetadataName: operatorNamespace}},
+			PodSelector:       &metav1.LabelSelector{MatchLabels: map[string]string{operatorPodNameLabel: operatorPodNameValue}},
+		}},
+		Ports: []networkingv1.NetworkPolicyPort{tcpPort(port)},
+	}, true
+}
+
+// credentialProxyNetworkPolicyWithOperatorPeer is the broker's policy as
+// buildCredentialProxyNetworkPolicy renders it, plus the operator-peer rule on
+// the metrics port for the poller that reads the broker's counters into
+// status.usage (usage_counters_poller.go). The rule is appended here rather
+// than in the builder so the builder keeps its one argument, which its tests
+// and other callers use.
+func credentialProxyNetworkPolicyWithOperatorPeer(agent *agentv1alpha1.PlatformAgent, operatorNamespace string) *networkingv1.NetworkPolicy {
+	np := buildCredentialProxyNetworkPolicy(agent)
+	if rule, ok := operatorMetricsIngressRule(operatorNamespace, credentialProxyMetricsPort); ok {
+		np.Spec.Ingress = append(np.Spec.Ingress, rule)
+	}
+	return np
+}
+
 func buildNetworkPolicy(agent *agentv1alpha1.PlatformAgent, apiCIDRs []string, profile netpolProfile, fqdnEnabled bool, otlpEndpoint string, otlpDisabled bool) *networkingv1.NetworkPolicy {
 	udp := corev1.ProtocolUDP
 	tcp := corev1.ProtocolTCP
@@ -5888,6 +6084,11 @@ func buildNetworkPolicy(agent *agentv1alpha1.PlatformAgent, apiCIDRs []string, p
 		},
 		Ports: []networkingv1.NetworkPolicyPort{tcpPort(eventWatcherMetricsPort)},
 	})
+	// The operator's own pods on the same port, for the poller that reads the
+	// watcher's counters into status.usage (usage_counters_poller.go).
+	if rule, ok := operatorMetricsIngressRule(profile.OperatorNamespace, eventWatcherMetricsPort); ok {
+		ingressRules = append(ingressRules, rule)
+	}
 
 	dnsPeers := clusterDNSPeers(dnsIPs)
 

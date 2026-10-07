@@ -173,7 +173,9 @@ and drops the custom roles; `SCOPE_PROJECTS`, `SCOPE_FOLDERS`, `SCOPE_ORGANIZATI
 renders an empty list for it in the scope block, which revokes the read roles in every project,
 folder, organisation or selector member it named and retires those projects' Cluster Agent profiles over the
 reconcile's next two clean runs; `SCOPE_MAX_PROJECTS` absent writes no cap, so the default of 100
-returns and the projects past it read `over-cap` (or the plan is refused, while a selector is declared).
+returns and the projects past it read `over-cap` (or the plan is refused, while a selector is declared);
+`SCOPED_SA_POOL_ENABLED` absent disarms the scoped service account pool, deleting its accounts
+and putting the broker back on the agent's own identity.
 The file `install.sh` writes at the end of a first install carries every one of these, so
 the hazard is a hand edit that deletes a line rather than setting it to `false`. Run
 `./upgrade.sh --plan` before a full upgrade and read any `destroy` line as missing
@@ -281,10 +283,12 @@ the plan, before anything is applied, naming the selector, the status and the AP
 needs `compute.projects.get` on a host, to read the Metrics Scope in its scoping project with the
 Monitoring API enabled there, and `resourcemanager.projects.get` on every monitored project; a
 monitored project it cannot name is left out by naming its project number in
-`SCOPE_EXCLUDE_PROJECTS`. That is why no shell preflight probes the two selectors' reads as
-`check_scope_container_access` probes a container: a container's failure lands inside the apply,
+`SCOPE_EXCLUDE_PROJECTS`. That is why no shell preflight probes the two selectors' reads,
+as `check_scope_container_access` probes a container's binding: the binding's failure lands inside the apply,
 after the Asset API is enabled and some containers are bound, while a failed read lands in the plan
-with nothing changed, `upgrade.sh --plan` included. The bindings themselves are the explicit
+with nothing changed, `upgrade.sh --plan` included. The pool's listing of a container's members is
+the exception that check probes too, while the pool is armed, because `install.sh` enables the
+Asset API before that plan and a listing refused there would leave it enabled. The bindings themselves are the explicit
 projects' case: a resolved project the applying identity cannot set IAM policy in fails inside the
 apply, as a `SCOPE_PROJECTS` entry does, and no preflight probes either. What the selectors do not have is a container's
 zero-touch onboarding: a service project attached, or a project added to the scope, after the last
@@ -298,7 +302,11 @@ Shared VPC host, which the composition enables in the apply that follows the pla
 So before an `install.sh` apply that carries a selector, `enable_scope_selector_apis` lists the
 project's enabled APIs and enables whichever of the ones the declared selectors read is off, as
 gcloud's active account, like the KMS enablement beside it: nothing is called when they are on, which is every re-run and Day-2 apply of an existing install, and a failure is a
-warning, since the plan reports a disabled API with the same command as its remedy. The
+warning, since the plan reports a disabled API with the same command as its remedy. The scoped
+service account pool armed beside a folder or organisation (`SCOPED_SA_POOL_ENABLED` true with
+`SCOPE_FOLDERS` or `SCOPE_ORGANIZATIONS` set) counts as a third selector kind there: the plan
+lists the container's members for the pool through `cloudasset.googleapis.com`, so it is enabled
+first the same way, with the pool's listing named as the reason. The
 generate-only handoff prints the command above the apply, `install.sh --dry-run` skips its plan
 with the command while an API a declared selector reads is off (a dry run enables nothing, and its plan would
 otherwise be refused for a reason the real run does not have), and `upgrade.sh` does none of it,
@@ -327,9 +335,35 @@ exceed it (while a selector is declared or the cap is below its default), and re
 check as part of the declaration, so a cap set on the CR by
 hand is reported like any hand edit until the key records it.
 
+`SCOPED_SA_POOL_ENABLED` and `SCOPED_SA_POOL_MAX_ACCOUNTS` are the scoped service account pool,
+derived from the same scope: with the switch on, the IAM module provisions one reader service
+account in the management project per project the plan lists (the management project,
+`SCOPE_PROJECTS` less an exact `SCOPE_EXCLUDE_PROJECTS` entry, each selector's members, and,
+while the pool is armed, each declared folder's or organisation's members, which the plan lists
+through the Asset API `enable_scope_selector_apis` turns on first and which get their accounts on
+that apply; a project created under the container since lags to the next apply, while the
+container-level grant and the reconcile's discovery of it stay zero-touch), and the chart renders the mapping into the CR as
+`spec.security.scopedServiceAccountPool` with `enabled` set from the same key, so declaring
+projects arms nothing on its own. Members carry the install's identity in their description
+(`Pool member of <PLATFORM_AGENT_GSA_NAME> for projects/<id>`), and `check_service_account_ownership`
+lists them by it before every apply, armed or not, so a member left by a lost state is refused
+beside the agent's account rather than 409ing after the agent is deleted. The generator writes `scoped_pool_enabled` on every run, `false`
+by default (a member holds no IAM grant yet, so an armed pool turns every cluster read into a
+`Forbidden`), and `scoped_pool_max_accounts` only when the key is set: the bound on the pool, declared from the
+management project's free service-account quota, 100 (GCP's default quota, not the headroom)
+when unset, with a pool past it refused at plan. `install.sh` takes `--scoped-sa-pool-enabled[=BOOL]` and
+`--scoped-sa-pool-max-accounts=N` and records them on a first install; a flag on a later run
+applies for that run and warns that the next full upgrade regenerates from the file. A misspelt
+switch, or a cap that is not a whole number of at least 1, stops every front door but
+`uninstall.sh`, which exports the switch off and the cap empty before it regenerates, so a typo
+cannot refuse a teardown.
+
 Before a full apply the front doors read the live `PlatformAgent` through the install's own
 kubeconfig context and refuse when it carries a scope that neither the release record nor the
-keys account for, printing the `SCOPE_*` lines that reproduce it; a read that cannot decide (no
+keys account for, printing the `SCOPE_*` lines that reproduce it; the scoped pool's switch
+(`spec.security.scopedServiceAccountPool.enabled`) is weighed with the lists and the cap, so a
+pool armed on the CR that `SCOPED_SA_POOL_ENABLED` does not record is refused the same way, with
+that key among the lines, rather than disarmed by the apply. A read that cannot decide (no
 context, an unreadable CR or release) refuses too, because the apply itself needs no kubeconfig
 and would go ahead over a scope nobody read (`refuse_apply_over_undeclared_scope` in
 `installer_common.sh`; `upgrade.sh --plan` warns instead). An `install.sh` re-run
@@ -342,7 +376,11 @@ host project or no enforced organisation policy (`constraints/gcp.restrictServic
 legacy `constraints/serviceuser.services`; a policy in dry run enforces nothing and is not read)
 denies it, read through gcloud's active account, and that the identity Terraform applies with
 holds `resourcemanager.folders.setIamPolicy` on each folder and
-`resourcemanager.organizations.setIamPolicy` on each organisation, asked through Resource
+`resourcemanager.organizations.setIamPolicy` on each organisation, and, while the scoped service
+account pool is armed (`SCOPED_SA_POOL_ENABLED` true beside a container),
+`cloudasset.assets.searchAllResources` on each of them too, since the plan then lists the
+container's members for the pool and refuses without it, after the Asset API has been enabled
+(the remedy named is `roles/cloudasset.viewer` on that container), each asked through Resource
 Manager's `testIamPermissions` with a token minted for the credentials the google provider will
 read, in its order: `GOOGLE_OAUTH_ACCESS_TOKEN`, else `GOOGLE_CREDENTIALS`,
 `GOOGLE_CLOUD_KEYFILE_JSON` or `GCLOUD_KEYFILE_JSON` (an existing path is a key file, anything
