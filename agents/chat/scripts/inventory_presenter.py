@@ -14,9 +14,9 @@ not be scanned (permission denied)") is kept, as written, on its own line under
 the headline, since a silent gap reads as clean; a sentence it shares with the
 scan counts is split at its clauses, so the counts stay in the headline. A gap
 named after the list joins it from the roll-up, which both layouts leave out,
-and on the card from the closing lines too, which only the text keeps. The top two findings and every
-finding labelled critical follow (the whole list when it runs past the SOP's
-five, which the SOP allows only for an all-critical list), a row each, led by its severity as inline
+and on the card from the closing lines too, which only the text keeps. Every
+finding the report lists follows, since the report is already the selection
+(``inventory_findings.py select``), a row each, led by its severity as inline
 code when the report labels a finding's severity. Each finding keeps its
 headline and, on the line under it, the sentence the report wrote there,
 unchanged. The total is the listed items plus the roll-up's count, the
@@ -64,13 +64,9 @@ import re
 
 from slack_presenter import as_line, blocks_report, fallback_text, gap_parts, severity_row
 
-TOP_COUNT = 2
-#: The most items the SOP lists (Step 5) unless every one is critical: a longer
-#: list is all criticals, labelled or not, and criticals are never capped.
-SOP_LIST_CAP = 5
 BOLD_MARK = "**"
 PARAGRAPH_BREAK = "\n\n"
-#: Severities that earn the "worth fixing" lead; criticals are never rolled up.
+#: Severities that earn the "worth fixing" lead.
 CRITICAL = "critical"
 URGENT_SEVERITIES = frozenset({CRITICAL, "major"})
 #: A bold span ending in one of these is a whole headline; the text after it
@@ -624,10 +620,7 @@ class _Shape:
     """A parsed report reduced to its top rows, its total and the closing lines."""
 
     def __init__(self, posture: str, items: list[Item], tail: list[str]):
-        if len(items) > SOP_LIST_CAP:
-            self.top = list(items)
-        else:
-            self.top = [item for i, item in enumerate(items) if i < TOP_COUNT or item[0] == CRITICAL]
+        self.top = list(items)
         counted = [p for p in tail if _rollup_count(p, len(items)) is not None]
         rollup = next((p for p in counted if ROLLUP_STRONG.search(p)), counted[0] if counted else None)
         # Only the roll-up goes: the headline carries its count, and a closing

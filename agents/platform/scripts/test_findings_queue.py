@@ -1665,7 +1665,7 @@ class SopRubricParityTests(unittest.TestCase):
     def test_the_sop_names_the_commands_and_enum_values_it_tells_the_worker_to_send(self):
         self.assertIn("inventory_findings.py extract", self.text)
         self.assertIn("inventory_findings.py register", self.text)
-        self.assertIn("inventory_findings.py ranked", self.text)
+        self.assertIn("inventory_findings.py select", self.text)
         for kind in fq.REMEDIATION_KINDS:
             self.assertIn(f"`{kind}`", self.text)
         for kind in fq.VERIFICATION_KINDS:
