@@ -70,9 +70,36 @@ The full inventory is available — just ask.
 """
 
 
+#: The SOP's roll-up when criticals were left out, with the pace `select` printed.
+DEFERRED_ROLLUP = (
+    "Also found: 20 more items, 2 of them critical, tracked in the findings queue. "
+    "I'll bring the critical ones to you from 12:00 UTC the day after this report, at most 2 a day."
+)
+
+
 class PresentTest(unittest.TestCase):
     def test_the_card_headline_top_two_and_the_closing_line(self):
         self.assertEqual(inventory_presenter.present(REPORT), PRESENTED)
+
+    def test_a_roll_up_counting_left_out_criticals_is_kept_under_the_rows(self):
+        report = REPORT.replace(
+            "Also found: 20 more items, tracked in the findings queue — ask for the full list.", DEFERRED_ROLLUP
+        )
+        self.assertNotEqual(report, REPORT)
+        out = inventory_presenter.present(report)
+        rows_end = "remove the binding.\n\n"
+        self.assertIn(rows_end + DEFERRED_ROLLUP + "\n\nThe full inventory is available — just ask.\n", out)
+        self.assertIn("found 22 things to look at.", out)
+        # Kept in its place, so no ask replaces it.
+        last = report.replace("\n\nThe full inventory is available — just ask.\n", "\n")
+        out = inventory_presenter.present(last)
+        self.assertTrue(out.endswith(DEFERRED_ROLLUP + "\n"))
+        self.assertNotIn("Ask me to see all", out)
+
+    def test_a_roll_up_with_no_critical_left_out_still_goes(self):
+        report = REPORT.replace("tracked in the findings queue", "none of them critical, tracked in the findings queue")
+        self.assertNotEqual(report, REPORT)
+        self.assertNotIn("Also found", inventory_presenter.present(report))
 
     def test_the_rest_and_the_roll_up_are_left_out(self):
         out = inventory_presenter.present(REPORT)
@@ -811,6 +838,17 @@ KNOWN_WRONG_TOTALS = (
 
 
 class BlocksTest(unittest.TestCase):
+    def test_a_roll_up_counting_left_out_criticals_is_a_line_under_the_rows(self):
+        report = REPORT.replace(
+            "Also found: 20 more items, tracked in the findings queue — ask for the full list.", DEFERRED_ROLLUP
+        )
+        blocks, _ = inventory_presenter.blocks(report)
+        last_divider = max(i for i, block in enumerate(blocks) if block["type"] == "divider")
+        after = blocks[last_divider + 1]
+        self.assertEqual(after["type"], "rich_text")
+        self.assertEqual(after["elements"][0]["elements"][0]["text"], DEFERRED_ROLLUP)
+        self.assertEqual(self._buttons(blocks), ["Fix the first one", "See all 22"])
+
     def _types(self, blocks):
         return [block["type"] for block in blocks]
 
