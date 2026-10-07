@@ -270,14 +270,16 @@ def _post_surfaced(endpoint: str, finding_id: str, body: dict) -> None:
 def _mark_shown(data_dir: Path, in_sandbox: bool) -> bool:
     """Mark every row of every item the report lists shown, as ``PUBLISHER``.
 
-    Returns whether there was a shown file to archive. Never raises: the
-    claim is taken, so nothing here may stop the report going out.
+    Returns whether to set the shown file aside: True unless there is none,
+    so a file this run could not read is not marked by a later report.
+    Never raises: the claim is taken, so nothing here may stop the report
+    going out.
     """
     try:
         raw = _read_shown(data_dir, in_sandbox)
     except Exception as e:
         sys.stderr.write(f"bootstrap_delivery: could not read {SHOWN_NAME}; marking nothing: {e}\n")
-        return False
+        return True
     if raw is None:
         sys.stderr.write(f"bootstrap_delivery: no {SHOWN_NAME}; marking nothing\n")
         return False

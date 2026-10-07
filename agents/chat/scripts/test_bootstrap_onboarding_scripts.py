@@ -304,10 +304,14 @@ class DeliveryMarksShownTest(unittest.TestCase):
                 self.assertIn("is not readable", err)
 
     def test_a_failure_reading_the_shown_file_never_blocks_delivery(self):
+        self._shown()
         with mock.patch.object(bootstrap_delivery, "_read_shown", side_effect=RuntimeError("boom")):
             rc, out, err = self._run()
         self.assertEqual((rc, out), (0, "# Report\n"))
         self.assertIn("marking nothing: boom", err)
+        # Set aside all the same, so a later report is not marked with these ids.
+        self.assertFalse((self.d / SHOWN).exists())
+        self.assertTrue((self.d / SHOWN_DELIVERED).exists())
 
     def test_a_report_listing_no_item_marks_nothing(self):
         self._shown({"items": []})
