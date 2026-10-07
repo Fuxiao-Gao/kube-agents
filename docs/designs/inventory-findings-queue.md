@@ -934,8 +934,10 @@ profile home, written before the rows are marked. An addition whose mark fails i
 again that day and still counts against that day's limit, though `findings_additions` has no row
 for it. It also holds additions back as a pending item of its class would: a critical one holds
 non-criticals back, and a non-critical one stops every addition, though the stop-add notice does not
-name it. It comes back as new the next day. If the state file cannot be written either, the
-additions and the daily part repeat every hour.
+name it. Unlike a recorded addition, it counts only while it stays undecided and under the class
+it has now: a decision on it the same day refunds its slot, and a re-score can move it between
+the two counts. It comes back as new the next day. If the state file cannot be written either,
+the additions and the daily part repeat every hour.
 
 What this costs is the starvation §7.3 measured, brought back deliberately, from two sources. An
 ignored non-critical holds every new finding back until someone decides, and the daily notice is

@@ -46,7 +46,8 @@ The bookkeeping is best-effort, and what a failed write costs: an addition
 whose mark fails is not offered again the same day (the state file remembers
 it), still counts against that day's limit, and holds additions back as a
 pending item of its class would, though the stop-add notice does not name it.
-It is offered as new the next day. If the state file cannot be written
+Unlike a recorded addition, it counts only while undecided: a decision on it
+the same day refunds its slot. It is offered as new the next day. If the state file cannot be written
 either, the same additions and the daily part are posted again every hour.
 """
 
