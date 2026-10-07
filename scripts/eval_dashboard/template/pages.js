@@ -1587,7 +1587,7 @@ function nightCaseRow(night, c, newly) {
 function nightCasesTable(night) {
   const cases = Array.isArray(night.cases) ? night.cases.filter((c) => c && typeof c === "object") : [];
   if (!cases.length) return `<p class="mut">This night recorded no case${night.truncated ? ": the job was ended before any case finished" : ""}.</p>`;
-  const newly = new Set(night.newly_failing || []);
+  const newly = new Set(nightLacksMain(night) ? [] : night.newly_failing || []);
   const rows = [];
   let domain = null;
   for (const c of cases) {

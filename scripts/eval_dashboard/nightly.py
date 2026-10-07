@@ -100,8 +100,10 @@ RUNNING_MAX_AGE = datetime.timedelta(hours=9)
 LAST_NIGHT_MAX_AGE = datetime.timedelta(hours=36)
 # A nightly build is dated by its start plus this. Both periodics start at
 # 00:00 UTC, so a slow clock or a cron a few minutes early must not move a
-# build into the night before. Kept short: a manual re-run started late in
-# the evening UTC belongs to its own date, not to the next night.
+# build into the night before. Kept short: only a build started in the
+# last 15 minutes before midnight UTC moves to the next date, and a main
+# re-run started then is a night of its own there; it does not take the
+# cron night's writers part (filed_nights).
 NIGHT_START_GRACE = datetime.timedelta(minutes=15)
 # Where Prow's Spyglass shows a periodic's build and its artifacts. The
 # collector records it per nightly run (``runs[].log_url``, SCHEMA.md) from
@@ -304,23 +306,37 @@ def night_date(run: dict) -> datetime.date | None:
 
 def filed_nights(runs: list[dict]) -> list[tuple[dict[str, dict], list[dict]]]:
     """``runs`` (nightly, oldest first) as nights, oldest first, each
-    ``({part: run}, every run filed under the night)``. A run joins the
-    oldest night of its date (``night_date``) that does not have its part yet.
-    Failing that, a main build opens a night of its own, so one job alone
-    is one build per night as before and a same-day re-run of the main job
-    is a night of its own. A writers build instead takes the writers part
-    of the date's newest night: the writers part is the short one, the one
-    re-run after a flake, and its newest build stands for the night. The
-    build it replaces stays filed under that night, so a reader keyed by
-    build still finds it there. A run with no start time stands alone."""
+    ``({part: run}, every run filed under the night)``. A main build joins
+    the oldest night of its date (``night_date``) that has no main part yet;
+    failing that, it opens a night of its own, so one job alone is one
+    build per night as before and a same-day re-run of the main job is a
+    night of its own. A writers build joins, among the nights of its date
+    that have no writers part yet, the one whose main part started closest
+    to it (the newer on a tie), so a main re-run started late the evening
+    before does not take the cron night's writers part. Failing that, it
+    takes the writers part of the date's newest night if it recorded at
+    least as many cases as the part it replaces: the writers part is the
+    short one, the one re-run after a flake, and its newest build stands
+    for the night unless that build recorded less (one that died in setup
+    does not wipe the night's results). Either way the build left out of
+    the night stays filed under it, so a reader keyed by build still finds
+    it there. A run with no start time stands alone."""
     nights: list[tuple[dict[str, dict], list[dict]]] = []
     by_date: dict[datetime.date, list[tuple[dict[str, dict], list[dict]]]] = {}
     for run in runs:
         part, day = night_part(run), night_date(run)
         dated = by_date.get(day, []) if day else []
-        filed = next((n for n in dated if part not in n[0]), None)
+        open_nights = [n for n in dated if part not in n[0]]
+        if part == PART_WRITERS and open_nights:
+            started = parse_iso(run.get("started"))
+            filed = min(reversed(open_nights), key=lambda n: abs(parse_iso(n[0][PART_MAIN].get("started")) - started))
+        else:
+            filed = open_nights[0] if open_nights else None
         if filed is None and part == PART_WRITERS and dated:
             filed = dated[-1]
+            if len(night_cases(run, {})) < len(night_cases(filed[0][part], {})):
+                filed[1].append(run)
+                continue
         if filed is None:
             filed = ({}, [])
             nights.append(filed)

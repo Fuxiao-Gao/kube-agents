@@ -185,8 +185,9 @@ RATE_CACHE_MAX = 8
 
 # --- The nightly beside the verdict ---------------------------------------------
 # The newest nightly run that graded the case and finished within this long
-# of the run being classified, on either side: a night is one build, so two
-# days always covers the nearest one when the periodic is running at all.
+# of the run being classified, on either side: a night is one or two builds
+# started at 00:00 UTC, so two days always covers the nearest one when the
+# periodic is running at all.
 NIGHTLY_RECENT_WINDOW = timedelta(days=2)
 
 # --- Vocabulary shared with health.json ---------------------------------------

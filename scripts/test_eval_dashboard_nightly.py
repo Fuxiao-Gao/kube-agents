@@ -309,7 +309,6 @@ class SplitNightTest(unittest.TestCase):
     def test_a_writers_build_that_starts_first_opens_the_night_the_main_build_joins(self):
         data = split_nights()
         next(r for r in data["runs"] if r["build_id"] == NIGHT_2)["started"] = "2026-09-08T00:10:00+00:00"
-        data["runs"].reverse()
         nights = nightly.night_reports(data)
         parts = [[(p["part"], p["build"]) for p in n["parts"]] for n in nights]
         self.assertEqual(parts, [[("main", NIGHT_2), ("writers", WRITERS_2)], [("main", NIGHT_1)]])
@@ -318,7 +317,7 @@ class SplitNightTest(unittest.TestCase):
 
     def test_a_night_is_filed_by_its_utc_start_date_with_a_grace(self):
         """8 PM ET is 00:00 UTC: a writers build that starts a second early
-        still joins the night the main build a second later opens; one that
+        still opens the night the main build a second later joins; one that
         starts at 22:00 UTC belongs to its own date, the night before."""
         data = split_nights()
         next(r for r in data["runs"] if r["build_id"] == WRITERS_2)["started"] = "2026-09-07T23:59:59+00:00"
@@ -336,18 +335,22 @@ class SplitNightTest(unittest.TestCase):
         self.assertEqual(nightly.night_builds(data), {NIGHT_1: NIGHT_1, WRITERS_2: NIGHT_1, NIGHT_2: NIGHT_2})
 
     def test_a_main_rerun_late_in_the_evening_stays_on_its_own_date(self):
-        """A manual main re-run at 23:30 UTC is its own date's night: it must
-        not open the next night and take that night's writers part."""
-        data = split_nights()
-        data["runs"].append(night("3000000000000000007", "2026-09-08T23:30:00+00:00", "2026-09-09T06:10:00+00:00",
-                                  [task("case-a", "pass", "pass", "pass"), task("case-b", "pass", "pass", "pass"), task("case-c", "pass", "pass", "pass")]))
-        data["runs"].append(night("3000000000000000003", "2026-09-09T00:00:00+00:00", "2026-09-09T06:40:00+00:00",
-                                  [task("case-a", "pass", "pass", "pass"), task("case-b", "pass", "pass", "pass"), task("case-c", "pass", "pass", "pass")]))
-        data["runs"].append(writers("3000000000000000013", "2026-09-09T00:00:05+00:00", "2026-09-09T02:10:05+00:00",
-                                    [task("pr-a", "pass", "pass", "pass"), task("pr-b", "pass", "pass", "pass")]))
-        newest = nightly.night_reports(data)[0]
-        self.assertEqual([(p["part"], p["build"]) for p in newest["parts"]], [("main", "3000000000000000003"), ("writers", "3000000000000000013")])
-        self.assertEqual(newest["missing_parts"], [])
+        """A manual main re-run at 23:30 UTC is its own date's night; one at
+        23:50 UTC is dated to the next day by the grace and is a night of its
+        own there. Neither takes the cron night's writers part."""
+        for rerun_at in ("2026-09-08T23:30:00+00:00", "2026-09-08T23:50:00+00:00"):
+            with self.subTest(rerun_at=rerun_at):
+                data = split_nights()
+                data["runs"].append(night("3000000000000000007", rerun_at, "2026-09-09T06:10:00+00:00",
+                                          [task("case-a", "pass", "pass", "pass"), task("case-b", "pass", "pass", "pass"), task("case-c", "pass", "pass", "pass")]))
+                data["runs"].append(night("3000000000000000003", "2026-09-09T00:00:00+00:00", "2026-09-09T06:40:00+00:00",
+                                          [task("case-a", "pass", "pass", "pass"), task("case-b", "pass", "pass", "pass"), task("case-c", "pass", "pass", "pass")]))
+                data["runs"].append(writers("3000000000000000013", "2026-09-09T00:00:05+00:00", "2026-09-09T02:10:05+00:00",
+                                            [task("pr-a", "pass", "pass", "pass"), task("pr-b", "pass", "pass", "pass")]))
+                newest, rerun = nightly.night_reports(data)[:2]
+                self.assertEqual([(p["part"], p["build"]) for p in newest["parts"]], [("main", "3000000000000000003"), ("writers", "3000000000000000013")])
+                self.assertEqual(newest["missing_parts"], [])
+                self.assertEqual([(p["part"], p["build"]) for p in rerun["parts"]], [("main", "3000000000000000007")])
 
     def test_a_case_both_parts_recorded_the_night_before_reads_as_the_main_part_did(self):
         """Tonight a case both parts recorded counts as the main part
@@ -532,6 +535,19 @@ class SplitNightTest(unittest.TestCase):
         self.assertEqual(last["newly_failing"], ["case-b"])
         self.assertEqual(nightly.night_builds(data), {NIGHT_1: NIGHT_1, NIGHT_2: NIGHT_2, WRITERS_2: NIGHT_2, rerun: NIGHT_2}, "the replaced build still files under its night")
         self.assertEqual(self.line(data), "🌙 Nightly: 5 cases · 3 passed all reps · 1 partial · 1 failed · newly failing: case-b · 6h 40m")
+
+    def test_a_writers_rerun_that_recorded_nothing_leaves_the_writers_part(self):
+        """A writers re-run that died in setup recorded no case: it does not
+        replace the part that did, and still files under its night."""
+        data = split_nights()
+        before = nightly.night_reports(data)[0]
+        rerun = "3000000000000000014"
+        data["runs"].append(writers(rerun, "2026-09-08T05:00:00+00:00", "2026-09-08T05:03:00+00:00", [], result="ABORTED", duration_s=180))
+        last = nightly.night_reports(data)[0]
+        self.assertEqual([(p["part"], p["build"]) for p in last["parts"]], [("main", NIGHT_2), ("writers", WRITERS_2)])
+        self.assertEqual((last["counts"], last["newly_failing"], last["missing_parts"]), (before["counts"], before["newly_failing"], []))
+        self.assertEqual(nightly.night_builds(data), {NIGHT_1: NIGHT_1, NIGHT_2: NIGHT_2, WRITERS_2: NIGHT_2, rerun: NIGHT_2})
+        self.assertEqual(self.line(data), self.line(split_nights()))
 
     def test_a_night_is_one_run_level_event_across_its_parts(self):
         """The pages charge a broken run's failures to the run. A writers
@@ -753,6 +769,8 @@ class SplitNightPageTest(unittest.TestCase):
         self.assertIn("No verdict on what is newly failing: the main part of this night is missing, so only the writers part's cases are on record.", page)
         self.assertNotIn("Newly failing</b>", page)
         self.assertNotIn("Nothing newly failing", page)
+        self.assertIn('<td class="nm">pr-b</td>', page)
+        self.assertNotIn('class="newly"', page, "no row badged newly failing either")
         self.assertIn("no main part on record", page)
         self.assertIn('<div class="k">Newly failing</div><div class="v">—</div>', page)
         self.assertIn("2 cases · 1 passed all reps · 0 partial · 1 failed · main part missing · 2h 10m", brief)

@@ -790,8 +790,10 @@ night is one nightly run, or the main and writers parts' runs of one date:
 a run's date is the UTC date of its start plus 15 minutes
 (`NIGHT_START_GRACE`; both periodics start at 00:00 UTC, so a run that
 starts a moment early still joins its night). A second run of the main part that date is a night of its
-own; a second run of the writers part takes the writers part of the date's
-newest night;
+own. A writers run joins the night of its date, still without a writers
+part, whose main part started closest to it; a second run of the writers
+part takes the writers part of the date's newest night if it recorded at
+least as many cases;
 `build`, `job`, `head_sha`, `project`, `result` and `log_url` are the main
 part's (the writers part's when there is no main part), `started` and
 `finished` the earliest and latest of the parts, `duration_s` the longest
