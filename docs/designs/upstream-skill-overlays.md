@@ -128,25 +128,31 @@ Retire-When: never; the persona rule is ours
  ...
 ```
 
-### Patch order: no series file
+### Patch order
 
-- Patches apply in filename order; every patch file in the overlay is applied.
-- `make skills-refresh` names a new patch with the next free number and a slug from its subject; removing a patch means deleting its file.
-- Two concurrent PRs can both pick `0003`; the slugs differ, so the files do not collide and the tie sorts by slug.
+How it works:
 
-The alternative is a `series` file listing patches in order, as `quilt` does. Every new patch goes on its last line, so two PRs that each add a patch both write that line:
+- Patches apply in filename order (`0001-…`, `0002-…`); every patch file in the overlay is applied.
+- Each patch is recorded on top of all earlier ones: `make skills-refresh` diffs the edit against upstream plus every existing patch.
+- The tool names a new patch with the next free number and a slug from its subject; deleting a patch's file removes it.
 
-| Two concurrent pull requests on one skill | With a `series` file                                                 | Filename order    |
-| ----------------------------------------- | -------------------------------------------------------------------- | ----------------- |
-| Change the same lines of the skill        | Conflict in the skill; the second author rebases and refreshes       | The same          |
-| Change unrelated lines of the skill       | Conflict in `series`; the second author rebases and keeps both lines | Merges on its own |
-| Merged by Tide once approved              | Not while `series` conflicts                                         | Yes               |
+Why order rarely matters:
 
-- A `series` conflict is easy to resolve, but it falls on every concurrent pair.
-- Git's `union` merge mode does not help: GitHub ignores it when deciding whether a PR conflicts.
-- Filename order gives up switching a patch off while keeping its file; git history covers that.
-- Same or adjacent lines: GitHub reports a conflict on the second PR; its author rebases and runs `make skills-refresh`.
-- Nearby but not adjacent lines: both PRs can merge green, because `validate` does not rerun on an open PR when `main` moves and Tide retests only Prow presubmits. The second patch may then no longer apply; `validate`'s run on `main` fails and names the skill, and a follow-up PR runs `make skills-refresh`. With a merge queue (`validate` already runs on `merge_group`), the second PR fails in the queue instead.
+- Patches that change separate parts of a file give the same result in any order.
+- "Separate" means neither patch changes a line within the other's three lines of context.
+- Duplicate numbers are allowed: two PRs can both add a `0003-…` patch, and the slug keeps the files apart and breaks the tie.
+- A wrong order cannot ship: a patch placed before one it builds on no longer applies, and `make skills-check` fails.
+
+When parallel PRs on one skill conflict:
+
+| The two PRs change               | What happens                                                              | Fix                                                   |
+| -------------------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------- |
+| Separate parts of the skill      | Both merge; they share no file                                            | None                                                  |
+| The same or adjacent lines       | GitHub reports a conflict on the second PR                                | Rebase, settle the wording, run `make skills-refresh` |
+| Lines within three of each other | Both can merge green; `validate` on `main` then fails and names the patch | A follow-up PR runs `make skills-refresh`             |
+
+- Each fix is one command once the wording is settled.
+- The third case is caught after merge because `validate` does not rerun on an open PR when `main` moves; a merge queue would catch it before merge (`validate` already runs on `merge_group`).
 
 ### Syncing a skill
 
@@ -360,6 +366,7 @@ Optional, not part of this design: an `OWNERS` file on `third_party/google-skill
 | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Keep the string registries                                                      | F1–F7 stay.                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | Smarter matching on the stored snippets (fuzzy search plus a per-snippet merge) | Fixes small upstream edits inside a snippet, but only at registered snippets: footers, reference files and unregistered edits have no ancestor, so F4 stays, and no upstream version is recorded. Needs a custom fuzzy matcher that can pick the wrong passage in skills with repeated wording.                                                                                                                                                        |
+| A `series` file listing patches in order, as `quilt` does                       | Every new patch is added on its last line, so two PRs that each add a patch to one skill conflict even when their changes are unrelated, and Tide cannot merge until someone rebases (GitHub ignores git's `union` merge mode). It does allow switching a patch off without deleting it, and its forced rebase re-runs CI on the merged result.                                                                                                        |
 | Vendor branch or `git subtree` merges into main                                 | Real merges, but main is squash-merged, which loses the merge base a subtree merge needs; nothing records why each change exists; "what do we change" needs a diff against upstream.                                                                                                                                                                                                                                                                   |
 | Git submodule pinning `google/skills`                                           | Only replaces the pinned copy: it pins the whole repository at one commit, so syncing skills separately would take one full upstream clone per skill; our changes still need a fork of upstream or patches applied on top (this design with a submodule instead of the committed copy); a sync PR shows a commit-ID bump with a compare link instead of upstream's changes inline; and every checkout, CI job and image build has to fetch submodules. |
 | Heading-keyed overlays (Kustomize-like)                                         | Markdown has no schema: list items, fenced blocks and frontmatter scalars, which current changes edit, are not addressable by heading, so it falls back to text matching.                                                                                                                                                                                                                                                                              |
@@ -406,7 +413,7 @@ PR 4 also updates every file that names the old script or its registries:
 | --- | ------------------------------------------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------- |
 | F1  | No upstream commit recorded, no common ancestor                     | Fully                     | The upstream version is kept in `third_party/` and its commit and sha256 in `upstream.lock`; a sync rebases our patches onto the new copy, so git does a three-way merge.                                    | [Sync](#syncing-a-skill)                                        |
 | F2  | Changes live in the script; a new kind of edit needs a new registry | Fully                     | Each change is a patch file next to its skill and covers any file type; the registries and the script go away.                                                                                               | [The three layers](#the-three-layers)                           |
-| F3  | One shared file, so parallel PRs conflict                           | Fully, for the skill sync | One overlay and one lock per skill, patches ordered by filename. Left: edits a few lines apart from two PRs are caught on `main` after merge, not before (a merge queue would catch them earlier).           | [Patch order](#patch-order-no-series-file)                      |
+| F3  | One shared file, so parallel PRs conflict                           | Fully, for the skill sync | One overlay and one lock per skill, patches ordered by filename. Left: edits a few lines apart from two PRs are caught on `main` after merge, not before (a merge queue would catch them earlier).           | [Patch order](#patch-order)                                     |
 | F4  | Unregistered edits are not caught                                   | Fully                     | `make skills-check` on every PR rebuilds each mirrored skill and fails on any byte no patch records.                                                                                                         | [The presubmit check](#the-presubmit-check)                     |
 | F5  | Upstream adoption is mishandled                                     | Mostly                    | An adopted patch is retired automatically. An adopted `append.md` is detected and reported, and a person deletes it.                                                                                         | [Sync](#syncing-a-skill)                                        |
 | F6  | Local skills deleted by name                                        | Fully                     | A skill is mirrored because it has a lock, not because of its name; local skills are never touched.                                                                                                          | [Skills this repository writes](#skills-this-repository-writes) |
