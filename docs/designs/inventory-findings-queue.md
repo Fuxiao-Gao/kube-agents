@@ -460,13 +460,13 @@ over two of those fields and stays correct through a re-rank by construction. A 
 column would be a second copy of the same fact, free to disagree with the vector the moment §4.6's
 re-rank moves L.
 
-The threshold is load-bearing in one place. A `critical` grade always clears the severity floor of
+For promotion, the threshold is load-bearing in one place. A `critical` grade always clears the severity floor of
 the auto-promotion sweep in `finish`, which is what opens a pull request without being asked (`major`
 clears it only on the few checks `MAJOR_SWEEP_CHECKS` names). It is
 **not** a condition on `remediate`, which passes `auto_promote=False` and "opens what was named and
 nothing else" — and `remediate` is the call §9 puts on this path. So on the queue's own path the
 threshold decides nothing about promotion; it decides what the surfaced message calls the finding,
-and what a future `finish`-style sweep would pick up if one were ever pointed at this table.
+when pacing lets it reach chat (below), and what a future `finish`-style sweep would pick up if one were ever pointed at this table.
 
 That is also what makes the floor cheap. Widening `critical` would be alarming if `critical` opened
 pull requests, and on the queue's path it does not: promotion is bounded by the promotion slice (§9), not
@@ -478,7 +478,7 @@ accident from a labelling rule written here.
 Pacing (§7.2) makes the threshold load-bearing on the queue's own path as well. A `critical`
 finding is added to chat under its own daily limit and from noon UTC; anything below it waits for
 the afternoon, and while one such finding is pending it holds every addition back. Widening
-`critical` therefore moves findings from the afternoon slot to the morning one and changes what
+`critical` therefore moves findings from the afternoon slot to the noon one and changes what
 stop-add waits on.
 
 ### 4.3 Worked examples
