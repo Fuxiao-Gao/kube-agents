@@ -154,6 +154,12 @@ KNOWN_UNREGISTERED = {
     # nightly is a tier decision nobody has made; this entry is the record
     # that the omission is known rather than accidental.
     "cluster-provision-kanban": "cluster-scoped provisioning task, tier decision pending",
+    # Has its fixture (its own stack) and its eval record (#2468: red on main,
+    # three greens on the fix), and belongs in the nightly; held out only
+    # because the nightly's infra-lock chain has no room for another stack
+    # case. The entry goes when #2467 makes room and the case joins
+    # hack/eval/nightly-cases.txt.
+    "networking-audit-subnet-range-exhaustion": "#2467: stack case held out of the nightly for its infra-lock budget",
 }
 
 # Cases whose fixture does not exist at all, waiting on the issue that plants
@@ -194,12 +200,6 @@ FIXTURE_NOT_READY = {
         "harness install's spec.scope.projects, whose listing the agent's service "
         "account is denied, as a fixture role of its own; the evaluation fleet has "
         "one project per install today, so the case cannot be red on main"
-    ),
-    "networking-audit-subnet-range-exhaustion": (
-        "#2467: its fixture is its own stack (prebuilt/subnet-range-exhaustion) "
-        "and it has its eval record (#2450, #2468), but the nightly's "
-        "infra-lock chain has no room for another stack case. Run it by hand "
-        "against a dev install, as its header says"
     ),
     "networking-audit-second-project": (
         "#1865: needs a second GCP project per pool project that the agent's "

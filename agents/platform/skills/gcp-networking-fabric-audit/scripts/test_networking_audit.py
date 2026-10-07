@@ -675,6 +675,17 @@ class SubnetCapacityTest(unittest.TestCase):
         self.assertEqual(networking_audit.node_blocks_that_fit("10.0.0.0/20", 0.5, 22), 2)
         self.assertIsNone(networking_audit.node_blocks_that_fit("10.0.0.0/20", 0.5, None))
 
+    def test_block_prefix_outside_ipv4_is_unreadable_not_fatal(self):
+        for value in (33, -1, "40"):
+            with self.subTest(value=value):
+                self.assertIsNone(networking_audit._prefix(value))
+        self.assertEqual(networking_audit._prefix("24"), 24)
+        # A pool reporting a nonsense block size drops the estimate, not the run.
+        cluster = gke_cluster("c1", "gke", "pods", 0.95, [("pool", "pods", 0.95, 99)])
+        ranges = networking_audit.pod_range_utilization([cluster], "p1")
+        pod = ranges[("p1", "us-central1", "gke", "pods")]
+        self.assertIsNone(networking_audit.node_blocks_that_fit("10.0.0.0/20", pod["utilization"], pod.get("prefix")))
+
     def test_scope_entry_shape(self):
         _, _, active, _ = self.sweep(subnets=[subnet("big", "10.0.0.0/24")])
         entry = active[0]
@@ -797,8 +808,8 @@ class SharedVpcTest(unittest.TestCase):
         self.assertIn("gcloud compute instances list --project=svc ", command)
         validate(self, findings, skipped, active, ["host", "svc"])
 
-    def test_failed_service_project_read_lands_on_host_subnets(self):
-        findings, _, active, _ = subnet_sweep(
+    def test_failed_service_project_read_is_a_skipped_row_not_a_host_limitation(self):
+        findings, skipped, active, _ = subnet_sweep(
             ["host", "svc"],
             fleet_reads({
                 "host": {"subnets": self.HOST_SUBNETS},
@@ -806,8 +817,31 @@ class SharedVpcTest(unittest.TestCase):
             }),
         )
         self.assertEqual([f["object"] for f in findings], ["Subnet/shared"])
-        self.assertIn("Pod ranges not read: `gcloud container clusters list --project=svc", active[0]["limitations"])
-        self.assertIn("PERMISSION_DENIED", active[0]["limitations"])
+        # The host's own reads succeeded, so its subnet carries no limitation; the
+        # service project owns no subnet entry, so its failure is a skipped row.
+        self.assertNotIn("limitations", active[0])
+        self.assertEqual([t["cluster"] for t in skipped], ["svc/UNREAD_SUBNET_USAGE"])
+        self.assertIn("Pod ranges not read: `gcloud container clusters list --project=svc", skipped[0]["reason"])
+        self.assertIn("PERMISSION_DENIED", skipped[0]["reason"])
+        validate(self, findings, skipped, active, ["host", "svc"])
+
+    def test_failed_read_marks_only_its_own_projects_subnets(self):
+        # A host bound with compute.viewer alone: its clusters read is refused,
+        # its compute reads succeed. Only its own subnet carries the limitation.
+        findings, skipped, active, _ = subnet_sweep(
+            ["host", "svc"],
+            fleet_reads({
+                "host": {"subnets": self.HOST_SUBNETS,
+                         "clusters": (None, "clusters list failed (1): PERMISSION_DENIED")},
+                "svc": {**self.service_reads(), "subnets": [subnet("own", "10.8.0.0/24", project="svc")]},
+            }),
+        )
+        by_name = {e["name"]: e for e in active}
+        self.assertIn("Pod ranges not read: `gcloud container clusters list --project=host",
+                      by_name["host/us-central1/shared"]["limitations"])
+        self.assertNotIn("limitations", by_name["svc/us-central1/own"])
+        self.assertEqual(skipped, [])
+        validate(self, findings, skipped, active, ["host", "svc"])
 
     def test_pod_range_on_out_of_scope_host_subnet_keeps_its_finding(self):
         findings, skipped, active, _ = subnet_sweep(["svc"], fleet_reads({"svc": self.service_reads()}))
@@ -878,7 +912,7 @@ class RunCmdTest(unittest.TestCase):
         with patch("subprocess.run", side_effect=networking_audit.subprocess.TimeoutExpired(["gcloud"], 60)):
             rc, stdout, stderr = networking_audit.run_cmd(["gcloud", "compute", "instances", "list"])
         self.assertEqual((rc, stdout), (-1, ""))
-        self.assertIn("timed out after 60 seconds", stderr)
+        self.assertIn("timed out after 300 seconds", stderr)
 
 
 class CheckRoutingTest(unittest.TestCase):
