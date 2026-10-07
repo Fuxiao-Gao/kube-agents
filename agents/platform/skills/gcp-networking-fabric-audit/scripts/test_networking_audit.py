@@ -14,6 +14,11 @@ sys.path.insert(0, os.path.dirname(__file__))
 import networking_audit
 
 class TestNetworkingAudit(unittest.TestCase):
+    def setUp(self):
+        # Project numbers are remembered for a run; each test is its own run.
+        networking_audit.PROJECT_NUMBERS.clear()
+        self.addCleanup(networking_audit.PROJECT_NUMBERS.clear)
+
     @patch("networking_audit.run_gcloud_json")
     def test_audit_project_networking_rejected_psc(self, mock_gcloud):
         mock_gcloud.return_value = ([
@@ -112,6 +117,7 @@ class TestNetworkingAudit(unittest.TestCase):
                 return (1, "", "PERMISSION_DENIED: resourcemanager.projects.get")
             return self._refusal_run("222222222222")(cmd, *args, **kwargs)
 
+        networking_audit.PROJECT_NUMBERS.clear()  # a second run
         skipped, active = [], []
         with patch("networking_audit.run_cmd", side_effect=describe_failed), \
                 patch("sys.stderr", new_callable=io.StringIO):
@@ -121,6 +127,18 @@ class TestNetworkingAudit(unittest.TestCase):
             "`gcloud projects describe real-proj` failed (rc=1), so the refusal's project number could not be compared",
             skipped[0]["reason"],
         )
+
+    def test_project_number_is_described_once_per_run(self):
+        calls = []
+
+        def run(cmd, *args, **kwargs):
+            calls.append(cmd)
+            return self._refusal_run("111111111111")(cmd, *args, **kwargs)
+
+        with patch("networking_audit.run_cmd", side_effect=run), patch("sys.stderr", new_callable=io.StringIO):
+            for _ in range(3):
+                networking_audit.run_gcloud_json(["gcloud", "compute", "instances", "list", "--project", "real-proj"])
+        self.assertEqual(sum(cmd[:3] == ["gcloud", "projects", "describe"] for cmd in calls), 1)
 
     def test_own_numbered_refusal_is_empty(self):
         skipped, active = [], []
@@ -646,6 +664,7 @@ class SubnetCapacityTest(unittest.TestCase):
             ranges,
             {("p1", "us-central1", "default", "pods"): {
                 "utilization": 0.99, "prefix": None, "cluster": "c", "pool": None, "project": "p1",
+                "unreadable": [],
             }},
         )
         findings, _, _, _ = self.sweep(
@@ -658,6 +677,30 @@ class SubnetCapacityTest(unittest.TestCase):
             findings[0]["evidence"]["excerpt"],
             "Pod range pods (10.4.0.0/20): GKE reports 99.0% allocated (cluster c)",
         )
+
+    def test_unreadable_utilization_is_a_limitation_not_a_clean_range(self):
+        subnets = [subnet("gke", "10.0.16.0/20", [("pods", "10.4.0.0/20")])]
+        for raw in (float("nan"), float("inf"), 1.5, -0.2, "nan"):
+            with self.subTest(raw=raw):
+                findings, _, active, _ = self.sweep(
+                    subnets=subnets, clusters=[gke_cluster("c", "gke", "pods", raw)])
+                self.assertEqual(findings, [])
+                self.assertIn("Pod range pods: GKE reported utilization", active[0]["limitations"])
+                self.assertIn("not a fraction in 0-1", active[0]["limitations"])
+
+    def test_unreadable_report_does_not_mask_a_readable_one(self):
+        cluster = gke_cluster("c", "gke", "pods", float("nan"), [("pool", "pods", 0.9, 24)])
+        findings, _, active, _ = self.sweep(
+            subnets=[subnet("gke", "10.0.16.0/20", [("pods", "10.4.0.0/20")])], clusters=[cluster])
+        self.assertEqual([f["object"] for f in findings], ["SecondaryRange/pods"])
+        self.assertIn("90.0% allocated (cluster c, node pool pool)", findings[0]["evidence"]["excerpt"])
+        self.assertIn("GKE reported utilization nan (cluster c)", active[0]["limitations"])
+
+    def test_unparsable_subnet_range_is_uncounted_not_measured(self):
+        findings, _, active, stderr = self.sweep(subnets=[subnet("bad", "not-a-cidr"), subnet("ok", "10.0.0.0/24")])
+        self.assertEqual([e["name"] for e in active], ["p1/us-central1/ok"])
+        self.assertEqual(findings, [])
+        self.assertIn("bad (unparsable range 'not-a-cidr')", stderr)
 
     def test_additional_pod_ranges_are_read(self):
         cluster = gke_cluster("c", "gke", "pods", 0.1, [("pool", "pods", 0.1, 24)])
@@ -843,6 +886,33 @@ class SharedVpcTest(unittest.TestCase):
         self.assertEqual(skipped, [])
         validate(self, findings, skipped, active, ["host", "svc"])
 
+    def test_service_project_failure_is_recorded_under_check_all(self):
+        """Under the default `--check all` the PSC sweep's project entries must not hide it."""
+        fake_subnet_reads = fleet_reads({
+            "host": {"subnets": self.HOST_SUBNETS},
+            "svc": {**self.service_reads(), "clusters": (None, "clusters list failed (1): PERMISSION_DENIED")},
+        })
+
+        def fake(cmd, warnings=None):
+            if cmd[-1] == "--format=json":  # the PSC sweep's forwarding-rules read
+                return ([], None)
+            return fake_subnet_reads(cmd, warnings)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = os.path.join(tmp, "out.json")
+            argv = ["networking_audit.py", "--output", output]
+            with patch.object(networking_audit, "get_target_projects", return_value=["host", "svc"]), \
+                    patch.object(networking_audit, "run_gcloud_json", side_effect=fake), \
+                    patch.object(sys, "argv", argv), \
+                    patch("sys.stdout", new_callable=io.StringIO), \
+                    patch("sys.stderr", new_callable=io.StringIO):
+                networking_audit.main()
+            with open(output, encoding="utf-8") as f:
+                doc = json.load(f)
+        self.assertIn("project/svc", [e["name"] for e in doc["scope"]["clusters"]])
+        self.assertEqual([t["cluster"] for t in doc["scope"]["skipped"]], ["svc/UNREAD_SUBNET_USAGE"])
+        self.assertIn("PERMISSION_DENIED", doc["scope"]["skipped"][0]["reason"])
+
     def test_pod_range_on_out_of_scope_host_subnet_keeps_its_finding(self):
         findings, skipped, active, _ = subnet_sweep(["svc"], fleet_reads({"svc": self.service_reads()}))
         self.assertEqual(skipped, [])
@@ -940,10 +1010,6 @@ class CheckRoutingTest(unittest.TestCase):
 
     def test_document_passes_audit_report_validation(self):
         """The helper's subnet entries and findings, merged as SOP 2.1 says, validate."""
-        sys.path.insert(0, FLEET_AUDIT_SCRIPTS)
-        self.addCleanup(sys.path.remove, FLEET_AUDIT_SCRIPTS)
-        import audit_report
-
         small = SUBNET_LINK.format("small")
         fake = reads(
             subnets=[
@@ -967,22 +1033,7 @@ class CheckRoutingTest(unittest.TestCase):
         self.assertEqual(
             sorted(f["object"] for f in doc["findings"]), ["SecondaryRange/pods", "Subnet/small"]
         )
-        doc["scope"]["clusters"].append({
-            "name": "project/p1",
-            "location": "global",
-            "project": "p1",
-            "checks_run": [
-                {"check": "cloud-nat-exhaustion", "command": "gcloud compute routers list --project=p1 --format=json"},
-                {"check": "psc-routing-deadlock", "command": "gcloud compute forwarding-rules list --project p1 --format=json"},
-                {"check": "mtu-packet-fragmentation", "command": "gcloud compute networks list --project=p1 --format=json"},
-                {"check": "cloud-armor-false-positive", "command": "gcloud compute security-policies list --project=p1 --format=json"},
-            ],
-            "checks_not_applicable": [{
-                "check": "subnet-ip-exhaustion",
-                "reason": "Subnet IP capacity is audited per individual subnet scope entry.",
-            }],
-        })
-        audit_report.validate_findings(doc, "gcp-networking-fabric-audit")
+        validate(self, doc["findings"], doc["scope"]["skipped"], doc["scope"]["clusters"], ["p1"])
 
 
 if __name__ == "__main__":

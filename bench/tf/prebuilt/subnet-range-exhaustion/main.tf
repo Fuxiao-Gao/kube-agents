@@ -36,6 +36,9 @@ locals {
   # Every stack in a run is handed the same cluster_name, so it is hashed
   # into this stack's own names rather than used as one.
   name = "${var.subnet_name_prefix}-${substr(md5(var.cluster_name), 0, 8)}"
+  # Networks and subnets take no labels, so a sweep for a killed run's
+  # leftovers has this fixed description to match on, as well as the name.
+  plant_description = "kube-agents-bench plant (networking-audit-subnet-range-exhaustion); safe to delete when no eval run holds the infra lock"
 }
 
 provider "google" {
@@ -45,11 +48,13 @@ provider "google" {
 
 resource "google_compute_network" "plant" {
   name                    = local.name
+  description             = local.plant_description
   auto_create_subnetworks = false
 }
 
 resource "google_compute_subnetwork" "plant" {
   name          = local.name
+  description   = local.plant_description
   region        = local.region
   network       = google_compute_network.plant.id
   ip_cidr_range = "10.10.0.0/29" # sanitizer: allow a private range inside this stack's own VPC
@@ -62,6 +67,7 @@ resource "google_compute_address" "plant" {
   name         = "${local.name}-${count.index}"
   region       = local.region
   address_type = "INTERNAL"
+  description  = local.plant_description
   subnetwork   = google_compute_subnetwork.plant.id
   labels = {
     "managed-by"  = "kube-agents-bench"

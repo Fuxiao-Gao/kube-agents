@@ -58,6 +58,10 @@ API_DISABLED_MARKERS = (
 # API is off. fleet_waste.refusal_owner draws the same line.
 REFUSED_PROJECT_NUMBER_RE = re.compile(r"\bprojects?[ /](\d+)\b")
 PROJECT_DESCRIBE_CMD = (GCLOUD, "projects", "describe")
+# A project's number cannot change within a run, and every refused read asks
+# for it: a project with the Compute Engine API off refuses five reads here.
+# fleet_waste._describing_once answers the repeats from the first result too.
+PROJECT_NUMBERS: dict[str, tuple[int, str, str]] = {}
 PROJECT_NUMBER_FORMAT = "--format=value(projectNumber)"
 PROJECT_FLAG = "--project"
 JSON_INDENT = 2
@@ -160,7 +164,9 @@ def refusal_names_project(project: str, stderr: str) -> tuple[bool, str]:
         if re.search(rf"\b(?i:projects?)[ /]['\"\[]?{re.escape(project)}(?![\w-])", stderr):
             return True, ""
         return False, f"the refusal does not name {project!r}"
-    rc, stdout, err = run_cmd([*PROJECT_DESCRIBE_CMD, project, PROJECT_NUMBER_FORMAT])
+    if project not in PROJECT_NUMBERS:
+        PROJECT_NUMBERS[project] = run_cmd([*PROJECT_DESCRIBE_CMD, project, PROJECT_NUMBER_FORMAT])
+    rc, stdout, err = PROJECT_NUMBERS[project]
     if rc != 0:
         return False, (
             f"`gcloud projects describe {project}` failed (rc={rc}), so the refusal's project number "
@@ -385,11 +391,16 @@ def region_of_location(location: str) -> str:
 
 
 def _fraction(value: object) -> float | None:
-    """A GKE utilization value as a float, or None when it is absent or unreadable."""
+    """A GKE utilization value as a float, or None when it is absent, unreadable or not in 0-1.
+
+    `json.loads` accepts NaN and Infinity, and a range is flagged on
+    `1 - utilization`, so anything but a finite fraction would read as clean.
+    """
     try:
-        return float(value) if value is not None else None
+        fraction = float(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+    return fraction if fraction is not None and math.isfinite(fraction) and 0 <= fraction <= 1 else None
 
 
 def _prefix(value: object) -> int | None:
@@ -412,22 +423,33 @@ def pod_range_utilization(
     Every report naming a range counts -- the cluster default range, each node
     pool's range and each additional Pod range -- and the highest utilization
     wins. The per-node block prefix kept is the largest block (smallest prefix)
-    any pool on the range takes, so "how many more nodes fit" errs low.
+    any pool on the range takes, so "how many more nodes fit" errs low. A
+    report whose utilization is not a finite fraction in 0-1 is kept in the
+    range's `unreadable` list, and `utilization` stays None until a readable
+    report arrives.
     """
     ranges = {} if ranges is None else ranges
 
-    def record(key, utilization, prefix, cluster, pool):
-        if utilization is None or key is None:
+    def record(key, raw, prefix, cluster, pool):
+        if raw is None or key is None:
             return
+        utilization = _fraction(raw)
         entry = ranges.get(key)
         if entry is None:
-            ranges[key] = {"utilization": utilization, "prefix": prefix, "cluster": cluster, "pool": pool,
-                           "project": project_id}
-            return
+            entry = ranges[key] = {"utilization": None, "prefix": prefix, "cluster": cluster, "pool": pool,
+                                   "project": project_id, "unreadable": []}
         if prefix is not None and (entry["prefix"] is None or prefix < entry["prefix"]):
             entry["prefix"] = prefix
+        if utilization is None:
+            # The utilization is the measurement: an unreadable one is named on
+            # the subnet's entry rather than dropped.
+            where = f"cluster {cluster}" + (f", node pool {pool}" if pool else "")
+            entry["unreadable"].append(f"{raw!r} ({where})")
+            return
         # A pool's report on a tie names more than the cluster default's does.
-        if (utilization, pool is not None) > (entry["utilization"], entry["pool"] is not None):
+        if entry["utilization"] is None or (
+            (utilization, pool is not None) > (entry["utilization"], entry["pool"] is not None)
+        ):
             entry.update(utilization=utilization, cluster=cluster, pool=pool, project=project_id)
 
     for cluster in clusters:
@@ -458,19 +480,19 @@ def pod_range_utilization(
         ]
         record(
             keyed(default_subnet, default_range),
-            _fraction(policy.get("defaultPodIpv4RangeUtilization")),
+            policy.get("defaultPodIpv4RangeUtilization"),
             min(default_prefixes, default=None),
             name,
             None,
         )
         for info in (policy.get("additionalPodRangesConfig") or {}).get("podRangeInfo") or []:
             if isinstance(info, dict):
-                record(keyed(default_subnet, info.get("rangeName", "")), _fraction(info.get("utilization")),
+                record(keyed(default_subnet, info.get("rangeName", "")), info.get("utilization"),
                        None, name, None)
         for pool in pools:
             net = pool.get("networkConfig") or {}
             pool_subnet = subnet_key(net.get("subnetwork", ""), project_id) or default_subnet
-            record(keyed(pool_subnet, net.get("podRange", "")), _fraction(net.get("podIpv4RangeUtilization")),
+            record(keyed(pool_subnet, net.get("podRange", "")), net.get("podIpv4RangeUtilization"),
                    _prefix(pool.get("podIpv4CidrSize")), name, pool.get("name", ""))
     return ranges
 
@@ -628,10 +650,21 @@ def audit_subnet_capacity(projects: list[str], usage: dict, skipped_targets: lis
             pod_range_finding(target, subnet_name, region, range_name, cidrs.get(range_name, ""), pod,
                               clusters_command(pod))
             for range_name, pod in sorted(pods_by_subnet.get(key, {}).items())
-            if 1 - pod["utilization"] < AVAILABLE_FRACTION_FLOOR
+            if pod["utilization"] is not None and 1 - pod["utilization"] < AVAILABLE_FRACTION_FLOOR
+        ]
+
+    def unreadable_notes(key):
+        return [
+            f"Pod range {range_name}: GKE reported utilization {', '.join(pod['unreadable'])}, not a "
+            "fraction in 0-1, so that report was not measured"
+            for range_name, pod in sorted(pods_by_subnet.get(key, {}).items()) if pod["unreadable"]
         ]
 
     findings = []
+    # Under `--check all` the PSC sweep has already added a `project/<id>`
+    # entry for most projects; only this sweep's own entries say whether a
+    # project's failed reads have a subnet entry to be named on.
+    first_entry = len(active_targets)
     evaluated: set[tuple[str, str, str]] = set()
     # Why a project in scope named none of its subnets, for the entries of Pod
     # ranges on them.
@@ -670,30 +703,30 @@ def audit_subnet_capacity(projects: list[str], usage: dict, skipped_targets: lis
             if purpose not in COUNTABLE_SUBNET_PURPOSES or not cidr:
                 uncounted.append(f"{name} ({purpose or 'no IPv4 range'})")
                 continue
+            try:
+                network = ipaddress.ip_network(cidr, strict=False)
+            except ValueError:
+                uncounted.append(f"{name} (unparsable range {cidr!r})")
+                continue
             _, region, name = key
             target = f"{project_id}/{region}/{name}"
             evaluated.add(key)
             active_targets.append(subnet_entry(target, region, project_id, scope_command,
-                                               limitations.get(project_id, [])))
+                                               [*limitations.get(project_id, []), *unreadable_notes(key)]))
 
-            try:
-                network = ipaddress.ip_network(cidr, strict=False)
-            except ValueError:
-                network = None
-            if network is not None:
-                capacity = network.num_addresses
-                used = (addresses_in_range(usage["used_ips"].get(key, set()), network)
-                        + GCP_RESERVED_PRIMARY_ADDRESSES)
-                available = max(capacity - used, 0) / capacity
-                if available < AVAILABLE_FRACTION_FLOOR:
-                    # The subnet's own listing, then the primary reads of
-                    # every project that named an address in it.
-                    sources = [project_id, *sorted(usage["readers"].get(key, set()) - {project_id})]
-                    primary_command = command_text(cmds["subnets"], *(
-                        subnet_commands(p)[role] for p in sources
-                        for role in ("instances", "addresses", "forwarding_rules")))
-                    findings.append(primary_finding(target, name, region, cidr, used, capacity, available,
-                                                    primary_command))
+            capacity = network.num_addresses
+            used = (addresses_in_range(usage["used_ips"].get(key, set()), network)
+                    + GCP_RESERVED_PRIMARY_ADDRESSES)
+            available = max(capacity - used, 0) / capacity
+            if available < AVAILABLE_FRACTION_FLOOR:
+                # The subnet's own listing, then the primary reads of
+                # every project that named an address in it.
+                sources = [project_id, *sorted(usage["readers"].get(key, set()) - {project_id})]
+                primary_command = command_text(cmds["subnets"], *(
+                    subnet_commands(p)[role] for p in sources
+                    for role in ("instances", "addresses", "forwarding_rules")))
+                findings.append(primary_finding(target, name, region, cidr, used, capacity, available,
+                                                primary_command))
 
             cidrs = {
                 secondary.get("rangeName", ""): secondary.get("ipCidrRange", "")
@@ -714,16 +747,17 @@ def audit_subnet_capacity(projects: list[str], usage: dict, skipped_targets: lis
         target = f"{owner}/{region}/{name}"
         # One command keeps the entry under MAX_COMMAND_CHARS: the read behind
         # its fullest range. Each finding's evidence names its own read.
-        fullest = max(pods_by_subnet[key].values(), key=lambda pod: pod["utilization"])
+        fullest = max(pods_by_subnet[key].values(),
+                      key=lambda pod: -1 if pod["utilization"] is None else pod["utilization"])
         note = (
             f"subnet {name} was not listed because {why}, so only the Pod ranges GKE reports on it were "
             "measured, not its primary range"
         )
         active_targets.append(subnet_entry(target, region, owner, clusters_command(fullest),
-                                           [note, *limitations.get(owner, [])]))
+                                           [note, *limitations.get(owner, []), *unreadable_notes(key)]))
         findings.extend(pod_findings(target, name, region, key, {}))
 
-    entry_projects = {entry["project"] for entry in active_targets}
+    entry_projects = {entry["project"] for entry in active_targets[first_entry:]}
     unlisted_rows = {row["project"]: row for row in skipped_targets
                      if row["cluster"].endswith(f"/{UNENUMERATED_SUBNETS}")}
     for project_id in projects:

@@ -1,6 +1,7 @@
 # PARKED — a KNOWN_UNREGISTERED entry in scripts/validate_bench_cases.py,
 # in no roster file under hack/eval/: the nightly's infra-lock chain has no
-# room for another stack case (#2467). It has its eval record (#2468:
+# room for another stack case (#2467), and nothing yet sweeps what a killed
+# run leaves behind (#2552). It has its eval record (#2468:
 # red on main 83194e93, three greens on the fix, 2026-10-06). Until a nightly
 # seat opens it runs by hand against a dev install:
 #   cd bench && BENCH_TF_ROOT=./tf GCP_LOCATION=<zone> \
