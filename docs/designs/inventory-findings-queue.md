@@ -928,8 +928,9 @@ which on stderr. And a run that fails before it posts, a failed queue read inclu
 which the scheduler posts, at most once a UTC day; later failures that day go to stderr. The day's
 state (the daily part sent, the items added today, the failure reported) is a file in the platform
 profile home, written before the rows are marked. An addition whose mark fails is not announced
-again that day but comes back as new the next; if the state file cannot be written either, the
-additions and the daily part repeat every hour.
+again that day and still counts against that day's limit, though `findings_additions` has no row
+for it; a critical one also still holds non-criticals back. It comes back as new the next day. If
+the state file cannot be written either, the additions and the daily part repeat every hour.
 
 What this costs is the starvation §7.3 measured, brought back deliberately, from two sources. An
 ignored non-critical holds every new finding back until someone decides, and the daily notice is

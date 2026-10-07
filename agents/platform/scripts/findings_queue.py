@@ -1217,6 +1217,7 @@ def pace(
     limits: PacingLimits,
     added_today: Mapping[str, int],
     may_add: bool = True,
+    announced: Iterable[Iterable[str]] = (),
 ) -> PacingPlan:
     """What a paced publisher names now, from the open rows in ranked order.
 
@@ -1232,6 +1233,10 @@ def pace(
 
     `may_add=False` adds nothing whatever the rest says (the first inventory
     report is on its way).
+
+    `announced` is the keys of the items already added today. One that is
+    still new (every mark of it failed) is not added again and counts as an
+    addition of its class, as if `added_today` held it.
     """
     now = (now if now.tzinfo else now.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
     items, managed = _gather(rows)
@@ -1239,6 +1244,13 @@ def pace(
 
     pending = [item for item in items if item.pending]
     new = [item for item in items if not item.pending]
+    announced_keys = {tuple(key) for key in announced}
+    unrecorded = [item for item in new if item.key in announced_keys]
+    new = [item for item in new if item.key not in announced_keys]
+
+    def spent(item_class: str) -> int:
+        return int(added_today.get(item_class) or 0) + sum(1 for item in unrecorded if item.item_class == item_class)
+
     blocking = [item for item in pending if item.item_class == noncritical]
     pending_critical = [item for item in pending if item.item_class == critical]
     remind = [item for item in pending_critical if item.first_shown.date() != now.date()][: limits.daily_criticals]
@@ -1247,15 +1259,23 @@ def pace(
     if may_add and not blocking:
         new_critical = [item for item in new if item.item_class == critical]
         if now.hour >= REMIND_HOUR:
-            budget = max(0, limits.daily_criticals - int(added_today.get(critical) or 0))
+            budget = max(0, limits.daily_criticals - spent(critical))
             add = new_critical[:budget]
         # A critical left out of `add` waits for tomorrow's budget or today's
         # hour, and a non-critical added now would hold it back behind
         # stop-add. With a daily limit of 0 no critical is ever added, so none
-        # is waiting.
+        # is waiting. A critical announced today but never recorded holds them
+        # back as a pending one would.
         critical_waiting = limits.daily_criticals > 0 and len(new_critical) > len(add)
-        if not pending_critical and not add and not critical_waiting and now.hour >= limits.noncritical_after_hour:
-            budget = max(0, limits.noncritical_max - int(added_today.get(noncritical) or 0))
+        critical_unrecorded = any(item.item_class == critical for item in unrecorded)
+        if (
+            not pending_critical
+            and not critical_unrecorded
+            and not add
+            and not critical_waiting
+            and now.hour >= limits.noncritical_after_hour
+        ):
+            budget = max(0, limits.noncritical_max - spent(noncritical))
             add = [item for item in new if item.item_class == noncritical][:budget]
 
     return PacingPlan(

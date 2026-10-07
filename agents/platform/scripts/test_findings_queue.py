@@ -1331,6 +1331,19 @@ class TestPace(unittest.TestCase):
         self.assertEqual(self.pace(rows, at(6, 18), {"critical": 0, "noncritical": 3}).add, [])
         self.assertEqual(ids(self.pace(rows, at(6, 18), {"critical": 0, "noncritical": 1}).add), [["m0"], ["m1"]])
 
+    def test_an_announced_but_unrecorded_item_counts_against_its_class_budget(self):
+        rows = [row("c-new", score=400), row("c0", score=300), row("c1", score=290), row("m0", "major")]
+        announced = [fq.item_key(r) for r in rows[1:3]]
+        plan = fq.pace(rows, at(6, 13), self.LIMITS, NONE_ADDED, announced=announced)
+        self.assertEqual(plan.add, [])
+        self.assertEqual(ids(plan.waiting), [["c-new"], ["m0"]])
+        # With one of the two announced, one slot is left, and an unrecorded
+        # critical still holds the major back.
+        plan = fq.pace(rows, at(6, 16), self.LIMITS, NONE_ADDED, announced=announced[:1])
+        self.assertEqual(ids(plan.add), [["c-new"]])
+        plan = fq.pace(rows[1:2] + rows[3:], at(6, 16), self.LIMITS, NONE_ADDED, announced=announced[:1])
+        self.assertEqual(plan.add, [])
+
     def test_a_pending_critical_holds_back_noncriticals(self):
         rows = [row("c0", state="surfaced", shown=at(5, 12)), row("m0", "major")]
         plan = self.pace(rows, at(6, 16))

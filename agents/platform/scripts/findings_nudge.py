@@ -368,10 +368,9 @@ def main(argv: list[str] | None = None, clock=_now) -> int:
         held, why = first_report_hold(gateway_home, now)
         if why:
             sys.stderr.write(why + "\n")
-        plan = fq.pace(rows, now, fq.pacing_limits(os.environ), added_today, may_add=not held)
         announced = state.get(ANNOUNCED_KEY) if isinstance(state.get(ANNOUNCED_KEY), dict) else {}
         announced_keys = (announced.get("keys") or []) if announced.get("day") == today else []
-        plan.add = [item for item in plan.add if list(item.key) not in announced_keys]
+        plan = fq.pace(rows, now, fq.pacing_limits(os.environ), added_today, may_add=not held, announced=announced_keys)
         daily = now.hour >= fq.REMIND_HOUR and state.get(DAILY_KEY) != today
         open_count = len({fq.item_key(row) for row in rows if not fq.rolled_up(row)}) + plan.rolled_up
         message = compose(plan, open_count, daily)

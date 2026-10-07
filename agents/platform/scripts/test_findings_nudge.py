@@ -310,6 +310,35 @@ class MainTests(NudgeHarness):
         self.run_at(at(7, 12), rows)
         self.assertIn("New: 1 critical finding.", self.out.getvalue())
 
+    def test_an_announced_critical_whose_mark_failed_still_spends_the_day_budget(self):
+        a = finding(id="a", check_slug="a", rank_score=300)
+        b = finding(id="b", check_slug="b", rank_score=290)
+        c = finding(id="c", check_slug="c", rank_score=400)
+        self.run_at(at(6, 12), [a, b], surfaced_error=urllib.error.URLError("refused"))
+        self.assertIn("New: 2 critical findings.", self.out.getvalue())
+        # c outranks both, but today's two were already announced.
+        self.run_at(at(6, 13), [c, a, b])
+        self.assertEqual(self.out.getvalue(), "")
+        self.assertEqual(self.marks, [])
+        self.run_at(at(7, 12), [c, a, b])
+        self.assertIn("New: 2 critical findings.", self.out.getvalue())
+        self.assertEqual([fid for fid, _ in self.marks], ["c", "a"])
+
+    def test_an_announced_noncritical_whose_mark_failed_still_spends_the_day_budget(self):
+        rows = [finding(id=f"m{i}", check_slug=f"m{i}", severity="major", rank_score=90 - i) for i in range(3)]
+        self.run_at(at(6, 16), rows, surfaced_error=urllib.error.URLError("refused"))
+        self.assertIn("New: 3 findings, none of them critical.", self.out.getvalue())
+        self.run_at(at(6, 17), [finding(id="m9", check_slug="m9", severity="major", rank_score=95)] + rows)
+        self.assertEqual(self.out.getvalue(), "")
+        self.assertEqual(self.marks, [])
+
+    def test_an_announced_critical_whose_mark_failed_still_holds_noncriticals_back(self):
+        critical = finding(id="a", check_slug="a")
+        self.run_at(at(6, 12), [critical], surfaced_error=urllib.error.URLError("refused"))
+        self.run_at(at(6, 16), [critical, finding(id="m0", check_slug="m0", severity="major")])
+        self.assertNotIn("none of them critical", self.out.getvalue())
+        self.assertEqual(self.marks, [])
+
     def test_a_mark_that_raises_skips_neither_the_other_marks_nor_the_daily_record(self):
         rows = [shown(at(5, 12), id="old"), finding(id="new", check_slug="x")]
         code = self.run_at(at(6, 12), rows, surfaced_error=http.client.IncompleteRead(b""))
