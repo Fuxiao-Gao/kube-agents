@@ -802,8 +802,8 @@ def main():
         abort(local_correction_lost_message(e, repo_root))
     except UpstreamDriftError as e:
         abort(
-            f"\nError: Synchronization aborted, nothing written. Upstream has moved away from "
-            f"corrections this repository registers:\n{e}\n"
+            f"\nError: Synchronization aborted, nothing written. Corrections this repository "
+            f"registers can no longer be applied as written:\n{e}\n"
             f"Update the entries in {os.path.basename(__file__)} and re-run."
         )
     except subprocess.CalledProcessError:
