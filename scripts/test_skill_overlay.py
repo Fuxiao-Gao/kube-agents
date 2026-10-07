@@ -1,6 +1,6 @@
 """Scenario tests for scripts/skill_overlay.py.
 
-Each test builds a throwaway upstream repository (tags v1-v5) and a throwaway downstream
+Each test builds a throwaway upstream repository (tags v1-v6) and a throwaway downstream
 repository holding a copy of the tool, then runs the tool as a contributor would. Nothing
 reaches the network: SKILL_OVERLAY_UPSTREAM points the tool at the local upstream.
 Run: python3 -m unittest scripts.test_skill_overlay
@@ -20,6 +20,10 @@ TOOL = HERE / "skill_overlay.py"
 GIT_ENV = {
     "GIT_CONFIG_GLOBAL": os.devnull,
     "GIT_CONFIG_NOSYSTEM": "1",
+    # No user ignore file, as in the tool: the fixtures must commit every file they write.
+    "GIT_CONFIG_COUNT": "1",
+    "GIT_CONFIG_KEY_0": "core.excludesFile",
+    "GIT_CONFIG_VALUE_0": os.devnull,
     "GIT_AUTHOR_NAME": "test",
     "GIT_AUTHOR_EMAIL": "test@example.invalid",
     "GIT_COMMITTER_NAME": "test",
@@ -49,7 +53,7 @@ def git(cwd, *args, check=True):
 
 
 def build_upstream(root):
-    """v1 base; v2 nearby edit; v3 adopts the typo fix; v4 edits the patched line; v5 new skill."""
+    """v1 base; v2 nearby edit; v3 adopts the typo fix; v4 edits the patched line; v5 new skill; v6 renames a reference file."""
     skills = root / "skills" / "cloud"
     (skills / "basics").mkdir(parents=True)
     (skills / "storage").mkdir(parents=True)
@@ -90,6 +94,7 @@ class Scenario(unittest.TestCase):
         (self.repo / "scripts").mkdir(parents=True)
         shutil.copy(TOOL, self.repo / "scripts" / "skill_overlay.py")
         git(self.repo, "init", "-q", "-b", "main")
+        (self.repo / ".gitignore").write_text(".skill-sync/\n")
         self.env = dict(os.environ, SKILL_OVERLAY_UPSTREAM=str(self.upstream), **GIT_ENV)
 
     def tearDown(self):
@@ -138,7 +143,6 @@ class Scenario(unittest.TestCase):
         self.adopt_with_two_patches()
         copy = self.repo / "third_party" / "google-skills" / "storage" / "SKILL.md"
         copy.write_text(copy.read_text() + "x\n")
-        sys.path.insert(0, str(self.repo / "scripts"))
         lock = self.overlay("storage") / "upstream.lock"
         commit = lock.read_text().splitlines()[0].split(": ")[1]
         res = subprocess.run([sys.executable, "-c",
@@ -275,6 +279,13 @@ class Scenario(unittest.TestCase):
         self.assertFalse((self.skill().parent / "SKILL.md.orig").exists())
         self.assertNotIn("<<<<<<<", self.skill().read_text())
 
+    def test_continue_refuses_markers_in_a_staged_file(self):
+        self.adopt_with_two_patches()
+        self.run_tool("sync", "basics", "--ref", "v4", expect=2)
+        scratch = self.repo / ".skill-sync" / "basics"
+        git(scratch, "add", "SKILL.md")
+        self.assertIn("conflict markers remain", self.run_tool("continue", "basics", expect=1))
+
     def test_conflict_resolved_to_upstream_reports_the_patch_dropped(self):
         self.adopt_with_two_patches()
         self.run_tool("sync", "basics", "--ref", "v4", expect=2)
@@ -339,6 +350,10 @@ class Scenario(unittest.TestCase):
         patch.write_text(patch.read_text().replace("Why: TODO", "Why: edited meanwhile"))
         git(self.repo / ".skill-sync" / "basics", "checkout", "--theirs", "SKILL.md")
         self.assertIn("changed while the sync was paused", self.run_tool("continue", "basics", expect=1))
+        # The refusal comes before the rebase moves on, so undoing the edit lets the sync finish.
+        patch.write_text(patch.read_text().replace("Why: edited meanwhile", "Why: TODO"))
+        self.assertIn("synced basics", self.run_tool("continue", "basics"))
+        self.assertIn("ok: 2", self.run_tool("check"))
 
     def test_continue_without_a_paused_sync_explains(self):
         (self.repo / ".skill-sync" / "basics").mkdir(parents=True)
@@ -360,13 +375,22 @@ class Scenario(unittest.TestCase):
         git(self.repo, "add", "-A")
         git(self.repo, "commit", "-q", "-m", "base")
         base = git(self.repo, "rev-parse", "HEAD").stdout.strip()
-        self.skill().write_text(self.skill().read_text())
-        git(self.repo, "commit", "-q", "--allow-empty", "-m", "unrelated")
+        # A change beside the lock, not to it: the path filter has to tell them apart.
+        patch = self.overlay() / "0001-use-location.patch"
+        patch.write_text(patch.read_text().replace("Why: TODO", "Why: unrelated edit"))
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "unrelated")
         self.assertIn("skip:", self.run_tool("verify-upstream", "--changed-since", base))
         self.run_tool("sync", "basics", "--ref", "v2")
         git(self.repo, "add", "-A")
         git(self.repo, "commit", "-q", "-m", "sync")
         self.assertIn("ok: 2", self.run_tool("verify-upstream", "--changed-since", base))
+
+    def test_os_junk_files_do_not_fail_the_check(self):
+        self.adopt_with_two_patches()
+        (self.repo / "third_party" / "google-skills" / "storage" / ".DS_Store").write_bytes(b"\0junk")
+        (self.skill().parent / "SKILL.md.swp").write_bytes(b"\0junk")
+        self.assertIn("ok: 2", self.run_tool("check"))
 
     def test_executable_bit_is_part_of_the_check(self):
         script = self.upstream / "skills" / "cloud" / "storage" / "run.sh"

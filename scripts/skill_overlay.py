@@ -28,12 +28,14 @@ Requires git 2.34 or newer (rename-aware rebase).
 
 import argparse
 import difflib
+import fnmatch
 import hashlib
 import io
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -56,6 +58,11 @@ UPSTREAM_CACHE = SCRATCH_ROOT / "upstream.git"
 REFRESH_SCRATCH = SCRATCH_ROOT / "refresh"
 PARTIAL_CLONE_FILTER = "--filter=blob:none"
 LOCK_NAME = "upstream.lock"
+LOCK_COMMIT_KEY = "commit"
+LOCK_SHA256_KEY = "sha256"
+# OS and editor files that are never part of a skill: hashing or comparing them would report a
+# clean copy as edited by hand.
+JUNK_FILE_PATTERNS = (".DS_Store", "Thumbs.db", "*.swp", "*.swo", "*~")
 APPEND_NAME = "append.md"
 SKILL_MD = "SKILL.md"
 # Every append.md starts with a line that begins with this; the rest of the line is free text.
@@ -206,22 +213,23 @@ def read_lock(skill):
         if ":" in line:
             key, _, value = line.partition(":")
             values[key.strip()] = value.strip()
-    if not (LOCK_COMMIT_RE.fullmatch(values.get("commit", ""))
-            and LOCK_SHA256_RE.fullmatch(values.get("sha256", ""))):
+    if not (LOCK_COMMIT_RE.fullmatch(values.get(LOCK_COMMIT_KEY, ""))
+            and LOCK_SHA256_RE.fullmatch(values.get(LOCK_SHA256_KEY, ""))):
         raise OverlayError(f"{skill}: {rel(overlay_dir(skill) / LOCK_NAME)} must hold "
-                           f"`commit: <40-hex commit>` and `sha256: <64-hex digest>`")
+                           f"`{LOCK_COMMIT_KEY}: <40-hex commit>` and `{LOCK_SHA256_KEY}: <64-hex digest>`")
     return values
 
 
 def write_lock(skill, commit, digest):
     overlay_dir(skill).mkdir(parents=True, exist_ok=True)
-    write_exact(overlay_dir(skill) / LOCK_NAME, f"commit: {commit}\nsha256: {digest}\n")
+    write_exact(overlay_dir(skill) / LOCK_NAME, f"{LOCK_COMMIT_KEY}: {commit}\n{LOCK_SHA256_KEY}: {digest}\n")
 
 
 def files_of(root):
     root = Path(root)
     return sorted(p.relative_to(root).as_posix() for p in root.rglob("*")
-                  if p.is_file() and ".git" not in p.relative_to(root).parts)
+                  if p.is_file() and ".git" not in p.relative_to(root).parts
+                  and not any(fnmatch.fnmatchcase(p.name, pattern) for pattern in JUNK_FILE_PATTERNS))
 
 
 def committable_files(root):
@@ -239,7 +247,8 @@ def committable_files(root):
 
 
 def file_mode(path):
-    return EXECUTABLE_MODE if os.access(path, os.X_OK) else REGULAR_MODE
+    # The mode bit git records; os.access() answers no for every file on a noexec mount.
+    return EXECUTABLE_MODE if Path(path).stat().st_mode & stat.S_IXUSR else REGULAR_MODE
 
 
 def tree_sha256(root):
@@ -351,8 +360,8 @@ def apply_overlay(skill, base, dest, with_append=True):
         if res.returncode != 0:
             raise OverlayError(
                 f"{skill}: patch {patch.name} no longer applies. Either an earlier patch it depended on "
-                f"was deleted or a hand edit clashes (fold or refresh it, then run "
-                f"`make skills-generate SKILL={skill}`), or the upstream copy was changed without "
+                f"was deleted or a hand edit clashes (delete it too, run `make skills-generate "
+                f"SKILL={skill}`, then redo its edit and `make skills-refresh`), or the upstream copy was changed without "
                 f"`make skills-sync SKILL={skill}` (revert the copy and lock, then sync, which "
                 f"carries the patches forward).\n{decode(res.stderr)}"
             )
@@ -369,7 +378,7 @@ def build(skill, dest):
 
 def verify_copy(skill):
     lock = read_lock(skill)
-    if not copy_dir(skill).is_dir() or tree_sha256(copy_dir(skill)) != lock["sha256"]:
+    if not copy_dir(skill).is_dir() or tree_sha256(copy_dir(skill)) != lock[LOCK_SHA256_KEY]:
         raise OverlayError(
             f"{skill}: {rel(copy_dir(skill))} no longer matches the sha256 in {LOCK_NAME}. The "
             f"upstream copy was edited by hand: revert it, and change it only with "
@@ -450,7 +459,7 @@ def staleness_notice(skill):
         cache = upstream_cache()
     except OverlayError:
         return
-    commit = read_lock(skill)["commit"]
+    commit = read_lock(skill)[LOCK_COMMIT_KEY]
     if upstream_tree_id(cache, commit, skill) != upstream_tree_id(cache, UPSTREAM_BRANCH, skill):
         print(f"note: upstream has {newer_upstream_commits(cache, commit, skill)} newer commit(s) for "
               f"{skill}. To take them, run `make skills-sync SKILL={skill}` in its own commit or PR.")
@@ -725,7 +734,7 @@ def cmd_sync(skill, ref=None):
             return
         verify_copy(skill)
         require_generated_matches(skill, "The sync")
-        old = read_lock(skill)["commit"]
+        old = read_lock(skill)[LOCK_COMMIT_KEY]
         if old == commit:
             print(f"{skill}: already at upstream {commit[:12]}")
             return
@@ -773,7 +782,8 @@ def continue_or_stop(skill, repo, res):
 
 def leftover_conflict_markers(repo):
     files = set(git_out(["diff", "--name-only", "--diff-filter=U"], cwd=repo, check=False).split())
-    files |= set(git_out(["diff", "--name-only"], cwd=repo, check=False).split())
+    # Against HEAD, not the index: a file staged with `git add` still has to be read.
+    files |= set(git_out(["diff", "--name-only", "HEAD"], cwd=repo, check=False).split())
     found = []
     for name in sorted(files):
         path = Path(repo) / name
@@ -789,6 +799,11 @@ def cmd_continue(skill):
         raise OverlayError(f"{skill}: no sync in progress")
     if not (repo / ".git" / STATE_FILE).is_file():
         raise OverlayError(f"{skill}: {rel(repo)} holds no paused sync; delete it and run the sync again")
+    state = json.loads(read_exact(repo / ".git" / STATE_FILE))
+    if [p.name for p in patches(skill)] != state["patches"] or headers_of(skill) != state["headers"]:
+        raise OverlayError(f"{skill}: {rel(overlay_dir(skill))} changed while the sync was paused. Undo "
+                           f"that change and run `make skills-continue SKILL={skill}` again, or abandon "
+                           f"the sync (delete {rel(repo)}); then apply the change after the sync.")
     leftover = leftover_conflict_markers(repo)
     if leftover:
         raise OverlayError(f"{skill}: conflict markers remain in {', '.join(leftover)} under {rel(repo)}/; "
@@ -802,9 +817,6 @@ def cmd_continue(skill):
 
 def finish_sync(skill, repo):
     state = json.loads(read_exact(repo / ".git" / STATE_FILE))
-    if [p.name for p in patches(skill)] != state["patches"] or headers_of(skill) != state["headers"]:
-        raise OverlayError(f"{skill}: {rel(overlay_dir(skill))} changed while the sync was paused. Finish "
-                           f"or abandon the sync (delete {rel(repo)}), then apply that change again.")
     for p in patches(skill):
         p.unlink()
     surviving = export_series(skill, repo, NEW_UPSTREAM_BRANCH, state["headers"])
@@ -834,7 +846,7 @@ def finish_sync(skill, repo):
 def cmd_status():
     cache = upstream_cache()
     for skill in mirrored_skills():
-        commit = read_lock(skill)["commit"]
+        commit = read_lock(skill)[LOCK_COMMIT_KEY]
         if upstream_tree_id(cache, commit, skill) == upstream_tree_id(cache, UPSTREAM_BRANCH, skill):
             print(f"up to date  {skill}")
         else:
@@ -865,7 +877,7 @@ def cmd_verify_upstream(changed_since=None):
     failures = []
     for skill in mirrored_skills():
         try:
-            commit = read_lock(skill)["commit"]
+            commit = read_lock(skill)[LOCK_COMMIT_KEY]
             resolve(cache, commit)
             require_on_upstream_branch(cache, commit)
             with tempfile.TemporaryDirectory() as tmp:

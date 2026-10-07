@@ -99,7 +99,7 @@ flowchart LR
 
 - **Mirrored list:** a skill is mirrored if its overlay has a lock (the overlay may hold only the lock).
   - When upstream drops or renames a skill, the sync reports it and a person moves or removes the copy, overlay and lock.
-- **Patches:** one change per file in `git format-patch` form, without commit hashes, `index` lines or a diffstat, so a refresh changes only hunk headers and moved lines. A patch can touch any file in the skill or add one. Example header below.
+- **Patches:** one change per file in `git format-patch` form, without commit hashes, `index` lines (kept only in binary sections, which need them) or a diffstat, so a refresh changes only hunk headers and moved lines. A patch can touch any file in the skill or add one. Example header below.
 - **One patch per reason:** follow-up edits fold into the existing patch, so the count tracks reasons: today's registries become seven patches across four skills (at most four in one) plus five `append.md` files.
 - **When to stop mirroring:** a person's decision, not a CI rule. Patch count alone is not a signal: several small patches over a small part of a skill still leave the rest getting upstream's updates.
   - Review a skill when its patches rewrite most of it, when most of its syncs conflict, or when upstream keeps moving it away from what we need.
@@ -316,12 +316,12 @@ Every PR that changes what the agent reads from a mirrored skill — a sync or a
 
 What `make skills-check` reports when a step is skipped:
 
-| What happened                                                                                  | What the check sees                               | Fix                                                    |
-| ---------------------------------------------------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------------ |
-| The skill was edited and no patch records the edit                                             | the rebuilt skill differs from the committed one  | `make skills-refresh`                                  |
-| A patch or `append.md` was edited and the skill not rebuilt                                    | the rebuilt skill differs from the committed one  | `make skills-generate`                                 |
-| The upstream copy was edited by hand                                                           | the copy no longer matches the sha256 in its lock | revert it; sync to change it                           |
-| A patch no longer applies (an earlier patch it depends on was deleted, or a hand edit clashes) | the overlay cannot be applied in filename order   | fold or refresh the patch, then `make skills-generate` |
+| What happened                                                                                  | What the check sees                               | Fix                                                                      |
+| ---------------------------------------------------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------------------------------ |
+| The skill was edited and no patch records the edit                                             | the rebuilt skill differs from the committed one  | `make skills-refresh`                                                    |
+| A patch or `append.md` was edited and the skill not rebuilt                                    | the rebuilt skill differs from the committed one  | `make skills-generate`                                                   |
+| The upstream copy was edited by hand                                                           | the copy no longer matches the sha256 in its lock | revert it; sync to change it                                             |
+| A patch no longer applies (an earlier patch it depends on was deleted, or a hand edit clashes) | the overlay cannot be applied in filename order   | delete it too, regenerate, then redo its edit with `make skills-refresh` |
 
 ### Skills this repository writes
 
