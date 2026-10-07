@@ -1052,17 +1052,16 @@ class TestShownMarker(QueueTestCase):
 
 
 class TestAdditions(QueueTestCase):
-    DAY = "2026-10-06"
+    # mark_surfaced stamps each addition with SQLite's date('now'), the real
+    # UTC day, so the tests compare against today's UTC date.
+    def setUp(self):
+        super().setUp()
+        self.DAY = datetime.now(UTC).date().isoformat()
 
     def add(self, finding, added_class="critical", when=at(6, 12)):
+        # `when` only names the run: two calls with the same `when` are one run.
         fid = fq.validate_finding(finding)["id"]
-        run = when.isoformat()
-        fq.mark_surfaced(self.conn, fid, publisher="nudge", added_class=added_class, run=run)
-        self.conn.execute("UPDATE findings SET first_shown_at = ? WHERE id = ?", (stamp(when), fid))
-        self.conn.execute(
-            "UPDATE findings_additions SET day = ?, added_at = ? WHERE run = ?",
-            (when.date().isoformat(), stamp(when), run),
-        )
+        fq.mark_surfaced(self.conn, fid, publisher="nudge", added_class=added_class, run=when.isoformat())
         return fid
 
     def test_dismissing_or_snoozing_refunds_nothing(self):
@@ -1106,9 +1105,8 @@ class TestAdditions(QueueTestCase):
 
     def test_the_day_is_the_utc_date(self):
         self.register(sample())
-        self.add(sample(), when=at(5, 23, 59))
-        self.assertEqual(fq.additions_on(self.conn, self.DAY)["critical"], 0)
-        self.assertEqual(fq.additions_on(self.conn, "2026-10-05")["critical"], 1)
+        self.add(sample())
+        self.assertEqual(fq.additions_on(self.conn, self.DAY)["critical"], 1)
 
     def test_pulls_and_joins_are_not_additions(self):
         pulled, joined = sample(check="a"), sample(check="b")
