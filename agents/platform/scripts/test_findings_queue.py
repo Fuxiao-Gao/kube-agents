@@ -880,7 +880,6 @@ def _table_after(text: str, marker: str) -> list[list[str]]:
 
 UTC = timezone.utc
 CRITICAL_RUBRIC = {"B": 8, "L": 6, "detect": 3, "recover": 2, "C": 1.0}  # 240
-MINOR_RUBRIC = {"B": 1, "L": 1, "detect": 1, "recover": 1, "C": 1.0}  # 2
 
 
 def at(day: int, hour: int, minute: int = 0) -> datetime:
@@ -1126,8 +1125,7 @@ class TestAdditions(QueueTestCase):
         self.register(pulled, joined)
         fq.mark_surfaced(self.conn, fq.validate_finding(pulled)["id"])
         fq.mark_surfaced(self.conn, fq.validate_finding(joined)["id"], publisher="nudge")
-        today = datetime.now(UTC).date().isoformat()
-        self.assertEqual(fq.additions_on(self.conn, today), {"day": today, "critical": 0, "noncritical": 0})
+        self.assertEqual(fq.additions_on(self.conn, self.DAY), {"day": self.DAY, "critical": 0, "noncritical": 0})
 
     def test_a_day_must_be_a_date(self):
         for day in ("", "yesterday", "2026-10-06T00:00:00", None, "2026-99-99", "2026-02-30", "20261006", "٢٠٢٦-١٠-٠٦"):
@@ -1296,7 +1294,7 @@ class TestPacingLimits(unittest.TestCase):
         self.assertEqual(limits.noncritical_after_hour, 23)
 
 
-class TestPace(unittest.TestCase):
+class TestPace(QueueTestCase):
     LIMITS = fq.PacingLimits()
 
     def pace(self, rows, now, added=NONE_ADDED, limits=None, may_add=True):
@@ -1479,9 +1477,10 @@ class TestPace(unittest.TestCase):
         self.assertEqual(ids(plan.add), [["probe-a", "probe-b", "probe-c"], ["other"]])
         self.assertEqual(plan.add[0].item_class, "critical")
 
-    def test_a_gathered_line_with_its_critical_dismissed_is_a_pending_noncritical(self):
-        # The critical member was dismissed, so /ranked no longer has it; the
-        # major shown with it is still waiting for a decision.
+    def test_a_gathered_line_whose_critical_resolved_is_a_pending_noncritical(self):
+        # A sweep resolved the critical member, so /ranked no longer has it.
+        # Verification changes only its own row, so the major shown with it
+        # still waits for a decision.
         rows = [row("probe-b", "major", check="probes", state="surfaced", shown=at(5, 12)), row("c0")]
         plan = self.pace(rows, at(6, 12))
         self.assertEqual(ids(plan.blocking), [["probe-b"]])
@@ -1541,17 +1540,15 @@ class TestPace(unittest.TestCase):
         self.assertEqual(ids(self.pace(rows, datetime(2026, 10, 6, 12)).add), [["c0"]])
 
     def test_from_the_database_the_covered_count_is_what_a_decision_decides(self):
-        conn = sqlite3.connect(":memory:")
-        self.addCleanup(conn.close)
-        fq.init_findings_schema(conn)
+        conn = self.conn
         members = [sample(object=f"Deployment/d{i}", rubric=CRITICAL_RUBRIC) for i in range(5)]
-        fq.register_findings(conn, members)
+        self.register(*members)
         member_ids = [fq.validate_finding(m)["id"] for m in members]
         for fid in member_ids:
             fq.mark_surfaced(conn, fid, publisher="nudge", added_class="critical")
         # A complete sweep reports two of the five; the other three are no
         # longer pending, but a decision on the line still reaches them.
-        fq.register_findings(conn, members[:2], {"project": "acme-prod", "cluster": "prod-eu", "complete": True})
+        self.register(*members[:2], scope={"project": "acme-prod", "cluster": "prod-eu", "complete": True})
         # Set directly: a decision through the route would decide the line.
         conn.execute("UPDATE findings SET state = 'accepted' WHERE id = ?", (member_ids[4],))
         rows = fq.ranked_findings(conn)
@@ -1566,11 +1563,9 @@ class TestPace(unittest.TestCase):
         self.assertEqual(item.covers, 4)
 
     def test_from_the_database_dismissing_refunds_nothing(self):
-        conn = sqlite3.connect(":memory:")
-        self.addCleanup(conn.close)
-        fq.init_findings_schema(conn)
+        conn = self.conn
         findings = [sample(check=f"c{i}", rubric=CRITICAL_RUBRIC) for i in range(3)]
-        fq.register_findings(conn, findings)
+        self.register(*findings)
         plan = fq.pace(fq.ranked_findings(conn), at(6, 12), self.LIMITS, fq.additions_on(conn, "2026-10-06"))
         self.assertEqual(len(plan.add), 2)
         for item in plan.add:

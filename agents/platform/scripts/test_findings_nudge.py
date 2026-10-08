@@ -324,7 +324,9 @@ class MainTests(NudgeHarness):
         self.assertIn("New: 2 critical findings.", self.out.getvalue())
         self.assertEqual([fid for fid, _ in self.marks], ["c", "a"])
 
-    def test_an_announced_noncritical_whose_mark_failed_still_spends_the_day_budget(self):
+    def test_an_announced_noncritical_whose_mark_failed_holds_back_a_higher_ranked_one(self):
+        # Through stop-add: an unrecorded non-critical stops every addition,
+        # as a pending one does, so the day's budget is never reached.
         rows = [finding(id=f"m{i}", check_slug=f"m{i}", severity="major", rank_score=90 - i) for i in range(3)]
         self.run_at(at(6, 16), rows, surfaced_error=urllib.error.URLError("refused"))
         self.assertIn("New: 3 findings, none of them critical.", self.out.getvalue())
