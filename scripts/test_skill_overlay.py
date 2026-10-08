@@ -448,6 +448,27 @@ class Scenario(unittest.TestCase):
         cafe.write_text("a\nB\nc\n")
         self.assertIn("lines that 0001-add-cafe.patch introduced", self.run_tool("refresh", "basics", "--message", "edit"))
 
+    def test_continue_refuses_markers_in_a_conflicted_file_with_a_space_or_non_ascii_name(self):
+        refs = self.upstream / "skills" / "cloud" / "basics" / "references"
+        names = ("a b.md", "caf\u00e9.md")
+        for name in names:
+            (refs / name).write_text("x\n")
+        git(self.upstream, "add", "-A")
+        git(self.upstream, "commit", "-q", "-m", "named refs")
+        base = git(self.upstream, "rev-parse", "HEAD").stdout.strip()
+        for name in names:
+            (refs / name).write_text("z\n")
+        git(self.upstream, "commit", "-qam", "edit named refs")
+        self.run_tool("sync", "basics", "--ref", base)
+        for name in names:
+            (self.skill().parent / "references" / name).write_text("y\n")
+        self.run_tool("refresh", "basics", "--message", "edit named refs")
+        self.run_tool("sync", "basics", expect=2)
+        scratch = self.repo / ".skill-sync" / "basics"
+        git(scratch, "add", "-A")
+        out = self.run_tool("continue", "basics", expect=1)
+        self.assertIn("conflict markers remain in references/a b.md, references/caf\u00e9.md", out)
+
     def test_patch_in_traditional_form_survives_a_sync(self):
         self.adopt_with_two_patches()
         patch = self.overlay() / "0001-use-location.patch"
@@ -509,19 +530,6 @@ class Helpers(unittest.TestCase):
         out = self.tool.strip_index_lines(diff)
         self.assertNotIn("index 111..222", out)
         self.assertIn("index 333..444", out)
-
-    def test_conflict_markers_found_in_a_staged_file_with_a_space(self):
-        repo = Path(tempfile.mkdtemp())
-        git(repo, "init", "-q", "-b", "main")
-        (repo / "a b.md").write_text("x\n")
-        (repo / "caf\u00e9.md").write_text("x\n")
-        git(repo, "add", "-A")
-        git(repo, "commit", "-q", "-m", "base")
-        for name in ("a b.md", "caf\u00e9.md"):
-            (repo / name).write_text("<<<<<<< ours\nx\n=======\ny\n>>>>>>> theirs\n")
-        git(repo, "add", "-A")
-        self.assertEqual(sorted(self.tool.leftover_conflict_markers(repo, ["a b.md", "caf\u00e9.md"])),
-                         ["a b.md", "caf\u00e9.md"])
 
     def test_patch_header_stops_at_a_traditional_diff_and_not_inside_why(self):
         text = "Subject: s\n\nWhy: quotes diff --git here\nRetire-When: x\n\n--- a/SKILL.md\n+++ b/SKILL.md\n"
