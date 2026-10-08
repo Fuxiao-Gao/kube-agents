@@ -1171,7 +1171,7 @@ class PacingPlan:
     blocking: list = field(default_factory=list)
     # New items this run did not add.
     waiting: list = field(default_factory=list)
-    # Open provider-managed observations, never items.
+    # Lines (`item_key`) of open provider-managed observations, never items.
     rolled_up: int = 0
 
 
@@ -1186,7 +1186,7 @@ def _still_reported(finding: Mapping) -> bool:
 
 
 def _gather(rows: Iterable[Mapping]) -> tuple[list[Item], int]:
-    """Rows in ranked order into items in ranked order, plus the rolled-up count.
+    """Rows in ranked order into items in ranked order, plus the rolled-up line count.
 
     A row is pending when a paced publisher showed it, it still waits for a
     decision (`surfaced`), and no complete sweep has missed it since it was
@@ -1196,13 +1196,13 @@ def _gather(rows: Iterable[Mapping]) -> tuple[list[Item], int]:
     item's order is its best member's.
     """
     items: dict[tuple, Item] = {}
-    managed = 0
+    managed: set[tuple] = set()
     covered: dict[tuple, int] = {}
     for row in rows:
-        if rolled_up(row):
-            managed += 1
-            continue
         key = item_key(row)
+        if rolled_up(row):
+            managed.add(key)
+            continue
         if decided_with_item(row):
             covered[key] = covered.get(key, 0) + 1
         state = row.get("state") or "queued"
@@ -1222,7 +1222,7 @@ def _gather(rows: Iterable[Mapping]) -> tuple[list[Item], int]:
             item.first_shown = at if item.first_shown is None else min(item.first_shown, at)
     for key, item in items.items():
         item.covers = covered.get(key, 0)
-    return list(items.values()), managed
+    return list(items.values()), len(managed)
 
 
 def pace(

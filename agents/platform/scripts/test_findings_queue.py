@@ -1522,6 +1522,12 @@ class TestPace(QueueTestCase):
         self.assertEqual(ids(plan.add), [["fault"]])
         self.assertEqual(plan.rolled_up, 1)
 
+    def test_provider_managed_observations_are_counted_by_line(self):
+        observation = {"provider_managed": True, "actionable": False}
+        rows = [row(f"dns{i}", check="dns", **observation) for i in range(3)]
+        rows += [row("dns-staging", check="dns", cluster="staging", **observation), row("c0")]
+        self.assertEqual(self.pace(rows, at(6, 12)).rolled_up, 2)
+
     def test_a_daily_limit_of_zero_adds_and_reminds_no_criticals(self):
         limits = fq.PacingLimits(daily_criticals=0)
         rows = [row("c-old", state="surfaced", shown=at(4, 12)), row("c0"), row("m0", "major")]

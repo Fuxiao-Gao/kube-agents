@@ -307,7 +307,7 @@ def compose(plan: fq.PacingPlan, open_count: int, daily: bool) -> str:
     tail = f"{_plural(open_count, 'finding is', 'findings are')} open on the queue. Ask for the full list."
     if plan.rolled_up:
         tail += (
-            f" {_plural(plan.rolled_up, 'of them is a provider-managed item', 'of them are provider-managed items')}"
+            f" {_plural(plan.rolled_up, 'of them is', 'of them are')} provider-managed,"
             " with no next step you can take, never named here."
         )
     return f"{HEADING}\n\n" + "\n\n".join(sections) + f"\n\n{tail}"

@@ -143,7 +143,7 @@ class ComposeTests(unittest.TestCase):
         rows = [finding(id="obs", check_slug="x", provider_managed=True, actionable=False, title="kube-system thing"), finding(id="c0")]
         message = nudge.compose(plan_for(rows), 2, False)
         self.assertNotIn("kube-system thing", message)
-        self.assertIn("1 of them is a provider-managed item with no next step you can take", message)
+        self.assertIn("1 of them is provider-managed, with no next step you can take", message)
 
 
 class NudgeHarness(unittest.TestCase):
@@ -359,6 +359,21 @@ class MainTests(NudgeHarness):
         rows = [finding(id=f"p{i}", object=f"d{i}") for i in range(3)] + [finding(id="x", check_slug="x")]
         self.run_at(at(6, 12), rows)
         self.assertIn("2 findings are open on the queue.", self.out.getvalue())
+
+    def test_the_open_count_counts_provider_managed_observations_by_item(self):
+        # Two lines of nameable rows, and ten observations of one check on
+        # one cluster: three findings, one of them provider-managed.
+        rows = [finding(id=f"p{i}", object=f"d{i}") for i in range(3)] + [finding(id="x", check_slug="x")]
+        rows += [
+            finding(id=f"obs{i}", check_slug="dns", namespace="kube-system", object=f"pod{i}",
+                    provider_managed=True, actionable=False)
+            for i in range(10)
+        ]
+        self.run_at(at(6, 12), rows)
+        self.assertIn(
+            "3 findings are open on the queue. Ask for the full list. 1 of them is provider-managed,",
+            self.out.getvalue(),
+        )
 
     def test_a_failed_expiry_costs_snooze_lateness_not_the_message(self):
         def fake_request(endpoint, path, body=None, method=""):
