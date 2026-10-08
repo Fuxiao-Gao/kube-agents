@@ -1405,9 +1405,18 @@ class TestPace(QueueTestCase):
         self.assertEqual(ids(plan.add), [["c0"]])
 
     def test_a_lapsed_snooze_of_a_shown_row_is_pending_again(self):
-        rows = [row("m0", "major", state="surfaced", shown=at(1, 16)), row("c0")]
-        plan = self.pace(rows, at(6, 12))
-        self.assertEqual(ids(plan.blocking), [["m0"]])
+        major, critical = sample(check="m0"), sample(check="c0", rubric=CRITICAL_RUBRIC)
+        self.register(major, critical)
+        major_id, critical_id = (fq.validate_finding(f)["id"] for f in (major, critical))
+        fq.mark_surfaced(self.conn, major_id, publisher="nudge", added_class="noncritical")
+        fq.patch_finding(self.conn, major_id, {"state": "snoozed", "snoozed_until": "2000-01-01"})
+        # While snoozed it is not in /ranked, so nothing stops the critical.
+        self.assertEqual(ids(self.pace(fq.ranked_findings(self.conn), at(6, 12)).add), [[critical_id]])
+
+        self.assertEqual(fq.expire_snoozes(self.conn), 1)
+
+        plan = self.pace(fq.ranked_findings(self.conn), at(6, 12))
+        self.assertEqual(ids(plan.blocking), [[major_id]])
         self.assertEqual(plan.add, [])
 
     def test_a_pull_marked_row_is_new_not_pending(self):
