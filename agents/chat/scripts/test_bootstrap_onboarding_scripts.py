@@ -454,6 +454,26 @@ class DeliveryRegistersFindingsTest(unittest.TestCase):
         self.assertEqual((rc, out), (0, "# Report\n"))
         self.assertEqual([objects for objects, _, _ in self.sent], [["api"], ["api", "web"]])
 
+    def test_a_row_the_queue_reports_suppressed_is_not_marked_shown(self):
+        # Sandboxed, `select` never learned the user dismissed it, so the report lists it.
+        self._write()
+        (self.d / SHOWN).write_text(json.dumps(SHOWN_RECORD), encoding="utf-8")
+        dismissed = "sa-key.acme.prod.app.sa1"
+        self.post.stop()
+        with mock.patch.object(
+            inventory_findings,
+            "post_batch",
+            side_effect=[{"results": [{"id": dismissed, "outcome": "suppressed"}]}, {"results": []}],
+        ), mock.patch.object(bootstrap_delivery, "_post_surfaced") as mark:
+            rc, out, err = self._run()
+        self.post.start()
+        self.assertEqual((rc, out), (0, "# Report\n"))
+        self.assertEqual(
+            [call.args[1] for call in mark.call_args_list],
+            ["sa-key.acme.prod.app.sa2", "crashloop.acme.prod.app.api"],
+        )
+        self.assertIn(f"not marking {dismissed} shown", err)
+
     def test_a_clean_fleet_registers_nothing_and_needs_no_scores(self):
         self._write(items={"items": []}, scores=None)
         rc, out, err = self._run()

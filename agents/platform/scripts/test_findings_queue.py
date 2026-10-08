@@ -1052,6 +1052,25 @@ class TestShownMarker(QueueTestCase):
             fq.mark_surfaced(self.conn, self.fid, publisher="nudge", added_class="major")
         self.assertIsNone(fq.get_finding(self.conn, self.fid)["first_shown_at"])
 
+    def test_a_paced_publisher_may_not_show_a_decided_row(self):
+        # A re-armed first report can name a finding the user dismissed earlier.
+        for state, patch in (
+            ("dismissed", {"state": "dismissed"}),
+            ("accepted", {"state": "accepted"}),
+            ("snoozed", {"state": "snoozed", "snoozed_until": "2099-01-01T00:00:00Z"}),
+        ):
+            with self.subTest(state=state):
+                fq.patch_finding(self.conn, self.fid, patch)
+                for publisher in fq.PACED_PUBLISHERS:
+                    with self.assertRaises(fq.FindingError):
+                        fq.mark_surfaced(self.conn, self.fid, publisher=publisher, added_class="critical", run="r1")
+                row = fq.get_finding(self.conn, self.fid)
+                self.assertEqual((row["state"], row["surface_count"]), (state, 0))
+                self.assertIsNone(row["first_shown_at"])
+                self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM findings_additions").fetchone()[0], 0)
+        # A pull still names it.
+        self.assertEqual(fq.mark_surfaced(self.conn, self.fid)["surface_count"], 1)
+
     def test_a_recurrence_is_new_again(self):
         fq.mark_surfaced(self.conn, self.fid, publisher="nudge", added_class="noncritical")
         fq.record_verification(self.conn, self.fid, "resolved")

@@ -4304,6 +4304,20 @@ class TestFindingsQueueApi(unittest.TestCase):
             {"day": day, "critical": 1, "noncritical": 0},
         )
 
+    def test_the_first_report_may_not_mark_a_dismissed_finding(self):
+        self._register(self._finding())
+        fid = self.client.get("/v1/findings/ranked").json()["findings"][0]["id"]
+        self.client.patch(f"/v1/findings/{fid}", json={"state": "dismissed"})
+
+        refused = self.client.post(
+            f"/v1/findings/{fid}/surfaced",
+            json={"publisher": "first_report", "added_class": "critical", "run": "2026-10-07T09:00:00Z"},
+        )
+
+        self.assertEqual(refused.status_code, 400)
+        self.assertIn("dismissed", refused.json()["detail"])
+        self.assertEqual(self.client.get("/v1/findings/additions").json()["critical"], 0)
+
     def test_a_decision_on_one_id_covers_its_gathered_line(self):
         self._register(self._finding(), self._finding(object="Deployment/cart"))
         first, second = sorted(f["id"] for f in self.client.get("/v1/findings/ranked").json()["findings"])

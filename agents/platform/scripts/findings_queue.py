@@ -813,6 +813,11 @@ def mark_surfaced(
     in `findings_additions` per item and `run`; a row that joins an item
     already shown is shown without one and is not an addition. `run` names the
     publisher's run, so the members of one item marked in it are one addition.
+
+    A paced publisher may show only a row still waiting for a decision
+    (`UNDECIDED_STATES`). A dismissed, accepted or snoozed row is refused, so
+    a report that names one spends no slot of the day's limit on a row that
+    can never be pending.
     """
     if publisher and publisher not in PACED_PUBLISHERS:
         raise FindingError(f"publisher is {_brief(publisher)}; must be one of {list(PACED_PUBLISHERS)}")
@@ -824,6 +829,10 @@ def mark_surfaced(
     current = get_finding(conn, finding_id)
     if current is None:
         raise FindingNotFound(finding_id)
+    if publisher and current["state"] not in UNDECIDED_STATES:
+        raise FindingError(
+            f"{finding_id} is {current['state']}; a paced publisher shows only a row in {list(UNDECIDED_STATES)}"
+        )
     if added_class and current["first_shown_at"] is None:
         conn.execute(
             "INSERT OR IGNORE INTO findings_additions (item_key, run, added_class) VALUES (?, ?, ?)",

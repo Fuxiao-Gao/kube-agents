@@ -107,6 +107,8 @@ ITEMS_KEY = "items"
 SCORES_KEY = "scores"
 # A few KB per finding; far above any fleet's sweep.
 BATCH_MAX_BYTES = 4 * 1024 * 1024
+# The outcome the queue gives a row the user dismissed (findings_queue._register_one).
+SUPPRESSED = "suppressed"
 
 # The findings queue on this pod's loopback, as findings_nudge.py reaches it.
 # The cron child inherits SESSION_KV_API_KEY (deploy/docker/plugins/verify_chat_relay.py).
@@ -289,7 +291,7 @@ def _findings_endpoint() -> str:
     return (os.environ.get(FINDINGS_ENDPOINT_ENV) or DEFAULT_FINDINGS_ENDPOINT).rstrip("/")
 
 
-def _register_findings(data_dir: Path, in_sandbox: bool) -> None:
+def _register_findings(data_dir: Path, in_sandbox: bool) -> set[str]:
     """Register every finding the sweep extracted in the findings queue, as
     ``inventory_findings.py register`` does, from this pod.
 
@@ -307,9 +309,14 @@ def _register_findings(data_dir: Path, in_sandbox: bool) -> None:
     earlier sweep's, whose complete scopes would re-open findings and mark
     current ones absent.
 
+    Returns the ids the queue answered ``suppressed``: rows the user
+    dismissed. With the shell sandbox on, ``select`` never learned them, so
+    the report may list one; ``_mark_shown`` leaves them unmarked.
+
     Never raises. Runs before the claim, so it adds nothing to the claimed
     run's work (``RETIRE_AFTER_SECONDS``), and the nudge holds until the claim.
     """
+    suppressed: set[str] = set()
     try:
         import bootstrap_handoff  # beside this script in the pod
         import inventory_findings  # beside this script in the pod
@@ -320,37 +327,43 @@ def _register_findings(data_dir: Path, in_sandbox: bool) -> None:
                 "bootstrap_delivery: the hand-off filed no prioritization card, so any "
                 f"{ITEMS_NAME} is an earlier sweep's; registering nothing\n"
             )
-            return
+            return suppressed
         extracted = _read_json_beside(data_dir, in_sandbox, ITEMS_NAME)
         if extracted is None:
             sys.stderr.write(f"bootstrap_delivery: no {ITEMS_NAME}; registering nothing\n")
-            return
+            return suppressed
         items = extracted[ITEMS_KEY]
         if not items:
-            return  # a clean fleet: nothing to register, and no scores file
+            return suppressed  # a clean fleet: nothing to register, and no scores file
         raw_scores = _read_json_beside(data_dir, in_sandbox, SCORES_NAME)
         if raw_scores is None:
             sys.stderr.write(f"bootstrap_delivery: no {SCORES_NAME}; registering nothing\n")
-            return
+            return suppressed
         payloads = inventory_findings.build_payloads(items, raw_scores[SCORES_KEY])
         batches = inventory_findings.cluster_batches(payloads, inventory_findings.complete_clusters(raw_scores))
     except Exception as e:
         detail = "; ".join(getattr(e, "errors", None) or [str(e)])
         sys.stderr.write(f"bootstrap_delivery: could not read the sweep's findings; registering nothing: {detail}\n")
-        return
+        return suppressed
     endpoint = _findings_endpoint()
     for where, batch, scope in batches:
         try:
-            inventory_findings.post_batch(endpoint, batch, scope)
+            result = inventory_findings.post_batch(endpoint, batch, scope)
         except urllib.error.HTTPError as e:
             # This cluster only.
             sys.stderr.write(f"bootstrap_delivery: the findings queue refused {where}'s findings: {e.code}\n")
+            continue
         except Exception as e:
             sys.stderr.write(
                 f"bootstrap_delivery: the findings queue at {endpoint} did not answer ({e}); "
                 "not registering the rest\n"
             )
-            return
+            return suppressed
+        outcomes = result.get("results") if isinstance(result, dict) else None
+        for entry in outcomes if isinstance(outcomes, list) else []:
+            if isinstance(entry, dict) and entry.get("outcome") == SUPPRESSED:
+                suppressed.add(str(entry.get("id")))
+    return suppressed
 
 
 def _post_surfaced(endpoint: str, finding_id: str, body: dict) -> None:
@@ -366,8 +379,11 @@ def _post_surfaced(endpoint: str, finding_id: str, body: dict) -> None:
         response.read()
 
 
-def _mark_shown(data_dir: Path, in_sandbox: bool) -> bool:
-    """Mark every row of every item the report lists shown, as ``PUBLISHER``.
+def _mark_shown(data_dir: Path, in_sandbox: bool, suppressed: set[str] = frozenset()) -> bool:
+    """Mark every row of every item the report lists shown, as ``PUBLISHER``,
+    except the ``suppressed`` ids registration reported: the user dismissed
+    them, so they are never pending and spend no slot of the day's limit.
+    The queue refuses such a mark anyway; skipping it saves the request.
 
     Returns whether to set the shown file aside: True unless there is none,
     so a file this run could not read is not marked by a later report.
@@ -395,10 +411,14 @@ def _mark_shown(data_dir: Path, in_sandbox: bool) -> bool:
     for added_class, ids in marks:
         body = {"publisher": PUBLISHER, "added_class": added_class, "run": run}
         for finding_id in ids:
+            if finding_id in suppressed:
+                sys.stderr.write(f"bootstrap_delivery: not marking {finding_id} shown: the user dismissed it\n")
+                continue
             try:
                 _post_surfaced(endpoint, finding_id, body)
             except urllib.error.HTTPError as e:
-                # This row only: an unregistered one is a 404. Reading the
+                # This row only: an unregistered one is a 404, one the user
+                # decided since registration a 400. Reading the
                 # body can itself time out, which must not escape.
                 try:
                     detail = e.read().decode("utf-8", "replace").strip()
@@ -579,7 +599,7 @@ def main(data_dir: Path | None = None) -> int:
 
     # Before the claim, which ends the nudge's hold, so the rows exist when
     # the marks below are sent.
-    _register_findings(data_dir, in_sandbox)
+    suppressed = _register_findings(data_dir, in_sandbox)
 
     # The cheap check above is advisory; this is the decision. Nothing may be
     # written to stdout before it succeeds.
@@ -588,7 +608,7 @@ def main(data_dir: Path | None = None) -> int:
 
     # Right after the claim, which ends the nudge's hold, so a nudge run has
     # the shortest window in which to announce these findings as new.
-    shown = _mark_shown(data_dir, in_sandbox)
+    shown = _mark_shown(data_dir, in_sandbox, suppressed)
 
     if not _posted_as_blocks(content):
         sys.stdout.write(_presented(content))

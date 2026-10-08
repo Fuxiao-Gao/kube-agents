@@ -955,7 +955,12 @@ that is never claimed leaves them new for the nudge; one claimed and then lost i
 moment between the claim and the marks can announce the report's items as new. Marking never holds
 delivery back: a row the queue refuses, such as one it never registered, is skipped, a queue that
 does not answer ends the marking for that delivery, and either goes to the delivery run's stderr. An
-item whose mark failed stays unshown, and the nudge adds it as new later.
+item whose mark failed stays unshown, and the nudge adds it as new later. A paced publisher may
+mark only a row waiting for a decision (`queued` or `surfaced`); the queue refuses a dismissed,
+accepted or snoozed one, and delivery does not send a mark for an id its own registration reported
+`suppressed`. On a sandboxed install the report can still name a finding the user dismissed in an
+earlier onboarding, because the worker cannot reach the queue until #2143, so `select` never learns
+of the dismissal. That finding is not marked, spends no slot and is never pending.
 
 Three things keep the hourly run from adding noise. It prints nothing on a run with nothing to say,
 which is most of them. It adds nothing until the first inventory report's delivery is claimed
