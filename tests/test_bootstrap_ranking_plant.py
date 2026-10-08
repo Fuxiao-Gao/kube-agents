@@ -481,6 +481,10 @@ class BootstrapRankingPlantTest(unittest.TestCase):
                 self.assertIn("could not finish the teardown an earlier run left", completed.stderr)
                 self.assertEqual(self._indices(calls, "[plant pod/platform-agent-shell-0]"), [])
                 self.assertNotIn("Plant failed", completed.stderr)
+                # A failed resolve comes after `disarm` removed the state file,
+                # so the next run does not retry it.
+                retried = "the next run tries again" in completed.stderr
+                self.assertEqual(retried, fail == "DISARM_FAIL")
 
     def test_anything_but_one_sandbox_pod_stops_the_apply_before_changing_anything(self):
         for pods in (0, 2):
