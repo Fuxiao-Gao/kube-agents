@@ -81,9 +81,10 @@ DEFAULT_SLUG = "change"
 HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? ")
 BLAME_LINE_RE = re.compile(r"^[0-9a-f]{40} ")
 DIFF_SECTION_PREFIX = "diff --git "
-# Where a patch's headers end: its first diff line, in the git form or the traditional `--- a/` form
-# git apply also accepts. Anchored to a line start, so a `Why:` that quotes either is not a cut.
-PATCH_DIFF_START_RE = re.compile(r"^(?:diff --git |--- )", re.MULTILINE)
+# Where a patch's headers end: its first diff line, in the git form or the traditional form git
+# apply also accepts (`--- a/` or `--- /dev/null`). Anchored to a line start and to those exact
+# forms, so header prose that quotes them mid-line, or a line that merely begins `--- `, is no cut.
+PATCH_DIFF_START_RE = re.compile(r"^(?:diff --git |--- (?:a/|/dev/null))", re.MULTILINE)
 NUL = "\0"
 DIFF_OLD_FILE_PREFIX = "--- a/"
 INDEX_LINE_PREFIX = "index "
@@ -128,9 +129,12 @@ GIT_ENV = {
     "GIT_CONFIG_GLOBAL": os.devnull,
     "GIT_CONFIG_NOSYSTEM": "1",
     # No user ignore file either: a scratch repository must record every file it is given.
-    "GIT_CONFIG_COUNT": "1",
+    # and paths printed verbatim, so the diff text the tool parses names a non-ASCII file as is.
+    "GIT_CONFIG_COUNT": "2",
     "GIT_CONFIG_KEY_0": "core.excludesFile",
     "GIT_CONFIG_VALUE_0": os.devnull,
+    "GIT_CONFIG_KEY_1": "core.quotePath",
+    "GIT_CONFIG_VALUE_1": "false",
     "GIT_TERMINAL_PROMPT": "0",
     "GIT_AUTHOR_NAME": "skill-overlay",
     "GIT_AUTHOR_EMAIL": "skill-overlay@example.invalid",
@@ -455,10 +459,13 @@ def refuse_ignored_files(skill, tree):
     """Refuse an upstream copy holding a file this repository's .gitignore ignores: the lock would
     hash a file `git add` never stages, so the copy would fail its check on every other checkout."""
     names = [f"{rel(copy_dir(skill))}/{name}" for name in files_of(tree)]
-    res = git(["check-ignore", "--no-index", "-v", "--stdin"], cwd=REPO_ROOT, check=False,
+    # Decided without -v, which also prints paths a `!` negation re-includes; -v only explains.
+    res = git(["check-ignore", "--no-index", "--stdin"], cwd=REPO_ROOT, check=False,
               input_text="\n".join(names) + "\n")
-    ignored = decode(res.stdout).strip()
-    if ignored:
+    paths = decode(res.stdout).strip()
+    if paths:
+        ignored = decode(git(["check-ignore", "--no-index", "-v", "--stdin"], cwd=REPO_ROOT, check=False,
+                             input_text=paths + "\n").stdout).strip()
         raise OverlayError(
             f"{skill}: upstream's copy has files this repository's .gitignore ignores, so they would "
             f"never be committed and the lock could not be verified elsewhere:\n  "
@@ -818,8 +825,11 @@ def continue_or_stop(skill, repo, res):
         state["conflicts"] += 1
         if stopped not in state["stopped"]:
             state["stopped"].append(stopped)
+        # The files git left conflicted, recorded now: `git add` takes a file off that list, and
+        # the other files the patch touches may hold marker-like lines on purpose.
+        state["conflicted"] = git_paths(["diff", "--name-only", "--diff-filter=U"], cwd=repo, check=False)
         write_exact(state_path, json.dumps(state))
-        conflicted = ", ".join(git_paths(["diff", "--name-only", "--diff-filter=U"], cwd=repo, check=False))
+        conflicted = ", ".join(state["conflicted"])
         print(f"CONFLICT: {stopped} overlaps upstream's change in: {conflicted or '(see git status)'}\n"
               f"Fix the conflict markers in {rel(repo)}/, then run "
               f"`make skills-continue SKILL={skill}`.", file=sys.stderr)
@@ -827,12 +837,11 @@ def continue_or_stop(skill, repo, res):
     finish_sync(skill, repo)
 
 
-def leftover_conflict_markers(repo):
-    files = set(git_paths(["diff", "--name-only", "--diff-filter=U"], cwd=repo, check=False))
-    # Against HEAD, not the index: a file staged with `git add` still has to be read.
-    files |= set(git_paths(["diff", "--name-only", "HEAD"], cwd=repo, check=False))
+def leftover_conflict_markers(repo, conflicted):
+    """The files among those the stop left conflicted that still hold a marker line. Read from
+    the working tree, so a file already staged with `git add` is still checked."""
     found = []
-    for name in sorted(files):
+    for name in sorted(set(conflicted)):
         path = Path(repo) / name
         if path.is_file() and any(line.startswith(CONFLICT_MARKER_PREFIXES)
                                   for line in read_exact(path).splitlines()):
@@ -851,7 +860,7 @@ def cmd_continue(skill):
         raise OverlayError(f"{skill}: {rel(overlay_dir(skill))} changed while the sync was paused. Undo "
                            f"that change and run `make skills-continue SKILL={skill}` again, or abandon "
                            f"the sync (delete {rel(repo)}); then apply the change after the sync.")
-    leftover = leftover_conflict_markers(repo)
+    leftover = leftover_conflict_markers(repo, state.get("conflicted", []))
     if leftover:
         raise OverlayError(f"{skill}: conflict markers remain in {', '.join(leftover)} under {rel(repo)}/; "
                            f"finish resolving them first")

@@ -424,6 +424,29 @@ class Scenario(unittest.TestCase):
         self.assertIn("chart.tgz", out)
         self.assertIn(".gitignore ignores", out)
         self.assertFalse((self.overlay("storage") / "upstream.lock").exists())
+        # The refusal's own remedy, a negation, lets the sync through.
+        (self.repo / ".gitignore").write_text(".skill-sync/\n*.tgz\n!third_party/google-skills/storage/**\n")
+        self.assertIn("adopted storage", self.run_tool("sync", "storage"))
+
+    def test_marker_lines_outside_the_conflicted_files_do_not_block_continue(self):
+        self.run_tool("sync", "basics", "--ref", "v1")
+        md = self.skill()
+        md.write_text(md.read_text().replace("--region=REGION --quiet", "--location=LOCATION --quiet"))
+        (md.parent / "references" / "merge.md").write_text("<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> branch\n")
+        self.run_tool("refresh", "basics", "--message", "use location")
+        self.run_tool("sync", "basics", "--ref", "v4", expect=2)
+        scratch = self.repo / ".skill-sync" / "basics"
+        git(scratch, "checkout", "--theirs", "SKILL.md")
+        self.assertIn("synced basics", self.run_tool("continue", "basics"))
+        self.assertIn("<<<<<<< HEAD", (md.parent / "references" / "merge.md").read_text())
+
+    def test_overlap_warning_names_the_patch_for_a_non_ascii_file(self):
+        self.run_tool("sync", "basics", "--ref", "v1")
+        cafe = self.skill().parent / "references" / "caf\u00e9.md"
+        cafe.write_text("a\nb\nc\n")
+        self.run_tool("refresh", "basics", "--message", "add cafe")
+        cafe.write_text("a\nB\nc\n")
+        self.assertIn("lines that 0001-add-cafe.patch introduced", self.run_tool("refresh", "basics", "--message", "edit"))
 
     def test_patch_in_traditional_form_survives_a_sync(self):
         self.adopt_with_two_patches()
@@ -497,11 +520,16 @@ class Helpers(unittest.TestCase):
         for name in ("a b.md", "caf\u00e9.md"):
             (repo / name).write_text("<<<<<<< ours\nx\n=======\ny\n>>>>>>> theirs\n")
         git(repo, "add", "-A")
-        self.assertEqual(sorted(self.tool.leftover_conflict_markers(repo)), ["a b.md", "caf\u00e9.md"])
+        self.assertEqual(sorted(self.tool.leftover_conflict_markers(repo, ["a b.md", "caf\u00e9.md"])),
+                         ["a b.md", "caf\u00e9.md"])
 
     def test_patch_header_stops_at_a_traditional_diff_and_not_inside_why(self):
         text = "Subject: s\n\nWhy: quotes diff --git here\nRetire-When: x\n\n--- a/SKILL.md\n+++ b/SKILL.md\n"
         self.assertEqual(self.tool.patch_header(text), "Subject: s\n\nWhy: quotes diff --git here\nRetire-When: x\n\n")
+
+    def test_patch_header_keeps_a_prose_line_that_begins_with_dashes(self):
+        text = "Subject: s\n\nWhy: first line\n--- see the upstream thread\nRetire-When: x\n\ndiff --git a/S b/S\n"
+        self.assertEqual(self.tool.patch_header(text), text[: text.index("diff --git")])
 
     def test_split_append_keeps_crlf_body(self):
         body, appended = self.tool.split_append("a\r\n\n<!-- kube-agents: local addition -->\nZ\n", "a\r\n")
