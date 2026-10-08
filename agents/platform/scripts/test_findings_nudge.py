@@ -428,6 +428,11 @@ class FirstReportTests(NudgeHarness):
         # The re-arm runbook deletes it; a run that saw it a moment before
         # must not fail on the read that follows.
         self.assertIsNone(nudge._filed_at(self.gateway / nudge.SCAN_FILED_MARKER))
+        self.file_scan(at(6, 9))
+        with unittest.mock.patch.object(nudge, "_filed_at", return_value=None):
+            self.assertEqual(nudge.first_report_hold(self.gateway, at(6, 12)), (False, ""))
+            self.run_at(at(6, 12), [finding()])
+        self.assertIn("New: 1 critical finding.", self.out.getvalue())
 
     def test_additions_start_once_it_was_delivered(self):
         self.file_scan(at(6, 9))
