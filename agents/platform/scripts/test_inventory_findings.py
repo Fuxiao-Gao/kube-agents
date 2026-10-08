@@ -442,6 +442,15 @@ class SelectItemsTests(unittest.TestCase):
         shown, deferred, others = self.select(specs)
         self.assertEqual((shown, deferred, others), ([], 0, 2))
 
+    def test_a_line_with_an_observation_and_an_ordinary_row_counts_once(self):
+        # One check on one cluster, on a kube-system workload and on a user one.
+        specs = [
+            (MAJOR, {"check": "observation", "namespace": "kube-system", "object": "kube-dns"}, {"actionable": False}),
+            (MAJOR, {"check": "observation", "namespace": "payments", "object": "api"}),
+        ]
+        shown, deferred, others = self.select(specs)
+        self.assertEqual((shown, deferred, others), ([], 0, 1))
+
     def test_an_excluded_row_is_neither_listed_nor_counted(self):
         items, scores = batch(*criticals(3))
         dismissed = inv.fq.derive_finding_id("check-0", "acme", "prod", "payments", "obj-0")

@@ -461,7 +461,8 @@ def select_items(
     best row in the queue's order; an item is critical when any of its rows
     is. The report lists the top `limit` critical items and nothing else.
     Provider-managed observations (`fq.rolled_up`) are never items and count
-    once per line (`fq.item_key`) among the others, as the nudge counts them.
+    once per line (`fq.item_key`) among the others, as the nudge counts them;
+    a line that also has an ordinary row is already counted as that item.
     Ids in `exclude` are rows the user dismissed, which are neither listed nor
     counted.
     """
@@ -487,7 +488,7 @@ def select_items(
         lines.setdefault(fq.item_key(row), []).append(row)
     critical = [members for members in lines.values() if any(r["severity"] == fq.SEVERITIES[0] for r in members)]
     shown = critical[:limit]
-    return shown, len(critical) - len(shown), len(lines) - len(critical) + len(managed)
+    return shown, len(critical) - len(shown), len(lines) - len(critical) + len(managed - lines.keys())
 
 
 def _plural(count: int, singular: str, plural: str) -> str:
