@@ -531,6 +531,27 @@ class Helpers(unittest.TestCase):
         self.assertNotIn("index 111..222", out)
         self.assertIn("index 333..444", out)
 
+    def test_stage_all_sees_a_same_size_edit_with_unchanged_stat(self):
+        # What Linux CI hit: git compares whole-second times, so a same-size edit copied in
+        # with the old mtime looks unchanged to `git add` unless the index is rebuilt.
+        repo = Path(tempfile.mkdtemp())
+        try:
+            git(repo, "init", "-q", "-b", "main")
+            git(repo, "config", "core.checkStat", "minimal")
+            git(repo, "config", "core.trustctime", "false")
+            f = repo / "a.md"
+            f.write_text("x\n")
+            old = f.stat().st_mtime - 10
+            os.utime(f, (old, old))
+            git(repo, "add", "-A")
+            git(repo, "commit", "-q", "-m", "x")
+            f.write_text("y\n")
+            os.utime(f, (old, old))
+            self.tool.stage_all(repo)
+            self.assertEqual(git(repo, "diff", "--cached", "--name-only").stdout.split(), ["a.md"])
+        finally:
+            shutil.rmtree(repo)
+
     def test_patch_header_stops_at_a_traditional_diff_and_not_inside_why(self):
         text = "Subject: s\n\nWhy: quotes diff --git here\nRetire-When: x\n\n--- a/SKILL.md\n+++ b/SKILL.md\n"
         self.assertEqual(self.tool.patch_header(text), "Subject: s\n\nWhy: quotes diff --git here\nRetire-When: x\n\n")
