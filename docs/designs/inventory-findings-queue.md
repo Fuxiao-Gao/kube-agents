@@ -939,8 +939,9 @@ once shown, like any other.
 `inventory_findings.py select` chooses the first report's items. It reads the scores the
 prioritization worker just wrote and derives each finding's score and severity with the queue's own
 functions, so the choice does not depend on the queue being reachable and sees only this sweep. It
-gathers rows into items, leaves out provider-managed observations (§4.4) and rows the user has
-dismissed, and takes the top critical items in the queue's order. It never fills the list: a sweep
+gathers rows into items, leaves out provider-managed observations (§4.4) and the ids the worker's
+`register` reported as suppressed (on a sandboxed install, where `register` cannot reach the queue,
+there are none), and takes the top critical items in the queue's order. It never fills the list: a sweep
 with fewer criticals than the limit lists those, a sweep with none gets a report that says so and
 lists nothing, and a limit of 0 lists nothing. The worker writes the report from what `select`
 printed. Its roll-up line counts every item not listed, plus each line of provider-managed
