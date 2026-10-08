@@ -81,6 +81,10 @@ DEFAULT_SLUG = "change"
 HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? ")
 BLAME_LINE_RE = re.compile(r"^[0-9a-f]{40} ")
 DIFF_SECTION_PREFIX = "diff --git "
+# Where a patch's headers end: its first diff line, in the git form or the traditional `--- a/` form
+# git apply also accepts. Anchored to a line start, so a `Why:` that quotes either is not a cut.
+PATCH_DIFF_START_RE = re.compile(r"^(?:diff --git |--- )", re.MULTILINE)
+NUL = "\0"
 DIFF_OLD_FILE_PREFIX = "--- a/"
 INDEX_LINE_PREFIX = "index "
 BINARY_PATCH_MARKER = "GIT binary patch"
@@ -145,11 +149,12 @@ class OverlayError(Exception):
 # ---------------------------------------------------------------- helpers
 
 
-def git(args, cwd, check=True, extra_env=None):
+def git(args, cwd, check=True, extra_env=None, input_text=None):
     env = {k: v for k, v in os.environ.items() if k not in REPO_LOCAL_GIT_ENV}
     env.update(GIT_ENV)
     env.update(extra_env or {})
-    res = subprocess.run(["git", *args], cwd=cwd, env=env, capture_output=True)
+    res = subprocess.run(["git", *args], cwd=cwd, env=env, capture_output=True,
+                         input=None if input_text is None else input_text.encode())
     if check and res.returncode != 0:
         raise OverlayError(f"git {' '.join(args)} failed:\n{decode(res.stderr)}")
     return res
@@ -304,8 +309,8 @@ def patches(skill):
 
 
 def patch_header(text):
-    idx = text.find(DIFF_SECTION_PREFIX)
-    return text if idx < 0 else text[:idx]
+    match = PATCH_DIFF_START_RE.search(text)
+    return text if match is None else text[: match.start()]
 
 
 def patch_why(path):
@@ -381,7 +386,13 @@ def build(skill, dest):
 
 def verify_copy(skill):
     lock = read_lock(skill)
-    if not copy_dir(skill).is_dir() or tree_sha256(copy_dir(skill)) != lock[LOCK_SHA256_KEY]:
+    if not copy_dir(skill).is_dir():
+        raise OverlayError(
+            f"{skill}: {rel(copy_dir(skill))} does not exist but {LOCK_NAME} does. Commit the "
+            f"upstream copy (a new directory, so `git add {rel(copy_dir(skill))}`), or remove the "
+            f"lock to stop mirroring the skill."
+        )
+    if tree_sha256(copy_dir(skill)) != lock[LOCK_SHA256_KEY]:
         raise OverlayError(
             f"{skill}: {rel(copy_dir(skill))} no longer matches the sha256 in {LOCK_NAME}. The "
             f"upstream copy was edited by hand: revert it, and change it only with "
@@ -431,6 +442,29 @@ def require_on_upstream_branch(cache, commit):
         raise OverlayError(
             f"commit {commit[:12]} is not on upstream's {UPSTREAM_BRANCH} branch. A commit that exists "
             f"only in a fork is not published upstream and cannot be pinned."
+        )
+
+
+def git_paths(args, cwd, **kw):
+    """Paths from a git listing run with -z: NUL-separated, so a space or a non-ASCII byte in a
+    name survives (whitespace splitting breaks the first, core.quotePath quotes the second)."""
+    return [p for p in decode(git([args[0], "-z", *args[1:]], cwd, **kw).stdout).split(NUL) if p]
+
+
+def refuse_ignored_files(skill, tree):
+    """Refuse an upstream copy holding a file this repository's .gitignore ignores: the lock would
+    hash a file `git add` never stages, so the copy would fail its check on every other checkout."""
+    names = [f"{rel(copy_dir(skill))}/{name}" for name in files_of(tree)]
+    res = git(["check-ignore", "--no-index", "-v", "--stdin"], cwd=REPO_ROOT, check=False,
+              input_text="\n".join(names) + "\n")
+    ignored = decode(res.stdout).strip()
+    if ignored:
+        raise OverlayError(
+            f"{skill}: upstream's copy has files this repository's .gitignore ignores, so they would "
+            f"never be committed and the lock could not be verified elsewhere:\n  "
+            + ignored.replace("\n", "\n  ")
+            + f"\nAdd a negation for them to .gitignore (for example `!{rel(copy_dir(skill))}/**`), "
+            f"then run this again."
         )
 
 
@@ -704,8 +738,12 @@ def cmd_import(skill, ref):
     cache = upstream_cache()
     commit = resolve(cache, ref)
     require_on_upstream_branch(cache, commit)
-    if not export_skill(cache, commit, skill, copy_dir(skill)):
-        raise OverlayError(f"upstream has no {UPSTREAM_SKILLS_PATH}/{skill} at {commit[:12]}")
+    with tempfile.TemporaryDirectory() as tmp:
+        exported = Path(tmp) / skill
+        if not export_skill(cache, commit, skill, exported):
+            raise OverlayError(f"upstream has no {UPSTREAM_SKILLS_PATH}/{skill} at {commit[:12]}")
+        refuse_ignored_files(skill, exported)
+        replace_tree(exported, copy_dir(skill))
     write_lock(skill, commit, tree_sha256(copy_dir(skill)))
     with tempfile.TemporaryDirectory() as tmp:
         build(skill, Path(tmp) / skill)
@@ -729,6 +767,7 @@ def cmd_sync(skill, ref=None):
         if not export_skill(cache, commit, skill, new_copy):
             raise OverlayError(f"upstream has no {UPSTREAM_SKILLS_PATH}/{skill} at {commit[:12]}. If it was "
                                f"renamed or removed, move or remove the copy, overlay and lock by hand.")
+        refuse_ignored_files(skill, new_copy)
         if not is_mirrored(skill):
             if generated_dir(skill).exists():
                 raise OverlayError(
@@ -780,7 +819,7 @@ def continue_or_stop(skill, repo, res):
         if stopped not in state["stopped"]:
             state["stopped"].append(stopped)
         write_exact(state_path, json.dumps(state))
-        conflicted = git_out(["diff", "--name-only", "--diff-filter=U"], cwd=repo, check=False)
+        conflicted = ", ".join(git_paths(["diff", "--name-only", "--diff-filter=U"], cwd=repo, check=False))
         print(f"CONFLICT: {stopped} overlaps upstream's change in: {conflicted or '(see git status)'}\n"
               f"Fix the conflict markers in {rel(repo)}/, then run "
               f"`make skills-continue SKILL={skill}`.", file=sys.stderr)
@@ -789,9 +828,9 @@ def continue_or_stop(skill, repo, res):
 
 
 def leftover_conflict_markers(repo):
-    files = set(git_out(["diff", "--name-only", "--diff-filter=U"], cwd=repo, check=False).split())
+    files = set(git_paths(["diff", "--name-only", "--diff-filter=U"], cwd=repo, check=False))
     # Against HEAD, not the index: a file staged with `git add` still has to be read.
-    files |= set(git_out(["diff", "--name-only", "HEAD"], cwd=repo, check=False).split())
+    files |= set(git_paths(["diff", "--name-only", "HEAD"], cwd=repo, check=False))
     found = []
     for name in sorted(files):
         path = Path(repo) / name
@@ -859,8 +898,7 @@ def cmd_status():
             print(f"up to date  {skill}")
         else:
             print(f"behind      {skill}: {newer_upstream_commits(cache, commit, skill)} newer upstream commit(s)")
-    listing = git_out(["ls-tree", "--name-only", f"{UPSTREAM_BRANCH}:{UPSTREAM_SKILLS_PATH}"], cwd=cache)
-    for skill in listing.split():
+    for skill in git_paths(["ls-tree", "--name-only", f"{UPSTREAM_BRANCH}:{UPSTREAM_SKILLS_PATH}"], cwd=cache):
         if skill.startswith(UPSTREAM_SKILL_PREFIX) and not is_mirrored(skill):
             clash = " (ships here without a lock; see `make skills-import`)" if generated_dir(skill).exists() else ""
             print(f"not mirrored {skill}{clash}")
@@ -870,7 +908,7 @@ def changed_paths(base):
     """Paths changed between base and HEAD. In CI, HEAD is the pull request's merge commit, so a
     two-dot diff against the base commit is exactly the pull request's change, and it needs no
     history beyond the two commits."""
-    return git_out(["diff", "--name-only", base, "HEAD"], cwd=REPO_ROOT).splitlines()
+    return git_paths(["diff", "--name-only", base, "HEAD"], cwd=REPO_ROOT)
 
 
 def cmd_verify_upstream(changed_since=None):

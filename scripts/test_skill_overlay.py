@@ -409,6 +409,31 @@ class Scenario(unittest.TestCase):
         (self.skill().parent / "SKILL.md.swp").write_bytes(b"\0junk")
         self.assertIn("ok: 2", self.run_tool("check"))
 
+    def test_missing_copy_is_reported_as_missing(self):
+        self.adopt_with_two_patches()
+        shutil.rmtree(self.repo / "third_party" / "google-skills" / "storage")
+        self.assertIn("does not exist but upstream.lock does", self.run_tool("check", expect=1))
+
+    def test_upstream_file_the_repo_ignores_is_refused(self):
+        (self.repo / ".gitignore").write_text(".skill-sync/\n*.tgz\n")
+        chart = self.upstream / "skills" / "cloud" / "storage" / "chart.tgz"
+        chart.write_bytes(b"\0chart")
+        git(self.upstream, "add", "-A")
+        git(self.upstream, "commit", "-q", "-m", "chart")
+        out = self.run_tool("sync", "storage", expect=1)
+        self.assertIn("chart.tgz", out)
+        self.assertIn(".gitignore ignores", out)
+        self.assertFalse((self.overlay("storage") / "upstream.lock").exists())
+
+    def test_patch_in_traditional_form_survives_a_sync(self):
+        self.adopt_with_two_patches()
+        patch = self.overlay() / "0001-use-location.patch"
+        patch.write_text("".join(l for l in patch.read_text().splitlines(True) if not l.startswith("diff --git ")))
+        self.run_tool("check")
+        self.run_tool("sync", "basics", "--ref", "v2")
+        self.assertEqual(patch.read_text().count("+++ b/SKILL.md"), 1)
+        self.assertIn("ok: 2", self.run_tool("check"))
+
     def test_executable_bit_is_part_of_the_check(self):
         script = self.upstream / "skills" / "cloud" / "storage" / "run.sh"
         script.write_text("#!/bin/sh\necho hi\n")
@@ -461,6 +486,22 @@ class Helpers(unittest.TestCase):
         out = self.tool.strip_index_lines(diff)
         self.assertNotIn("index 111..222", out)
         self.assertIn("index 333..444", out)
+
+    def test_conflict_markers_found_in_a_staged_file_with_a_space(self):
+        repo = Path(tempfile.mkdtemp())
+        git(repo, "init", "-q", "-b", "main")
+        (repo / "a b.md").write_text("x\n")
+        (repo / "caf\u00e9.md").write_text("x\n")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "base")
+        for name in ("a b.md", "caf\u00e9.md"):
+            (repo / name).write_text("<<<<<<< ours\nx\n=======\ny\n>>>>>>> theirs\n")
+        git(repo, "add", "-A")
+        self.assertEqual(sorted(self.tool.leftover_conflict_markers(repo)), ["a b.md", "caf\u00e9.md"])
+
+    def test_patch_header_stops_at_a_traditional_diff_and_not_inside_why(self):
+        text = "Subject: s\n\nWhy: quotes diff --git here\nRetire-When: x\n\n--- a/SKILL.md\n+++ b/SKILL.md\n"
+        self.assertEqual(self.tool.patch_header(text), "Subject: s\n\nWhy: quotes diff --git here\nRetire-When: x\n\n")
 
     def test_split_append_keeps_crlf_body(self):
         body, appended = self.tool.split_append("a\r\n\n<!-- kube-agents: local addition -->\nZ\n", "a\r\n")

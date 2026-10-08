@@ -118,6 +118,7 @@ Local-Issue: #2037
 Upstream-Issue: none (specific to this repository)
 Retire-When: never; the persona rule is ours
 
+diff --git a/SKILL.md b/SKILL.md
 --- a/SKILL.md
 +++ b/SKILL.md
 @@ -224,8 +224,12 @@
