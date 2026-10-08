@@ -244,6 +244,16 @@ SOURCES: dict[str, Source] = {
         "k8s-operator/internal/controller/platformagent_a2a_manifests.go",
         ("func buildA2ASessionNetworkPolicy", "a2aSessionComponent", "a2aPartOf ="),
     ),
+    # The A2A gateway's rendered ingress: its three fences and the gateway
+    # container's declared ports, written by an operator Go test
+    # (TestRenderedA2AGatewayIngressMatchesTheConformanceFixture) because no
+    # golden renders mode next. The anchors are the collector's namespace and
+    # the metrics port's name: lose either and C1's assertion has nothing to
+    # hold the fences to.
+    "a2a_gateway_ingress_fixture": Source(
+        "k8s-operator/internal/controller/testdata/a2a-gateway-ingress.yaml",
+        ("kind: NetworkPolicy", "gke-gmp-system", "name: a2a-metrics"),
+    ),
     # The eval-only inject door. Two files, two modules: the operator decides
     # whether the door is rendered at all (Go module k8s-operator) and the
     # gateway decides what it does once it is (Go module a2a). A3's darkness

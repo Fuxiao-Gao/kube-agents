@@ -477,6 +477,74 @@ class C1IsolationIsStructural(unittest.TestCase):
             "fences no pod: fence requires %r, spawner stamps %r" % (required, stamped),
         )
 
+    def test_C1_the_a2a_gateway_admits_the_collector_to_the_metrics_port_and_nobody_else(self) -> None:
+        """The gateway's fences admit one peer, to one port: the collector, to metrics.
+
+        The A2A gateway's doors listen on loopback, and its fences deny every
+        pod on their ports; a door reached from the pod network is a task
+        submission endpoint guarded by a bearer token alone. The metrics
+        listener is the one port on that pod the pod network is meant to
+        reach, and only from the managed-Prometheus collector's namespace --
+        the credential broker's second rule, copied. A rule that admits any
+        other peer, or admits the collector to any other port, widens the
+        gateway past what the metrics listener needed.
+
+        Read from the operator's real render (the fixture its Go test keeps
+        equal to the builder), with both doors armed so all three fences
+        exist: each door's, and the gateway's own, which renders on every next
+        gateway door or no door because the metrics listener binds every
+        interface (#2473).
+        """
+        documents = h.yaml_documents("a2a_gateway_ingress_fixture")
+        policies = h.objects_of_kind(documents, "NetworkPolicy")
+        deployments = h.objects_of_kind(documents, "Deployment")
+        self.assertEqual(len(policies), 3, "the fixture no longer renders the three gateway fences")
+        self.assertTrue(
+            any(p["metadata"]["name"].endswith("-a2a-gateway-netpol") for p in policies),
+            "the fixture no longer renders the gateway's own fence, the one no door flag decides",
+        )
+        self.assertEqual(len(deployments), 1, "the fixture no longer carries the gateway's ports")
+
+        gateway = deployments[0]
+        ports = [p for c in h.containers_of(gateway) for p in c.get("ports") or []]
+        metrics = [p["containerPort"] for p in ports if p.get("name") == "a2a-metrics"]
+        doors = {p["containerPort"] for p in ports if p.get("name") != "a2a-metrics"}
+        self.assertEqual(len(metrics), 1, "the gateway declares no single a2a-metrics port")
+        self.assertTrue(doors, "the fixture renders no door port, so nothing here is fenced")
+        self.assertNotIn(metrics[0], doors, "the metrics port is also a door's port")
+        collector = {"matchLabels": {"kubernetes.io/metadata.name": "gke-gmp-system"}}
+        # The labels the gateway pod carries, not the Deployment's name: a
+        # fence requiring a label the pod lacks selects nothing, and the API
+        # server reports that as success.
+        pod_labels = ((gateway["spec"].get("template") or {}).get("metadata") or {}).get("labels") or {}
+        self.assertTrue(pod_labels, "the fixture carries no gateway pod labels, so no selector can be checked")
+
+        for policy in policies:
+            name = policy["metadata"]["name"]
+            spec = policy["spec"]
+            with self.subTest(policy=name):
+                selector = spec.get("podSelector") or {}
+                required = selector.get("matchLabels") or {}
+                self.assertEqual(set(selector), {"matchLabels"}, "the fence's podSelector is not plain matchLabels")
+                self.assertTrue(required, "the fence's podSelector is empty, so it selects every pod")
+                self.assertEqual(
+                    required, {key: pod_labels.get(key) for key in required},
+                    "the fence selects labels the gateway pod does not carry, so it fences no pod: "
+                    "fence requires %r, pod carries %r" % (required, pod_labels),
+                )
+                self.assertIn("Ingress", spec.get("policyTypes") or [], "the fence governs no ingress")
+                rules = spec.get("ingress") or []
+                self.assertEqual(len(rules), 1, "the fence admits more than the collector's rule")
+                rule = rules[0]
+                self.assertEqual(
+                    rule.get("from"), [{"namespaceSelector": collector}],
+                    "the fence admits a peer other than the collector's namespace, alone",
+                )
+                self.assertEqual(
+                    rule.get("ports"), [{"port": metrics[0], "protocol": "TCP"}],
+                    "the collector is admitted to a port other than the metrics listener's",
+                )
+
     def test_C1_a_session_pod_carries_no_kubernetes_identity(self) -> None:
         """The premise the fence's rule set rests on.
 
