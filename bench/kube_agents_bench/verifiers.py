@@ -4060,6 +4060,11 @@ class BootstrapReportCriticalsVerifier(_OnboardingPollVerifier):
     that is also a critical row's are not looked for, so a critical item that
     says which cluster it is on does not read as padding.
 
+    Names are looked for, not counts. The case plants single-row lines, so a
+    gathered line the SOP lets the worker name by count alone ("12
+    Deployments in ``shop``") does not arise, and such a mention is not graded:
+    it would read as not named.
+
     ``status="error"`` when the worker scored ``limit`` or fewer items
     critical: a report listing every critical and one capped at ``limit``
     are then the same report, so the run cannot grade the cap. Also an error:
