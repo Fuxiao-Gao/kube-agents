@@ -254,6 +254,20 @@ def test_rows_on_one_check_are_one_critical_item(sandbox: Path) -> None:
     assert "name 2 of the 3" in result.reason
 
 
+def test_rows_are_gathered_by_the_scorers_item_key(sandbox: Path) -> None:
+    # Two spellings of one check are one line to `select`, so one item here.
+    items = json.loads((sandbox / "INVENTORY.items.json").read_text())
+    for item in items["items"]:
+        if item["object"] == "pricing-engine":
+            item["check"] = "Crashloop_Backoff"
+    (sandbox / "INVENTORY.items.json").write_text(json.dumps(items))
+    (sandbox / "INVENTORY.delivered.md").write_text(_report("invoice-worker", "quote-api", "pricing-engine"))
+    result = _verify()
+    assert result.status == "pass", result.reason
+    assert "crashloop-backoff (pricing-engine, quote-api)" in result.reason
+    assert "name 2 of the 3" in result.reason
+
+
 def test_a_provider_managed_observation_is_not_an_item(sandbox: Path) -> None:
     scores = json.loads((sandbox / "INVENTORY.scores.json").read_text())
     for item in _items(sandbox):

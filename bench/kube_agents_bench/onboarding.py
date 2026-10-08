@@ -169,11 +169,13 @@ SCORES_FILE = f"{DATA_ROOT}/INVENTORY.scores.json"
 SCORED_READ = "__ONBOARDING_SCORED_REPORT__"
 # Far above the SOP's 4000-character ceiling; the read stops here.
 MAX_REPORT_BYTES = 1 << 16
-SCORED_ROW_FIELDS = ("check_slug", "project", "cluster", "namespace", "object", "severity", "provider_managed", "actionable")
+SCORED_ROW_FIELDS = ("check_slug", "project", "cluster", "namespace", "object", "severity")
 
 # Runs in the sandbox. Prints the report, delivered copy first, and every row of
-# the batch with the severity the sandbox's scorer gives it, or why the batch
-# could not be scored. A scorer that cannot be imported is printed as "error".
+# the batch with the severity the sandbox's scorer gives it, the line it is
+# gathered into (`fq.item_key`) and whether it is rolled up (`fq.rolled_up`), as
+# `select` decides them, or why the batch could not be scored. A scorer that
+# cannot be imported is printed as "error".
 _SCORED_SCRIPT = """
 import json, os, sys
 items_path, scores_path, delivered, report, parser_dir, module, max_bytes, max_errors, sentinel, fields = sys.argv[1:11]
@@ -201,7 +203,11 @@ else:
             scores = json.load(fh)["scores"]
         payloads = scorer.build_payloads(items, scores)
         out["rows"] = [
-            {k: row.get(k) for k in fields.split(",")}
+            dict(
+                {k: row.get(k) for k in fields.split(",")},
+                item_key=list(scorer.fq.item_key(row)),
+                rolled_up=scorer.fq.rolled_up(row),
+            )
             for row in (scorer.fq.validate_finding(p) for p in payloads)
         ]
     except scorer.Failure as exc:
@@ -582,7 +588,8 @@ def read_scored_report(shell: Callable[[str, float], str], timeout: float) -> di
 
     ``"report"`` is ``delivered``, ``written`` (not yet delivered), ``absent``
     or ``unreadable``, with its text in ``"text"``. ``"rows"`` holds each
-    finding's identity and severity, or is ``None`` with ``"errors"`` saying
+    finding's identity and severity, with its ``"item_key"`` and
+    ``"rolled_up"`` from the sandbox's queue module, or is ``None`` with ``"errors"`` saying
     why the batch could not be scored. An ``"error"`` is a scorer that could
     not be imported. ``shell`` is :func:`sandbox_shell`, a parameter so the
     tests can run it locally.

@@ -4044,9 +4044,11 @@ class BootstrapReportCriticalsVerifier(_OnboardingPollVerifier):
     (:mod:`kube_agents_bench.onboarding`), the report the worker wrote (the
     delivered copy first) and the worker's ``INVENTORY.scores.json``, scored
     with the sandbox's own ``inventory_findings.py`` as ``register`` would score
-    it. The critical items are this batch's, not the live queue's: rows with
-    the same check on one project and cluster are one item, an item is critical
-    when any of its rows is, and a provider-managed observation is not an item.
+    it. The critical items are this batch's, not the live queue's, gathered as
+    ``select`` gathers them, by the sandbox's own queue module: rows sharing an
+    ``fq.item_key`` (one check on one project and cluster) are one item, an
+    item is critical when any of its rows is, and a row ``fq.rolled_up`` calls
+    a provider-managed observation is not an item.
 
     ``limit``: how many critical items the report may list. Passes when the
     report's numbered items name exactly ``limit`` of the critical items, an
@@ -4077,12 +4079,12 @@ class BootstrapReportCriticalsVerifier(_OnboardingPollVerifier):
                 f"{pod}: the batch cannot be scored, so which findings are critical is unknown: {read.get('errors')}",
                 read,
             )
-        critical: dict[tuple[str, str, str], set[str]] = {}
+        critical: dict[tuple[str, ...], set[str]] = {}
         for row in read["rows"]:
-            if row.get("provider_managed") and not row.get("actionable", True):
+            if row.get("rolled_up"):
                 continue
             if row.get("severity") == _CRITICAL:
-                key = tuple(str(row.get(k) or "").lower() for k in ("check_slug", "project", "cluster"))
+                key = tuple(str(part) for part in row.get("item_key") or ())
                 critical.setdefault(key, set()).add(str(row.get("object")))
         labels = {key: f"{key[0]} ({', '.join(sorted(objects))})" for key, objects in critical.items()}
         raw: dict[str, Any] = {"critical": sorted(labels.values()), "report": read.get("report")}
