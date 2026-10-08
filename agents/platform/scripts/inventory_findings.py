@@ -461,8 +461,9 @@ def select_items(
     best row in the queue's order; an item is critical when any of its rows
     is. The report lists the top `limit` critical items and nothing else.
     Provider-managed observations (`fq.rolled_up`) are never items and count
-    one each among the others, as the nudge counts them. Ids in `exclude` are
-    rows the user dismissed, which are neither listed nor counted.
+    once per line (`fq.item_key`) among the others, as the nudge counts them.
+    Ids in `exclude` are rows the user dismissed, which are neither listed nor
+    counted.
     """
     payloads = build_payloads(items, scores)
     by_ref = {item["id"]: item for item in items}
@@ -475,18 +476,18 @@ def select_items(
         # line's, as registering them would leave it.
         rows[row["id"]] = row
 
-    managed = 0
+    managed: set[tuple] = set()
     lines: dict[tuple, list[dict]] = {}
     for row in sorted(rows.values(), key=fq.ranked_sort_key):
         if row["id"] in exclude:
             continue
         if fq.rolled_up(row):
-            managed += 1
+            managed.add(fq.item_key(row))
             continue
         lines.setdefault(fq.item_key(row), []).append(row)
     critical = [members for members in lines.values() if any(r["severity"] == fq.SEVERITIES[0] for r in members)]
     shown = critical[:limit]
-    return shown, len(critical) - len(shown), len(lines) - len(critical) + managed
+    return shown, len(critical) - len(shown), len(lines) - len(critical) + len(managed)
 
 
 def _plural(count: int, singular: str, plural: str) -> str:

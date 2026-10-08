@@ -431,6 +431,17 @@ class SelectItemsTests(unittest.TestCase):
         self.assertEqual(refs(shown), [["f002"]])
         self.assertEqual((deferred, others), (0, 1))
 
+    def test_provider_managed_observations_are_counted_by_line(self):
+        # Three observations of one check on one cluster are one line; the
+        # same check on another cluster is another, as the nudge counts them.
+        observation = {"actionable": False}
+        specs = [
+            (MAJOR, {"check": "observation", "namespace": "kube-system", "object": name}, observation)
+            for name in ("kube-dns", "konnectivity", "metrics-server")
+        ] + [(MAJOR, {"check": "observation", "cluster": "dev", "namespace": "kube-system"}, observation)]
+        shown, deferred, others = self.select(specs)
+        self.assertEqual((shown, deferred, others), ([], 0, 2))
+
     def test_an_excluded_row_is_neither_listed_nor_counted(self):
         items, scores = batch(*criticals(3))
         dismissed = inv.fq.derive_finding_id("check-0", "acme", "prod", "payments", "obj-0")

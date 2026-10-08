@@ -943,7 +943,8 @@ gathers rows into items, leaves out provider-managed observations (§4.4) and ro
 dismissed, and takes the top critical items in the queue's order. It never fills the list: a sweep
 with fewer criticals than the limit lists those, a sweep with none gets a report that says so and
 lists nothing, and a limit of 0 lists nothing. The worker writes the report from what `select`
-printed. Its roll-up line counts every item not listed and says how many of them are critical, and
+printed. Its roll-up line counts every item not listed, plus each line of provider-managed
+observations once, as the nudge's open count does. It says how many of them are critical, and
 when criticals were left out or none was listed it also gives the hour and daily count at which the
 nudge adds the rest. The limit is the value the onboarding hand-off read when it filed the ranking
 card, written to `/opt/data/INVENTORY.limits.json`. `select` also writes the listed rows' ids to
