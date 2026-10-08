@@ -1867,8 +1867,9 @@ func renderConfigYAML(agent *agentv1alpha1.PlatformAgent, agentPlugins []*agentv
 		// the volume with.
 		Database *managedDatabaseConfig `json:"database,omitempty"`
 		// Hooks carries the bridge activity door's pod-wide entry under
-		// mode next with a bridge declared (a2aActivityHook); absent
-		// otherwise, so a default install's config is unchanged.
+		// mode next with an api-executor bridge in the pod, rendered or
+		// declared (a2aActivityHook); absent otherwise, so a today
+		// install's config is unchanged.
 		Hooks *managedHooks `json:"hooks,omitempty"`
 	}{}
 
@@ -3177,6 +3178,18 @@ func buildPodTemplateSpec(agent *agentv1alpha1.PlatformAgent, configHash, fluent
 	// exactly that reason — see bridgeIdentity.
 	if a2aAgentSurface(agent) {
 		mountIntoContainer(containers, "platform-agent", a2aBusTokenVolumeMount())
+	}
+	// The bridge, rendered from the finished agent container (every mount
+	// above included, the bus token then dropped) when the CR declares none
+	// of its own, once the bus is provisioned (a2aBridgeInPod). It takes the executor environment every task-executing
+	// sidecar gets, like a declared bridge does. See platformagent_a2a_bridge.go.
+	if a2aBridgeInPod(agent) {
+		for _, c := range containers {
+			if c.Name == a2aAgentContainerName {
+				sidecars = append(sidecars, a2aExecutorSidecarEnv([]corev1.Container{buildA2ABridgeContainer(agent, c)})...)
+				break
+			}
+		}
 	}
 
 	defaultAnnotations := map[string]string{
