@@ -301,12 +301,26 @@ def _register_findings(data_dir: Path, in_sandbox: bool) -> None:
     Registering is an upsert, so a batch the worker did register is written
     again unchanged.
 
+    Nothing is registered when the hand-off filed no prioritization card
+    (``bootstrap_handoff.NO_RANKING``): no cluster was audited, nothing
+    rewrote the items and scores, and any left beside the report are an
+    earlier sweep's, whose complete scopes would re-open findings and mark
+    current ones absent.
+
     Never raises. Runs before the claim, so it adds nothing to the claimed
     run's work (``RETIRE_AFTER_SECONDS``), and the nudge holds until the claim.
     """
     try:
+        import bootstrap_handoff  # beside this script in the pod
         import inventory_findings  # beside this script in the pod
 
+        handed_off = bootstrap_handoff._read_marker(data_dir / bootstrap_handoff.HANDOFF_MARKER)
+        if handed_off.get("task_id") == bootstrap_handoff.NO_RANKING:
+            sys.stderr.write(
+                "bootstrap_delivery: the hand-off filed no prioritization card, so any "
+                f"{ITEMS_NAME} is an earlier sweep's; registering nothing\n"
+            )
+            return
         extracted = _read_json_beside(data_dir, in_sandbox, ITEMS_NAME)
         if extracted is None:
             sys.stderr.write(f"bootstrap_delivery: no {ITEMS_NAME}; registering nothing\n")

@@ -47,6 +47,7 @@ sys.path.insert(0, str(Path(__file__).parent.absolute()))
 sys.path.insert(1, str(Path(__file__).resolve().parents[2] / "platform" / "scripts"))
 
 import bootstrap_delivery  # noqa: E402
+import bootstrap_handoff  # noqa: E402
 import bootstrap_scan_gate  # noqa: E402
 import cluster_agent_profile  # noqa: E402
 import findings_queue  # noqa: E402
@@ -432,6 +433,26 @@ class DeliveryRegistersFindingsTest(unittest.TestCase):
                 (["api", "web"], {"project": "acme", "cluster": "prod", "complete": True}, False),
             ],
         )
+
+    def test_a_hand_off_that_filed_no_ranking_card_registers_nothing(self):
+        # A no-coverage sweep writes the report itself; the items and scores are the last sweep's.
+        self._write()
+        (self.d / bootstrap_handoff.HANDOFF_MARKER).write_text(
+            f"sweep=t_sweep\ntask_id={bootstrap_handoff.NO_RANKING}\nfiled_at=1\n", encoding="utf-8"
+        )
+        rc, out, err = self._run()
+        self.assertEqual((rc, out), (0, "# Report\n"))
+        self.assertEqual(self.sent, [])
+        self.assertIn("filed no prioritization card", err)
+
+    def test_a_hand_off_that_filed_a_ranking_card_registers_its_batch(self):
+        self._write()
+        (self.d / bootstrap_handoff.HANDOFF_MARKER).write_text(
+            "sweep=t_sweep\ntask_id=t_rank\nfiled_at=1\n", encoding="utf-8"
+        )
+        rc, out, _ = self._run()
+        self.assertEqual((rc, out), (0, "# Report\n"))
+        self.assertEqual([objects for objects, _, _ in self.sent], [["api"], ["api", "web"]])
 
     def test_a_clean_fleet_registers_nothing_and_needs_no_scores(self):
         self._write(items={"items": []}, scores=None)
