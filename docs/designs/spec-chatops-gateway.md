@@ -176,7 +176,8 @@ not the whole output story: the gateway authors a small set of posts of its own.
 placeholder that opens a task ("submitted…", which becomes the rolling line the relay
 edits), the status card, the steer acknowledgement, the release line for a task that
 produced no first event inside the grace (its id and the grace; Session lifecycle
-below), and failure notices (a submission or steer that never reached the bus). All
+below), the notice the reap scan posts once when that grace passes with no turn to
+carry the release line, and failure notices (a submission or steer that never reached the bus). All
 are deterministic templates over facts the
 gateway itself owns - its own publishes, its own registry, stream replay - which is
 what keeps them inside the no-model rule. They also say only what the gateway knows:
@@ -185,8 +186,12 @@ next is conditioned on the route the same way the width bias above is, because t
 gateway knows the route and the two executors do different things: on a
 session-routed conversation, that the worker picks it up at its next turn boundary
 if the task is still running; on a fixed-routed one, that the standing executor does
-not take mid-task input and the reply will say so. Neither claims the steer was
-absorbed, which the gateway cannot know. The payload spec's refusal posture - both
+not take mid-task input and the reply will say so. A task with nothing on its stream
+yet gets neither, on either route: both assume an executor holds the task, and none
+has shown it does (a session pod may still be starting, or nothing took the task), so
+the line promises no reply and, when the task has a submission time to measure from,
+says when the conversation frees up. None of these claims
+the steer was absorbed, which the gateway cannot know. The payload spec's refusal posture - both
 the fixed-route refusal and the race-window one - is what closes the loop on the
 stream.
 
@@ -527,7 +532,16 @@ and assertion 9 exists because a task whose only event is its supervisor's termi
 empty. That release publishes no terminal: age alone is not
 evidence, a first event that is merely late could still arrive, and no supervisor path
 ever sees a task with no pod, so its submission ages out with the stream's retention -
-named here rather than papered over. Otherwise the terminal event this chain
+named here rather than papered over. A human who waits rather than writes is told too: the reap scan
+posts one line once the grace has passed with nothing on the stream, naming the task and
+saying the next message starts a new task. It marks the active-task record before it
+posts, so the line goes out at most once per task, across gateway restarts, and it
+releases nothing; the release stays with the next turn, which reads the stream again
+first. The line is for a placeholder somebody may still be watching, so it has a ceiling:
+a task older than three graces (30 minutes by default) gets none, and neither does a
+record the same reap pass deletes past `A2A_SESSION_TTL`. Without the ceiling the first
+pass after a rollout, or after an outage longer than the grace, would post into every
+conversation that wedged in the last week. Otherwise the terminal event this chain
 guarantees is what deletes the active-task record (and the `ask` copy riding it). A
 detached task is the exception on both counts: it does
 not exempt the session, so reap may delete a pod whose harness is still working, and
