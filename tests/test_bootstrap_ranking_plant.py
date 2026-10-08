@@ -464,18 +464,23 @@ class BootstrapRankingPlantTest(unittest.TestCase):
         self.assertIn("An earlier run left delivery armed", completed.stderr)
         states = self._indices(calls, "[state]")
         disarm = self._indices(calls, "[disarm]")
+        resolve = self._indices(calls, "[resolve]")
         clear = self._indices(calls, "[clear pod/platform-agent-shell-0]")
-        self.assertEqual((len(states), len(disarm)), (2, 1))
+        self.assertEqual((len(states), len(disarm), len(resolve)), (2, 1, 1))
         self.assertLess(clear[0], disarm[0])
-        self.assertLess(disarm[0], states[1])
+        self.assertLess(disarm[0], resolve[0])
+        self.assertLess(resolve[0], states[1])
         self.assertLess(states[1], self._indices(calls, "[plant pod/platform-agent-shell-0]")[0])
 
     def test_a_leftover_arm_that_will_not_tear_down_stops_the_apply(self):
-        completed, calls = self._run(STEP_1_STATE="armed;clear", DISARM_FAIL=1)
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("could not finish the teardown an earlier run left", completed.stderr)
-        self.assertEqual(self._indices(calls, "[plant pod/platform-agent-shell-0]"), [])
-        self.assertNotIn("Plant failed", completed.stderr)
+        for fail in ("DISARM_FAIL", "RESOLVE_FAIL"):
+            with self.subTest(fail=fail):
+                self._clear()
+                completed, calls = self._run(STEP_1_STATE="armed;clear", **{fail: 1})
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("could not finish the teardown an earlier run left", completed.stderr)
+                self.assertEqual(self._indices(calls, "[plant pod/platform-agent-shell-0]"), [])
+                self.assertNotIn("Plant failed", completed.stderr)
 
     def test_anything_but_one_sandbox_pod_stops_the_apply_before_changing_anything(self):
         for pods in (0, 2):

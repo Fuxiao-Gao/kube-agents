@@ -417,7 +417,7 @@ resource "null_resource" "ranking" {
       state="$(read_state)"
       if [ "$state" = armed ]; then
         echo "An earlier run left delivery armed (${local.state_file}); finishing its teardown." >&2
-        if ! clear_inventory || ! disarm >&2; then
+        if ! clear_inventory || ! disarm >&2 || ! resolve >&2; then
           echo "ERROR: could not finish the teardown an earlier run left on ${var.host_cluster_name}; nothing was planted, and the next run tries again." >&2
           exit 1
         fi
