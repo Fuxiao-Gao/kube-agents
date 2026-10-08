@@ -35,8 +35,8 @@
 #
 # While the rows are planted, the install's nudge may name them in its next
 # message, like any other open finding. They are planted at a non-critical
-# severity, so that is at most one non-critical line, which the run's decision
-# or the teardown closes.
+# severity on three lines, so one nudge run may add all three, up to the day's
+# non-critical limit. The run's decision or the teardown closes them.
 
 terraform {
   required_version = ">= 1.5.0"
