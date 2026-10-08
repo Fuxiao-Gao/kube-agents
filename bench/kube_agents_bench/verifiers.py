@@ -4395,7 +4395,7 @@ class FindingsItemStateVerifier(_OnboardingPollVerifier):
     the Session KV server's own ``GET /v1/findings`` in the agent container
     (:mod:`kube_agents_bench.findings`). Passes when every row in
     ``finding_ids`` is in ``state``; a row in any other state fails, and the
-    reason names each row's state.
+    reason names the state of each row not in ``state``.
 
     A listed row the queue does not hold is ``status="error"``: the case's plant
     is missing, so there is nothing to grade. An unreadable pod or a queue that
