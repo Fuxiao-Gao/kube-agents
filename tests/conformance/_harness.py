@@ -115,6 +115,9 @@ SOURCES: dict[str, Source] = {
             "def _sanitize_for_logging(",
             "def blocked_by(",
             "os.umask(0o177)",
+            "DESTRUCTIVE_SLACK_VERBS",
+            "SLACK_REMOVE_ALLOWLIST",
+            "SLACK_METHOD_SHAPE",
         ),
     ),
     "session_kv_server": Source(

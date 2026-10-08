@@ -475,6 +475,42 @@ Mutation(
         "allows every verb beneath it, `delete` included",
     ),
     Mutation(
+        "B1-slack-remove-allowlist-widened",
+        "agents/platform/scripts/credential_proxy.py",
+        ('SLACK_REMOVE_ALLOWLIST = frozenset({"reactions.remove"})\n',
+         'SLACK_REMOVE_ALLOWLIST = frozenset({"reactions.remove", "pins.remove"})\n'),
+        "test_B1_the_slack_relay_removes_nothing_but_its_own_reaction",
+        "exempt a second remove the same way the first was, one name added to "
+        "a set that reads as already settled",
+    ),
+    Mutation(
+        "B1-slack-remove-exemption-case-folded",
+        "agents/platform/scripts/credential_proxy.py",
+        ("            method not in SLACK_REMOVE_ALLOWLIST\n",
+         "            method.lower() not in SLACK_REMOVE_ALLOWLIST\n"),
+        "test_B1_the_slack_relay_removes_nothing_but_its_own_reaction",
+        "case-fold the exemption to match the verb rule beside it, which "
+        "forwards `Reactions.Remove` past the gate",
+    ),
+    Mutation(
+        "B1-slack-verb-rule-dropped",
+        "agents/platform/scripts/credential_proxy.py",
+        ('DESTRUCTIVE_SLACK_VERBS = frozenset({"delete", "remove", "kick", "archive"})\n',
+         'DESTRUCTIVE_SLACK_VERBS = frozenset({"kick", "archive"})\n'),
+        "test_B1_the_slack_relay_removes_nothing_but_its_own_reaction",
+        "replace the remove refusal with the allowlist rather than adding the "
+        "allowlist beside it",
+    ),
+    Mutation(
+        "B1-slack-method-shape-dropped",
+        "agents/platform/scripts/credential_proxy.py",
+        ("        if not SLACK_METHOD_SHAPE.fullmatch(method):\n",
+         "        if not method:\n"),
+        "test_B1_the_slack_relay_removes_nothing_but_its_own_reaction",
+        "drop the shape check as redundant beside the verb rule, which reads "
+        "only the text after the last dot and so forwards `chat.delete#x`",
+    ),
+    Mutation(
         "B2-second-pull-requests-write",
         ".github/workflows/conformance.yml",
         ("permissions:\n  contents: read\n\njobs:\n  conformance:\n",
