@@ -254,7 +254,7 @@ sandbox too, and passes when onboarding's delivery job has claimed the ranked re
 (`.bootstrap_completed` on the agent pod) and renamed the sandbox's `INVENTORY.md` to
 `INVENTORY.delivered.md`, which it does after reading it. `bootstrap_report_criticals` reads
 that report and the worker's `INVENTORY.scores.json` there, and passes when the report's numbered
-items name exactly `limit` of the batch's critical items; a worker that scored `limit` or fewer
+items name exactly `limit` of the batch's critical items and none of its non-critical ones; a worker that scored `limit` or fewer
 critical is an error, since such a run cannot tell a capped report from one listing every
 critical. `bootstrap_delivered` reads the
 agent pod's `cron/executions.db` instead and passes when the delivery job's run that claimed

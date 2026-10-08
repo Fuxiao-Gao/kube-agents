@@ -189,6 +189,25 @@ def test_a_report_that_lists_every_critical_fails(sandbox: Path) -> None:
     assert "5 numbered item(s) name 4 of the 4 item(s) the worker scored critical; expected exactly 2" in result.reason
 
 
+def test_two_criticals_padded_with_non_criticals_fail(sandbox: Path) -> None:
+    # The shape the old SOP produced, with only the critical cap applied.
+    (sandbox / "INVENTORY.delivered.md").write_text(_report("invoice-worker", "release-bot", "gift-cards", "orders-db"))
+    result = _verify()
+    assert result.status == "fail"
+    assert "name 2 of the 4 item(s) the worker scored critical; they also name 2 non-critical finding(s)" in result.reason
+    assert result.raw["padded"] == ["gift-cards", "orders-db"]
+
+
+def test_a_critical_item_naming_its_cluster_is_not_padding(sandbox: Path) -> None:
+    # Every item says `in prod-central`, the object of the cluster-level Managed Prometheus finding.
+    report = _report("invoice-worker", "release-bot")
+    assert report.count("`prod-central`") == 2
+    (sandbox / "INVENTORY.delivered.md").write_text(report)
+    result = _verify()
+    assert result.status == "pass", result.reason
+    assert result.raw["padded"] == []
+
+
 def test_a_deferred_critical_named_outside_the_list_does_not_count(sandbox: Path) -> None:
     rollup = "Also found: `quote-api` and `pricing-engine` are down too, and 3 more items."
     (sandbox / "INVENTORY.delivered.md").write_text(_report("invoice-worker", "release-bot", rollup=rollup))

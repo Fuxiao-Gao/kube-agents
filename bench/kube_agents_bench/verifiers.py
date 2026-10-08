@@ -4051,10 +4051,14 @@ class BootstrapReportCriticalsVerifier(_OnboardingPollVerifier):
     a provider-managed observation is not an item.
 
     ``limit``: how many critical items the report may list. Passes when the
-    report's numbered items name exactly ``limit`` of the critical items, an
-    item being named when one of its objects appears as a whole word in a
-    numbered item or the lines indented under it. A posture sentence or the
-    roll-up line naming a deferred critical does not count.
+    report's numbered items name exactly ``limit`` of the critical items and
+    none of the batch's non-critical findings, an item or finding being named
+    when one of its objects appears as a whole word in a numbered item or the
+    lines indented under it. A posture sentence or the roll-up line naming a
+    deferred critical does not count. A non-critical finding whose object is
+    its cluster (such as a cluster setting), a rolled-up row, and an object
+    that is also a critical row's are not looked for, so a critical item that
+    says which cluster it is on does not read as padding.
 
     ``status="error"`` when the worker scored ``limit`` or fewer items
     critical: a report listing every critical and one capped at ``limit``
@@ -4080,12 +4084,17 @@ class BootstrapReportCriticalsVerifier(_OnboardingPollVerifier):
                 read,
             )
         critical: dict[tuple[str, ...], set[str]] = {}
+        others: set[str] = set()
         for row in read["rows"]:
             if row.get("rolled_up"):
                 continue
+            obj = str(row.get("object") or "")
             if row.get("severity") == _CRITICAL:
                 key = tuple(str(part) for part in row.get("item_key") or ())
-                critical.setdefault(key, set()).add(str(row.get("object")))
+                critical.setdefault(key, set()).add(obj)
+            elif obj and obj.lower() != str(row.get("cluster") or "").lower():
+                others.add(obj)
+        others -= {obj for objects in critical.values() for obj in objects}
         labels = {key: f"{key[0]} ({', '.join(sorted(objects))})" for key, objects in critical.items()}
         raw: dict[str, Any] = {"critical": sorted(labels.values()), "report": read.get("report")}
         if len(critical) <= self.limit:
@@ -4106,10 +4115,19 @@ class BootstrapReportCriticalsVerifier(_OnboardingPollVerifier):
             for key, objects in critical.items()
             if any(_names(name).search(item) for name in objects for item in items)
         )
-        raw.update({"named": named, "items": items})
+        padded = sorted(obj for obj in others if any(_names(obj).search(item) for item in items))
+        raw.update({"named": named, "padded": padded, "items": items})
         counts = f"name {len(named)} of the {len(critical)} item(s) the worker scored critical"
+        padding = f"; they also name {len(padded)} non-critical finding(s), which the report must not list: {padded}"
         if len(named) != self.limit:
-            return "fail", f"the report's {len(items)} numbered item(s) {counts}; expected exactly {self.limit}: {named}", raw
+            return (
+                "fail",
+                f"the report's {len(items)} numbered item(s) {counts}; expected exactly {self.limit}: {named}"
+                + (padding if padded else ""),
+                raw,
+            )
+        if padded:
+            return "fail", f"the report's {len(items)} numbered item(s) {counts}{padding}", raw
         return "pass", f"the report's {len(items)} numbered item(s) {counts}, the limit of {self.limit}: {named}", raw
 
 
