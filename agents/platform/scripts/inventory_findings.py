@@ -461,8 +461,9 @@ def select_items(
     best row in the queue's order; an item is critical when any of its rows
     is. The report lists the top `limit` critical items and nothing else.
     Provider-managed observations (`fq.rolled_up`) are never items and count
-    once per line (`fq.item_key`) among the others, as the nudge counts them;
-    a line that also has an ordinary row is already counted as that item.
+    once per line (`fq.item_key`) among the others; a line that also has an
+    ordinary row is already counted as that item. The nudge's open count
+    still counts such a line twice, once as the item and once as managed.
     Ids in `exclude` are rows the user dismissed, which are neither listed nor
     counted.
     """
