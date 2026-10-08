@@ -356,7 +356,10 @@ def apply_overlay(skill, base, dest, with_append=True):
     """Copy base to dest, apply the skill's patches in filename order, then append.md."""
     replace_tree(base, dest)
     for patch in patches(skill):
-        res = git(["apply", "-p1", "--whitespace=nowarn", str(patch)], cwd=dest, check=False)
+        # dest is a plain directory, so without a ceiling git would treat a work tree around it
+        # (TMPDIR inside a checkout) as the repository and skip every path outside it.
+        res = git(["apply", "-p1", "--whitespace=nowarn", str(patch)], cwd=dest, check=False,
+                  extra_env={"GIT_CEILING_DIRECTORIES": str(Path(dest).parent)})
         if res.returncode != 0:
             raise OverlayError(
                 f"{skill}: patch {patch.name} no longer applies. Either an earlier patch it depended on "
@@ -559,16 +562,22 @@ def cmd_check(skills):
     print(f"ok: {len(names)} mirrored skill(s) match their upstream copy + overlay")
 
 
+def strip_separator(body, base_md):
+    """Drop the separator generation puts before append.md, but only when it is there: a section
+    written straight under the last line leaves no separator to drop, and stripping one anyway
+    records a newline-only patch."""
+    sep = separator_for(base_md)
+    if sep and body.endswith(sep) and body[: -len(sep)].endswith("\n") == base_md.endswith("\n"):
+        return body[: -len(sep)]
+    return body
+
+
 def split_append(edited_md, base_md):
     """Separate the appended section from an edited SKILL.md. Returns (body, append_text or None)."""
     if APPEND_MARKER_PREFIX not in edited_md:
         return edited_md, None
     idx = edited_md.rindex(APPEND_MARKER_PREFIX)
-    body, appended = edited_md[:idx], edited_md[idx:]
-    sep = separator_for(base_md)
-    if sep and body.endswith(sep):
-        body = body[: -len(sep)]
-    return body, appended
+    return strip_separator(edited_md[:idx], base_md), edited_md[idx:]
 
 
 def overlap_warnings(repo):
@@ -637,11 +646,10 @@ def refresh_into_overlay(skill, repo, tmp, target, message):
     if md.exists():
         body, appended = split_append(read_exact(md), base_md)
         existing = read_exact(append_path) if append_path.is_file() else None
-        sep = separator_for(base_md)
-        if appended is None and existing is not None and sep and body.endswith(sep):
-            # The section was cut but the blank line before it stayed; that line is the
+        if appended is None and existing is not None:
+            # The section was cut but the blank line before it may have stayed; that line is the
             # append's separator, not an edit to the skill.
-            body = body[: -len(sep)]
+            body = strip_separator(body, base_md)
         write_exact(md, body)
         if appended is not None and appended != existing:
             write_exact(append_path, appended)

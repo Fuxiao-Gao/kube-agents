@@ -48,7 +48,10 @@ gcloud container clusters get-credentials CLUSTER --region=REGION --quiet
 
 
 def git(cwd, *args, check=True):
-    return subprocess.run(["git", *args], cwd=cwd, env=dict(os.environ, **GIT_ENV),
+    # Without inherited GIT_DIR and the like, as in the tool: a fixture must not commit into the
+    # repository the suite was started from.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    return subprocess.run(["git", *args], cwd=cwd, env=dict(env, **GIT_ENV),
                           capture_output=True, text=True, check=check)
 
 
@@ -125,6 +128,20 @@ class Scenario(unittest.TestCase):
 
     def test_check_passes_after_refresh(self):
         self.adopt_with_two_patches()
+        self.assertIn("ok: 2", self.run_tool("check"))
+
+    def test_check_passes_with_a_temp_dir_inside_a_work_tree(self):
+        self.adopt_with_two_patches()
+        (self.repo / ".skill-sync").mkdir(exist_ok=True)
+        self.env["TMPDIR"] = str(self.repo / ".skill-sync")
+        self.assertIn("ok: 2", self.run_tool("check"))
+
+    def test_appended_section_without_a_blank_line_records_no_patch(self):
+        self.adopt_with_two_patches()
+        self.skill().write_text(self.skill().read_text() + "<!-- kube-agents: local addition -->\n\nOurs.\n")
+        out = self.run_tool("refresh", "basics")
+        self.assertIn("no change outside append.md", out)
+        self.assertEqual(len(list(self.overlay().glob("*.patch"))), 2)
         self.assertIn("ok: 2", self.run_tool("check"))
 
     def test_hand_edit_without_patch_fails_check(self):
