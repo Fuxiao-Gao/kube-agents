@@ -165,6 +165,7 @@ ADDED_AFTER_THE_MOVE = [
     "oobe-first-run-audits",  # the oobe job's first-run audits stage
     "chat-fanout-fleet-restarts-rows",  # a fleet question fanned out one titled card per cluster
     "backup-dr-cmek-selected-namespaces-probe",  # the gke-backup-dr skill sync
+    "findings-decision-covers-item",  # the findings queue's item-wide decision
 ]
 
 # Admitted after the split, each by a pull request that cited the record
