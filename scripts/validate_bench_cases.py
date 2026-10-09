@@ -170,6 +170,17 @@ KNOWN_UNREGISTERED = {
         "#2755: stack case held out of the nightly until runner Compute "
         "permission, a scheduled plant sweep and infra-lock room land"
     ),
+    # Parked out of hack/eval/nightly-cases.txt on 2026-10-09 after its first
+    # night (build 2108346853085941760): its three repetitions held the infra
+    # lock 140 minutes and the deadline cut the main part, and each graded
+    # blocked, because its no-tool turn leaves an empty trajectory, which the
+    # gate's liveness rung reads as no agent run. The entry goes when the case
+    # can record a pass or a fail and the main part's infra-lock chain has
+    # room for it (or it runs on a job of its own).
+    "oobe-first-run-audits": (
+        "parked 2026-10-09: 140 infra-lock minutes truncated the main nightly, "
+        "and its empty trajectory grades every repetition blocked"
+    ),
 }
 
 # Cases whose fixture does not exist at all, waiting on the issue that plants
