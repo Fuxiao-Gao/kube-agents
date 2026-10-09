@@ -160,6 +160,34 @@ readonly EVAL_DRIFT_READY_INTERVAL_SECONDS=5
 # the CR.
 readonly EVAL_KANBAN_MAX_IN_PROGRESS="5"
 
+# The credential-proxy container's memory limit on the eval install. The broker
+# admits a request only while its child memory reservation fits the budget it
+# derives from this limit (agents/platform/scripts/credential_proxy.py,
+# docs/designs/credential-proxy-child-memory-budget.md): at the operator's 1Gi
+# default that is four requests at once, under its slot cap of eight. The eval
+# runs EVAL_TASK_PARALLELISM lanes of Platform Agents, each fanning Cluster
+# Agents out over the seeded fleet, and on the default the queue behind those
+# four reached p50 waits of 8-22s and a longest wait of 56.7s against the
+# broker's 60s refusal: Cluster Agents' commands timed out and the judge graded
+# the answers as regressions on pull requests that never touched the path
+# (#2632). At 2Gi the budget admits nine, so the slot cap is the binding bound
+# again and the queue is the one the broker had before the budget existed,
+# with the OOM the budget exists to prevent still held off by the budget
+# (#2455's live test ran this figure: the broker's startup line read "admits 9
+# requests at once beside the slot cap of 8"). Set on this install only, through
+# spec.deployment.credentialProxy.resources, so the production default stays
+# where the CRD reference argues it should and an install that outgrows it
+# raises the same field. A string, because the CRD's quantity is int-or-string.
+# Limits only: the pool's host clusters are Autopilot with bursting, where a
+# limit above its request stands (the #2454 presubmit's proxy pod rendered
+# limits.memory 1Gi over a 512Mi request, QoS Burstable, and its broker read
+# the 1Gi), so requests.memory stays at the operator's default. On an Autopilot
+# cluster without bursting this override would be inert, as the CRD field doc
+# says, and requests.memory is the figure to raise there.
+# tests/test_ci_deploy_credential_proxy_limit.py pins the flag, that the limit
+# admits at least the slot cap, and the chart rendering it onto the CR.
+readonly EVAL_CREDENTIAL_PROXY_MEMORY_LIMIT="2Gi"
+
 # The release step 5 installs, and — for the poisoned-record guard (#1172) —
 # the label pair Helm stamps on every release-record Secret it writes
 # (`owner=helm` plus `name=<release>`), selecting every revision's record of
@@ -235,6 +263,11 @@ readonly SANDBOX_SSH_KEY_COMMENT="kube-agents-ci-eval"
 # password key in platformagent_a2a_manifests.go). The CR name is the chart's
 # platformAgent.name default, which this deploy does not override.
 readonly PLATFORM_AGENT_CR_NAME="platform-agent"
+# The chart's CRDs, applied server-side before the release (5b′ below); the
+# same literal hack/ci-teardown.sh declares, relative to the checkout, joined
+# to SCRIPT_DIR at the use site because the tests that lift this file's
+# readonly lines into a harness run them without SCRIPT_DIR.
+readonly CHART_CRD_DIR="charts/kube-agents/crds/"
 # Timeout for deleting the PlatformAgent CR during retry, allowing the live
 # operator to clear its finalizer before uninstallation. Matches
 # charts/kube-agents/values.yaml cleanupHook.timeout (120s).
@@ -1344,10 +1377,27 @@ if [ "${EVAL_FORGE}" = "gitlab" ]; then
   materialize_gitlab_forge_secret
 fi
 
+# ─── 5b′. The chart's CRDs, before the chart ─────────────────────────────────
+# Helm never touches crds/ on upgrade, and `helm upgrade --install` below takes
+# the upgrade path whenever a release record survived the last teardown (5a
+# keeps a deployed one, and hack/ci-teardown.sh keeps the CRDs with it). The
+# chart then renders against whatever CRD that project last installed: a field
+# the served CRD lacks is pruned from the CR on write, and the chart's own guard
+# refuses to render credentialProxy.resources against a CRD that predates it,
+# which is a render failure the retry loop below does not retry. The front
+# doors apply the chart's CRDs server-side before every re-apply for exactly
+# this (apply_crd_upgrades in scripts/installer/installer_common.sh); this
+# deploy does the same. On a fresh project it installs the objects Helm would
+# have installed, so it is idempotent there.
+echo "=== [$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Applying the chart's CRDs (server-side) ==="
+kubectl apply --server-side --force-conflicts -f "${SCRIPT_DIR}/../${CHART_CRD_DIR}" >/dev/null
+echo "✓ CRDs applied from ${CHART_CRD_DIR}"
+
 # ─── 5c. Deploy the chart ─────────────────────────────────────────────────────
 # Named in the build log so a run's dispatcher behaviour can be read against
 # the cap it was given without opening the rendered CR.
 echo "Kanban board cap for this install: max_in_progress=${EVAL_KANBAN_MAX_IN_PROGRESS} (spec.harness.tuning.maxInProgress)"
+echo "Credential-proxy memory limit for this install: ${EVAL_CREDENTIAL_PROXY_MEMORY_LIMIT} (spec.deployment.credentialProxy.resources.limits.memory)"
 
 HELM_INSTALL_OUT="$(mktemp)"
 HELM_EXIT=0
@@ -1372,6 +1422,7 @@ for ((attempt=1; attempt<=HELM_DEPLOY_ATTEMPTS; attempt++)); do
     --set-string "litellm.vertex.serviceAccountAnnotations.iam\.gke\.io/gcp-service-account=${LITELLM_GSA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com" \
     --set "platformAgent.deployment.availability.runtimeClassName=" \
     --set "platformAgent.harness.tuning.maxInProgress=${EVAL_KANBAN_MAX_IN_PROGRESS}" \
+    --set-string "platformAgent.deployment.credentialProxy.resources.limits.memory=${EVAL_CREDENTIAL_PROXY_MEMORY_LIMIT}" \
     --set-string "platformAgent.deployment.env[0].name=ALERT_DAILY_LIMIT_WARNING" \
     --set-string "platformAgent.deployment.env[0].value=${EVAL_ALERT_DAILY_LIMIT_WARNING}" \
     --set-string "platformAgent.deployment.env[1].name=ALERT_DAILY_LIMIT_DRIFT" \
