@@ -20,7 +20,7 @@ The Platform Agent (Hermes) Deployment exports OpenTelemetry traces and, from it
 
 The Platform Agent (Hermes) container itself exposes no Prometheus `/metrics` endpoint — it serves only the API (`8642`) and Dashboard (`9119`) ports. Its runtime signals surface as OpenTelemetry traces (below) and `tool_call_audit` audit records (below); pod-level CPU/memory is available through the Kubernetes metrics API (`kubectl top`). The metrics the gateway pod does serve are the event watcher's, above.
 
-The operator reads two of these series itself, every five minutes: the broker's `kubeagents_tool_invocations_total` and the watcher's `k8s_event_watcher_events_injected_total` become `status.usage.toolExecutionsTotal` and `status.usage.eventsIngestedTotal` on the `PlatformAgent`, kept monotonic across restarts, which is where an install without a collector sees the counts ([CRD reference](/kube-agents/operator/platformagent-crd/)).
+The operator reads some of these series itself, every five minutes: the broker's `kubeagents_tool_invocations_total` and the watcher's `k8s_event_watcher_events_injected_total` become `status.usage.toolExecutionsTotal` and `status.usage.eventsIngestedTotal` on the `PlatformAgent`, kept monotonic across restarts, and the watcher's `k8s_event_watcher_cluster_up` becomes `status.usage.clustersRegistered` (the series present) and `status.usage.clustersMonitored` (those at `1`), the latest reading rather than a total. That is where an install without a collector sees the counts and how much of its fleet is being watched ([CRD reference](/kube-agents/operator/platformagent-crd/)).
 
 ### OpenTelemetry traces
 
