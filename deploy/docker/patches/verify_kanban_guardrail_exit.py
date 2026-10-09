@@ -846,9 +846,9 @@ check(
     ),
 )
 
-# Nothing to hand back twice. This is the guard that makes a false positive
-# impossible rather than merely unlikely: the transcript can lie about a
-# terminal call after compaction, the board cannot.
+# Nothing to hand back twice. The board decides, not the transcript: the
+# transcript can lie about a terminal call after compaction, the board cannot.
+# The status alone is not enough, though — see the re-run case below.
 check("the card is no longer running", not task_is_still_running(conn, card))
 before = len(events(conn, card))
 check(
