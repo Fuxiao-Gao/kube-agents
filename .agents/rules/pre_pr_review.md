@@ -39,10 +39,14 @@ The rule, and the requirement to fill in the template's **Self-Review** section,
   the reviewer something untrue about how the change was checked.
 - **Every finding gets a disposition: fixed, or deliberately not with a reason that argues about
   this change.** "Out of scope", "pre-existing", and "will fix later" are not reasons on their
-  own; the separate issue you filed is. Fix what a pass confirms and report what it only
-  suspects — a finding it could not pin down is an open question for the section, not a licence
-  to rewrite working code. And "no findings" is an answer only alongside what you looked for: a
-  pass that names none of its angles is indistinguishable from no pass.
+  own; the separate issue you filed is. On a later round of the automated review, a
+  `declined: <reason about this change>` reply in the thread is that disposition
+  ([`docs/pull-request-workflow.md`, "Green is settled"](../../docs/pull-request-workflow.md#green-is-settled));
+  on a first review a finding that correctly applies a rule with no exemption is still a fix. Fix
+  what a pass confirms and report what it only suspects — a finding it could not pin down is an
+  open question for the section, not a licence to rewrite working code. And "no findings" is an
+  answer only alongside what you looked for: a pass that names none of its angles is
+  indistinguishable from no pass.
   [`.agents/skills/review-preflight/SKILL.md`](../skills/review-preflight/SKILL.md) §6
   elaborates, including how to merge two passes that grade differently.
 - **Do not claim more than you did.** A self-review the diff contradicts is worse than none: it
