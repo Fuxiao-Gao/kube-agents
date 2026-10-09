@@ -448,8 +448,11 @@ def record_missing_terminal_call(
     gives it an ``expected_run_id`` that it checks inside its own write
     transaction, as ``block_task`` does, and a card running under a newer
     worker's run is left alone. The read before it answers the common case
-    without a write and keeps this function's return value honest; the check
-    inside the transaction covers a hand-over between the two.
+    without a write; the check inside the transaction covers a hand-over
+    between the two. ``_record_task_failure``'s own return means "tripped the
+    breaker", not "wrote", so whether the charge landed is read back from the
+    board: a charge always moves the card off ``running``, and a refused one
+    leaves it ``running`` under the newer run.
 
     ``stop_nudges`` (``agent._kanban_stop_nudges``) is reported in the error
     text; see ``missing_terminal_error``.
@@ -497,7 +500,7 @@ def record_missing_terminal_call(
                 "detector": DETECTOR,
             },
         )
-        return True
+        return not task_is_still_running(conn, task_id)
     finally:
         try:
             conn.close()

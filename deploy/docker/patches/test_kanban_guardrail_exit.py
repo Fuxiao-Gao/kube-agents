@@ -440,11 +440,21 @@ class TaskIsStillRunningTest(unittest.TestCase):
 
 
 class Recorder:
-    def __init__(self):
+    """Stands in for ``_record_task_failure``: a charge moves the card off
+    ``running`` and clears its run, as the real one does."""
+
+    def __init__(self, writes=True):
         self.calls = []
+        self.writes = writes
 
     def __call__(self, conn, task_id, **kwargs):
         self.calls.append((task_id, kwargs))
+        if self.writes:
+            conn.execute(
+                "UPDATE tasks SET status = 'ready', current_run_id = NULL WHERE id = ?",
+                (task_id,),
+            )
+        return False
 
 
 class ClosableConn:
@@ -545,6 +555,19 @@ class RecordMissingTerminalTest(unittest.TestCase):
         self.assertEqual(rec.calls[0][1]["expected_run_id"], 197)
         _, rec, _ = self._record("running", reason=TEXT_EXIT)
         self.assertIsNone(rec.calls[0][1]["expected_run_id"])
+
+    def test_a_charge_refused_inside_the_write_is_not_reported_as_recorded(self):
+        """The card changed hands between the read and the write: the patched
+        _record_task_failure writes nothing, and this must not say it did."""
+        conn = ClosableConn(board([("t1", "running", 197)]))
+        did = record_missing_terminal_call(
+            task_id="t1",
+            turn_exit_reason=TEXT_EXIT,
+            connect=lambda: conn,
+            record_failure=Recorder(writes=False),
+            run_id=197,
+        )
+        self.assertFalse(did)
 
     def test_the_nudge_count_reaches_the_error(self):
         _, rec, _ = self._record("running", reason=TEXT_EXIT, stop_nudges=1)
