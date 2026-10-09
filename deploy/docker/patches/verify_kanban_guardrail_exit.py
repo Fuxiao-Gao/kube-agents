@@ -31,8 +31,11 @@ and still be useless:
    ``completed`` determination.
 4. **The board write lands.** ``record_missing_terminal_call`` is driven against
    a real kanban database through the real ``_record_task_failure``: claim
-   released, run closed, failure counted, exit reason legible in the event. Plus
-   the three cases that must *not* write — a card the board no longer shows as
+   released, run closed, failure counted, exit reason legible in the event, and
+   no text upstream would re-read as an auth blocker or a protocol violation.
+   Plus a worker whose run already ended (it blocked, the card was re-run, and
+   it ended in text afterwards), which must leave the next worker's run open.
+   Plus the three cases that must *not* write — a card the board no longer shows as
    ``running`` (compaction can drop a terminal tool call out of ``messages``,
    the board cannot), a goal-mode worker between turns, and a dispatched cron
    run, which is holding its *caller's* task id. The cron case is checked
@@ -905,6 +908,83 @@ check(
     row(conn, card)["status"] == "blocked",
     f"status={row(conn, card)['status']!r}",
 )
+
+# A worker that blocked its own card keeps running until it ends a turn in
+# text; by then the card can be running again under the next worker's run.
+# Its backstop must leave that run alone — _record_task_failure would close it.
+TEXT_EXIT = "text_response(finish_reason=stop)"
+conn = board()
+moved = K.create_task(conn, title="Check PDB coverage (blocked, re-run)", assignee="platform")
+K.recompute_ready(conn)
+check("the first worker's card is claimed", K.claim_task(conn, moved))
+first_run = K.get_task(conn, moved).current_run_id
+check(
+    "the first worker blocks its own run",
+    K.block_task(conn, moved, reason="waiting on a sibling card", expected_run_id=first_run),
+)
+check("and the card is unblocked", K.unblock_task(conn, moved))
+K.recompute_ready(conn)
+check("the next worker claims it", K.claim_task(conn, moved))
+second_run = K.get_task(conn, moved).current_run_id
+check("under a new run", second_run != first_run, f"run {first_run} -> {second_run}")
+check(
+    "the first worker's backstop records nothing",
+    record_missing_terminal_call(
+        task_id=moved,
+        turn_exit_reason=TEXT_EXIT,
+        connect=board,
+        record_failure=KD._record_task_failure,
+        run_id=first_run,
+        stop_nudges=0,
+    )
+    is False,
+)
+conn = board()
+after = row(conn, moved)
+check(
+    "the next worker's run is still open and uncharged",
+    after["status"] == "running"
+    and open_runs(conn, moved) == 1
+    and K.get_task(conn, moved).current_run_id == second_run
+    and (after["consecutive_failures"] or 0) == 0,
+    f"status={after['status']!r} open={open_runs(conn, moved)} "
+    f"failures={after['consecutive_failures']!r}",
+)
+check(
+    "the next worker's own leak is still charged to its run",
+    record_missing_terminal_call(
+        task_id=moved,
+        turn_exit_reason=TEXT_EXIT,
+        connect=board,
+        record_failure=KD._record_task_failure,
+        run_id=second_run,
+        stop_nudges=2,
+    )
+    is True,
+)
+conn = board()
+text_error = row(conn, moved)["last_failure_error"] or ""
+check(
+    "a text exit says the model replied in text, and how often it was nudged",
+    text_error.startswith("model replied in text")
+    and f"turn_exit_reason={TEXT_EXIT}" in text_error
+    and "kanban nudges sent: 2" in text_error,
+    f"last_failure_error={text_error!r}",
+)
+
+# The text is read back by upstream: a respawn-blocker word parks the card as
+# an auth/quota wall, and "protocol violation" feeds the clean-exit streak.
+for reason in (TEXT_EXIT,) + EXIT_REASONS:
+    text = missing_terminal_error(reason, 2)
+    check(
+        f"the {reason} text is not read as a respawn blocker",
+        not KD._RESPAWN_BLOCKER_RE.search(text),
+        f"matched {KD._RESPAWN_BLOCKER_RE.search(text)!r} in {text!r}",
+    )
+    check(
+        f"the {reason} text is not read as a protocol violation",
+        "protocol violation" not in text,
+    )
 
 
 # --- 6. The rate-limit block lands ------------------------------------------

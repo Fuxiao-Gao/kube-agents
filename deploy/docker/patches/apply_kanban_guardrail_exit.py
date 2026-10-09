@@ -14,7 +14,8 @@ phase:
    funnel every exit passes through, for the six sibling exits that leak the
    same way and for the halt path when its nudges are spent. A
    retries-exhausted exit whose last failure was a rate limit is blocked with
-   the provider's text instead of being charged a ``timed_out``.
+   the provider's text instead of being charged a ``timed_out``. Either write
+   is pinned to the worker's own run.
 3. ``agent/turn_api_error.py`` — the retry loop's error handler stashes its last
    classified failure ``(reason, summary)`` on the agent, which is how edit 2
    tells a 429 exhaustion from the other retries-exhausted exits.
@@ -176,6 +177,9 @@ FINALIZER_INSERT = '''    # kube-agents patch: the guardrail-halt exit and six s
             # A retry loop that ended on a 429 blocks the card with the
             # provider's text (block_task, kind=transient) instead of being
             # charged a timed_out; the error handler's stash says which.
+            # run_id pins the charge to this worker's run: a worker that
+            # already blocked keeps going and can reach here after the card
+            # is running again under a newer worker's run.
             if _kanban_record_missing_terminal(
                 task_id=_kanban_task_id,
                 turn_exit_reason=_turn_exit_reason,
@@ -184,6 +188,7 @@ FINALIZER_INSERT = '''    # kube-agents patch: the guardrail-halt exit and six s
                 block_task=_kb.block_task,
                 last_api_failure=getattr(agent, "_kube_last_api_failure", None),
                 run_id=_kube_worker_run_id(),
+                stop_nudges=getattr(agent, "_kanban_stop_nudges", 0),
             ):
                 logger.info(
                     "recorded missing-terminal-call outcome for task %s "
