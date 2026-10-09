@@ -41,7 +41,6 @@ from kanban_guardrail_exit import (
     RATE_LIMIT_BLOCK_KIND,
     RATE_LIMIT_REASON_PREFIX,
     RETRIES_EXHAUSTED_EXIT_REASON,
-    RETRY_INSTRUCTION,
     block_rate_limited_worker,
     guardrail_halt_nudge,
     is_rate_limit_exhaustion,
@@ -560,11 +559,17 @@ class MissingTerminalErrorTest(unittest.TestCase):
         self.assertIn("replied in text", head)
         self.assertIn("kanban nudges sent: 2", head)
 
-    def test_the_retry_worker_is_told_what_to_do(self):
-        for reason in (TEXT_EXIT, "guardrail_halt", RETRIES_EXHAUSTED_EXIT_REASON):
-            text = missing_terminal_error(reason)
-            self.assertTrue(text.endswith(RETRY_INSTRUCTION), reason)
-            self.assertIn("kanban_complete with the full answer in result", text)
+    def test_the_text_describes_and_does_not_instruct(self):
+        """The retry worker reads this; an instruction in it would be a prompt
+        change, which needs its own eval case."""
+        self.assertTrue(
+            missing_terminal_error(TEXT_EXIT, 2).endswith("was not saved as its result.")
+        )
+        for reason in (TEXT_EXIT, "guardrail_halt", RETRIES_EXHAUSTED_EXIT_REASON,
+                       "partial_stream_recovery", "fallback_prior_turn_content",
+                       "empty_response_exhausted", "local_processing_error",
+                       "error_near_max_iterations"):
+            self.assertNotIn("kanban_complete", missing_terminal_error(reason, 2), reason)
 
     def test_other_exits_keep_the_generic_lead(self):
         text = missing_terminal_error("guardrail_halt", 0)

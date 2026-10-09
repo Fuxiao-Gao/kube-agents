@@ -264,25 +264,19 @@ GOAL_MODE_ON = "1"
 TEXT_RESPONSE_EXIT_PREFIX = "text_response"
 
 #: How ``last_failure_error`` opens. It is what an operator reads first (the
-#: CLI shows 160 characters) and what the retry worker reads under "Prior
-#: attempts", so it says what happened before it says why. Neither may contain
-#: "protocol violation" (upstream's ``_protocol_violation_streak`` counts it)
-#: or a word ``_RESPAWN_BLOCKER_RE`` matches (``auth…``, ``quota``, ``403``…),
-#: which would park the card as an auth blocker.
+#: CLI shows 160 characters), so it says what happened before it says why.
+#: Neither may contain "protocol violation" (upstream's
+#: ``_protocol_violation_streak`` counts it) or a word ``_RESPAWN_BLOCKER_RE``
+#: matches (``auth…``, ``quota``, ``403``…), which would park the card as an
+#: auth blocker. The retry worker also reads this text, under "Prior
+#: attempts"; it describes and does not instruct, because an instruction there
+#: would change what the retry worker does.
 MISSING_TERMINAL_LEAD = "worker ended without a terminal kanban call"
 TEXT_RESPONSE_LEAD = "model replied in text and made no terminal kanban call"
 
 #: What a text-response exit leaves behind, for the operator.
 TEXT_RESPONSE_CONSEQUENCE = (
     " The card was not closed and the reply was not saved as its result."
-)
-
-#: The instruction the retry worker reads. Upstream's own clean-exit error
-#: carries a near-identical sentence for the same reason; this one names ``result``,
-#: which ``kanban_result_required`` refuses to leave empty.
-RETRY_INSTRUCTION = (
-    " If the prior run already did the work, verify it and call"
-    " kanban_complete with the full answer in result."
 )
 
 _HALT_SUFFIX = (
@@ -317,8 +311,7 @@ def guardrail_halt_nudge(build_nudge, *, messages, attempts, decision):
 
 
 def missing_terminal_error(turn_exit_reason, stop_nudges=None) -> str:
-    """The ``last_failure_error`` text: what happened, how the turn ended, and
-    what the retry worker should do.
+    """The ``last_failure_error`` text: what happened and how the turn ended.
 
     ``stop_nudges`` is ``agent._kanban_stop_nudges``, the count of synthetic
     "finish on the board" turns the worker got. It is reported rather than
@@ -333,7 +326,7 @@ def missing_terminal_error(turn_exit_reason, stop_nudges=None) -> str:
     if stop_nudges is not None:
         detail += f"; kanban nudges sent: {stop_nudges}"
     consequence = TEXT_RESPONSE_CONSEQUENCE if text_response else ""
-    return f"{lead} ({detail}).{consequence}{RETRY_INSTRUCTION}"
+    return f"{lead} ({detail}).{consequence}"
 
 
 def should_record_missing_terminal(
@@ -450,10 +443,17 @@ def record_missing_terminal_call(
     ``release_claim`` / ``end_run`` pair is the same one the iteration-budget
     path uses: the card is still ``running`` with an open run, and this hands
     both back. ``_record_task_failure`` closes whatever run is current, so
-    ``run_id`` (``HERMES_KANBAN_RUN_ID``) pins the charge to this worker's own
-    run: a newer worker's run is left alone. The read and the write are two
-    transactions, as on the block path; the window between them is
-    milliseconds, and a new run needs a dispatcher tick.
+    the board is first checked for this worker's own run (``run_id``,
+    ``HERMES_KANBAN_RUN_ID``): a card running under a newer worker's run is
+    left alone. That is a check before the write, not a condition on it.
+    ``_record_task_failure`` takes no expected run and opens its own
+    transaction through ``write_txn`` without ``allow_nested``, so it cannot
+    run inside one opened here, and the card could still change hands between
+    the two. That needs this worker's run ended and a new one claimed inside
+    that window — normally milliseconds, longer only while another writer
+    holds the lock — while the process is alive; the gap this closes is the minutes between a worker's own
+    ``kanban_block`` and its exit. Closing the rest means re-implementing
+    upstream's failure counter and breaker here, which would drift.
 
     ``stop_nudges`` (``agent._kanban_stop_nudges``) is reported in the error
     text; see ``missing_terminal_error``.
