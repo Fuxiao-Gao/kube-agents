@@ -3083,8 +3083,8 @@ anyway is in [The Session KV store](#the-session-kv-store).
   `.bashrc` route are covered by `make docker-smoke-sandbox`. When the helper landed, a
   routed `gcloud` or `kubectl`
   stopped at `CREDENTIAL_PROXY_URL is not configured`, so the connection was proven and
-  the command behind it was not; since then `stall-watch`, a shipped roster entry, runs `gcloud container clusters
-get-credentials` and `kubectl` behind it on every tick, and `github_token_refresh.py`'s
+  the command behind it was not; since then `stall-watch`, a shipped roster entry, runs `kubectl` behind it
+  on every tick and `gcloud container clusters get-credentials` when a cluster's credential record is a day old, and `github_token_refresh.py`'s
   forward mints through it. The helper had to land before
   the agent image can drop `credential-proxy-exec`, which makes it the gate on that change.
 - **The MCP server's kubeconfig moved to `/home/hermes/.kubeconfigs`, and the proxy
