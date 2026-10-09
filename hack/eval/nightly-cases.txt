@@ -238,8 +238,8 @@
 # agent run (bench/kube_agents_bench/scoring.py, _liveness_failures), so the
 # case cannot record a pass or a fail as written (#2699's tool_calls_optional
 # key is the open fix for that half). Counted from the lists,
-# this file is now sixty-three cases (189 units) of a seventy-seven-case,
-# 231-unit matrix.
+# this file is now sixty-four cases (192 units) of a seventy-eight-case,
+# 234-unit matrix.
 
 # ── The four full audits recast out of the presubmit on 2026-08-26 ──────────
 # Spec-ready, each domain covered in the presubmit by its probe:
