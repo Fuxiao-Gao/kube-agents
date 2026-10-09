@@ -41,6 +41,7 @@ from kanban_guardrail_exit import (
     RATE_LIMIT_BLOCK_KIND,
     RATE_LIMIT_REASON_PREFIX,
     RETRIES_EXHAUSTED_EXIT_REASON,
+    RETRY_INSTRUCTION,
     block_rate_limited_worker,
     guardrail_halt_nudge,
     is_rate_limit_exhaustion,
@@ -57,7 +58,8 @@ from kanban_guardrail_exit import (
 SCHEMA = """
 CREATE TABLE tasks (
     id TEXT PRIMARY KEY,
-    status TEXT NOT NULL
+    status TEXT NOT NULL,
+    current_run_id INTEGER
 );
 """
 
@@ -81,11 +83,15 @@ def nudge_returning(value):
 
 
 def board(rows):
+    """``rows`` are ``(id, status)`` or ``(id, status, current_run_id)``."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
-    for tid, status in rows:
-        conn.execute("INSERT INTO tasks (id, status) VALUES (?, ?)", (tid, status))
+    for tid, status, *run in rows:
+        conn.execute(
+            "INSERT INTO tasks (id, status, current_run_id) VALUES (?, ?, ?)",
+            (tid, status, run[0] if run else None),
+        )
     return conn
 
 
@@ -415,8 +421,21 @@ class TaskIsStillRunningTest(unittest.TestCase):
     def test_a_plain_tuple_row_factory_works(self):
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
-        conn.execute("INSERT INTO tasks (id, status) VALUES ('t1', 'running')")
+        conn.execute("INSERT INTO tasks (id, status, current_run_id) VALUES ('t1', 'running', 7)")
         self.assertTrue(task_is_still_running(conn, "t1"))
+        self.assertTrue(task_is_still_running(conn, "t1", 7))
+        self.assertFalse(task_is_still_running(conn, "t1", 6))
+
+    def test_the_workers_own_run_is_running(self):
+        self.assertTrue(task_is_still_running(board([("t1", "running", 7)]), "t1", 7))
+
+    def test_a_newer_workers_run_is_not_this_workers(self):
+        """The card was blocked, re-dispatched, and is running again for someone else."""
+        self.assertFalse(task_is_still_running(board([("t1", "running", 8)]), "t1", 7))
+        self.assertFalse(task_is_still_running(board([("t1", "running")]), "t1", 7))
+
+    def test_no_run_id_asks_nothing_about_the_run(self):
+        self.assertTrue(task_is_still_running(board([("t1", "running", 8)]), "t1"))
 
 
 class Recorder:
@@ -440,14 +459,15 @@ class ClosableConn:
 
 
 class RecordMissingTerminalTest(unittest.TestCase):
-    def _record(self, status, reason="guardrail_halt"):
-        conn = ClosableConn(board([("t1", status)]))
+    def _record(self, status, reason="guardrail_halt", current_run=None, **kwargs):
+        conn = ClosableConn(board([("t1", status, current_run)]))
         rec = Recorder()
         did = record_missing_terminal_call(
             task_id="t1",
             turn_exit_reason=reason,
             connect=lambda: conn,
             record_failure=rec,
+            **kwargs,
         )
         return did, rec, conn
 
@@ -501,6 +521,67 @@ class RecordMissingTerminalTest(unittest.TestCase):
         text = missing_terminal_error("guardrail_halt")
         self.assertIn("terminal kanban call", text)
         self.assertIn("guardrail_halt", text)
+
+    def test_a_worker_whose_run_already_ended_charges_nobody(self):
+        """t_46c49c08: a worker blocked, kept going, and ended in text after the
+        card was running again under the next worker's run."""
+        did, rec, conn = self._record(
+            "running", reason=TEXT_EXIT, current_run=204, run_id=197
+        )
+        self.assertFalse(did)
+        self.assertEqual(rec.calls, [])
+        self.assertTrue(conn.closed)
+
+    def test_the_workers_own_run_is_still_charged(self):
+        did, rec, _ = self._record("running", reason=TEXT_EXIT, current_run=197, run_id=197)
+        self.assertTrue(did)
+        self.assertEqual(rec.calls[0][1]["outcome"], OUTCOME)
+
+    def test_the_nudge_count_reaches_the_error(self):
+        _, rec, _ = self._record("running", reason=TEXT_EXIT, stop_nudges=1)
+        self.assertIn("kanban nudges sent: 1", rec.calls[0][1]["error"])
+
+
+TEXT_EXIT = "text_response(finish_reason=stop)"
+
+
+class MissingTerminalErrorTest(unittest.TestCase):
+    def test_a_text_reply_says_so_first(self):
+        text = missing_terminal_error(TEXT_EXIT, 2)
+        self.assertTrue(text.startswith("model replied in text"), text)
+        self.assertIn("terminal kanban call", text)
+        self.assertIn(f"turn_exit_reason={TEXT_EXIT}", text)
+        self.assertIn("kanban nudges sent: 2", text)
+        self.assertIn("reply was not saved as its result", text)
+
+    def test_the_operator_reads_what_happened_within_the_cli_cut(self):
+        """`hermes kanban show` prints the first 160 characters of a run error."""
+        head = missing_terminal_error(TEXT_EXIT, 2)[:160]
+        self.assertIn("replied in text", head)
+        self.assertIn("kanban nudges sent: 2", head)
+
+    def test_the_retry_worker_is_told_what_to_do(self):
+        for reason in (TEXT_EXIT, "guardrail_halt", RETRIES_EXHAUSTED_EXIT_REASON):
+            text = missing_terminal_error(reason)
+            self.assertTrue(text.endswith(RETRY_INSTRUCTION), reason)
+            self.assertIn("kanban_complete with the full answer in result", text)
+
+    def test_other_exits_keep_the_generic_lead(self):
+        text = missing_terminal_error("guardrail_halt", 0)
+        self.assertTrue(text.startswith("worker ended without a terminal kanban call"))
+        self.assertNotIn("replied in text", text)
+
+    def test_an_unknown_count_is_left_out_rather_than_guessed(self):
+        self.assertNotIn("nudges", missing_terminal_error(TEXT_EXIT))
+
+    def test_the_text_avoids_the_phrases_upstream_parses(self):
+        """"protocol violation" feeds upstream's clean-exit streak; auth/quota words
+        park the card as a respawn blocker (verified against the real regex in the image)."""
+        for reason in (TEXT_EXIT, "guardrail_halt"):
+            text = missing_terminal_error(reason, 2).lower()
+            self.assertNotIn("protocol violation", text)
+            for word in ("auth", "quota", "429", "403", "forbidden", "permission"):
+                self.assertNotIn(word, text)
 
 
 STORM_ERROR = (
@@ -696,7 +777,7 @@ class FinalizerRateLimitBranchTest(unittest.TestCase):
     """The finalize_turn site: retries exhausted with no response after a 429."""
 
     def _record(self, reason, last_api_failure, block_task=None):
-        conn = ClosableConn(board([("t_storm", "running")]))
+        conn = ClosableConn(board([("t_storm", "running", 7)]))
         rec = Recorder()
         did = record_missing_terminal_call(
             task_id="t_storm",
@@ -1039,6 +1120,7 @@ class ApplierTest(unittest.TestCase):
             'last_api_failure=getattr(agent, "_kube_last_api_failure", None)', call
         )
         self.assertIn("run_id=_kube_worker_run_id()", call)
+        self.assertIn('stop_nudges=getattr(agent, "_kanban_stop_nudges", 0)', call)
 
     def test_the_finalizer_reads_the_split_kanban_modules(self):
         """hermes_cli.kanban_db no longer defines connect or _record_task_failure."""
