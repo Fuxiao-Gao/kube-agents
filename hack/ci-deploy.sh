@@ -471,6 +471,17 @@ readonly A2A_CONSOLE_IMAGE_NAME="a2a-console"
 # renders the bridge sidecar from it.
 readonly A2A_BRIDGE_IMAGE_NAME="hermes-bridge"
 
+# The image tag's parts (section 2 assembles them). The prefix is the pool
+# repository's cleanup key: scripts/provision_ci_pool_project.sh deletes tagged
+# images whose tag starts with it once they are 14 days old, so a tag outside
+# it would be kept forever, one set of images per run.
+readonly CI_IMAGE_TAG_PREFIX="pr-"
+# Stands in for PULL_NUMBER on a run that is not a presubmit.
+readonly CI_IMAGE_TAG_NO_PULL="local"
+# Stands in for the commit when neither PULL_PULL_SHA nor a git checkout names one.
+readonly CI_IMAGE_TAG_NO_COMMIT="latest"
+readonly CI_IMAGE_TAG_SHA_CHARS=7
+
 # ─── 1. Validation & Pre-checks ───────────────────────────────────────────────
 # Still required with the agent path on vertex_ai below: the judge reads it
 # (JUDGE_API_KEY in ci-eval-pr.sh) and the chart's credentials secret carries it.
@@ -496,9 +507,29 @@ source "${SCRIPT_DIR}/../tags.env"
 trap dump_prow_artifacts_on_failure EXIT
 ensure_helm
 
-RAW_PULL_SHA="${PULL_PULL_SHA:-latest}"
-PULL_SHA_SHORT="${RAW_PULL_SHA:0:7}"
-export TAG="pr-${PULL_NUMBER:-local}-${PULL_SHA_SHORT:-latest}"
+# The image tag, carried by every image this run builds and installs. It has
+# to be one no node has seen: pool clusters keep their nodes' image cache
+# between leases and these images pull IfNotPresent, so a reused tag runs
+# whatever it pointed at the last time that node pulled it, and a run can
+# install a mix of its own images and older ones (gke-labs/kube-agents#2766).
+# BUILD_ID, which Prow sets on every job type, makes it unique per run. Without
+# it a periodic reused one tag forever, and a presubmit re-run of the same head
+# reused its tag after main had moved, though Prow builds the head merged onto
+# the current main. The commit is there to be read: the pull request's head on
+# a presubmit, otherwise the checkout's HEAD, since Prow sets no PULL_* on a
+# periodic (EnvForSpec returns before them) and on a batch HEAD is the merge
+# the run builds.
+if [ -n "${PULL_PULL_SHA:-}" ]; then
+  TAG_COMMIT="${PULL_PULL_SHA}"
+else
+  TAG_COMMIT="$(git -C "${SCRIPT_DIR}/.." rev-parse HEAD 2>/dev/null || true)"
+fi
+TAG_COMMIT="${TAG_COMMIT:-${CI_IMAGE_TAG_NO_COMMIT}}"
+TAG="${CI_IMAGE_TAG_PREFIX}${PULL_NUMBER:-${CI_IMAGE_TAG_NO_PULL}}-${TAG_COMMIT:0:${CI_IMAGE_TAG_SHA_CHARS}}"
+if [ -n "${BUILD_ID:-}" ]; then
+  TAG="${TAG}-${BUILD_ID}"
+fi
+export TAG
 export AR_REPO="${AR_REPO:-us-central1-docker.pkg.dev/${PROJECT_ID}/kube-agents}"
 
 export IMG="${AR_REPO}/kube-agents-operator:${TAG}"
