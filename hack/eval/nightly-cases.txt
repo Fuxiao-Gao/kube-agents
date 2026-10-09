@@ -720,6 +720,12 @@
 # scraped, answered from the PodMonitoring and the Cloud Monitoring series.
 ./tasks/observability-watcher-scrape-state/task.yaml
 
+# gke-platform-security skill probe: Secrets encryption is verified on
+# databaseEncryption.currentState (CURRENT_STATE_ENCRYPTED), the observed
+# state, not on databaseEncryption.state, the requested one.
+# deployer: noop, transcript-only.
+./tasks/platform-security-secrets-encryption-currentstate-probe/task.yaml
+
 # A fleet question fanned out one card per cluster, each titled with the bare
 # cluster name the Slack plan row renders (agents/platform/SOUL.md, fan-out).
 # deployer: noop; reads the seeded fleet's crashloop-workload role.
@@ -737,3 +743,8 @@
 # the rows through the Session KV server's findings routes and resolves them on
 # destroy. No fixture; the host install only.
 ./tasks/findings-decision-covers-item/task.yaml
+
+# gke-upgrades skill probe: a node-pool upgrade runbook uses
+# clusters upgrade --node-pool, and the no_upgrades limits name the rolling
+# 92-day window. deployer: noop, transcript-only, one delegation round trip.
+./tasks/upgrades-freeze-runbook-probe/task.yaml
