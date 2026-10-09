@@ -170,6 +170,11 @@ ADDED_AFTER_THE_MOVE = [
     "findings-decision-covers-item",  # the findings queue's item-wide decision
     "upgrades-freeze-runbook-probe",  # the gke-upgrades skill sync
 ]
+# Taken back out of the nightly file after registering there, each with a
+# KNOWN_UNREGISTERED entry in scripts/validate_bench_cases.py that says why.
+PARKED_AFTER_THE_MOVE = [
+    "oobe-first-run-audits",  # 2026-10-09: truncated the main nightly, graded blocked
+]
 
 # Admitted after the split, each by a pull request that cited the record
 # (docs/eval-gate-roster.md, "Admitted on the record since the split"), as
@@ -323,7 +328,7 @@ class SplitLostNothingTest(unittest.TestCase):
             [
                 c
                 for c in expected + HELD_OUT_TO_NIGHTLY + ADDED_AT_THE_TAIL + ADDED_AFTER_THE_MOVE
-                if c not in seated
+                if c not in seated and c not in PARKED_AFTER_THE_MOVE
             ],
         )
 
