@@ -34,7 +34,10 @@ and still be useless:
    released, run closed, failure counted, exit reason legible in the event, and
    no text upstream would re-read as an auth blocker or a protocol violation.
    Plus a worker whose run already ended (it blocked, the card was re-run, and
-   it ended in text afterwards), which must leave the next worker's run open.
+   it ended in text afterwards), which must leave the next worker's run open,
+   and the same hand-over landing between the backstop's read and
+   ``_record_task_failure``'s write, which the run check inside the write
+   transaction must refuse.
    Plus the three cases that must *not* write — a card the board no longer shows as
    ``running`` (compaction can drop a terminal tool call out of ``messages``,
    the board cannot), a goal-mode worker between turns, and a dispatched cron
@@ -970,6 +973,53 @@ check(
     and f"turn_exit_reason={TEXT_EXIT}" in text_error
     and "kanban nudges sent: 2" in text_error,
     f"last_failure_error={text_error!r}",
+)
+
+# The read above runs before _record_task_failure opens its own transaction.
+# Hand the card over in exactly that gap: the run check inside the write has
+# to refuse the charge, or the new run is closed as before.
+params = inspect.signature(KD._record_task_failure).parameters
+check(
+    "_record_task_failure takes expected_run_id, defaulting to no check",
+    "expected_run_id" in params and params["expected_run_id"].default is None,
+    f"parameters: {list(params)}",
+)
+conn = board()
+raced = K.create_task(conn, title="Check PDB coverage (hand-over mid-charge)", assignee="platform")
+K.recompute_ready(conn)
+K.claim_task(conn, raced)
+raced_run = K.get_task(conn, raced).current_run_id
+handed_over = {}
+
+
+def hand_over_then_record(conn, task_id, **kwargs):
+    K.block_task(conn, task_id, reason="hand-over", expected_run_id=raced_run)
+    K.unblock_task(conn, task_id)
+    K.recompute_ready(conn)
+    K.claim_task(conn, task_id)
+    handed_over["run"] = K.get_task(conn, task_id).current_run_id
+    return KD._record_task_failure(conn, task_id, **kwargs)
+
+
+record_missing_terminal_call(
+    task_id=raced,
+    turn_exit_reason=TEXT_EXIT,
+    connect=board,
+    record_failure=hand_over_then_record,
+    run_id=raced_run,
+    stop_nudges=0,
+)
+conn = board()
+after = row(conn, raced)
+check(
+    "a hand-over between the read and the write leaves the new run open",
+    handed_over.get("run") not in (None, raced_run)
+    and after["status"] == "running"
+    and open_runs(conn, raced) == 1
+    and K.get_task(conn, raced).current_run_id == handed_over.get("run")
+    and (after["consecutive_failures"] or 0) == 0,
+    f"handed over to {handed_over.get('run')!r}; status={after['status']!r} "
+    f"open={open_runs(conn, raced)} failures={after['consecutive_failures']!r}",
 )
 
 # The text is read back by upstream: a respawn-blocker word parks the card as
