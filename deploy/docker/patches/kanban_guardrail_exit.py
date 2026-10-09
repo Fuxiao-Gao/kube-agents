@@ -442,18 +442,14 @@ def record_missing_terminal_call(
     is ``hermes_cli.kanban_db_dispatch._record_task_failure``, both injected. The
     ``release_claim`` / ``end_run`` pair is the same one the iteration-budget
     path uses: the card is still ``running`` with an open run, and this hands
-    both back. ``_record_task_failure`` closes whatever run is current, so
-    the board is first checked for this worker's own run (``run_id``,
-    ``HERMES_KANBAN_RUN_ID``): a card running under a newer worker's run is
-    left alone. That is a check before the write, not a condition on it.
-    ``_record_task_failure`` takes no expected run and opens its own
-    transaction through ``write_txn`` without ``allow_nested``, so it cannot
-    run inside one opened here, and the card could still change hands between
-    the two. That needs this worker's run ended and a new one claimed inside
-    that window — normally milliseconds, longer only while another writer
-    holds the lock — while the process is alive; the gap this closes is the minutes between a worker's own
-    ``kanban_block`` and its exit. Closing the rest means re-implementing
-    upstream's failure counter and breaker here, which would drift.
+    both back. Upstream's ``_record_task_failure`` closes whatever run is
+    current, so the charge is conditioned on this worker's own run
+    (``run_id``, ``HERMES_KANBAN_RUN_ID``): ``apply_kanban_guardrail_exit``
+    gives it an ``expected_run_id`` that it checks inside its own write
+    transaction, as ``block_task`` does, and a card running under a newer
+    worker's run is left alone. The read before it answers the common case
+    without a write and keeps this function's return value honest; the check
+    inside the transaction covers a hand-over between the two.
 
     ``stop_nudges`` (``agent._kanban_stop_nudges``) is reported in the error
     text; see ``missing_terminal_error``.
@@ -495,6 +491,7 @@ def record_missing_terminal_call(
             outcome=OUTCOME,
             release_claim=True,
             end_run=True,
+            expected_run_id=run_id,
             event_payload_extra={
                 "turn_exit_reason": str(turn_exit_reason),
                 "detector": DETECTOR,

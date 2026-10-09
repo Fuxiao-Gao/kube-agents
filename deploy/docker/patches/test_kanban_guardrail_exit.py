@@ -27,9 +27,11 @@ from apply_kanban_guardrail_exit import (
     CLASSIFY_ANCHOR,
     CLI_ANCHOR,
     CLI_RELATIVE,
+    DISPATCH_RELATIVE,
     FINALIZER_ANCHOR,
     FINALIZER_RELATIVE,
     HALT_ANCHOR,
+    RECORD_RUN_ANCHOR,
     TOOL_ROUND_RELATIVE,
     apply,
 )
@@ -536,6 +538,14 @@ class RecordMissingTerminalTest(unittest.TestCase):
         self.assertTrue(did)
         self.assertEqual(rec.calls[0][1]["outcome"], OUTCOME)
 
+    def test_the_charge_carries_the_run_into_the_write(self):
+        """The read is not enough on its own: the card can change hands before
+        record_failure opens its transaction, so the run travels with it."""
+        _, rec, _ = self._record("running", reason=TEXT_EXIT, current_run=197, run_id=197)
+        self.assertEqual(rec.calls[0][1]["expected_run_id"], 197)
+        _, rec, _ = self._record("running", reason=TEXT_EXIT)
+        self.assertIsNone(rec.calls[0][1]["expected_run_id"])
+
     def test_the_nudge_count_reaches_the_error(self):
         _, rec, _ = self._record("running", reason=TEXT_EXIT, stop_nudges=1)
         self.assertIn("kanban nudges sent: 1", rec.calls[0][1]["error"])
@@ -1027,6 +1037,42 @@ def finalize_turn(agent, *, final_response, api_call_count, interrupted, failed,
 '''
 
 
+# Upstream's _record_task_failure, cut to the lines the two dispatch edits
+# anchor on and one write the run check has to precede.
+DISPATCH_STUB = '''from typing import Optional
+
+
+def _record_task_failure(
+    conn,
+    task_id: str,
+    error: str,
+    *,
+    outcome: str,
+    failure_limit: int = None,
+    force_trip: bool = False,
+    release_claim: bool = False,
+    end_run: bool = False,
+    event_payload_extra: Optional[dict] = None,
+) -> bool:
+    """Record a non-success outcome."""
+    with _kb.write_txn(conn):
+        row = conn.execute(
+            "SELECT consecutive_failures, status, max_retries, current_run_id "
+            "FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        retry_status = (
+            "ready"
+        )
+        conn.execute(
+            "UPDATE tasks SET status = ?, current_run_id = NULL WHERE id = ? AND status = 'running'",
+            (retry_status, task_id),
+        )
+        return False
+'''
+
+
 def stage_tree():
     root = Path(tempfile.mkdtemp())
     (root / "agent").mkdir()
@@ -1036,6 +1082,7 @@ def stage_tree():
     (root / FINALIZER_RELATIVE).write_text(FINALIZER_STUB)
     (root / CLI_RELATIVE).write_text(CLI_STUB)
     (root / CHAT_RELATIVE).write_text(CHAT_STUB)
+    (root / DISPATCH_RELATIVE).write_text(DISPATCH_STUB)
     return root
 
 
@@ -1079,6 +1126,7 @@ class ApplierTest(unittest.TestCase):
             "api_error": (root / API_ERROR_RELATIVE).read_text(),
             "cli": (root / CLI_RELATIVE).read_text(),
             "chat": (root / CHAT_RELATIVE).read_text(),
+            "dispatch": (root / DISPATCH_RELATIVE).read_text(),
         }
 
     def test_all_files_are_patched_and_stay_parseable(self):
@@ -1090,6 +1138,49 @@ class ApplierTest(unittest.TestCase):
         self.assertIn("agent._kube_last_api_failure = (", files["api_error"])
         self.assertIn("_kube_block_rate_limited(result)", files["cli"])
         self.assertIn("_kube_block_rate_limited_chat(turn.result)", files["chat"])
+
+    def test_the_run_check_runs_inside_the_transaction_before_any_write(self):
+        dispatch = self._apply_all()["dispatch"]
+        ast.parse(dispatch)
+        self.assertIn("    expected_run_id: Optional[int] = None,\n) -> bool:", dispatch)
+        self.assertEqual(dispatch.count(RECORD_RUN_ANCHOR), 0)
+        check = dispatch.index('row["current_run_id"] != expected_run_id')
+        self.assertLess(dispatch.index("with _kb.write_txn(conn):"), check)
+        self.assertLess(dispatch.index("if row is None:"), check)
+        self.assertLess(check, dispatch.index("UPDATE tasks"))
+
+    def test_the_patched_failure_record_leaves_another_run_alone(self):
+        """Run the miniature: a mismatched run writes nothing; a matching run or
+        no run at all writes as upstream did."""
+        import contextlib
+
+        root = stage_tree()
+        apply(root)
+        spec = importlib.util.spec_from_file_location("patched_dispatch", root / DISPATCH_RELATIVE)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module._kb = types.SimpleNamespace(write_txn=lambda conn: contextlib.nullcontext())
+
+        def card(run):
+            conn = sqlite3.connect(":memory:")
+            conn.row_factory = sqlite3.Row
+            conn.execute(
+                "CREATE TABLE tasks (id TEXT, status TEXT, current_run_id INTEGER, "
+                "consecutive_failures INTEGER DEFAULT 0, max_retries INTEGER)"
+            )
+            conn.execute("INSERT INTO tasks (id, status, current_run_id) VALUES ('t1', 'running', ?)", (run,))
+            return conn
+
+        def status(conn):
+            return conn.execute("SELECT status, current_run_id FROM tasks").fetchone()[:]
+
+        conn = card(204)
+        module._record_task_failure(conn, "t1", "x", outcome="timed_out", expected_run_id=197)
+        self.assertEqual(status(conn), ("running", 204))
+        for expected in (204, None):
+            conn = card(204)
+            module._record_task_failure(conn, "t1", "x", outcome="timed_out", expected_run_id=expected)
+            self.assertEqual(status(conn), ("ready", None), expected)
 
     def test_the_stash_follows_the_classification(self):
         api_error = self._apply_all()["api_error"]
