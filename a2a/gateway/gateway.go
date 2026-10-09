@@ -927,7 +927,15 @@ func (g *Gateway) routeTurn(ctx context.Context, msg InboundMessage, backend, pr
 				rec.Addressee = rec.BusSession
 			}
 		}
-		g.startTask(ctx, rec, msg, backend, principal, authority)
+		// The busy notice: counted once the task is on the bus, leaving the
+		// task itself out, and shown on the task's status line (showBusy).
+		// fixedRouteAhead answers false off the fixed route. Informational:
+		// the turn has already started either way.
+		if taskID := g.startTask(ctx, rec, msg, backend, principal, authority); taskID != "" {
+			if ahead, busy := g.fixedRouteAhead(ctx, rec, backend, taskID); busy {
+				g.showBusy(rec, taskID, ahead)
+			}
+		}
 	}
 
 	if err := withRetry(kvRetryAttempts, func() error { return g.reg.Put(ctx, rec) }); err != nil {
@@ -1950,15 +1958,17 @@ type taskStart struct {
 	LinkParent bool
 }
 
-// startTask opens a turn for a human message.
-func (g *Gateway) startTask(ctx context.Context, rec *SessionRecord, msg InboundMessage, backend, principal string, authority Authority) {
-	g.startTaskWith(ctx, rec, taskStart{
+// startTask opens a turn for a human message, and returns its task id once
+// the submission is on the bus, "" otherwise (startTaskWith).
+func (g *Gateway) startTask(ctx context.Context, rec *SessionRecord, msg InboundMessage, backend, principal string, authority Authority) string {
+	taskID, _ := g.startTaskWith(ctx, rec, taskStart{
 		Text:      msg.Text,
 		MessageID: msg.MessageID,
 		Principal: principal,
 		Requester: TaskRequester{Backend: backend, Subject: requesterSubject(g.ps, backend, msg.AuthorID)},
 		Authority: authority,
 	})
+	return taskID
 }
 
 // startTaskWith mints the identifiers, publishes the submission, and posts
