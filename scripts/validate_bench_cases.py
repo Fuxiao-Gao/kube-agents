@@ -178,10 +178,10 @@ KNOWN_UNREGISTERED = {
     # gate's liveness rung reads as no agent run. The entry goes when the case
     # can record a pass or a fail (#2699's tool_calls_optional would let its
     # reply pass that rung) and the main part's infra-lock chain has room for
-    # it (or it runs on a job of its own).
+    # it (or it runs on a job of its own); #2806 tracks both.
     "oobe-first-run-audits": (
-        "parked 2026-10-09: 140 infra-lock minutes truncated the main nightly, "
-        "and its empty trajectory grades every repetition blocked"
+        "#2806: parked 2026-10-09; 140 infra-lock minutes truncated the main "
+        "nightly, and its empty trajectory grades every repetition blocked"
     ),
 }
 

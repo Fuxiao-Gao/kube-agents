@@ -1,5 +1,5 @@
 # PARKED -- a KNOWN_UNREGISTERED entry in scripts/validate_bench_cases.py, in
-# no roster file under hack/eval/, since 2026-10-09. Its first nightly held the
+# no roster file under hack/eval/, since 2026-10-09, until #2806 lands. Its first nightly held the
 # infra lock 140 minutes and the deadline cut the main part; every repetition
 # graded blocked, because the no-tool turn below leaves an empty trajectory and
 # the gate's liveness rung reads that as no agent run (#2699's
