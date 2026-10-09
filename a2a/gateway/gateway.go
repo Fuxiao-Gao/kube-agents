@@ -1317,6 +1317,7 @@ func (g *Gateway) probeConversation(ctx context.Context, key, taskID string) (Co
 	if rec == nil {
 		return state, nil
 	}
+	state.ContextID = rec.ContextID
 	active := rec.ActiveTask
 	if taskID == "" {
 		if active == nil {
