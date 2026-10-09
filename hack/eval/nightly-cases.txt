@@ -942,3 +942,10 @@
 # upgrade, not a hand edit of the PlatformAgent (#2019). deployer: noop,
 # transcript-only, one delegation round trip.
 ./tasks/manage-cluster-exclusion-installer-route-probe/task.yaml
+
+# A plain chat request for a cost analysis runs the waste audit's collector
+# (#2386): the Platform Agent routes a domain request to its stream's
+# collector even when the request names no SOP, and answers in chat without
+# publishing. deployer: noop; reads the seeded fleet's idle-nodepool role.
+# Nightly rather than presubmit for the collector's full sweep.
+./tasks/cost-chat-request-runs-collector/task.yaml
