@@ -1001,13 +1001,18 @@ def hand_over_then_record(conn, task_id, **kwargs):
     return KD._record_task_failure(conn, task_id, **kwargs)
 
 
-record_missing_terminal_call(
+raced_recorded = record_missing_terminal_call(
     task_id=raced,
     turn_exit_reason=TEXT_EXIT,
     connect=board,
     record_failure=hand_over_then_record,
     run_id=raced_run,
     stop_nudges=0,
+)
+check(
+    "and the backstop does not report a charge the write refused",
+    raced_recorded is False,
+    f"returned {raced_recorded!r}; the finalizer would log 'recorded'",
 )
 conn = board()
 after = row(conn, raced)

@@ -43,8 +43,10 @@ The inserts mirror code that is already in the tree: edit 1 copies the shape of
 upstream's kanban stop gate in ``agent/turn_stop_gates.py`` (local import,
 synthetic user row through ``append_message``, nudge counter on the agent), and
 edit 2 copies the ``_record_task_failure`` call ``_resolve_budget_fallback``
-directly above it already makes. None is idempotent — every insert sits next to
-its anchor rather than consuming it, so a marker check refuses the second run.
+directly above it already makes. None is idempotent: edits 1 to 5 sit next to
+their anchors rather than consuming them, and edit 6 splits its two anchors
+with the inserted lines. Either way a second run cannot be told from the
+anchors alone, so a marker check refuses it.
 
 See the module docstring in kanban_guardrail_exit.py for the incidents.
 """
