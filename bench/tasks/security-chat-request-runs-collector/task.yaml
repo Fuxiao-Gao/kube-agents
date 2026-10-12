@@ -5,14 +5,14 @@
 # What this case grades (#2386): a plain chat request to check the fleet's
 # security posture, one that names no SOP, gets the checks the scheduled
 # compliance audit runs. Nothing a kanban worker reads sent it to the
-# governance SOP: the only rule that did (a request that names an SOP) sits in
-# agents/platform/AGENTS.md, which Hermes does not load for a kanban worker,
-# and SOUL.md's fan-out paragraph sent a fleet question out one card per
-# cluster. So "check our security posture" became per-cluster gke-* skill
+# governance SOP: the only rule that did (a request that names an SOP) sits
+# in agents/platform/AGENTS.md, which Hermes does not load for a kanban
+# worker, and SOUL.md's fan-out paragraph sent a fleet question out one card
+# per cluster. So "check our security posture" became per-cluster gke-* skill
 # checks: gke-workload-security's audit_cluster.sh describes one cluster and
-# reads no RBAC. The route now sits in agents/platform/SOUL.md. collect.py compliance-audit, the stream's
-# collector, sweeps every cluster and flags a cluster-admin binding to a
-# service account.
+# reads no RBAC. The route now sits in agents/platform/SOUL.md.
+# collect.py compliance-audit, the stream's collector, sweeps every cluster
+# and flags a cluster-admin binding to a service account.
 #
 # The red check is the collector invocation: the skill route never runs it.
 # The reply must also name the planted binding, which an agent on the skill
