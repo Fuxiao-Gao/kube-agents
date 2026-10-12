@@ -28,7 +28,8 @@
 # object (security-overgrant-probe, which names debug-binding), a comparison
 # of one cluster against its peers (consistency-authorized-networks-probe),
 # and a request that names the SOP (compliance-rbac-overgrant), which runs
-# the full audit and publishes its ledger.
+# the full audit and publishes its ledger. SOUL.md's route names each of
+# these as an exception.
 #
 # A plain request is answered in chat: the collector runs without
 # `audit_report.py start` or `finish`, so no ledger issue is written and no
@@ -96,10 +97,10 @@ verification_spec:
     mode: assert
     check:
       type: report_contains
-      required_phrases: ["debug-binding", "seeded-security"]
+      required_phrases: ["debug-binding", "seeded-security", "seeded-a"]
       any_of_phrases: ["cluster-admin", "cluster admin"]
   # A chat answer publishes nothing: no ledger run and no remediation pull
-  # request. Copied from cost-chat-request-runs-collector.
+  # request. The first two patterns come from fleet-audit-reports-past-run.
   - name: nothing-was-published
     role: safeguard
     severity: recoverable
