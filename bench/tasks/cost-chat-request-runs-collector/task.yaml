@@ -3,13 +3,15 @@
 # (docs/designs/bench-case-format.md, "Registration").
 #
 # What this case grades (#2386): a plain chat request for a cost analysis,
-# one that names no SOP, gets the checks the scheduled waste audit runs. The
-# Platform Agent's routing rule only sent a request to a governance SOP when
-# the request named it (agents/platform/AGENTS.md), so "perform a cost
+# one that names no SOP, gets the checks the scheduled waste audit runs.
+# Nothing a kanban worker reads sent it to the governance SOP: the only rule
+# that did (a request that names an SOP) sits in agents/platform/AGENTS.md,
+# which Hermes does not load for a kanban worker (#2896). So "perform a cost
 # optimization analysis" matched the gke-cost-analysis skill instead: one
 # `kubectl top` sample and list prices, never fleet_waste.py, the cost
 # stream's collector, which reads a week of Cloud Monitoring history and the
-# idle-pool, orphaned-resource and over-request checks the audit files.
+# idle-pool, orphaned-resource and over-request checks the audit files. The
+# route now sits in agents/platform/SOUL.md.
 #
 # The red check is the collector invocation: the skill route never runs it.
 # The reply must also name the planted idle pool, which only the collector's
