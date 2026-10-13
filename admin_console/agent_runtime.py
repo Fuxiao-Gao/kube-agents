@@ -544,9 +544,12 @@ def _unframe(stdout: str) -> tuple[int, str] | None:
     """Split the read script's length header from its body, if present."""
     header, separator, body = stdout.partition("\n")
     tag, _, length = header.partition(" ")
-    if not separator or tag != _READ_FRAME_TAG or not length.isdigit():
+    if not separator or tag != _READ_FRAME_TAG:
         return None
-    return int(length), body
+    try:
+        return int(length), body
+    except ValueError:
+        return None
 
 
 class KubeRunner(Protocol):

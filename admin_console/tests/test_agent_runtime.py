@@ -420,6 +420,28 @@ class EmbeddedReadScriptTest(unittest.TestCase):
         self.assertLessEqual(max(sizes), 65536)
         self.assertGreater(sum(sizes), 65536)
 
+    def test_board_holds_after_its_last_write(self):
+        prelude = (
+            "import os, sys, time\n"
+            "_write = os.write\n"
+            "def _logged(fd, data):\n"
+            "    sys.stderr.write('write\\n')\n"
+            "    return _write(fd, data)\n"
+            "os.write = _logged\n"
+            "time.sleep = lambda seconds: sys.stderr.write(f'sleep {seconds}\\n')\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._create_board_db(root / "kanban.db", [("t_00000001", "Task", "s")])
+            completed = subprocess.run(
+                [sys.executable, "-c", prelude + self._script_for(root), "board", "500"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(completed.stderr.splitlines()[-1], "sleep 0.25")
+
     def test_board_round_trips_non_ascii_text(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -795,6 +817,15 @@ class FramedReadTest(unittest.TestCase):
 
         with self.assertRaisesRegex(AgentRuntimeError, "returned invalid data"):
             provider.check_connection("platform-agent")
+
+    def test_header_length_int_refuses_is_invalid(self):
+        for length in ("²", "9" * 5000):
+            with self.subTest(length=length[:8]):
+                provider = self._provider(
+                    FramedReadRunner(f"{_READ_FRAME_TAG} {length}\n{{}}")
+                )
+                with self.assertRaisesRegex(AgentRuntimeError, "returned invalid data"):
+                    provider.check_connection("platform-agent")
 
     def test_failed_read_without_a_header_still_reports_failure(self):
         provider = self._provider(FramedReadRunner("", returncode=1))
