@@ -18,6 +18,7 @@ sys.path.insert(0, str(HERE.parent.parent / "platform" / "scripts"))
 
 import bootstrap_delivery
 import inventory_presenter
+import oobe
 
 #: A paragraph of this many "1 more clusters" runs (96 KB) took 60 seconds with
 #: the scope-noun lookahead unbounded.
@@ -1465,6 +1466,23 @@ class OriginPlatformTest(unittest.TestCase):
             self.assertIsNone(bootstrap_delivery._origin_platform())
 
 
+# The repository list is read through kubectl in the pod; every delivery here sees one repository.
+REPOSITORIES = mock.patch.object(oobe, "managed_repositories", return_value=["acme/gitops"])
+
+
+def setUpModule():
+    REPOSITORIES.start()
+
+
+def tearDownModule():
+    REPOSITORIES.stop()
+
+
+def delivered(report: str) -> str:
+    """What delivery prints for a report with no oobe marker beside it: the report, then the audits note."""
+    return report.rstrip("\n") + "\n\n" + bootstrap_delivery.AUDITS_RUNNING_NOTE + "\n"
+
+
 class DeliveryFlagTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -1494,13 +1512,13 @@ class DeliveryFlagTest(unittest.TestCase):
         return buf.getvalue()
 
     def test_flag_unset_delivers_presented(self):
-        self.assertEqual(self._run(None), PRESENTED)
+        self.assertEqual(self._run(None), delivered(PRESENTED))
 
     def test_flag_off_delivers_verbatim(self):
-        self.assertEqual(self._run("0"), REPORT)
+        self.assertEqual(self._run("0"), delivered(REPORT))
 
     def test_flag_on_delivers_presented_and_archives_original(self):
-        self.assertEqual(self._run("1"), PRESENTED)
+        self.assertEqual(self._run("1"), delivered(PRESENTED))
         self.assertEqual((self.d / "INVENTORY.delivered.md").read_text(encoding="utf-8"), REPORT)
 
     def test_flag_on_without_a_relay_prints_the_text(self):
@@ -1508,7 +1526,7 @@ class DeliveryFlagTest(unittest.TestCase):
         import slack_blocks_post
 
         with mock.patch.object(slack_blocks_post, "post") as poster:
-            self.assertEqual(self._run("1"), PRESENTED)
+            self.assertEqual(self._run("1"), delivered(PRESENTED))
         poster.assert_not_called()
 
     def test_google_chat_is_verbatim_with_the_flag_on(self):
@@ -1516,20 +1534,20 @@ class DeliveryFlagTest(unittest.TestCase):
         import slack_blocks_post
 
         with mock.patch.object(slack_blocks_post, "post") as poster:
-            self.assertEqual(self._run("1", platform="google_chat", relay=RELAY_URL), REPORT)
+            self.assertEqual(self._run("1", platform="google_chat", relay=RELAY_URL), delivered(REPORT))
         poster.assert_not_called()
 
     def test_a_missing_origin_is_verbatim_with_the_flag_on(self):
         import slack_blocks_post
 
         with mock.patch.object(slack_blocks_post, "post") as poster:
-            self.assertEqual(self._run("1", platform=None, relay=RELAY_URL), REPORT)
+            self.assertEqual(self._run("1", platform=None, relay=RELAY_URL), delivered(REPORT))
         poster.assert_not_called()
 
     def test_presenter_failure_delivers_verbatim(self):
         boom = mock.patch.object(inventory_presenter, "present", side_effect=ValueError("boom"))
         with boom, contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(self._run("1"), REPORT)
+            self.assertEqual(self._run("1"), delivered(REPORT))
 
 
 
@@ -1562,8 +1580,8 @@ class BlocksDeliveryTest(unittest.TestCase):
         self.posts = poster.call_args_list
         return out.getvalue()
 
-    def test_posts_blocks_into_the_origin_and_prints_nothing(self):
-        self.assertEqual(self._run(lambda *a: "9.9"), "")
+    def test_posts_blocks_into_the_origin_and_prints_only_the_audits_note(self):
+        self.assertEqual(self._run(lambda *a: "9.9"), bootstrap_delivery.AUDITS_RUNNING_NOTE + "\n")
         (post,) = self.posts
         channel, text, blocks, thread_ts = post.args
         self.assertEqual((channel, thread_ts), ("C1", "1.5"))
@@ -1572,30 +1590,39 @@ class BlocksDeliveryTest(unittest.TestCase):
         self.assertTrue((self.d / ".bootstrap_completed").exists())
         self.assertEqual((self.d / "INVENTORY.delivered.md").read_text(encoding="utf-8"), REPORT)
 
+    def test_a_skip_goes_out_as_its_own_message_after_the_blocks(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            oobe.skip(self.d, oobe.SKIP_NO_REPOSITORY, 1000.0)
+        self.assertEqual(
+            self._run(lambda *a: "9.9"),
+            f"The first-run audits did not run: {oobe.SKIP_NO_REPOSITORY}. {bootstrap_delivery.AUDITS_COVERED_NOTE}\n",
+        )
+        self.assertEqual(len(self.posts), 1)
+
     def test_flag_off_is_byte_identical(self):
-        self.assertEqual(self._run(lambda *a: "9.9", flag="0"), REPORT)
+        self.assertEqual(self._run(lambda *a: "9.9", flag="0"), delivered(REPORT))
         self.assertEqual(self.posts, [])
 
     def test_a_refusal_that_is_not_about_blocks_is_not_retried(self):
-        self.assertEqual(self._run(self.sbp.Refused("channel_not_found")), PRESENTED)
+        self.assertEqual(self._run(self.sbp.Refused("channel_not_found")), delivered(PRESENTED))
         self.assertEqual(len(self.posts), 1)
 
     def test_refused_blocks_are_not_retried(self):
         # The card has no fold to leave out, so the same blocks would be refused again.
-        self.assertEqual(self._run(self.sbp.Refused("invalid_blocks")), PRESENTED)
+        self.assertEqual(self._run(self.sbp.Refused("invalid_blocks")), delivered(PRESENTED))
         self.assertEqual(len(self.posts), 1)
 
     def test_a_relay_failure_prints_the_text(self):
-        self.assertEqual(self._run(OSError("connection refused")), PRESENTED)
+        self.assertEqual(self._run(OSError("connection refused")), delivered(PRESENTED))
         self.assertEqual(len(self.posts), 1)
 
     def test_a_post_that_may_have_landed_still_prints_the_text(self):
         # The first inventory is sent once, so a second copy beats none.
-        self.assertEqual(self._run(TimeoutError("timed out")), PRESENTED)
+        self.assertEqual(self._run(TimeoutError("timed out")), delivered(PRESENTED))
         self.assertEqual(len(self.posts), 1)
 
     def test_no_chat_id_prints_the_text(self):
-        self.assertEqual(self._run(lambda *a: "9.9", origin={"platform": "slack"}), PRESENTED)
+        self.assertEqual(self._run(lambda *a: "9.9", origin={"platform": "slack"}), delivered(PRESENTED))
         self.assertEqual(self.posts, [])
 
 

@@ -27,6 +27,19 @@ sys.path.insert(1, str(Path(__file__).resolve().parents[2] / "platform" / "scrip
 
 import bootstrap_handoff as h
 import inventory_findings
+import oobe
+
+# The repository list is read through kubectl in the pod; every test here sees one repository
+# unless it patches the list itself.
+REPOSITORIES = mock.patch.object(oobe, "managed_repositories", return_value=["acme/gitops"])
+
+
+def setUpModule():
+    REPOSITORIES.start()
+
+
+def tearDownModule():
+    REPOSITORIES.stop()
 
 FIXTURE = Path(__file__).parent / "testdata" / "bootstrap_handoff" / "cluster_metadata.json"
 SWEEP = "t_sweep"
@@ -183,6 +196,41 @@ class ComposeTest(unittest.TestCase):
         text = h.compose(self._state(_all_done()), timed_out=False, now=NOW)
         self.assertIn("| seeded-b |", text)
         self.assertNotIn('"cluster": "seeded-b"', text)
+
+    def test_the_workload_table_carries_only_the_scans_own_checks(self):
+        workload = {"namespace": "ns", "name": "api", "kind": "Deployment", "replicas": "2/2",
+                    "probes": {"startup": False}, "telemetry": "otlp", "security_context": {"read_only_root_fs": True}}
+        meta = {"project": "p", "cluster": "c", "workloads": [workload], "findings": []}
+        text = h.compose(self._state([("t_w", "done", meta, "")]), timed_out=False, now=NOW)
+        self.assertIn("| Replicas | Startup Probe | Telemetry | ReadOnlyFS |", text)
+        self.assertIn("| c | ns | api | Deployment | 2/2 | no | otlp | yes |", text)
+        self.assertNotIn("Requests/Limits", text)
+        self.assertIn("are not checked by this scan: the first-run audits own them", text)
+
+    def test_the_workload_table_carries_the_no_repository_checks_when_an_audit_ran_them(self):
+        workload = {"namespace": "ns", "name": "api", "kind": "Deployment", "replicas": "2/2",
+                    "probes": {"liveness": True, "readiness": False, "startup": False},
+                    "resources": {"requests": True, "limits": False, "qos": "Burstable"}, "hpa": False,
+                    "telemetry": "otlp",
+                    "security_context": {"run_as_non_root": True, "read_only_root_fs": True, "privileged": False}}
+        narrow = {"namespace": "ns", "name": "web", "kind": "Deployment", "replicas": "1/1",
+                  "probes": {"startup": True}, "telemetry": "none", "security_context": {"read_only_root_fs": False}}
+        clusters = [("t_w", "done", {"project": "p", "cluster": "c", "workloads": [workload], "findings": []}, ""),
+                    ("t_n", "done", {"project": "p", "cluster": "d", "workloads": [narrow], "findings": []}, "")]
+        text = h.compose(self._state(clusters), timed_out=False, now=NOW)
+        self.assertIn("| Probes (Live/Ready/Startup) | Requests/Limits/QoS | Telemetry | NonRoot/ReadOnlyFS/Privileged |", text)
+        self.assertIn("| c | ns | api | Deployment | 2/2 | yes/no/no | yes/no/Burstable | otlp | yes/yes/no |", text)
+        # A card that did not run the section leaves its cells unknown, not clean.
+        self.assertIn("| d | ns | web | Deployment | 1/1 | n/a/n/a/yes | n/a | none | n/a/no/n/a |", text)
+        self.assertIn("this scan also checked liveness and readiness probes", text)
+
+    def test_a_no_repository_finding_alone_says_the_scan_checked_them(self):
+        # A cluster-level check such as Workload Identity leaves no workload field behind.
+        meta = {"project": "p", "cluster": "c", "workloads": [], "findings": [
+            {"check": "workload-identity-off", "issue": "Workload Identity is not enabled"}]}
+        text = h.compose(self._state([("t_w", "done", meta, "")]), timed_out=False, now=NOW)
+        self.assertIn("this scan also checked liveness and readiness probes", text)
+        self.assertNotIn("are not checked by this scan", text)
 
     def test_a_blocked_card_is_a_named_gap(self):
         clusters = _all_done()[:1] + [("t_blocked", "blocked", None, "Cluster preflight check failed with exit code 255.")]
@@ -562,6 +610,33 @@ class HandOffTest(unittest.TestCase):
         self.assertEqual(argv[argv.index("--assignee") + 1], "cluster-t_missing")
         self.assertIn("cluster_inventory_audit_sop.md", argv[argv.index("--body") + 1])
         self.assertEqual(self.filed, [])
+
+    def test_a_cluster_card_runs_the_no_repository_section_only_without_a_repository(self):
+        for repositories, expected, other in (([], h.NO_REPOSITORY_RUN, h.NO_REPOSITORY_SKIP),
+                                              (["acme/gitops"], h.NO_REPOSITORY_SKIP, h.NO_REPOSITORY_RUN)):
+            with self.subTest(repositories=repositories):
+                _board(self.board, clusters=[])
+                sent = []
+                with self._stub_kanban(sent), mock.patch.object(oobe, "managed_repositories", return_value=repositories):
+                    self._run_roster([self._agent("t_a"), self._agent("t_b")])
+                bodies = [(lambda a: a[a.index("--body") + 1])(shlex.split(cmd)) for cmd in sent]
+                self.assertEqual(len(bodies), 2)
+                for body in bodies:
+                    self.assertIn(expected, body)
+                    self.assertNotIn(other, body)
+                self.board.unlink()
+
+    def test_the_repository_list_is_read_once_per_tick_and_only_to_file_a_card(self):
+        _board(self.board, clusters=[])
+        with self._stub_kanban([]), mock.patch.object(oobe, "managed_repositories", return_value=[]) as read:
+            self._run_roster([self._agent("t_a"), self._agent("t_b")])
+        self.assertEqual(read.call_count, 1)
+        self.board.unlink()
+        _board(self.board, clusters=_all_done())
+        roster = [self._agent(tid) for tid, _, _, _ in _all_done()]
+        with self._stub_kanban([]), mock.patch.object(oobe, "managed_repositories", return_value=[]) as read:
+            self._run_roster(roster)
+        read.assert_not_called()
 
     def test_a_sweep_that_filed_no_cards_does_not_report_a_clean_fleet(self):
         # The live failure: a done sweep with no cluster cards at all.

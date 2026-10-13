@@ -530,6 +530,10 @@ def _task_body() -> str:
     instruction_list = "\n".join(f"  - {p}" for p in INSTRUCTIONS_PATHS)
     cluster_audit_list = "\n".join(f"  - {p}" for p in CLUSTER_AUDIT_INSTRUCTIONS_PATHS)
     roster = "\n".join(f"    - `{a['name']}`: {a['cluster_label']}" for a in cluster_agents()) or "    (none)"
+    no_repository = (
+        bootstrap_handoff.NO_REPOSITORY_RUN if bootstrap_handoff.no_repository_checks()
+        else bootstrap_handoff.NO_REPOSITORY_SKIP
+    )
     return (
         "First-time onboarding discovery sweep. Follow the inventory SOP, reading whichever "
         "of these exists:\n"
@@ -574,7 +578,7 @@ def _task_body() -> str:
         "**Step 3 — audit the clusters the list does not cover**, following Steps 2 to 4 of the "
         "single-cluster audit SOP (its own numbering) for each, reading whichever of these "
         f"exists:\n{cluster_audit_list}\n\n"
-        "and record each in that SOP's `metadata` shape. Usually there are none.\n\n"
+        f"and record each in that SOP's `metadata` shape. Usually there are none. {no_repository}\n\n"
         "**Step 4 — complete this card now. Do not wait for the per-cluster cards, do not write "
         f"`{RAW_INVENTORY_PATH}` or `{INVENTORY_PATH}`, and do not file a ranking card.** The "
         "onboarding gate waits for the per-cluster cards, writes the raw findings from their "

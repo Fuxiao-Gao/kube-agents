@@ -39,9 +39,14 @@ total, the top two rows, the rest folded, and "Fix the first one" and "See all N
 buttons), posted here through ``slack_blocks_post`` because the scheduler's delivery
 takes text only. Under ``spec.mode: next`` the same card goes through the A2A
 gateway as a chat message instead (``_posted_through_gateway``).
-Then nothing is printed; any failure prints the text. A failure after the request was
-sent may have posted, so that path can send the report twice; see
-``_posted_as_blocks``.
+Then only the audits note below is printed, as a second message; any failure prints the
+text. A failure after the request was sent may have posted, so that path can send the
+report twice; see ``_posted_as_blocks``.
+
+Every delivery closes with a short note on the first-run audits, read off the ``oobe`` stage's
+marker by ``_audits_note``: the report's scan leaves the workload checks to those audits, and a
+short report would otherwise read as a healthy fleet. The text path appends it to the report; the
+card paths print it on their own, since the card leaves closing lines out.
 
 Just before the claim, the run registers the sweep's findings in the
 findings queue from this pod, from the items and scores the prioritization
@@ -83,6 +88,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+import oobe  # beside this script in the pod
 import sandbox_exec
 
 # The two jobs oobe took over, removed once onboarding is done.
@@ -163,6 +169,44 @@ REMOTE_MV = "/bin/mv"
 
 # The only surface the reshaped report is written for; every other one gets it verbatim.
 PRESENTED_PLATFORM = "slack"
+
+# The note on the first-run audits (_audits_note). The scan leaves their workload checks to them
+# unless its cards ran the cluster inventory SOP's "Without a GitOps repository" section.
+AUDITS_SKIPPED_NOTE = "The first-run audits did not run: {reason}."
+AUDITS_NO_REASON = "no reason was recorded"
+# The scan's cards ran that section because the stage's repository list was empty, which is also
+# what this skip read (bootstrap_handoff.no_repository_checks).
+AUDITS_COVERED_NOTE = (
+    "This scan checked probes, requests and limits, autoscaling, NetworkPolicy and pod security in "
+    "their place, so this report covers them."
+)
+# Any other skip comes before the stage reads the list, so the report holds those checks only if
+# the list was empty when the scan's cards were filed.
+AUDITS_MAYBE_COVERED_NOTE = (
+    "This report covers probes, requests and limits, autoscaling, NetworkPolicy and pod security only "
+    "if the install had no GitOps repository when the scan ran; otherwise those audits check them on "
+    "their schedules."
+)
+# Also the note before the marker exists: the stage writes it on its first tick after the ranking
+# card finishes, which a user already in the chat can beat to this run.
+AUDITS_RUNNING_NOTE = (
+    "Workload checks (probes, requests and limits, autoscaling, NetworkPolicy, pod security) come "
+    "from the cost, security, reliability and capacity audits, which run one after another once this "
+    "scan is done. Each posts a summary to the home channel and opens a ledger issue in the GitOps "
+    "repository."
+)
+AUDITS_RAN_NOTE = (
+    "Workload checks (probes, requests and limits, autoscaling, NetworkPolicy, pod security) come "
+    "from the first-run audits, which have started: {audits}. Each posts a summary to the home channel "
+    "and opens a ledger issue in the GitOps repository when it finishes."
+)
+AUDITS_NONE_RAN_NOTE = (
+    "None of the first-run audits ran, so nothing has checked probes, requests and limits, "
+    "autoscaling, NetworkPolicy or pod security yet."
+)
+AUDITS_NOT_RUN_NOTE = "Not run: {audits}."
+# oobe gives up on an audit it could not start; the audit still runs on its own schedule.
+AUDITS_GAVE_UP_REASON = "it did not start, and runs on its own schedule"
 
 # The delivery job's ``origin`` and the keys the plugin writes into it.
 ORIGIN_KEY = "origin"
@@ -530,6 +574,46 @@ def _presented(content: str) -> str:
         return content
 
 
+def _audits_note(data_dir: Path) -> str:
+    """The note on the first-run audits the delivery closes with, from oobe's marker.
+
+    Before the marker exists the stage has not decided, so its repository list stands in: empty is
+    the skip it will record, anything else (unreadable included, which it retries) the chain.
+    """
+    state = oobe.read_state(data_dir)
+    if not state:
+        try:
+            repositories = oobe.managed_repositories()
+        except Exception:  # noqa: BLE001 - the stage retries an unreadable list rather than skipping
+            repositories = None
+        if repositories == []:
+            state = {oobe.STATE_SKIPPED: True, oobe.STATE_REASON: oobe.SKIP_NO_REPOSITORY}
+    if state.get(oobe.STATE_SKIPPED):
+        reason = str(state.get(oobe.STATE_REASON) or AUDITS_NO_REASON)
+        coverage = AUDITS_COVERED_NOTE if reason == oobe.SKIP_NO_REPOSITORY else AUDITS_MAYBE_COVERED_NOTE
+        return f"{AUDITS_SKIPPED_NOTE.format(reason=reason)} {coverage}"
+    fired = [a for a in oobe.FIRST_RUN_AUDITS if a in _list(state.get(oobe.STATE_FIRED))]
+    held = state.get(oobe.STATE_HELD) if isinstance(state.get(oobe.STATE_HELD), dict) else {}
+    gave_up = _list(state.get(oobe.STATE_GAVE_UP))
+    not_run = [f"`{a}` ({held[a]})" for a in oobe.FIRST_RUN_AUDITS if a in held]
+    not_run += [f"`{a}` ({AUDITS_GAVE_UP_REASON})" for a in oobe.FIRST_RUN_AUDITS if a in gave_up]
+    if not state.get(oobe.STATE_DONE):
+        note = AUDITS_RUNNING_NOTE
+    elif fired:
+        note = AUDITS_RAN_NOTE.format(audits=", ".join(f"`{a}`" for a in fired))
+    else:
+        note = AUDITS_NONE_RAN_NOTE
+    return f"{note} {AUDITS_NOT_RUN_NOTE.format(audits=', '.join(not_run))}" if not_run else note
+
+
+def _list(value) -> list:
+    return value if isinstance(value, list) else []
+
+
+def _with_note(report: str, note: str) -> str:
+    return report.rstrip("\n") + "\n\n" + note + "\n"
+
+
 def _posted_as_blocks(content: str) -> bool:
     """Whether the report was posted to Slack as Block Kit; False posts nothing.
 
@@ -670,9 +754,12 @@ def main(data_dir: Path | None = None) -> int:
     # the shortest window in which to announce these findings as new.
     shown = _mark_shown(data_dir, in_sandbox, suppressed)
 
-    if not _posted_as_blocks(content):
-        sys.stdout.write(_presented(content))
-        sys.stdout.flush()
+    note = _audits_note(data_dir)
+    if _posted_as_blocks(content):
+        sys.stdout.write(note + "\n")
+    else:
+        sys.stdout.write(_with_note(_presented(content), note))
+    sys.stdout.flush()
 
     # Cleanup runs only after the report is posted or safely on stdout (already
     # captured by the scheduler), so removing INVENTORY.md here cannot truncate delivery.

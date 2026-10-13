@@ -422,7 +422,10 @@ Write clean Markdown that reads well in a chat client. Structure:
 
 1. **One-line heading**, e.g. `# GKE Environment Scan`.
 2. **One or two sentences of posture:** what was scanned (clusters, nodes, workloads) and the
-   headline judgement. Give the reader the shape of their environment before the problems.
+   headline judgement. Give the reader the shape of their environment before the problems. Do not
+   call the workloads healthy: unless the raw findings say this scan checked them, it does not check
+   liveness or readiness probes, requests, HPA, NetworkPolicy or pod security, so a short list says
+   nothing about them.
 3. **The selected findings**, in the order `select` printed, as a numbered list. **Two lines each,
    no sub-bullets:** a bold one-line headline that opens with the severity label `Critical:` and names
    the problem and where it is (cluster, namespace and object, or for a gathered line the count and
