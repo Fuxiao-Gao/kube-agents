@@ -2,7 +2,7 @@
 """Build gate for the kanban guardrail-exit patch.
 
 Run by ``deploy/docker/Dockerfile`` from ``/opt/hermes`` after
-``apply_kanban_guardrail_exit.py``. The applier only proves its five anchors
+``apply_kanban_guardrail_exit.py``. The applier only proves its seven anchors
 matched exactly once; that says nothing about whether the inserted code is
 reachable, whether it still composes with the upstream helpers it calls, or
 whether the board write it makes lands.
@@ -1025,6 +1025,41 @@ check(
     and (after["consecutive_failures"] or 0) == 0,
     f"handed over to {handed_over.get('run')!r}; status={after['status']!r} "
     f"open={open_runs(conn, raced)} failures={after['consecutive_failures']!r}",
+)
+
+# The same hand-over, and the new worker completes the card before the
+# read-back: the card is no longer running, yet nothing of this worker's was
+# charged, so the backstop must still say so.
+conn = board()
+closed = K.create_task(conn, title="Check PDB coverage (hand-over, then done)", assignee="platform")
+K.recompute_ready(conn)
+K.claim_task(conn, closed)
+closed_run = K.get_task(conn, closed).current_run_id
+
+
+def hand_over_then_new_worker_completes(conn, task_id, **kwargs):
+    K.block_task(conn, task_id, reason="hand-over", expected_run_id=closed_run)
+    K.unblock_task(conn, task_id)
+    K.recompute_ready(conn)
+    K.claim_task(conn, task_id)
+    new_run = K.get_task(conn, task_id).current_run_id
+    tripped = KD._record_task_failure(conn, task_id, **kwargs)
+    K.complete_task(conn, task_id, result="done by the next worker", expected_run_id=new_run)
+    return tripped
+
+
+closed_recorded = record_missing_terminal_call(
+    task_id=closed,
+    turn_exit_reason=TEXT_EXIT,
+    connect=board,
+    record_failure=hand_over_then_new_worker_completes,
+    run_id=closed_run,
+    stop_nudges=0,
+)
+check(
+    "a refused charge is not reported even after the new worker closes the card",
+    closed_recorded is False and row(board(), closed)["status"] == "done",
+    f"returned {closed_recorded!r}; status={row(board(), closed)['status']!r}",
 )
 
 # The text is read back by upstream: a respawn-blocker word parks the card as

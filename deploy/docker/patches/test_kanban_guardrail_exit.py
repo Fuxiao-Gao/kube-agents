@@ -62,6 +62,12 @@ CREATE TABLE tasks (
     status TEXT NOT NULL,
     current_run_id INTEGER
 );
+CREATE TABLE task_runs (
+    id INTEGER PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    outcome TEXT,
+    error TEXT
+);
 """
 
 
@@ -89,10 +95,13 @@ def board(rows):
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
     for tid, status, *run in rows:
+        run_id = run[0] if run else None
         conn.execute(
             "INSERT INTO tasks (id, status, current_run_id) VALUES (?, ?, ?)",
-            (tid, status, run[0] if run else None),
+            (tid, status, run_id),
         )
+        if run_id is not None:
+            conn.execute("INSERT INTO task_runs (id, task_id) VALUES (?, ?)", (run_id, tid))
     return conn
 
 
@@ -440,8 +449,9 @@ class TaskIsStillRunningTest(unittest.TestCase):
 
 
 class Recorder:
-    """Stands in for ``_record_task_failure``: a charge moves the card off
-    ``running`` and clears its run, as the real one does."""
+    """Stands in for ``_record_task_failure``: a charge closes the current run
+    with its outcome and error, moves the card off ``running`` and clears its
+    run, as the real one does."""
 
     def __init__(self, writes=True):
         self.calls = []
@@ -450,6 +460,11 @@ class Recorder:
     def __call__(self, conn, task_id, **kwargs):
         self.calls.append((task_id, kwargs))
         if self.writes:
+            conn.execute(
+                "UPDATE task_runs SET outcome = ?, error = ? WHERE id = "
+                "(SELECT current_run_id FROM tasks WHERE id = ?)",
+                (kwargs["outcome"], kwargs["error"][:500], task_id),
+            )
             conn.execute(
                 "UPDATE tasks SET status = 'ready', current_run_id = NULL WHERE id = ?",
                 (task_id,),
@@ -568,6 +583,44 @@ class RecordMissingTerminalTest(unittest.TestCase):
             run_id=197,
         )
         self.assertFalse(did)
+
+    def test_a_refused_charge_is_not_recorded_when_the_new_worker_then_closes_the_card(self):
+        """The card changed hands, the write was refused, and the new worker
+        completed the card before the read-back: the card is not running, but
+        this worker's run was not closed by this charge."""
+
+        def refuse_then_new_worker_completes(conn, task_id, **kwargs):
+            conn.execute("UPDATE tasks SET status = 'done', current_run_id = NULL WHERE id = ?", (task_id,))
+            return False
+
+        conn = ClosableConn(board([("t1", "running", 197)]))
+        did = record_missing_terminal_call(
+            task_id="t1",
+            turn_exit_reason=TEXT_EXIT,
+            connect=lambda: conn,
+            record_failure=refuse_then_new_worker_completes,
+            run_id=197,
+        )
+        self.assertFalse(did)
+
+    def test_a_charge_that_trips_the_breaker_is_recorded(self):
+        """The trip path closes the run gave_up, not timed_out."""
+
+        def trip(conn, task_id, **kwargs):
+            conn.execute(
+                "UPDATE task_runs SET outcome = 'gave_up', error = ? WHERE id = 197",
+                (kwargs["error"][:500],),
+            )
+            conn.execute("UPDATE tasks SET status = 'blocked', current_run_id = NULL WHERE id = ?", (task_id,))
+            return True
+
+        conn = ClosableConn(board([("t1", "running", 197)]))
+        self.assertTrue(
+            record_missing_terminal_call(
+                task_id="t1", turn_exit_reason=TEXT_EXIT, connect=lambda: conn,
+                record_failure=trip, run_id=197,
+            )
+        )
 
     def test_the_nudge_count_reaches_the_error(self):
         _, rec, _ = self._record("running", reason=TEXT_EXIT, stop_nudges=1)

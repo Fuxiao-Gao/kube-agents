@@ -219,6 +219,13 @@ DEFAULT_MAX_NUDGES = 2
 
 OUTCOME = "timed_out"
 
+#: How ``_record_task_failure`` closes the run when this charge trips the
+#: breaker, instead of ``OUTCOME``.
+TRIPPED_OUTCOME = "gave_up"
+
+#: ``_record_task_failure`` stores ``error[:500]`` on the run it closes.
+RECORDED_ERROR_MAX_CHARS = 500
+
 DETECTOR = "kanban_guardrail_exit"
 
 #: The kind ``block_task`` files a rate-limit exhaustion under. It is in
@@ -451,8 +458,8 @@ def record_missing_terminal_call(
     without a write; the check inside the transaction covers a hand-over
     between the two. ``_record_task_failure``'s own return means "tripped the
     breaker", not "wrote", so whether the charge landed is read back from the
-    board: a charge always moves the card off ``running``, and a refused one
-    leaves it ``running`` under the newer run.
+    board (``charge_landed``): this worker's own run row, closed with this
+    charge's outcome and error text, and nothing else.
 
     ``stop_nudges`` (``agent._kanban_stop_nudges``) is reported in the error
     text; see ``missing_terminal_error``.
@@ -487,10 +494,11 @@ def record_missing_terminal_call(
     try:
         if not task_is_still_running(conn, task_id, run_id):
             return False
+        error = missing_terminal_error(turn_exit_reason, stop_nudges)
         record_failure(
             conn,
             task_id,
-            error=missing_terminal_error(turn_exit_reason, stop_nudges),
+            error=error,
             outcome=OUTCOME,
             release_claim=True,
             end_run=True,
@@ -500,12 +508,44 @@ def record_missing_terminal_call(
                 "detector": DETECTOR,
             },
         )
-        return not task_is_still_running(conn, task_id)
+        return charge_landed(conn, task_id, run_id, error)
     finally:
         try:
             conn.close()
         except Exception:
             pass
+
+
+def charge_landed(conn, task_id: str, run_id, error: str) -> bool:
+    """Whether the charge just attempted was written, read back from the board.
+
+    With ``run_id``, the answer is this worker's own run row: closed with
+    ``OUTCOME`` (or ``TRIPPED_OUTCOME`` when the charge tripped the breaker)
+    and this charge's error text. The card's status cannot answer it: a
+    charge refused because the card changed hands leaves it ``running`` under
+    the newer run, and that worker can close the card before this read, so
+    "not running" says nothing about who moved it. Without ``run_id`` there is
+    no row to ask, and the card leaving ``running`` is the best signal. A read
+    that fails answers ``False``: say nothing was recorded rather than claim it.
+    """
+    if run_id is None:
+        return not task_is_still_running(conn, task_id)
+    try:
+        row = conn.execute(
+            "SELECT outcome, error FROM task_runs WHERE id = ? AND task_id = ?",
+            (run_id, task_id),
+        ).fetchone()
+    except Exception:
+        return False
+    if row is None:
+        return False
+    try:
+        outcome, run_error = row["outcome"], row["error"]
+    except (TypeError, IndexError, KeyError):
+        outcome, run_error = row[0], row[1]
+    return outcome in (OUTCOME, TRIPPED_OUTCOME) and run_error == error[
+        :RECORDED_ERROR_MAX_CHARS
+    ]
 
 
 def is_rate_limit_failure(failure_reason) -> bool:
