@@ -121,6 +121,14 @@ class SmokeTest(unittest.TestCase):
         results = gate.verdicts(pull(), lambda: files)
         self.assertEqual(results[gate.SMOKE_GATE][0], gate.SUCCESS)
 
+    def test_a_red_or_running_smoke_on_skipped_paths_still_decides(self):
+        """A hand-run `/test` posts a smoke status on a skip-only change; Tide holds on its red."""
+        for state, expected in (("failure", gate.FAILURE), ("pending", gate.PENDING)):
+            with self.subTest(state=state):
+                statuses = {gate.SMOKE_CONTEXT: (state, "")}
+                results = gate.verdicts(pull(statuses=statuses), lambda: ["docs/a.md"])
+                self.assertEqual(results[gate.SMOKE_GATE][0], expected)
+
     def test_the_skip_list_matches_prows_reading(self):
         for path in ("tests/x.py", "examples/a/b.yaml", "scripts/release/x.sh", "scripts/eval_dashboard/x.py", "LICENSE"):
             with self.subTest(path=path):
@@ -212,6 +220,11 @@ class PostTest(unittest.TestCase):
         api = FakeAPI()
         gate.gate_pull(api, pull(base="release/1.2"))
         self.assertEqual(api.posts, [])
+
+    def test_the_dry_run_branch_is_gated_like_main(self):
+        api = FakeAPI()
+        gate.gate_pull(api, pull({"lgtm"}, statuses=green(gate.SMOKE_CONTEXT), base=gate.DRY_RUN_BASE))
+        self.assertEqual([payload["context"] for _, payload in api.posts], [gate.SMOKE_GATE])
 
     def test_a_status_event_gates_the_pull_request_with_that_head(self):
         raw = {"number": 7, "head": {"sha": SHA}, "base": {"ref": "main"}, "labels": [{"name": "lgtm"}]}

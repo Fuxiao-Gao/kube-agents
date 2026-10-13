@@ -8,8 +8,9 @@ signed, and the pull request carries `lgtm` and `approved` with no
 three becomes one, under these names:
 
   - `Smoke gate`: the latest `pull-kube-agents-smoke-test` status on the pull
-    request head is green (an `/override` included), or the pull request only
-    changes paths the presubmit skips, which is when Tide does not wait for it.
+    request head is green (an `/override` included), or there is none and the
+    pull request only changes paths the presubmit skips, which is when Tide
+    does not wait for it.
   - `CLA`: the latest `cla/google` check run from the CLA app on the pull
     request head passed. The app reports on pull request commits only and
     never on a queue commit, so `cla/google` itself cannot stay a required
@@ -47,6 +48,9 @@ from github_api import PER_PAGE, GitHubAPI, log  # noqa: E402
 
 #: The queue is `main`'s alone; a release line still merges through Tide.
 BASE = "main"
+#: The scratch copy of `main` that the dry run puts a queue on before the cut-over.
+DRY_RUN_BASE = "merge-queue-dry-run"
+BASES = (BASE, DRY_RUN_BASE)
 SMOKE_CONTEXT = "pull-kube-agents-smoke-test"
 CLA_CONTEXT = "cla/google"
 #: The google-cla app, which posts `cla/google`. A check run of that name from another app does not count.
@@ -132,9 +136,10 @@ def verdicts(pull, files):
     `files`, so the tests can drive it.
     """
     smoke = pull["statuses"].get(SMOKE_CONTEXT)
-    if smoke and smoke[0] == SUCCESS:
-        smoke_gate = status_verdict(smoke, SMOKE_CONTEXT)
-    elif not smoke_required(files()):
+    # A posted smoke status decides, even on skipped paths: a hand-run `/test`
+    # that went red holds a Tide merge too. The paths decide only when Prow
+    # posted nothing.
+    if smoke is None and not smoke_required(files()):
         smoke_gate = SUCCESS, "smoke not required: only paths it skips changed"
     else:
         smoke_gate = status_verdict(smoke, SMOKE_CONTEXT)
@@ -221,7 +226,7 @@ def post_verdicts(api, pull, results, dry_run=False):
 
 def gate_pull(api, pull, dry_run=False):
     """Decide and post the three statuses for one pull request on `main`."""
-    if pull["base"] != BASE:
+    if pull["base"] not in BASES:
         return [f"#{pull['number']}: targets {pull['base']}, not {BASE}; left to Tide"]
     results = verdicts(pull, lambda: changed_files(api, pull["number"]))
     return post_verdicts(api, pull, results, dry_run=dry_run)
@@ -234,8 +239,8 @@ def cmd_pull(api, number, dry_run=False):
 def cmd_status(api, sha, dry_run=False):
     """Gate every open pull request whose head is `sha`. Listed, not searched: search lags."""
     lines = []
-    for raw in api.get_all(f"/repos/{api.repo}/pulls?state=open&base={BASE}"):
-        if raw["head"]["sha"] == sha:
+    for raw in api.get_all(f"/repos/{api.repo}/pulls?state=open"):
+        if raw["head"]["sha"] == sha and raw["base"]["ref"] in BASES:
             lines += gate_pull(api, rest_pull(api, raw), dry_run=dry_run)
     return lines or [f"{sha[:SHORT_SHA]}: not the head of an open pull request on {BASE}"]
 

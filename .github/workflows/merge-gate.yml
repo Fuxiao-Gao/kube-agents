@@ -7,8 +7,10 @@ name: Merge Gate
 #
 # The queue asks twice. A pull request must pass every required check to enter
 # it, so the `pull-request` job posts the three verdicts as commit statuses on
-# the pull request head whenever an input changes: a push, a label, a new
-# smoke status or a finished CLA check run. A status, not the job's own check
+# the pull request head when an input changes: a push, a label, a new smoke
+# status or a finished CLA check run. A label that `hold-unresolved-threads.yml`
+# changes with `GITHUB_TOKEN` starts no run here; the enqueue sweep re-posts
+# the statuses of approved pull requests on its schedule. A status, not the job's own check
 # run: a run started by `status` or `check_run` attaches to the default
 # branch, where the queue does not look. Then the queue runs every required
 # check again on its own commit, and the `gate` jobs decide the same three
@@ -28,7 +30,11 @@ on:
   # no pull-request content reaches the write token's context.
   pull_request_target:
     types: [opened, reopened, synchronize, ready_for_review, labeled, unlabeled]
-    branches: [main]
+    # `merge-queue-dry-run` is the scratch copy of `main` that the dry run
+    # puts a queue on (`DRY_RUN_BASE` in the script). Its own copy of this
+    # file widens the `merge_group` filter below; this one is read from
+    # `main`, so the scratch branch is named here.
+    branches: [main, merge-queue-dry-run]
   status:
   check_run:
     types: [completed]
