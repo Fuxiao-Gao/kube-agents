@@ -258,7 +258,8 @@ share one connection-gate component that directs the user to Connection;
 provider-backed content becomes available after connecting to a verified
 kube-agents host.
 
-Each page reads the agent runtime through `kubectl exec` into the gateway pod.
+Task Kanban, Scheduled Cron, Chat History, and the Connection check read the
+agent runtime through `kubectl exec` into the gateway pod.
 A read that completes carries a length header, and the in-pod script writes its
 answer in 64 KiB pieces. A large read into a pod on GKE Sandbox (gVisor) can
 lose its end in transit; when the bytes that arrive fall short of the header,
