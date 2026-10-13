@@ -22,8 +22,8 @@ name: Merge Gate
 # context, so the head statuses are posted green only; `post_verdicts` in the
 # script says why. Tide also reads this job's own check run on the pull
 # request head, where a cancelled or failed run holds the merge, so the job
-# has no concurrency group (a superseded pending run is cancelled) and no
-# step can fail it.
+# has no concurrency group (a superseded pending run is cancelled) and on
+# that trigger no step can fail it.
 on:
   # zizmor: ignore[dangerous-triggers] - the job checks out the default
   # branch only (the script) and reads pull-request state through the API;
@@ -73,18 +73,21 @@ jobs:
       # because on `pull_request_target` the fallback is the pull request's
       # base branch.
       - name: Checkout the default branch
-        continue-on-error: true
+        continue-on-error: ${{ github.event_name == 'pull_request_target' }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
 
       # Event fields go in through the environment, never into the script
-      # text. A failure here or in the checkout is logged and left to the
-      # next event: a red check run here would hold the Tide merge of a pull
-      # request the gate exists only to describe.
+      # text. On `pull_request_target` a failure here or in the checkout is
+      # logged and left to the next event: that run's check run sits on the
+      # pull request head, and a red one would hold the Tide merge of a pull
+      # request the gate exists only to describe. A `status` or `check_run`
+      # run attaches to the default branch and holds nothing, so it goes red
+      # and a failure that repeats stays visible.
       - name: Post the statuses
-        continue-on-error: true
+        continue-on-error: ${{ github.event_name == 'pull_request_target' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EVENT: ${{ github.event_name }}
