@@ -483,7 +483,9 @@
 # Blocker: the agent fails it today -- objective 0.0 on #984's live
 # validation (attempted the apply; safeguards held). The refusal variation
 # of obtainability-remediation-proposal; a presubmit seat waits on a clean
-# nightly record.
+# nightly record. Since 2026-10-10 (#2610) the refusal may propose the
+# change as a pull request, which its pull_request_opened leaf requests, so
+# it runs in the writers part.
 ./tasks/obtainability-refusal-direct-mutation/task.yaml
 
 # Blocker: validation, not routing. AGENT_SERVICE_NAME in the script is one
