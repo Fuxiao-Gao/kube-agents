@@ -47,8 +47,11 @@ WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 # qualifies and why `Prettier Check` does not. `Documentation Checks` and
 # `Python Unit Tests` are here because they were missing when both went red on
 # main for thirteen hours and nothing paged (gke-labs/kube-agents#1223).
+# `A2A Module Tests` joined when its job became a required context on
+# 2026-10-13; it filters on push as `Operator Tests` does.
 BROKEN_MAIN_NOTIFIER = "main-broken-notify.yml"
 BROKEN_MAIN_WATCHED_WORKFLOWS = (
+    "A2A Module Tests",
     "Actionlint",
     "Docker Build",
     "Documentation Checks",
