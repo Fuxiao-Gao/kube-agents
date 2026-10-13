@@ -89,7 +89,7 @@ verification_spec:
       type: worker_commands
       required_patterns:
         [
-          '(python3?\s+(-\S+\s+)*|/)\S*collect\.py\s+compliance-audit\b(?![^\n|;&]*--help)',
+          '(python3?\s+(-\S+\s+)*|/)\S*collect\.py\s+compliance-audit\b(?![^\n|;&]*\s(--help|-h)\b)',
         ]
   # The planted binding, which the prompt deliberately does not name.
   - name: the-answer-names-the-overgrant
