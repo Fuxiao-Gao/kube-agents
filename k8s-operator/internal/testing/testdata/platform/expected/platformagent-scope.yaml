@@ -1106,7 +1106,7 @@ spec:
               memory: 2Gi
             requests:
               cpu: 500m
-              memory: 512Mi
+              memory: 1Gi
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

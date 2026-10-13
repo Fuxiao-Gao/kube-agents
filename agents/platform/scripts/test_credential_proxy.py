@@ -4156,8 +4156,9 @@ class CommandExecutorTest(unittest.TestCase):
 
     def test_a_limit_under_the_floor_disables_the_budget_with_a_warning(self):
         # Autopilot without bursting sets limits equal to requests, so the
-        # proxy's limit there is its 512Mi request; a budget derived from it
-        # would admit one request at a time, worse than slot-only admission.
+        # proxy's limit there is its memory request; at 512Mi, under the
+        # floor, a budget derived from it would admit one request at a time,
+        # worse than slot-only admission.
         mib = credential_proxy.MEBIBYTE
         with self.assertLogs(credential_proxy.LOGGER, level="WARNING") as logs:
             executor = self.executor(memory_limit_bytes=512 * mib, max_output_bytes=8 * mib)

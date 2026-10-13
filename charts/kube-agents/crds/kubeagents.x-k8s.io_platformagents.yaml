@@ -1186,7 +1186,8 @@ spec:
                             defaults, so the kubelet does not evict the pod at the smaller figure.
                             Only cpu, memory and ephemeral-storage
                             are accepted, the quantities the container declares. The operator
-                            refuses a memory limit below what admits two commands at once, a request
+                            refuses a memory limit below what admits two commands at once, a limits
+                            entry set alone below the default request it would cross, a request
                             above its limit, a negative quantity and a zero limit; `claims` is refused, because the proxy
                             pod declares no resourceClaims. A refused override, including an edit of
                             one that was valid, renders the proxy Deployment at the operator's
