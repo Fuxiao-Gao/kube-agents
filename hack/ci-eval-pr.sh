@@ -628,7 +628,9 @@ report_partial_verdict() {
 # was starved by 429s or a stuck dispatcher. collect_agent_pod_diagnostics
 # follows it: a pod replaced mid-run starts a fresh gateway log, and the
 # pod and event watch it stops, the previous containers and the restart
-# record are what say why.
+# record are what say why. collect_litellm_log follows those: the
+# thinking-replay hook's per-request line is in the LiteLLM log alone, so a
+# green run without it cannot say whether the hook touched its traffic.
 #
 # `set +e` is load-bearing, not tidying. errexit stays in force inside an EXIT
 # trap, so on any failing exit the `(exit "${exit_code}")` below returns
@@ -649,6 +651,7 @@ profile_and_dump_on_exit() {
   report_partial_verdict
   collect_gateway_log
   collect_agent_pod_diagnostics
+  collect_litellm_log
   profile_report "${exit_code}"
   (exit "${exit_code}")
   dump_prow_artifacts_on_failure
@@ -3455,7 +3458,11 @@ job_started_epoch() {
 # round trip, and the diagnostics collector is re-armed under a prefix
 # before it starts: whatever ends the run after that (a pass, a failure, the
 # deadline's TERM), the EXIT trap stops the watch, whose tails then cover
-# the flip, and writes a rollback-* snapshot beside the eval's.
+# the flip, and writes a rollback-* snapshot beside the eval's. The LiteLLM
+# log is not taken here: the flip patches spec.mode, which leaves
+# deployment/litellm alone (the operator only reads it), so the trap's
+# capture still holds the eval's lines, with the round trip's single-turn
+# requests after them.
 #
 # The round trip runs in the background and is waited on, so a SIGTERM (the
 # job's deadline) reaches this script's trap during the wait rather than
