@@ -27,10 +27,10 @@ the "wow moment that justifies the installation". What they get today:
 
 The gap between the report and the first audit is up to a day, and up to a week for cost. The
 only way to close it today is to know to start an audit by hand inside the pod
-(`agents/platform/AGENTS.md`, "Run the `<x>` cron job now"). The inventory report leaves the
-workload checks the first-run audits own (probes, requests and limits, HPA, NetworkPolicy, pod
-security) to those audits, so until they run nothing on day one covers those checks, or cost and
-capacity, and no pull request opens.
+(`agents/platform/AGENTS.md`, "Run the `<x>` cron job now"). Before `oobe`, the inventory report
+covered most of what the compliance and reliability audits check (`inventory-findings-queue.md`
+§10), but cost and capacity waited for the schedule, and no pull request opened until the first
+audit. With `oobe` running the audits, the scan leaves their workload checks to them (§4.4).
 
 ## 2. What `oobe` is
 
@@ -183,10 +183,10 @@ from `/etc/gitops/managed_repos`, which the operator mounts into the gateway con
 (`platformagent_manifests.go`, `gitopsStateDir`), through `gitops_workspace.get_managed_github_repos`.
 With none, it writes the marker with the reason and starts nothing.
 
-The onboarding scan reads the same list (`oobe.managed_repositories`) when it files the sweep card
-and the Cluster Agents' cards. With none, the cards also run the "Without a GitOps repository"
-section of `cluster_inventory_audit_sop.md`, which carries the workload checks the audits would
-otherwise own, so the report covers them. A list the scan cannot read counts as none: the stage
+The onboarding scan reads the same list (`oobe.managed_repositories`) once, when it files the sweep
+card, and records the answer in `.bootstrap_scan_filed` for the Cluster Agents' cards. With none,
+the cards also run the "Without a GitOps repository" section of `cluster_inventory_audit_sop.md`,
+which carries the workload checks the audits would otherwise own, so the report covers them. A list the scan cannot read counts as none: the stage
 retries such a read rather than starting the audits, and a check made twice costs less than one
 nobody makes.
 
@@ -194,8 +194,8 @@ It does not exit non-zero. No repository is a configuration the installer offers
 a failing per-minute job repeats until something changes. The operator is told instead: the
 interactive installer's "GitOps repository connection skipped" line says the scheduled audits run
 without one but write no ledger issue or pull request,
-and the delivered report closes with a note saying the first-run audits did not run, why, and that
-the report covers their workload checks instead. Delivery can run before the stage has recorded the
+and the delivered report closes with a note saying the first-run audits did not run, why, and, when a
+cluster was audited, that the report covers their workload checks instead. Delivery can run before the stage has recorded the
 skip; it then reads the repository list itself and, finding it empty, gives the same note. Beside a
 Slack Block Kit card the note is a second message.
 
@@ -254,15 +254,15 @@ times. It rides with the audits stage, whose eval case covers both.
 
 ## 6. Failure modes
 
-| Situation              | What the operator sees                                                                                   | Recovery                                                                                              |
-| ---------------------- | -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| Audits running         | Nothing in chat until each posts its summary; `hermes cron list` in the platform profile shows them      | None needed                                                                                           |
-| Marking an audit fails | Nothing; `oobe` logs and retries the missing ids each minute, five tries per audit                       | Automatic                                                                                             |
-| An audit run fails     | The audit's own failure path; `chat-delivery-watch` opens a GitHub issue when reports stop reaching chat | As today                                                                                              |
-| No GitOps repository   | One line in the interactive installer's output; the report runs the workload checks and says why         | Re-run the installer with `--gitops-org` and `--gitops-repo` (INSTALL.md), then wait for the schedule |
-| No home channel        | Ledger issues and pull requests appear in the repository with no chat summary                            | Set one (`/sethome`)                                                                                  |
-| Sweep stuck            | Audits start at the fallback                                                                             | As today for the report                                                                               |
-| Ranking card blocked   | Audits start at the fallback, unless someone unblocks the card first                                     | As today for the report                                                                               |
+| Situation              | What the operator sees                                                                                    | Recovery                                                                                              |
+| ---------------------- | --------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| Audits running         | Nothing in chat until each posts its summary; `hermes cron list` in the platform profile shows them       | None needed                                                                                           |
+| Marking an audit fails | Nothing; `oobe` logs and retries the missing ids each minute, five tries per audit                        | Automatic                                                                                             |
+| An audit run fails     | The audit's own failure path; `chat-delivery-watch` opens a GitHub issue when reports stop reaching chat  | As today                                                                                              |
+| No GitOps repository   | One line in the interactive installer's output; the scan runs the workload checks and the report says why | Re-run the installer with `--gitops-org` and `--gitops-repo` (INSTALL.md), then wait for the schedule |
+| No home channel        | Ledger issues and pull requests appear in the repository with no chat summary                             | Set one (`/sethome`)                                                                                  |
+| Sweep stuck            | Audits start at the fallback                                                                              | As today for the report                                                                               |
+| Ranking card blocked   | Audits start at the fallback, unless someone unblocks the card first                                      | As today for the report                                                                               |
 
 ## 7. Not in this design
 

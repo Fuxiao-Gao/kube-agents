@@ -467,6 +467,14 @@ class DeliveryRegistersFindingsTest(unittest.TestCase):
         self.assertEqual(self.sent, [])
         self.assertIn("filed no prioritization card", err)
 
+    def test_an_unreadable_hand_off_marker_registers_nothing(self):
+        self._write()
+        (self.d / bootstrap_handoff.HANDOFF_MARKER).write_bytes(b"sweep=t_sweep\ntask_id=\xff\xfe\n")
+        rc, out, err = self._run()
+        self.assertEqual((rc, out), (0, delivered("# Report\n")))
+        self.assertEqual(self.sent, [])
+        self.assertIn("could not be read; registering nothing", err)
+
     def test_a_hand_off_that_filed_a_ranking_card_registers_its_batch(self):
         self._write()
         (self.d / bootstrap_handoff.HANDOFF_MARKER).write_text(
@@ -880,7 +888,7 @@ class ScanGateTest(unittest.TestCase):
 
         def _fake_file(data_dir):
             self.filed.append(1)
-            bootstrap_scan_gate._mark_filed(data_dir, "t_test")
+            bootstrap_scan_gate._mark_filed(data_dir, "t_test", False)
             return "t_test"
 
         bootstrap_scan_gate.file_scan_task = _fake_file
@@ -1628,11 +1636,11 @@ class FirstRunAuditsTest(unittest.TestCase):
             slugs.update(re.findall(r"`([a-z0-9-]+)`", cells[1]))
         return slugs
 
-    def _note(self, state=None, repositories=("acme/gitops",)) -> str:
+    def _note(self, state=None, repositories=("acme/gitops",), no_coverage=False) -> str:
         if state is not None:
             oobe.write_state(self.d, state)
         with mock.patch.object(oobe, "managed_repositories", return_value=list(repositories)):
-            return bootstrap_delivery._audits_note(self.d)
+            return bootstrap_delivery._audits_note(self.d, no_coverage)
 
     def test_the_slug_table_names_no_check_a_first_run_audit_owns(self):
         sys.path.insert(0, str(FLEET_AUDIT_SCRIPTS))
@@ -1643,6 +1651,7 @@ class FirstRunAuditsTest(unittest.TestCase):
         owned = {check for audit in oobe.FIRST_RUN_AUDITS for check in audit_report.AUDITS[audit].checks}
         slugs = self._slug_table()
         self.assertIn("probes-startup", slugs)  # the parse found the table
+        self.assertIn("static-sa-key", slugs)  # Step 4's per-pod check; the cluster setting is the audit's
         self.assertEqual(sorted(slugs & owned), [])
 
     def test_the_sop_has_the_section_the_card_bodies_name(self):
@@ -1671,6 +1680,26 @@ class FirstRunAuditsTest(unittest.TestCase):
                 contextlib.redirect_stderr(io.StringIO()):
             self.assertIn(bootstrap_handoff.NO_REPOSITORY_RUN, bootstrap_scan_gate._task_body())
 
+    def test_the_sweep_card_records_what_it_was_told_for_the_hand_off(self):
+        for repositories, expected in (([], bootstrap_handoff.NO_REPOSITORY_RUN),
+                                       (["acme/gitops"], bootstrap_handoff.NO_REPOSITORY_SKIP)):
+            with self.subTest(repositories=repositories):
+                filed = []
+                kanban = types.ModuleType("hermes_cli.kanban")
+                kanban.run_slash = lambda cmd: filed.append(cmd) or '{"id": "t_sweep"}'
+                modules = {"hermes_cli": types.ModuleType("hermes_cli"), "hermes_cli.kanban": kanban}
+                with mock.patch.dict(sys.modules, modules), \
+                        mock.patch.object(oobe, "managed_repositories", return_value=repositories) as read, \
+                        mock.patch.object(bootstrap_scan_gate, "cluster_agents", return_value=[]), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(bootstrap_scan_gate.file_scan_task(self.d), "t_sweep")
+                self.assertEqual(read.call_count, 1)
+                args = shlex.split(filed[0])
+                self.assertIn(expected, args[args.index("--body") + 1])
+                self.assertIs(
+                    bootstrap_handoff.recorded_no_repository(self.d / SCAN_FILED), expected == bootstrap_handoff.NO_REPOSITORY_RUN
+                )
+
     def test_no_marker_says_the_audits_will_run_when_there_is_a_repository(self):
         # The stage writes it on its first tick after the ranking card, which delivery can beat.
         self.assertEqual(self._note(), bootstrap_delivery.AUDITS_RUNNING_NOTE)
@@ -1683,7 +1712,7 @@ class FirstRunAuditsTest(unittest.TestCase):
 
     def test_no_marker_and_an_unreadable_list_says_the_audits_will_run(self):
         with mock.patch.object(oobe, "managed_repositories", side_effect=RuntimeError("no kubectl")):
-            self.assertEqual(bootstrap_delivery._audits_note(self.d), bootstrap_delivery.AUDITS_RUNNING_NOTE)
+            self.assertEqual(bootstrap_delivery._audits_note(self.d, False), bootstrap_delivery.AUDITS_RUNNING_NOTE)
 
     def test_a_skip_for_no_repository_says_the_report_covers_the_checks(self):
         with contextlib.redirect_stderr(io.StringIO()):
@@ -1691,6 +1720,45 @@ class FirstRunAuditsTest(unittest.TestCase):
         self.assertEqual(
             self._note(),
             f"The first-run audits did not run: {oobe.SKIP_NO_REPOSITORY}. {bootstrap_delivery.AUDITS_COVERED_NOTE}",
+        )
+
+    def test_a_no_coverage_report_without_a_repository_says_nothing_checked_them(self):
+        # The hand-off's own report when no cluster's audit reached the raw file covers none of them.
+        unchecked = (
+            f"The first-run audits did not run: {oobe.SKIP_NO_REPOSITORY}. {bootstrap_delivery.AUDITS_UNCHECKED_NOTE}"
+        )
+        self.assertEqual(self._note(repositories=(), no_coverage=True), unchecked)
+        with contextlib.redirect_stderr(io.StringIO()):
+            oobe.skip(self.d, oobe.SKIP_NO_REPOSITORY, 1000.0)
+        self.assertEqual(self._note(no_coverage=True), unchecked)
+        self.assertNotIn("covers", unchecked)
+
+    def test_a_no_coverage_report_after_another_skip_points_at_the_schedules(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            oobe.skip(self.d, oobe.SKIP_NOT_NEW, 1000.0)
+        self.assertEqual(
+            self._note(no_coverage=True),
+            f"The first-run audits did not run: {oobe.SKIP_NOT_NEW}. {bootstrap_delivery.AUDITS_UNCHECKED_SCHEDULED_NOTE}",
+        )
+
+    def test_the_delivery_reads_no_coverage_off_the_hand_off_marker(self):
+        (self.d / INVENTORY).write_text("# Report\n", encoding="utf-8")
+        (self.d / ALIGNED).touch()
+        (self.d / bootstrap_handoff.HANDOFF_MARKER).write_text(
+            f"sweep=t_sweep\ntask_id={bootstrap_handoff.NO_RANKING}\nfiled_at=1\n", encoding="utf-8"
+        )
+        out = io.StringIO()
+        with (
+            mock.patch.object(sandbox_exec, "sandbox_enabled", return_value=False),
+            mock.patch.object(oobe, "managed_repositories", return_value=[]),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            self.assertEqual(bootstrap_delivery.main(self.d), 0)
+        self.assertEqual(
+            out.getvalue(),
+            f"# Report\n\nThe first-run audits did not run: {oobe.SKIP_NO_REPOSITORY}. "
+            f"{bootstrap_delivery.AUDITS_UNCHECKED_NOTE}\n",
         )
 
     def test_any_other_skip_says_the_report_covers_the_checks_only_without_a_repository(self):

@@ -225,12 +225,31 @@ class ComposeTest(unittest.TestCase):
         self.assertIn("this scan also checked liveness and readiness probes", text)
 
     def test_a_no_repository_finding_alone_says_the_scan_checked_them(self):
+        # Only with no recorded decision: a marker written before the gate recorded one.
         # A cluster-level check such as Workload Identity leaves no workload field behind.
         meta = {"project": "p", "cluster": "c", "workloads": [], "findings": [
             {"check": "workload-identity-off", "issue": "Workload Identity is not enabled"}]}
         text = h.compose(self._state([("t_w", "done", meta, "")]), timed_out=False, now=NOW)
         self.assertIn("this scan also checked liveness and readiness probes", text)
         self.assertNotIn("are not checked by this scan", text)
+
+    def test_the_recorded_decision_says_what_the_cards_were_told_whatever_they_filed(self):
+        # An audit-owned slug filed against a card told to skip the section is not the section running.
+        meta = {"project": "p", "cluster": "c", "workloads": [], "findings": [
+            {"check": "workload-identity-off", "issue": "Workload Identity is not enabled"}]}
+        state = self._state([("t_w", "done", meta, "")])
+        state[h.NO_REPOSITORY_FIELD] = False
+        text = h.compose(state, timed_out=False, now=NOW)
+        self.assertIn("are not checked by this scan: the first-run audits own them", text)
+        self.assertIn("| Replicas | Startup Probe | Telemetry | ReadOnlyFS |", text)
+        # Told to run it, the report says so even when no card recorded a field of it.
+        narrow = {"namespace": "ns", "name": "web", "kind": "Deployment", "replicas": "1/1",
+                  "probes": {"startup": True}, "telemetry": "none", "security_context": {"read_only_root_fs": False}}
+        state = self._state([("t_n", "done", {"project": "p", "cluster": "d", "workloads": [narrow], "findings": []}, "")])
+        state[h.NO_REPOSITORY_FIELD] = True
+        text = h.compose(state, timed_out=False, now=NOW)
+        self.assertIn("this scan also checked liveness and readiness probes", text)
+        self.assertIn("| Probes (Live/Ready/Startup) | Requests/Limits/QoS |", text)
 
     def test_a_blocked_card_is_a_named_gap(self):
         clusters = _all_done()[:1] + [("t_blocked", "blocked", None, "Cluster preflight check failed with exit code 255.")]
@@ -637,6 +656,32 @@ class HandOffTest(unittest.TestCase):
         with self._stub_kanban([]), mock.patch.object(oobe, "managed_repositories", return_value=[]) as read:
             self._run_roster(roster)
         read.assert_not_called()
+
+    def test_the_cluster_cards_and_the_report_go_by_what_the_gate_recorded(self):
+        for recorded, expected, other, posture in (
+            (True, h.NO_REPOSITORY_RUN, h.NO_REPOSITORY_SKIP, "this scan also checked liveness"),
+            (False, h.NO_REPOSITORY_SKIP, h.NO_REPOSITORY_RUN, "are not checked by this scan"),
+        ):
+            with self.subTest(recorded=recorded):
+                self.scan_marker.write_text(f"task_id={SWEEP}\nfiled_at={NOW - 60}\n" + h.no_repository_line(recorded))
+                _board(self.board, clusters=[])
+                sent = []
+                # The list now says the opposite; the cards were told what the sweep card was.
+                with self._stub_kanban(sent), mock.patch.object(
+                        oobe, "managed_repositories", return_value=[] if not recorded else ["acme/gitops"]) as read:
+                    self._run_roster([self._agent("t_a")])
+                read.assert_not_called()
+                body = (lambda a: a[a.index("--body") + 1])(shlex.split(sent[0]))
+                self.assertIn(expected, body)
+                self.assertNotIn(other, body)
+                self.board.unlink()
+                meta = {"project": "p", "cluster": "c", "workloads": [], "findings": [
+                    {"check": "workload-identity-off", "issue": "Workload Identity is not enabled"}]}
+                _board(self.board, clusters=[("t_w", "done", meta, "")])
+                self.assertEqual(self._run(), f"t_rank{len(self.filed)}")
+                self.assertIn(posture, (self.d / "INVENTORY.raw.md").read_text())
+                (self.d / h.HANDOFF_MARKER).unlink()
+                self.board.unlink()
 
     def test_a_sweep_that_filed_no_cards_does_not_report_a_clean_fleet(self):
         # The live failure: a done sweep with no cluster cards at all.

@@ -71,8 +71,15 @@ NO_REPOSITORY_WORKLOAD_FIELDS = (
 # The check slugs only that section files; a finding with one shows the checks ran too.
 NO_REPOSITORY_CHECKS = frozenset({
     "probes-liveness", "probes-readiness", "no-requests", "no-memory-limit", "no-hpa", "hpa-cannot-scale",
-    "netpol-missing", "workload-identity-off", "podsecurity-gaps",
+    "netpol-missing", "workload-identity-off", "podsecurity-gaps", "privileged-container", "host-namespace",
 })
+# What the cards were told, decided once when the gate files the sweep card and recorded in its
+# marker (bootstrap_scan_gate._mark_filed) under this field; also the hand-off state's key for it.
+# The cluster cards are told the same, and compose reads it rather than the cards. A marker written
+# before the field existed has none, and both fall back as they did.
+NO_REPOSITORY_FIELD = "no_repository"
+RECORDED_YES = "yes"
+RECORDED_NO = "no"
 
 HANDOFF_MARKER = ".bootstrap_handoff_filed"
 MARKER_FIELD = re.compile(r"^(\w+)=(\S+)$")
@@ -141,7 +148,7 @@ LIST_FIELDS = ("findings", "workloads")
 # Recorded as the ranking card when no cluster was audited and none was filed.
 NO_RANKING = "none"
 GAPS_HEADING = "## Gaps"
-# The no-coverage report goes to chat verbatim; the rest stay in the raw file.
+# The no-coverage report goes to chat as written; the rest stay in the raw file.
 MAX_REPORT_GAPS = 10
 # Placeholders a Cluster Agent writes where a field names more than one object.
 NOT_AN_OBJECT = ("", "multiple", "multiple workloads", "various", "n/a", "none")
@@ -181,7 +188,7 @@ def _read_marker(path: Path) -> dict[str, str]:
 def read_scan_marker(marker: Path, now: float | None = None) -> tuple[str, float] | None:
     """The sweep card's id and when it was filed, from the gate's marker; None without an id.
 
-    The one reader of this marker, for the hand-off and the oobe stage alike. A ``filed_at`` that
+    The one reader of its id and time, for the hand-off and the oobe stage alike. A ``filed_at`` that
     is missing, hand-written, truncated or not epoch seconds (milliseconds, nan, inf) would stop
     every clock that counts from it, so the marker's own age stands in.
     """
@@ -200,6 +207,16 @@ def read_scan_marker(marker: Path, now: float | None = None) -> tuple[str, float
         except OSError:
             return None
     return sweep_id, filed_at
+
+
+def no_repository_line(no_repository: bool) -> str:
+    """The scan marker's line recording what the cards were told."""
+    return f"{NO_REPOSITORY_FIELD}={RECORDED_YES if no_repository else RECORDED_NO}\n"
+
+
+def recorded_no_repository(marker: Path) -> bool | None:
+    """What the cards were told, from the gate's marker; None when it recorded nothing."""
+    return {RECORDED_YES: True, RECORDED_NO: False}.get(_read_marker(marker).get(NO_REPOSITORY_FIELD, ""))
 
 
 def _metadata(conn: sqlite3.Connection, task_id: str) -> dict:
@@ -417,7 +434,8 @@ def _flag(block: dict, *keys: str) -> str:
 def _ran_no_repository_checks(audits: list) -> bool:
     """Whether any audit recorded the workload fields or filed a check of the SOP's no-repository section.
 
-    Read off the cards rather than the repository list, which can change between filing and now.
+    Only for a sweep whose marker recorded no decision (``NO_REPOSITORY_FIELD``). Read off the cards
+    rather than the repository list, which can change between filing and now.
     """
     return any(
         isinstance(w, dict) and isinstance(w.get(block), dict) and key in w[block]
@@ -519,7 +537,8 @@ def compose(state: dict, timed_out: bool, now: float | None = None) -> str:
         gaps.append(f"the hand-off stopped waiting {deadline(state) // SECONDS_PER_MINUTE} minutes after the sweep was filed")
 
     stamp = time.strftime(STAMP_FORMAT, time.gmtime(now if now is not None else time.time()))
-    wide = _ran_no_repository_checks(audits)
+    recorded = state.get(NO_REPOSITORY_FIELD)
+    wide = _ran_no_repository_checks(audits) if recorded is None else recorded
     owned = (
         "With no GitOps repository for the first-run audits to publish to, this scan also checked liveness and "
         "readiness probes, requests and limits, HPA, NetworkPolicy and pod security."
@@ -730,7 +749,8 @@ def _prioritize_body() -> str:
         "Rank the onboarding inventory into the report the user receives. Follow the prioritization "
         f"SOP, reading whichever of these exists:\n{paths}\n\n"
         f"Your only input is `{RAW_PATH}`; write the ranked report to `{REPORT_PATH}`. A separate "
-        "delivery job posts that file to the user with no further model editing: verbatim, or on "
+        "delivery job posts that file to the user with no further model editing: as written, followed by a "
+        "short note on the first-run audits, or on "
         "Slack laid out again by a fixed script. Do not message the user yourself."
     )
 
@@ -810,7 +830,8 @@ def file_cluster_cards(state: dict, roster: list, parse_task_id) -> tuple[int, l
     have = {c["key"] for c in state["clusters"]} | state.get("archived_keys", set())
     stale = state.get("stale_keys", {})
     filed, unfiled = 0, []
-    no_repository = None  # read once, and only when a card is to be filed
+    # The sweep card's, as the gate recorded it; with none, read once, and only when a card is to be filed.
+    no_repository = state.get(NO_REPOSITORY_FIELD)
     for agent in roster:
         if agent["key"] in have:
             continue
@@ -867,6 +888,7 @@ def hand_off(data_dir: Path, scan_marker: Path, parse_task_id, roster=None, now:
     state = read_board(_board_path(data_dir), sweep_id)
     if state is None:
         return None
+    state[NO_REPOSITORY_FIELD] = recorded_no_repository(scan_marker)
     # Archiving the sweep, or every one of its cards, is how a person, the
     # re-arm runbook or a bench stack cancels it, often to plant a raw file of
     # their own; writing over that file once the deadline passed would undo

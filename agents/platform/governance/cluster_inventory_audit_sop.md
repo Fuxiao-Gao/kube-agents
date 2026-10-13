@@ -166,14 +166,16 @@ Record them in the Step 5 `metadata` as these fields, beside the ones Step 5 alr
 
 Report their findings under these slugs, alongside the Step 5 table:
 
-| what you found                  | check slug                            |
-| ------------------------------- | ------------------------------------- |
-| liveness / readiness probes     | `probes-liveness`, `probes-readiness` |
-| requests, limits, QoS class     | `no-requests`, `no-memory-limit`      |
-| HPA coverage                    | `no-hpa`, `hpa-cannot-scale`          |
-| NetworkPolicy                   | `netpol-missing`                      |
-| Workload Identity               | `workload-identity-off`               |
-| `runAsNonRoot` security context | `podsecurity-gaps`                    |
+| what you found                   | check slug                            |
+| -------------------------------- | ------------------------------------- |
+| liveness / readiness probes      | `probes-liveness`, `probes-readiness` |
+| requests, limits, QoS class      | `no-requests`, `no-memory-limit`      |
+| HPA coverage                     | `no-hpa`, `hpa-cannot-scale`          |
+| NetworkPolicy                    | `netpol-missing`                      |
+| Workload Identity on the cluster | `workload-identity-off`               |
+| `runAsNonRoot` security context  | `podsecurity-gaps`                    |
+| privileged containers            | `privileged-container`                |
+| host namespaces                  | `host-namespace`                      |
 
 ---
 
@@ -236,7 +238,7 @@ finding the report loses.
 
 `check` is a lowercase hyphenated slug naming the condition, stable across sweeps: with the project,
 cluster, namespace and workload it is the finding's identity in the findings queue. These are the
-audit streams' own slugs; use one where it fits. Using them means the same
+audit streams' own slugs where a stream has one (`probes-startup`, `readonly-root-fs`, `no-resourcequota` and `static-sa-key` have none yet); use one where it fits. Using them means the same
 problem carries one identity whichever source found it, and a finding promoted out of the queue
 routes to the stream that owns the check.
 
@@ -249,12 +251,14 @@ routes to the stream that owns the check.
 | Dataplane V2                     | `datapath-provider`  |
 | Managed Service for Prometheus   | `managed-prometheus` |
 | node auto-upgrade                | `no-autoupgrade`     |
+| pods on static Google Cloud keys | `static-sa-key`      |
 
 Checks the first-run audits own (cost, security, reliability and capacity: liveness and readiness
-probes, requests and limits, HPA, NetworkPolicy, the cluster's Workload Identity setting, pod
-security, privileged and host-namespace workloads among them) are not reported here, under any slug,
-unless your card has you run "Without a GitOps repository" above. Those audits report them with
-their own evidence, and a second copy from this card reaches the user as a separate problem.
+probes, requests and limits, HPA, NetworkPolicy, the cluster's Workload Identity setting
+(`workload-identity-off`; a pod's static keys are `static-sa-key` above), pod security, privileged
+and host-namespace workloads among them) are not reported here, under any slug, unless your card
+has you run "Without a GitOps repository" above. Those audits report them with their own evidence,
+and a second copy from this card reaches the user as a separate problem.
 
 For anything else, write a lowercase hyphenated slug naming the condition, and keep it stable: it
 is the row's identity across every later sweep.

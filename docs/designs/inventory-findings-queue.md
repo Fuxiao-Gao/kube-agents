@@ -46,7 +46,7 @@ worker follows `inventory.md` and lists the fleet, while the gate files one audi
 second card follows `inventory_prioritize_sop.md`, scoring and registering everything, and
 `inventory_findings.py select` chooses what it renders to `/opt/data/INVENTORY.md`: at most
 `FINDINGS_FIRST_REPORT_CRITICALS` (2) critical items and nothing below critical (§7.2);
-`bootstrap_delivery.py` posts that file to chat verbatim (on Slack with `KAGE_SLACK_UX` on, laid out
+`bootstrap_delivery.py` posts that file to chat as written, followed by a note on the first-run audits (on Slack with `KAGE_SLACK_UX` on, laid out
 again by a fixed script that keeps every listed finding with its sentence as written) and marks the
 listed findings shown. The cap covers criticals too. A fleet with six criticals gets two in the report
 and the other four through the paced nudge; a fleet with one critical and forty gaps gets one, and the
@@ -1309,7 +1309,7 @@ new SOP, and no change to shared code the seven live streams depend on.
 
 ### 10.1 The residue, and the three checks that need a home
 
-Five sweep checks have no owning stream. Two of them cost nothing: SLO and error-budget alerting
+Six sweep checks have no owning stream. Two of them cost nothing: SLO and error-budget alerting
 practice, and the OTel collector inventory, are unactionable observations caught by §4.4's gate.
 They never reach `remediate`, so the allowlist never sees them; the queue ranks and surfaces them
 with their recommendation and no PR, exactly as §9 says.
@@ -1323,7 +1323,9 @@ cannot serve:
 | `readOnlyRootFilesystem` absent             | Security Context                                             | `compliance-audit`    |
 | namespace has no ResourceQuota / LimitRange | Multi-Tenancy & Governance                                   | `compliance-audit`    |
 
-Each is a pod-spec or namespace YAML edit — the most promotable kind of finding there is — and each
+The sixth, `static-sa-key` (a pod on static Google Cloud keys rather than Workload Identity), was filed under `compliance-audit`'s cluster-level `workload-identity-off` until the sweep left that check to the audit. Its fix spans the pod's ServiceAccount and an IAM binding, so it stays `manual` and is not one of the three.
+
+Each of the three is a pod-spec or namespace YAML edit — the most promotable kind of finding there is — and each
 would be rejected by `validate_audit_id` for want of a stream. The near misses are worth naming so
 nobody re-derives them: `obtainability-audit` covers `probes-liveness` and `probes-readiness` but
 has no startup-probe check; `podsecurity-gaps` covers `runAsNonRoot`, `runAsUser`, and
@@ -1360,7 +1362,7 @@ the smaller change and leaves one vocabulary.
 It does not replace the audit ledgers. It builds no new remediation-PR machinery, reusing
 `remediate` wholesale. It changes the shape of the first-time report only as pacing needs (§7.2):
 the delivered `INVENTORY.md` lists at most `FINDINGS_FIRST_REPORT_CRITICALS` (2) critical items and
-nothing below critical, it is still posted verbatim (laid out again on Slack with `KAGE_SLACK_UX` on,
+nothing below critical, it is still posted as written (laid out again on Slack with `KAGE_SLACK_UX` on,
 each listed finding as written), and its `Also found: N items` line gains a link to the backlog (§5).
 What also changes is which items: §5 renders the report from what the sweep registered, so §4's
 single scale decides the order and §4.2's thresholds supply the severity word, where
