@@ -332,6 +332,15 @@ def _provider_managed(namespace: str) -> bool:
     return namespace in PROVIDER_NAMESPACES or namespace.startswith(PROVIDER_NAMESPACE_PREFIXES)
 
 
+def _names_an_object(value: str) -> bool:
+    """Whether a finding's workload or namespace field names one object.
+
+    A placeholder word, or a value with no letter or digit in it ("-", "—"), names none: written as
+    the object, it would give the finding an id the ranking stage refuses.
+    """
+    return value.lower() not in NOT_AN_OBJECT and any(ch.isalnum() for ch in value)
+
+
 def finding_lines(meta: dict) -> list[dict]:
     """The ```findings block lines for one cluster's audit ``metadata``.
 
@@ -352,8 +361,8 @@ def finding_lines(meta: dict) -> list[dict]:
             continue
         workload = _text(finding.get("workload"))
         namespace = _text(finding.get("namespace"))
-        scoped = namespace.lower() not in NOT_AN_OBJECT
-        named = workload.lower() not in NOT_AN_OBJECT
+        scoped = _names_an_object(namespace)
+        named = _names_an_object(workload)
         if named:
             obj = workload
         elif scoped:

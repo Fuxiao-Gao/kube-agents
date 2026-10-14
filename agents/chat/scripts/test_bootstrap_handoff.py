@@ -172,6 +172,17 @@ class FindingLinesTest(unittest.TestCase):
         self.assertTrue(managed["kube-system"])
         self.assertFalse(managed["buildkit"])
 
+    def test_a_dash_placeholder_names_no_object(self):
+        # A Cluster Agent wrote "workload": "-" on a namespace finding, and the ranking stage
+        # refused the line whose object was "-".
+        meta = {"project": "p", "cluster": "c", "findings": [
+            {"check": "no-resourcequota", "namespace": "default", "workload": "-", "issue": "no ResourceQuota"},
+            {"check": "no-resourcequota", "namespace": "—", "workload": "-", "issue": "no ResourceQuota"}]}
+        first, second = h.finding_lines(meta)
+        self.assertEqual((first["namespace"], first["object"]), ("default", "default"))
+        self.assertEqual(second["object"], "c")
+        self.assertNotIn("namespace", second)
+
     def test_a_check_the_agent_named_is_kept(self):
         meta = {"project": "p", "cluster": "c", "findings": [
             {"check": "probes-readiness", "namespace": "ns", "workload": "api", "issue": "no readinessProbe"}]}
