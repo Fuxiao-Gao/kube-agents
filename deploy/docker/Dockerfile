@@ -1469,7 +1469,10 @@ RUN /opt/hermes/.venv/bin/python3 /tmp/kanban-guardrail-exit/apply_state_db_sync
 # records which running card created which child (kanban_worker_children), and
 # kanban_complete refuses — once, never wedging — to close a card whose
 # recorded children are neither settled nor gated on it, telling the worker to
-# wait and synthesize instead. Must run AFTER apply_kanban_result_required.py
+# wait and synthesize instead. kanban_block also refuses kind="dependency" on a
+# card with nothing unfinished to wait on, which upstream re-queues to a fresh
+# worker that can't see the first one's work (#2704's duplicate PR). Must run
+# AFTER apply_kanban_result_required.py
 # (earlier stage): its completion anchor is text that patch introduced,
 # deliberately, because the site it needs only exists in the patched tree. The
 # create hook anchors on upstream's own line, so apply_kanban_auto_subscribe.py
