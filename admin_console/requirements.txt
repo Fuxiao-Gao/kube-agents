@@ -1,4 +1,10 @@
-streamlit>=1.65.0,<2
+# The upper bound is temporary. streamlit 1.66.0 changed AppTest: a rerun now
+# starts on the page the previous run finished on. Because a pages/ folder is
+# next to app.py, AppTest then runs that page without app.py, and 14 tests in
+# tests/test_admin_portal_ui.py fail. A real server still runs app.py on every
+# rerun. Lift the bound when #3044 renames pages/, and remove the streamlit rule
+# in .github/dependabot.yml in the same change.
+streamlit>=1.65.0,<1.66
 plotly>=7.1.0,<8
 fastapi>=0.142.2,<1
 httpx>=0.28.1,<1

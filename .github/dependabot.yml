@@ -91,10 +91,18 @@ updates:
     # version, and the cap is a bare range rather than an `==` pin, so there is
     # none. Remove this rule and lift the pin in one change when Streamlit
     # lifts its own.
+    #
+    # admin_console/requirements.txt caps streamlit below 1.66: from 1.66.0,
+    # AppTest skips app.py on reruns because a pages/ folder is next to it, and
+    # the admin console tests fail. Remove this rule and lift the cap in one
+    # change when #3044 renames that folder.
     ignore:
       - dependency-name: "websockets"
         versions:
           - ">=17"
+      - dependency-name: "streamlit"
+        versions:
+          - ">=1.66"
     groups:
       python:
         patterns:
