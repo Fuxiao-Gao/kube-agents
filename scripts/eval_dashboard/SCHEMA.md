@@ -893,12 +893,13 @@ again, a night short of a main case is incomplete without naming a part,
 and one short of a former writers case reports the writers part missing.
 `cases[]` is every task row the night measured,
 sorted by domain then name, as `{case, domain, state, reps{pass, fail,
-infra}, reason, transcript_url, turn1_p50_s, agent_p50_s}` with `state` in `pass|partial|fail|infra`
+infra}, reason, transcript_url, turn1_p50_s, agent_p50_s, agent_p90_s}` with `state` in `pass|partial|fail|infra`
 by the strip's rule over the task's reps (no `reps` key: the task's result
 is one rep), `reason` the first failing rep's grader text (`null` on a
 pass), and `turn1_p50_s` / `agent_p50_s` the median of the task's reps'
 `turn1_s` / `agent_s` over its reps that are not `infra` (nearest rank, as
-`cases[].latency`; `null` when no such rep carries it). The night's
+`cases[].latency`; `null` when no such rep carries it), and `agent_p90_s`
+the same reps' 90th percentile of `agent_s` (`AGENT_SLOW_PCT`). The night's
 `turn1_p50_s` and `turn1_p95_s` are the same percentiles of `turn1_s` over
 every rep of the night's `cases[]` that is not `infra` (`null` when none
 carries it). They are advisory: the page and the digest show the p95 beside

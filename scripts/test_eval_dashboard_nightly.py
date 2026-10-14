@@ -156,6 +156,8 @@ class NightDocumentTest(unittest.TestCase):
         self.assertEqual((by_name["case-a"]["turn1_p50_s"], by_name["case-a"]["agent_p50_s"]), (6.0, 110.0))
         self.assertEqual((by_name["case-b"]["turn1_p50_s"], by_name["case-b"]["agent_p50_s"]), (12.0, 300.0), "the infra rep left out")
         self.assertEqual((by_name["case-c"]["turn1_p50_s"], by_name["case-c"]["agent_p50_s"]), (None, None), "a value that is not a finite number is unknown")
+        # 100.0, 110.0, 120.0: nearest rank, index round(1.8) == 2 for p90.
+        self.assertEqual([by_name[name]["agent_p90_s"] for name in ("case-a", "case-b", "case-c")], [120.0, 300.0, None])
         # 4.0, 6.0, 9.0, 12.0: nearest rank, index round(1.5) == 2 for p50.
         self.assertEqual((last["turn1_p50_s"], last["turn1_p95_s"]), (9.0, 12.0))
         self.assertEqual((first["turn1_p50_s"], first["turn1_p95_s"]), (None, None), "no rep carried a time")
@@ -764,7 +766,7 @@ class NightlyPageTest(unittest.TestCase):
         self.assertIn("check y: required phrases absent", app)
         # The timing: case-a's medians, a dash where none was recorded, and
         # the night's opening turn beside the target, as advice.
-        self.assertIn('2/3</td><td class="num" title="median opening chat turn / median agent wall clock, over the repetitions not lost to infra">6.0 s / 110.0 s</td>', app)
+        self.assertIn('2/3</td><td class="num tm" title="median opening chat turn / median agent wall clock, then the agent\'s p90, over the repetitions not lost to infra">6.0 s / 110.0 s<br><small class="mut">p90 120.0 s</small></td>', app)
         self.assertIn(">— / —</td>", app)
         self.assertIn('<div class="k">Chat turn 1</div><div class="v">6.0<small>s p50</small></div><div class="d2">p95 11.5 s · advisory target p95 &lt; 10 s</div>', app)
         self.assertNotIn("Chat turn 1", dom_text(self.page, fragment=f"#build={NIGHT_1}"), "no tile for a night with no timing")

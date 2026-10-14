@@ -1651,7 +1651,7 @@ function nightCaseRow(night, c, newly) {
   return `<tr class="${newly.has(c.case) ? "newly" : ""}"><td class="nm">${esc(c.case)}</td>` +
     `<td><span class="pill ${PAGE.nightStateClass[c.state] || "p-infra"}" title="${esc(PAGE.nightStateWords[c.state] || c.state)}">${esc(c.state)}</span></td>` +
     `<td class="num" title="repetitions passed / graded">${esc(repText)}</td>` +
-    `<td class="num" title="median opening chat turn / median agent wall clock, over the repetitions not lost to infra">${esc(Number.isFinite(c.turn1_p50_s) ? secText(c.turn1_p50_s) : "—")} / ${esc(Number.isFinite(c.agent_p50_s) ? secText(c.agent_p50_s) : "—")}</td>` +
+    `<td class="num tm" title="median opening chat turn / median agent wall clock, then the agent's p90, over the repetitions not lost to infra">${esc(Number.isFinite(c.turn1_p50_s) ? secText(c.turn1_p50_s) : "—")} / ${esc(Number.isFinite(c.agent_p50_s) ? secText(c.agent_p50_s) : "—")}${Number.isFinite(c.agent_p90_s) ? `<br><small class="mut">p90 ${esc(secText(c.agent_p90_s))}</small>` : ""}</td>` +
     `<td>${c.reason ? `<span class="rsn" title="${esc(c.reason)}">${esc(c.reason)}</span>` : `<span class="mut">—</span>`}</td>` +
     `<td class="mut small">${links}</td></tr>`;
 }
@@ -1739,7 +1739,7 @@ function nightlyHtml(link) {
     `</div></div>`;
   return head + tiles +
     `<div class="sec"><h2>Against the night before</h2>${nightChangesHtml(night)}</div>` +
-    `<div class="sec"><h2>Every case, by domain</h2>${nightCasesTable(night)}<p class="mut small">States: pass = every graded rep passed · partial = some reps failed · fail = every graded rep failed · infra = nothing graded (quota or setup losses, never counted against a case). Reps read passed / graded. Turn 1 / agent are medians over the repetitions not lost to infra: the opening chat turn, then the agent's whole run. The transcript is the first repetition's.</p></div>` +
+    `<div class="sec"><h2>Every case, by domain</h2>${nightCasesTable(night)}<p class="mut small">States: pass = every graded rep passed · partial = some reps failed · fail = every graded rep failed · infra = nothing graded (quota or setup losses, never counted against a case). Reps read passed / graded. Turn 1 / agent are medians over the repetitions not lost to infra: the opening chat turn, then the agent's whole run, with the agent's p90 under them. The transcript is the first repetition's.</p></div>` +
     nightsListHtml(night) + footHtml();
 }
 

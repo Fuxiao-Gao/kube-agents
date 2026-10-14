@@ -143,10 +143,12 @@ SEP = " · "
 DIGEST_NAMED_CASES = 3
 # The per-rep timing the collector records from `rep N timing:` (SCHEMA.md:
 # runs[].tasks[].reps): the agent run's wall clock (results.json's latency),
-# and the opening
-# chat turn on the api transport.
+# and the opening chat turn on the api transport.
 REP_AGENT_S = "agent_s"
 REP_TURN1_S = "turn1_s"
+# The slow-run percentile the Nightly page shows beside a case's agent median:
+# the agent run's variation is in its tail, which a median hides.
+AGENT_SLOW_PCT = 90
 # The end-state target for a chat turn, "p95 < 10 s for read/plan"
 # (docs/architecture/05-system-architecture.md, "Chat turn latency"). The
 # digest and the page show the night's turn-1 p95 beside it as advice only:
@@ -315,6 +317,7 @@ def night_cases(run: dict, domain_of: dict[str, str]) -> list[dict]:
             "transcript_url": transcript_url(run, name),
             "turn1_p50_s": percentile(rep_seconds(task.get("reps"), REP_TURN1_S), 50),
             "agent_p50_s": percentile(rep_seconds(task.get("reps"), REP_AGENT_S), 50),
+            "agent_p90_s": percentile(rep_seconds(task.get("reps"), REP_AGENT_S), AGENT_SLOW_PCT),
         })
     out.sort(key=lambda c: (c["domain"], c["case"]))
     return out
