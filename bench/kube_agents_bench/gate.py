@@ -166,6 +166,9 @@ REPORT_EXCERPT_MAX_CHARS = 300
 # (scripts/eval_dashboard/collect.py, _REP_TIMING_KEYS) parses the same two.
 REP_TIMING_AGENT_KEY = "agent_s"
 REP_TIMING_TURN1_KEY = "turn1_s"
+# The line's precision. A value that rounds to zero at it is left out, as the
+# collector reads `0.0` as unknown.
+REP_TIMING_DECIMALS = 1
 
 # What must not reach the log line: C0 and C1 controls and DEL (a captured
 # kubectl colour code, a NUL, a stray 8-bit control), and lone surrogates,
@@ -462,9 +465,9 @@ def _cmd_case(args: argparse.Namespace) -> int:
         # dashboard's latency rollup. A missing value is left out, and no
         # line at all when both are. `rep N timing:` does not match `rep N:`.
         timing = " ".join(
-            f"{key}={value:.1f}"
+            f"{key}={value:.{REP_TIMING_DECIMALS}f}"
             for key, value in ((REP_TIMING_AGENT_KEY, rep.latency), (REP_TIMING_TURN1_KEY, rep.turn1_s))
-            if value is not None and value > 0
+            if value is not None and round(value, REP_TIMING_DECIMALS) > 0
         )
         if timing:
             print(f"  rep {rep.index} timing: {timing}")

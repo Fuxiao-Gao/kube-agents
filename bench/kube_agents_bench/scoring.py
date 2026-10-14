@@ -564,7 +564,11 @@ def _positive_seconds(data: Any, key: str) -> float | None:
     value = data.get(key) if isinstance(data, dict) else None
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
-    return float(value) if math.isfinite(value) and value > 0 else None
+    try:
+        seconds = float(value)
+    except OverflowError:  # a JSON integer too large for a float
+        return None
+    return seconds if math.isfinite(seconds) and seconds > 0 else None
 
 
 def _as_str(value: Any) -> str | None:

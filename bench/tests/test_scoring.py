@@ -303,8 +303,10 @@ def test_load_run_reads_the_opening_turn_seconds_from_timing_json(make_run):
 @pytest.mark.parametrize(
     "body",
     ['{"turn1_s": 0}', '{"turn1_s": -1.5}', '{"turn1_s": "4.2"}', '{"turn1_s": true}',
-     '{"turn1_s": null}', '{"turn1_s": NaN}', '{"turn1_s": Infinity}', "{}", "[4.2]", "not json"],
-    ids=["zero", "negative", "string", "bool", "null", "nan", "inf", "no-key", "list", "broken"],
+     '{"turn1_s": null}', '{"turn1_s": NaN}', '{"turn1_s": Infinity}', "{}", "[4.2]", "not json",
+     '{"turn1_s": 1' + "0" * 400 + "}"],
+    ids=["zero", "negative", "string", "bool", "null", "nan", "inf", "no-key", "list", "broken",
+         "int-too-large-for-a-float"],
 )
 def test_load_run_rejects_a_timing_that_is_not_a_finite_positive_number(make_run, body):
     run = make_run()

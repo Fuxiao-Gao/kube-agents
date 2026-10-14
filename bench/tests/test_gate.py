@@ -354,8 +354,9 @@ def _timed_run(make_run, latency, turn1_s=None):
         (123.46, None, TIMING_PREFIX + "agent_s=123.5"),
         (None, 4.26, TIMING_PREFIX + "turn1_s=4.3"),
         (0.0, 4.26, TIMING_PREFIX + "turn1_s=4.3"),
+        (123.46, 0.04, TIMING_PREFIX + "agent_s=123.5"),
     ],
-    ids=["both", "no-turn1", "no-latency", "zero-latency"],
+    ids=["both", "no-turn1", "no-latency", "zero-latency", "turn1-rounds-to-zero"],
 )
 def test_the_timing_line_follows_the_grading_line_and_omits_missing_fields(
     kanban_task, make_run, tmp_path, capsys, latency, turn1_s, expected
