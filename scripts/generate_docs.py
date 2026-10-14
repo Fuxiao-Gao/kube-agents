@@ -43,6 +43,8 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
+from generate_sop_geography import SOP_REF_RE
+
 REPO = Path(__file__).resolve().parent.parent
 
 # Two rosters, two profiles. Cron ticking is a property of a running gateway
@@ -75,9 +77,10 @@ SKILLS_CONCEPT_PAGE = REPO / "docs/site/src/content/docs/concepts/skills.md"
 SKILLS_PAGE = REPO / "docs/site/src/content/docs/skills/index.mdx"
 IMAGES_PAGE = REPO / "docs/site/src/content/docs/deploy/docker-images.md"
 README = REPO / "README.md"
-# A governance watchdog is a Platform Agent job whose prompt names its SOP, by a
-# path relative to the profile home.
-SOP_RE = re.compile(r"governance/[a-z0-9_]+_sop\.md")
+# A governance audit is a Platform Agent job that carries the fleet-audit skill;
+# that skill's tests hold this set equal to its audit catalogue. The prompt names
+# the audit's SOP by a path relative to the profile home.
+AUDIT_SKILL = "fleet-audit"
 PLATFORM_HOME = "agents/platform"
 
 GITHUB_BLOB = "https://github.com/gke-labs/kube-agents/blob/main"
@@ -366,6 +369,45 @@ def gen_skill_catalog() -> str:
     return "\n".join(out).rstrip()
 
 
+def run_order(audit: dict[str, str]) -> tuple[bool, bool, int, int]:
+    """Sort key for the audits: daily ones first, then the rest, each by time of day.
+
+    A schedule with no fixed time of day (an interval, a step, a list) sorts
+    after every schedule that has one.
+    """
+    fields = audit["expr"].split()
+    if len(fields) != 5 or not (fields[0].isdecimal() and fields[1].isdecimal()):
+        return True, True, 0, 0
+    minute, hour, *date = fields
+    return date != ["*", "*", "*"], False, int(hour), int(minute)
+
+
+def governance_audits() -> list[dict[str, str]]:
+    """Return the enabled governance audits in the order the README lists them."""
+    audits = []
+    for job in load_roster(PLATFORM_CRON_ROSTER):
+        if not job.get("enabled") or AUDIT_SKILL not in (job.get("skills") or []):
+            continue
+        sop = SOP_REF_RE.search(job.get("prompt") or "")
+        if not sop:
+            raise SystemExit(
+                f"{PLATFORM_CRON_ROSTER.relative_to(REPO)}: audit '{job.get('id')}' "
+                "names no governance SOP in its prompt; the capabilities region "
+                "has nothing to link."
+            )
+        schedule = job.get("schedule") or {}
+        audits.append(
+            {
+                "id": job.get("id", ""),
+                "name": job.get("name") or job.get("id", ""),
+                "expr": schedule.get("expr") or "",
+                "display": schedule.get("display") or "",
+                "sop": sop.group(0),
+            }
+        )
+    return sorted(audits, key=run_order)
+
+
 def gen_capabilities() -> str:
     """Render the README's capabilities matrix: the scheduled audits, then the skills.
 
@@ -377,28 +419,12 @@ def gen_capabilities() -> str:
         "| Audit | Schedule (UTC) | Procedure |",
         "| ----- | -------------- | --------- |",
     ]
-    audits = []
-    for job in load_roster(PLATFORM_CRON_ROSTER):
-        sop = SOP_RE.search(job.get("prompt", ""))
-        if not job.get("enabled") or not sop:
-            continue
-        schedule = job.get("schedule", {})
-        audits.append((schedule.get("expr", ""), schedule.get("display", ""), job["name"], sop.group(0)))
-
-    def run_order(audit: tuple[str, str, str, str]) -> tuple[bool, int, int]:
-        # Daily audits first, then the rest, each in the order they run. A
-        # schedule with no fixed time of day (an interval, a step) goes last.
-        fields = audit[0].split()
-        if len(fields) != 5 or not (fields[0].isdigit() and fields[1].isdigit()):
-            return True, 24, 0
-        minute, hour, day, _, weekday = fields
-        return (day, weekday) != ("*", "*"), int(hour), int(minute)
-
-    audits.sort(key=run_order)
-    for expr, display, name, sop in audits:
-        cadence = CRON_CADENCE.get(expr) or f"`{expr or display}`"
-        link = f"{PLATFORM_HOME}/{sop}"
-        out.append(f"| {md_escape(name)} | {cadence} | [`{sop.split('/')[-1]}`]({link}) |")
+    for audit in governance_audits():
+        cadence = CRON_CADENCE.get(audit["expr"]) or f"`{audit['expr'] or audit['display']}`"
+        link = f"{PLATFORM_HOME}/{audit['sop']}"
+        out.append(
+            f"| {md_escape(audit['name'])} | {cadence} | [`{Path(audit['sop']).name}`]({link}) |"
+        )
 
     out += [
         "",
