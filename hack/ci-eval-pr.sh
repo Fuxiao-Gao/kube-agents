@@ -80,6 +80,9 @@ readonly EVAL_VERDICT_OUTCOME_NOT_EVALUATED="not_evaluated"
 # STATE_DIR, holds one such record per skipped repetition.
 readonly EVAL_INFRA_FAILURE_MARKER="KUBE_AGENTS_INFRA_FAILURE"
 readonly EVAL_NOT_RUN_DIR="not-run"
+# The opening chat turn's seconds beside results.json, where
+# bench/kube_agents_bench/scoring.py (_TIMING_FILE) reads them.
+readonly EVAL_TIMING_FILE="timing.json"
 # The record's status: what the harness writes for a run that did not succeed.
 readonly EVAL_NOT_RUN_STATUS="failed"
 
@@ -2945,7 +2948,7 @@ record_case() { # <task-name>
 # gradings apart; it is not what keeps one case's block contiguous in the job
 # log, since the launcher's `>>>` and the other lanes' `<<<` lines never take
 # it. That is the single `cat` below: a block under PIPE_BUF (4096 bytes; the
-# fixtures measure 448-1524) reaches the stdout pipe in one write. It matters
+# fixtures measure 550-2054) reaches the stdout pipe in one write. It matters
 # because scripts/eval_dashboard/collect.py attaches `rep N:` lines to the
 # `Task <name> Result:` line above them and closes the block at the next
 # `>>>`/`===`/`---` header, so a launch marker landing inside a block would
@@ -3216,13 +3219,24 @@ run_one_unit() { # <task-path> <task-name> <rep> <reuse:true|empty> <has-stack:t
   else
     unset EVAL_STREAM_STARTED_AT EVAL_AUDIT_STREAM EVAL_STREAM_REPO
   fi
+  # The harness writes the opening chat turn's seconds here (harness.py,
+  # KUBE_AGENTS_TIMING_FILE); removed first so a stale file from an earlier
+  # lease is never copied in for this repetition.
+  local timing="${STATE_DIR}/${name}.rep${rep}.${EVAL_TIMING_FILE}"
+  rm -f "${timing}"
   start="$(_now_ms)"
-  (cd "${BENCH_DIR}" && uv run devops-bench "${run_task}" --agent-type kubeagents 2>&1 | _ts_lines > "${log}") || true
+  (cd "${BENCH_DIR}" && KUBE_AGENTS_TIMING_FILE="${timing}" uv run devops-bench "${run_task}" --agent-type kubeagents 2>&1 | _ts_lines > "${log}") || true
   end="$(_now_ms)"
   # `|| true`: a run that never printed a `results:` line must still write
   # its state files and reach the artifact copy -- it is exactly the crashed
   # run someone will need the log for.
   dir="$(grep -oE 'results: [^ ]*/results\.json' "${log}" | tail -1 | sed -e 's/^results: //' -e 's|/results\.json$||' || true)"
+  # Beside results.json, where load_run reads it, and before the .dir state
+  # file below lets the grading pass see this repetition. Best effort: a
+  # missing timing never fails the repetition.
+  if [ -n "${dir}" ] && [ -f "${timing}" ]; then
+    cp "${timing}" "${dir}/${EVAL_TIMING_FILE}" 2>/dev/null || true
+  fi
   # Written while this unit still holds the task lock, and counted under it:
   # repetitions of one task write their state files serially, so exactly one
   # of them -- the last to finish -- sees the count reach EVAL_REPETITIONS,

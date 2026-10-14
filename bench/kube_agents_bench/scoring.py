@@ -93,6 +93,11 @@ __all__ = [
 #: that exists but holds an unusable record, which is a different diagnosis.
 MISSING = "MISSING"
 
+#: The opening chat turn's seconds, which hack/ci-eval-pr.sh copies from the
+#: harness's KUBE_AGENTS_TIMING_FILE into the run directory, and its one key.
+_TIMING_FILE = "timing.json"
+_TIMING_TURN1_KEY = "turn1_s"
+
 #: ``VerificationCorrectness`` at or above this is a passing repetition. The
 #: existing presubmit floor, unchanged; the CLI reads it from the environment.
 DEFAULT_CORRECTNESS_FLOOR = 1.0
@@ -397,7 +402,8 @@ class RunRecord:
     ``results.json`` is the scoring contract: it is the only artifact carrying
     ``VerificationCoverage`` and the per-check ``verification_report``.
     ``manifest.json`` and ``rows.json`` are read for the version key and for
-    latency/token reporting.
+    latency/token reporting, and ``timing.json`` (copied in by
+    hack/ci-eval-pr.sh) for the opening turn's seconds.
     """
 
     run_dir: Path
@@ -406,6 +412,9 @@ class RunRecord:
     trajectory: list[Any]
     tokens: dict[str, Any]
     latency: float | None
+    #: Seconds of the opening chat turn, from ``timing.json``. None when the
+    #: file is absent or its value is not a finite number above zero.
+    turn1_s: float | None
     verification_report: list[dict[str, Any]]
     verification_parse_errors: list[Any]
     error: Any
@@ -508,6 +517,7 @@ def load_run(run_dir: str | Path) -> RunRecord | None:
         return None
 
     manifest = _read_json(path / "manifest.json") or {}
+    turn1_s = _positive_seconds(_read_json(path / _TIMING_FILE), _TIMING_TURN1_KEY)
     rows = _read_json(path / "rows.json") or []
     row = rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], dict) else {}
 
@@ -521,6 +531,7 @@ def load_run(run_dir: str | Path) -> RunRecord | None:
             trajectory=list(rec.get("trajectory") or []),
             tokens=dict(rec.get("tokens") or {}),
             latency=_as_float(rec.get("latency")),
+            turn1_s=turn1_s,
             verification_report=[e for e in (report or []) if isinstance(e, dict)],
             verification_parse_errors=list(rec.get("verification_parse_errors") or []),
             error=rec.get("error") or (rec.get("errors") or None),
@@ -551,6 +562,17 @@ def _as_float(value: Any) -> float | None:
         return None
 
 
+def _positive_seconds(data: Any, key: str) -> float | None:
+    value = data.get(key) if isinstance(data, dict) else None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    try:
+        seconds = float(value)
+    except OverflowError:  # a JSON integer too large for a float
+        return None
+    return seconds if math.isfinite(seconds) and seconds > 0 else None
+
+
 def _as_str(value: Any) -> str | None:
     return str(value) if value is not None else None
 
@@ -577,6 +599,7 @@ class RepResult:
     judged: dict[str, float] = field(default_factory=dict)
     failed_checks: list[str] = field(default_factory=list)
     latency: float | None = None
+    turn1_s: float | None = None
     total_tokens: int | None = None
     #: The agent's final report, verbatim, for the build log's excerpt line.
     #: Not in the hand-off: the dashboard reads it from the log.
@@ -1044,6 +1067,7 @@ def classify_rep(
             judged=record.judged if record else {},
             failed_checks=_failed_checks(record) if record else [],
             latency=record.latency if record else None,
+            turn1_s=record.turn1_s if record else None,
             total_tokens=(
                 record.tokens.get("total") if record and record.tokens else None
             ),
@@ -1414,6 +1438,7 @@ class CaseVerdict:
                     "catastrophic": r.catastrophic,
                     "judged": r.judged,
                     "latency": r.latency,
+                    "turn1_s": r.turn1_s,
                     "total_tokens": r.total_tokens,
                     "not_applicable_checks": list(r.not_applicable_checks),
                 }
