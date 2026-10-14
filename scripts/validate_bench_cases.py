@@ -183,6 +183,14 @@ KNOWN_UNREGISTERED = {
         "#2806: parked 2026-10-09; 140 infra-lock minutes truncated the main "
         "nightly, and its empty trajectory grades every repetition blocked"
     ),
+    # It grades what a chat channel received, and every CI install deploys with
+    # GOOGLE_CHAT_ENABLED and SLACK_ENABLED false (hack/ci-deploy.sh), so the
+    # relay posts nowhere there and the case can only fail. Run by hand against
+    # an install with a chat platform, as for a relay change's eval loop. The
+    # entry goes when an eval lane has a chat platform.
+    "chat-relay-posts-report-as-written": (
+        "needs a chat platform, which no CI install has; run by hand on a chat install"
+    ),
 }
 
 # Cases whose fixture does not exist at all, waiting on the issue that plants
@@ -269,19 +277,6 @@ FIXTURE_NOT_READY = {
         "#1873: needs the stalled-controller role applied to every pool "
         "project; fixture defined in #1893, waiting on fleet re-apply and pool "
         "verification sweep"
-    ),
-    "gitops-drift-noise-filtered-triage": (
-        "#911: needs an audit ingress on the eval install -- a drift-audit "
-        "topic, a subscription and a detector enabled to pull from it, none of "
-        "which hack/ci-deploy.sh builds, so no record of any tier reaches the "
-        "classifier and the case files no card at all, which is broken rather "
-        "than red. The umbrella owns it because the gap is the eval install "
-        "not asking for what the composition already builds behind "
-        "enable_drift_pubsub, not a defect anyone has filed separately. The "
-        "case's own header carries the rest: why the sink is the one part of "
-        "the trio it can do without, why #2137 is not a second blocker, and "
-        "the ALERT_DAILY_LIMIT_DRIFT raise the unparking pull request owes "
-        "alongside the ingress"
     ),
 }
 
@@ -392,6 +387,9 @@ CHECK_ASSERTIONS: dict[str, tuple[str, ...]] = {
         "forbidden_patterns",
     ),
     "ledger_issue_contains": ("required_phrases", "forbidden_phrases", "any_of_phrases"),
+    # No field: a bold one-sentence lead, no heading and the length caps are
+    # the assertion, and every field narrows it.
+    "answer_first": (),
     # No field, deliberately: the freshness binding is the assertion and every
     # field only narrows it. See the empty-tuple rule in _check_assertions.
     "pull_request_opened": (),
@@ -436,6 +434,9 @@ CHECK_ASSERTIONS: dict[str, tuple[str, ...]] = {
     # case planted. The rows it names are the assertion; with none it could
     # only pass.
     "findings_item_state": ("finding_ids",),
+    # This repository, agent-pod-reading. No field: whether every post a planted
+    # report produced is that report, exactly, is the whole assertion.
+    "relay_posted_as_written": (),
 }
 
 # Check types that read live cluster state. A case using one is asserting on

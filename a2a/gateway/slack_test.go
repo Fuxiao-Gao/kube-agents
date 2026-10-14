@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gke-labs/kube-agents/a2a/lib"
+	"github.com/gke-labs/kube-agents/a2a/lib/chattext"
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
 	"github.com/slack-go/slack/socketmode"
@@ -29,12 +31,15 @@ type fakeSlackAPI struct {
 	// gateway workers; single-goroutine tests read the slices directly.
 	mu sync.Mutex
 	// team is the team id auth.test answers with.
-	team     string
-	posted   []struct{ channel, thread, text string }
-	updated  []struct{ channel, ts, text string }
-	members  []string
-	cursor   string
-	openedIM string
+	team   string
+	posted []struct{ channel, thread, text string }
+	// postValues is every chat.postMessage's full form, for the fields
+	// posted does not name.
+	postValues []url.Values
+	updated    []struct{ channel, ts, text string }
+	members    []string
+	cursor     string
+	openedIM   string
 }
 
 func (f *fakeSlackAPI) AuthTestContext(context.Context) (*slack.AuthTestResponse, error) {
@@ -51,6 +56,7 @@ func (f *fakeSlackAPI) PostMessage(channelID string, options ...slack.MsgOption)
 	f.posted = append(f.posted, struct{ channel, thread, text string }{
 		values.Get("channel"), values.Get("thread_ts"), values.Get("text"),
 	})
+	f.postValues = append(f.postValues, values)
 	return channelID, "999.001", nil
 }
 
@@ -859,6 +865,11 @@ func TestSlackPostThreadsAndTranslates(t *testing.T) {
 	if api.posted[2].channel != "D1" || api.posted[2].thread != "100.1" {
 		t.Errorf("a post to a DM thread's conversation must land in that thread: %+v", api.posted[2])
 	}
+	for i, v := range api.postValues {
+		if v.Get("unfurl_links") != "false" || v.Get("unfurl_media") != "false" {
+			t.Errorf("post %d: unfurl_links=%q unfurl_media=%q, want both false", i, v.Get("unfurl_links"), v.Get("unfurl_media"))
+		}
+	}
 	if _, err := a.Post("discord:1/2", "x"); err == nil {
 		t.Error("malformed conversation must error")
 	}
@@ -1111,10 +1122,12 @@ func TestToMrkdwnConvertsProseAfterAChunkedFence(t *testing.T) {
 func TestToMrkdwnRewritesBoldOnlyOnClosedPairs(t *testing.T) {
 	cases := map[string]string{
 		// The issue's rows: none of these is a bold pair.
-		"**kwargs":                "**kwargs",
-		"**/*.yaml":               "**/*.yaml",
-		"a ** b":                  "a ** b",
-		"***":                     "***",
+		"**kwargs":  "**kwargs",
+		"**/*.yaml": "**/*.yaml",
+		"a ** b":    "a ** b",
+		// Inline, since a line of only *** is a thematic break, which
+		// rewriteSlackBlocks drops (TestRewriteSlackBlocks).
+		"a *** b":                 "a *** b",
 		"def f(*args, **kwargs):": "def f(*args, **kwargs):",
 		// Bold-italic is the one triple that is a pair, and a single star
 		// inside a pair is emphasis inside it, not a second pair.
@@ -1992,7 +2005,7 @@ func TestSlackSessionLookupLogLevels(t *testing.T) {
 }
 
 // TestSlackDecodedTextDrivesTheAffordances pins a consequence of decoding the
-// inbound entities that nothing else in the suite notices. normalize() drops
+// inbound entities that nothing else in the suite notices. chattext.Normalize() drops
 // every non-alphanumeric, so the entity escaping used to survive it as
 // letters: "&lt;stop&gt;" normalized to "ltstopgt" and matched nothing.
 // Decoded first, the same wire text normalizes to "stop" — a hard task cancel.
@@ -2003,8 +2016,8 @@ func TestSlackDecodedTextDrivesTheAffordances(t *testing.T) {
 
 	// What Slack puts on the wire when a user types "<stop>".
 	const stopWire = "&lt;stop&gt;"
-	if got := normalize(stopWire); got != "ltstopgt" || isStop(stopWire) {
-		t.Fatalf("premise: normalize(%q) = %q, isStop = %v", stopWire, got, isStop(stopWire))
+	if got := chattext.Normalize(stopWire); got != "ltstopgt" || chattext.IsStop(stopWire) {
+		t.Fatalf("premise: chattext.Normalize(%q) = %q, chattext.IsStop = %v", stopWire, got, chattext.IsStop(stopWire))
 	}
 	msg, ok := a.inbound(context.Background(), slackMsg("im", "D1", "U1", stopWire, "800.0", ""))
 	if !ok {
@@ -2013,7 +2026,7 @@ func TestSlackDecodedTextDrivesTheAffordances(t *testing.T) {
 	if msg.Text != "<stop>" {
 		t.Fatalf("inbound text = %q, want the decoded form", msg.Text)
 	}
-	if !isStop(msg.Text) {
+	if !chattext.IsStop(msg.Text) {
 		t.Error("a typed <stop> must cancel: the decode is what lets normalize see \"stop\"")
 	}
 }
