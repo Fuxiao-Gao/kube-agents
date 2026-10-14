@@ -169,6 +169,12 @@ readonly EVAL_GATEWAY_PYTHON="/opt/hermes/.venv/bin/python3"
 readonly EVAL_GATEWAY_HOME="/opt/data"
 readonly EVAL_PLATFORM_RUN_WAIT_SECONDS=7200
 readonly EVAL_PLATFORM_RUN_POLL_SECONDS=30
+# scheduled_audits: how long one exec that pauses or resumes the clock-started audits
+# may take. Each is a `hermes cron` call of a few seconds, bounded at 30s by the
+# script, so five stalled calls still finish and name themselves inside this.
+readonly EVAL_PAUSE_AUDITS_TIMEOUT_SECONDS=300
+readonly EVAL_PAUSE_AUDITS_ATTEMPTS=3
+readonly EVAL_PAUSE_AUDITS_DECIDED_EXIT=3
 # What a unit's lock deadline allows past its delegation timeout, for the
 # stack, the verifier and the state writes around the run.
 readonly UNIT_LOCK_ALLOWANCE_SECONDS=600
@@ -658,6 +664,8 @@ profile_and_dump_on_exit() {
   collect_gateway_log
   collect_agent_pod_diagnostics
   collect_litellm_log
+  # Defined further down; a run that died before then paused nothing.
+  declare -F scheduled_audits >/dev/null && scheduled_audits resume "exit"
   profile_report "${exit_code}"
   (exit "${exit_code}")
   dump_prow_artifacts_on_failure
@@ -1475,6 +1483,53 @@ wait_platform_runs() { # <label> <space-separated audit ids>
   return 0
 }
 
+# The Platform Agent's clock-started audits, paused once per lease before any unit
+# runs (#3020) and resumed from the EXIT trap. hack/ci_pause_scheduled_audits.py does
+# both in the gateway with Hermes' own `cron pause`/`cron resume`, and its header owns
+# which jobs, why the pause outlives a gateway restart, and its exit codes. A Prow
+# lease's teardown sweeps the volume anyway; the resume is for a run against an
+# install that outlives it. A pause that fails is a warning: the run goes on as it
+# did before this existed, with the audits on their clock. Pinned to
+# AGENT_CLUSTER_CONTEXT and refused for a context that does not name PROJECT_ID, as
+# wait_platform_runs is. Returns 0 whatever happens.
+scheduled_audits() { # <pause|resume> <label>
+  local mode="$1" label="$2" ns ctx out rc=0 args=()
+  ns="${TARGET_NAMESPACE:-}"
+  ctx="${AGENT_CLUSTER_CONTEXT:-}"
+  [ "${mode}" = "resume" ] && args=(--resume)
+  if [ -z "${PROJECT_ID:-}" ] || [ -z "${ctx}" ] || [ -z "${ns}" ] || ! command -v kubectl >/dev/null 2>&1; then
+    echo "WARNING: Scheduled audits (${label}): no ${mode}, PROJECT_ID, AGENT_CLUSTER_CONTEXT, TARGET_NAMESPACE or kubectl is missing" >&2
+    return 0
+  fi
+  case "${ctx}" in
+    "gke_${PROJECT_ID}_"*) ;;
+    *)
+      echo "WARNING: Scheduled audits (${label}): no ${mode}, AGENT_CLUSTER_CONTEXT=${ctx} does not name PROJECT_ID=${PROJECT_ID}" >&2
+      return 0 ;;
+  esac
+  # An exec that fails (a pod rolling, an API blip) is tried again, as wait_platform_runs
+  # does; the script skips what is already done. Its exit 3 is a verdict a retry would
+  # only repeat (unreadable inputs, a pause Hermes refused), so that one is final.
+  local bound=(timeout --foreground "${EVAL_PAUSE_AUDITS_TIMEOUT_SECONDS}")
+  command -v timeout >/dev/null 2>&1 || bound=()
+  local attempt
+  for attempt in $(seq 1 "${EVAL_PAUSE_AUDITS_ATTEMPTS}"); do
+    rc=0
+    out="$(${bound[@]+"${bound[@]}"} kubectl --context "${ctx}" -n "${ns}" exec -i "deployment/${AGENT_SERVICE_NAME}-gateway" \
+      -c "${EVAL_GATEWAY_CONTAINER}" --request-timeout="${EVAL_SANDBOX_EXEC_TIMEOUT}" -- \
+      "${EVAL_GATEWAY_PYTHON}" - "${EVAL_GATEWAY_HOME}" ${args[@]+"${args[@]}"} \
+      < "${SCRIPT_DIR}/ci_pause_scheduled_audits.py" 2>&1)" || rc=$?
+    if [ "${rc}" -eq 0 ]; then
+      echo "Scheduled audits (${label}): ${out}"
+      return 0
+    fi
+    [ "${rc}" -eq "${EVAL_PAUSE_AUDITS_DECIDED_EXIT}" ] && break
+    [ "${attempt}" -lt "${EVAL_PAUSE_AUDITS_ATTEMPTS}" ] && sleep "${EVAL_PLATFORM_RUN_POLL_SECONDS}"
+  done
+  echo "WARNING: Scheduled audits (${label}): ${mode} exited ${rc} on attempt ${attempt}: ${out}; any audit not named as ${mode}d keeps its state" >&2
+  return 0
+}
+
 if [ "${EVAL_FORGE}" = "gitlab" ]; then
   EVAL_LEDGER_REPO="$(eval_gitlab_project "${PROJECT_ID:-}" 2>/dev/null)" || EVAL_LEDGER_REPO=""
 else
@@ -1483,6 +1538,7 @@ fi
 reset_audit_ledgers "lease"
 reset_agent_pulls "lease" || echo "WARNING: Agent pulls reset (lease): the repository is not clean; every unit of a case that requests a pull request runs its own reset first and does not run when that fails too." >&2
 probe_gitlab_ledger_path "lease" || exit 1
+scheduled_audits pause "lease"
 
 # For opentofu provider
 export CLOUD_PROVIDER="gcp"
