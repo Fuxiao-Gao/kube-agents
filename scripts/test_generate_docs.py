@@ -166,5 +166,36 @@ class MultiPageBlockTest(unittest.TestCase):
         )
 
 
+class CapabilitiesTest(unittest.TestCase):
+    """The README's capabilities matrix lists every audit and every skill."""
+
+    def setUp(self):
+        self.body = generate_docs.gen_capabilities()
+        audits, self.skills = self.body.split("### Skills by area")
+        self.audit_rows = [r for r in audits.splitlines() if r.startswith("| ") and "---" not in r][1:]
+
+    def test_each_enabled_governance_job_is_one_row_with_a_named_cadence(self):
+        jobs = [
+            job
+            for job in generate_docs.load_roster(generate_docs.PLATFORM_CRON_ROSTER)
+            if job.get("enabled") and generate_docs.SOP_RE.search(job.get("prompt", ""))
+        ]
+        self.assertEqual(len(self.audit_rows), len(jobs))
+        for job in jobs:
+            row = next(r for r in self.audit_rows if r.startswith(f"| {job['name']} |"))
+            self.assertIn(generate_docs.CRON_CADENCE[job["schedule"]["expr"]], row)
+
+    def test_script_jobs_are_left_out(self):
+        self.assertNotIn("Findings Queue Nudge", self.body)
+
+    def test_every_skill_is_listed(self):
+        names = {
+            *generate_docs._read_skills(generate_docs.SKILLS_DIR),
+            *generate_docs._read_skills(generate_docs.CLUSTER_SKILLS_DIR),
+        }
+        for name in names:
+            self.assertIn(f"`{name}`", self.skills)
+
+
 if __name__ == "__main__":
     unittest.main()

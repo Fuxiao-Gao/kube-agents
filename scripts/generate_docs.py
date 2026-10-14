@@ -74,6 +74,11 @@ WATCHDOGS_PAGE = REPO / "docs/site/src/content/docs/concepts/autonomous-watchdog
 SKILLS_CONCEPT_PAGE = REPO / "docs/site/src/content/docs/concepts/skills.md"
 SKILLS_PAGE = REPO / "docs/site/src/content/docs/skills/index.mdx"
 IMAGES_PAGE = REPO / "docs/site/src/content/docs/deploy/docker-images.md"
+README = REPO / "README.md"
+# A governance watchdog is a Platform Agent job whose prompt names its SOP, by a
+# path relative to the profile home.
+SOP_RE = re.compile(r"governance/[a-z0-9_]+_sop\.md")
+PLATFORM_HOME = "agents/platform"
 
 GITHUB_BLOB = "https://github.com/gke-labs/kube-agents/blob/main"
 
@@ -162,6 +167,8 @@ CRON_CADENCE = {
     "20 6 * * *": "Daily 06:20",
     "50 6 * * *": "Daily 06:50",
     "50 8 * * *": "Daily 08:50",
+    "45 7 * * *": "Daily 07:45",
+    "0 8 * * *": "Daily 08:00",
     "10 10 * * *": "Daily 10:10",
     "0 9 * * *": "Daily 09:00",
     "20 9 * * *": "Daily 09:20",
@@ -318,10 +325,8 @@ def _read_skills(skills_dir: Path) -> dict[str, str]:
     return skills
 
 
-def gen_skill_catalog() -> str:
-    skills = _read_skills(SKILLS_DIR)
-    cluster_skills = _read_skills(CLUSTER_SKILLS_DIR)
-
+def group_skills(skills: dict[str, str], cluster_skills: dict[str, str]) -> dict[str, list[str]]:
+    """Return {group: skill names} in catalogue order; empty groups are kept."""
     grouped = {g: [] for g in SKILL_GROUPS}
     grouped["Other"] = []
     for name in sorted(skills):
@@ -330,6 +335,13 @@ def gen_skill_catalog() -> str:
     # Every Cluster Agent skill goes in one persona-scoped group, appended last so
     # the Platform Agent's editorial order above is untouched.
     grouped[CLUSTER_SKILL_GROUP] = sorted(cluster_skills)
+    return grouped
+
+
+def gen_skill_catalog() -> str:
+    skills = _read_skills(SKILLS_DIR)
+    cluster_skills = _read_skills(CLUSTER_SKILLS_DIR)
+    grouped = group_skills(skills, cluster_skills)
 
     def source_dir(group: str) -> str:
         return (
@@ -352,6 +364,49 @@ def gen_skill_catalog() -> str:
             out.append(f"| [`{name}`]({link}) | {md_escape(descriptions[name])} |")
         out.append("")
     return "\n".join(out).rstrip()
+
+
+def gen_capabilities() -> str:
+    """Render the README's capabilities matrix: the scheduled audits, then the skills.
+
+    It is a short index for a first-time reader, so it names things and links to
+    the site pages that describe them rather than repeating those descriptions.
+    """
+    out = [
+        "### Scheduled governance audits\n",
+        "| Audit | Schedule (UTC) | Procedure |",
+        "| ----- | -------------- | --------- |",
+    ]
+    audits = []
+    for job in load_roster(PLATFORM_CRON_ROSTER):
+        sop = SOP_RE.search(job.get("prompt", ""))
+        if not job.get("enabled") or not sop:
+            continue
+        expr = job["schedule"].get("expr", "")
+        audits.append((expr, job["name"], sop.group(0)))
+
+    def run_order(audit: tuple[str, str, str]) -> tuple[bool, int, int]:
+        # Daily audits first, then weekly ones, each in the order they run.
+        minute, hour, _, _, weekday = audit[0].split()
+        return weekday != "*", int(hour), int(minute)
+
+    audits.sort(key=run_order)
+    for expr, name, sop in audits:
+        cadence = CRON_CADENCE.get(expr, f"`{expr}`")
+        link = f"{PLATFORM_HOME}/{sop}"
+        out.append(f"| {md_escape(name)} | {cadence} | [`{sop.split('/')[-1]}`]({link}) |")
+
+    out += [
+        "",
+        "### Skills by area\n",
+        "| Area | Skills |",
+        "| ---- | ------ |",
+    ]
+    grouped = group_skills(_read_skills(SKILLS_DIR), _read_skills(CLUSTER_SKILLS_DIR))
+    for group, names in grouped.items():
+        if names:
+            out.append(f"| {group} | {', '.join(f'`{n}`' for n in names)} |")
+    return "\n".join(out)
 
 
 ORIGIN_SECTIONS: list[tuple[str, str, str]] = [
@@ -425,6 +480,7 @@ BLOCKS: dict[str, tuple[tuple[Path, ...], Callable[[], str]]] = {
     ),
     "skill-catalog": ((SKILLS_PAGE,), gen_skill_catalog),
     "container-images": ((IMAGES_PAGE,), gen_container_images),
+    "capabilities": ((README,), gen_capabilities),
 }
 
 # Generated artifacts that are a whole file rather than a region inside a
