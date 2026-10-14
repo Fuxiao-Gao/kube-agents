@@ -785,12 +785,15 @@ RUN cp /tmp/channel-directory/channel_directory_threads.py /opt/hermes/gateway/c
 # handlers by gateway/slack_ux_clicks.py; with the flag off nothing is
 # registered. Also rides this COPY and RUN. See deploy/docker/patches/slack_ux_clicks.py.
 #
-# Slack: with KAGE_SLACK_UX on, a PR a card opened and a question a card is
-# blocked on (kind needs_input) each post as a message of their own, with url
-# or choice buttons. kanban_progress_lines calls gateway/slack_ux_moments.py,
+# Slack: with KAGE_SLACK_UX on, a PR a card opened (or a GitLab merge request,
+# on gitlab.com or on the host of a GitLab entry in managed_repos) and a question
+# a card is blocked on (kind needs_input) each post as a message of their own,
+# with url or choice buttons. kanban_progress_lines calls gateway/slack_ux_moments.py,
 # and the notifier's wake notes a posted question so the Planning Agent does not
 # ask it again (apply_slack_ux_moments.py; the wake is unchanged with the flag
-# off). slack_moments.py is staged for the verifier as slack_presenter.py is.
+# off). slack_moments.py is staged for the verifier as slack_presenter.py is;
+# gitops_workspace.py and repo_ref.py are not, so the verifier runs the
+# gitlab.com-only path, with no self-managed hosts read.
 # Also rides this COPY and RUN. See deploy/docker/patches/slack_ux_moments.py.
 #
 # Slack: with KAGE_SLACK_UX on, an incident's triage report edits its alert in
