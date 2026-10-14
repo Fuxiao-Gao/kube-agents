@@ -183,6 +183,14 @@ def audit_job(job_id: str, schedule: dict, **extra) -> dict:
 class CapabilitiesTest(unittest.TestCase):
     """The README's capabilities matrix lists every audit and every skill."""
 
+    def test_the_block_is_registered_for_the_readme(self):
+        # Without this entry `--check` stops reading the README region and the
+        # table goes stale with every other test still green.
+        self.assertEqual(
+            generate_docs.BLOCKS["capabilities"],
+            ((generate_docs.README,), generate_docs.gen_capabilities),
+        )
+
     def test_each_enabled_audit_is_listed_with_a_named_cadence(self):
         jobs = [
             job
