@@ -119,7 +119,7 @@ The release notes list pull request titles only. A `!` before the colon marks a 
 | 0.9.0   | #2350: the scoped service account pool is keyed per project | The upgrade turns off a pool armed under the old per-cluster field. See [the scoped service account pool](/kube-agents/reference/security-and-iam/#the-scoped-service-account-pool).                                                                                                                                                                                 |
 | 0.8.0   | #2065: the `litellm` Service is renamed `inference-gateway` | Model calls can fail for a short time during the upgrade. See the chart README's [upgrade note](https://github.com/gke-labs/kube-agents/blob/main/charts/kube-agents/README.md#upgrade-notes-inference-gateway-service-rename).                                                                                                                                      |
 | 0.8.0   | #2070: forges and repositories in `spec.integration`        | The operator refuses some repository spellings that worked before. See the upgrade notes under [`spec.integration`](/kube-agents/operator/platformagent-crd/#specintegration).                                                                                                                                                                                       |
-| 0.8.0   | #2010, #2042: the A2A bus reserves more consumers           | `spec.mode: next` only. If `maxSessions` is 11 or more and 0.7.0 or earlier created the TASKS stream, the provision Job stops the upgrade. Do what its message says.                                                                                                                                                                                                 |
+| 0.8.0   | #2010, #2042: the A2A bus reserves more consumers           | `spec.mode: next` only. If 0.7.0 or earlier created the TASKS stream, the provision Job can stop the upgrade. Do what its message says.                                                                                                                                                                                                                              |
 | 0.8.0   | #1756: the upgrade follows the release-pinned contract      | The upgrade refuses an install with only `k8s-operator/scripts/vars.sh`. See [When an upgrade is refused](#when-an-upgrade-is-refused).                                                                                                                                                                                                                              |
 
 ## Upgrade modes
@@ -306,11 +306,11 @@ the `Recreate` strategy. Kubernetes stops the old pod before it starts the new o
 until the new pods are ready. The operator and LiteLLM keep serving. The operator starts its new
 pod first, and LiteLLM runs two replicas and keeps one serving.
 
-| Mode       | What restarts                                                                                                                                                                                 |
-| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `operator` | The operator. The agent gateway, the credential broker and the shell sandbox restart only if the new operator renders them differently, or if the run added keys to `platform-agent-secrets`. |
-| `harness`  | The agent gateway, the credential broker, whose image tag follows the agent's, and the shell sandbox.                                                                                         |
-| `full`     | The workloads of both other modes, and each object that a changed setting touches.                                                                                                            |
+| Mode       | What restarts                                                                                                                                                                                                         |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `operator` | The operator. The agent gateway also restarts if the run added keys to `platform-agent-secrets`. The agent gateway, the credential broker and the shell sandbox restart if the new operator renders them differently. |
+| `harness`  | The agent gateway, the credential broker, whose image tag follows the agent's, and the shell sandbox.                                                                                                                 |
+| `full`     | The workloads of both other modes, and each object that a changed setting touches.                                                                                                                                    |
 
 In each mode, a chart workload such as LiteLLM also restarts if the target release's chart changed
 it. In CI runs, a harness upgrade made the agent unavailable for 41 seconds to about 3 minutes. A
@@ -322,8 +322,8 @@ During the restart:
 - **Slack.** The broker confirms each Slack event to Slack when it arrives, and keeps it in memory
   until the agent takes it. If the broker restarts, the events it holds are lost. If only the agent
   restarts, the broker gives its events to the new agent. The sender must send an event again in
-  two cases: the old agent took it but did not finish it, or it arrived in the last 20 seconds
-  before the old agent stopped.
+  two cases: the old agent took it but did not finish it, or it arrived up to 20 seconds after
+  the old agent stopped.
 - **Google Chat.** A message stays in the Pub/Sub subscription until the agent confirms it. If the
   agent took a message but did not confirm it, Pub/Sub delivers it again after 60 seconds.
 - **Board cards.** The board is on the agent's volume, so the cards stay. A card that was running
