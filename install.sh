@@ -7246,8 +7246,10 @@ main() {
     exit 1
   fi
   if [ "${GITOPS_FORGE:-github}" = "gitlab" ]; then
-    create_gitlab_token_secret "$namespace" "$expected_ctx" || exit 1
+    # The CA first: an empty token source stops the run here, and the CA
+    # Secret must exist by then.
     create_gitlab_ca_secret "$namespace" "$expected_ctx" || exit 1
+    create_gitlab_token_secret "$namespace" "$expected_ctx" || exit 1
   fi
   local slow_rollouts=()
   for deployment in "$KUBE_AGENTS_OPERATOR_DEPLOYMENT" "$LITELLM_DEPLOYMENT" "$PLATFORM_AGENT_DEPLOYMENT"; do
