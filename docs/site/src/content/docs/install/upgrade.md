@@ -76,20 +76,23 @@ and do not save either one to a shared disk.
    gcloud storage cat <STATE_PATH> | jq '.outputs | map_values(.value)'
    ```
 
-3. Write each key from the tables below into a new file named `install.env`. Leave a key out when
-   its value is empty or the default in `install.defaults.env`, unless the table says to write it.
+3. Write each key from the tables below into a new file named `install.env`. Write every value
+   that is not empty, also when it equals a default: the upgrade does not apply every default that
+   `install.sh` applied. Leave a key out only when its value is empty, unless the table says
+   otherwise.
    Write a list as comma-separated values, for example
    `jq -r '.platformAgent.integration.slack.allowedUsers | join(",")' values.json`.
 4. Leave the secrets out. When the file holds no `API_SERVER_KEY`, model provider API key, Slack
    token or Session KV key, the upgrade reads it from the `platform-agent-secrets` Secret. Set
    `PERSIST_SECRETS_ON_DISK=false` to keep them out of the regenerated `terraform.tfvars` as well.
 5. Check the file before you upgrade. Use the `upgrade.sh` of the release the install runs now, not
-   the release you are moving to, and plan at the image tag the install records:
+   the release you are moving to. Plan at the image tag in the state output `image_tag`. If the
+   output is `null`, use `.platformAgent.deployment.image.tag` from `values.json`.
 
    ```bash
    curl -fsSL https://raw.githubusercontent.com/gke-labs/kube-agents/<CURRENT_RELEASE>/upgrade.sh \
      | KUBE_AGENTS_INSTALL_ENV="$PWD/install.env" bash -s -- --plan \
-       --image-tag="$(jq -r '.platformAgent.deployment.image.tag' values.json)"
+       --image-tag="$(gcloud storage cat <STATE_PATH> | jq -r '.outputs.image_tag.value')"
    ```
 
    Exit code 0 means the file renders the install as it is. If the exit code is 2, find the key
@@ -126,8 +129,8 @@ Each path is a `jq` path on `values.json`.
 | `USER_PROFILE_ENABLED`                           | `.platformAgent.harness.memory.userProfileEnabled`                                    |                                                                                                                                                                                                                                                                               |
 | `HERMES_DASHBOARD_ENABLED`                       | `.platformAgent.harness.hermes.dashboardEnabled`                                      | The upgrade does not read the old `ENABLE_WEBUI` name.                                                                                                                                                                                                                        |
 | `ENABLE_DRIFT_DETECTOR`                          | `.platformAgent.harness.driftDetector`                                                | If `enabled` is `true`, write `true`. If the object is empty, write `false`. If it has a `subscription` but no `enabled`, write `false` and `TF_VAR_enable_drift_pubsub=true`.                                                                                                |
-| `ENABLE_PUBSUB_PLATFORM`                         | `.plugins.pubsubPlatform.enabled`                                                     |                                                                                                                                                                                                                                                                               |
-| `ENABLE_STOCKOUT_INVESTIGATOR`                   | `.plugins.stockoutInvestigator.enabled`                                               |                                                                                                                                                                                                                                                                               |
+| `ENABLE_PUBSUB_PLATFORM`                         | `.plugins.pubsubPlatform.enabled`                                                     | When `.plugins.stockoutInvestigator.enabled` is `true`, this value is always `true` and does not show the key. Write the key only if you know its old value.                                                                                                                  |
+| `ENABLE_STOCKOUT_INVESTIGATOR`                   | `.plugins.stockoutInvestigator.enabled`                                               | If it is `true`, also copy these fields of `.plugins.stockoutInvestigator.pubsub`: `topic` to `TF_VAR_stockout_pubsub_topic`, `subscription` to `TF_VAR_stockout_pubsub_subscription` and `sink` to `TF_VAR_stockout_pubsub_sink`.                                            |
 | `SCOPE_*`                                        | `.platformAgent.scope`                                                                | Copy `projects`, `folders`, `organizations`, `sharedVpcHosts`, `metricsScopes`, `maxProjects`, `exclude.projects` and `exclude.clusters` (each as `project/location/cluster`).                                                                                                |
 | `SCOPED_SA_POOL_ENABLED`                         | `.platformAgent.security.scopedServiceAccountPool.enabled`                            |                                                                                                                                                                                                                                                                               |
 | `ACCEPT_NO_NETWORK_POLICY`                       | `.platformAgent.annotations["kubeagents.x-k8s.io/network-policy-enforcement"]`        | `absent-accepted` means `true`.                                                                                                                                                                                                                                               |
@@ -140,16 +143,17 @@ Each path is a `jq` path on `values.json`.
 
 ### Keys outside the values record
 
-| Key                                                             | Where to read it                                                                                                                                                                                                                |
-| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PLATFORM_AGENT_PERMISSION_SET`, `PLATFORM_AGENT_CUSTOM_ROLES`  | The state output `agent_project_roles`. If it is not the [`read-only` set](/kube-agents/reference/security-and-iam/#roles-per-set), write `custom` and the roles.                                                               |
-| `ENABLE_GKE_BACKUP_PLAN`                                        | The state output `backup_plan_name`. A value means `true`.                                                                                                                                                                      |
-| `TF_VAR_drift_pubsub_topic`, `TF_VAR_drift_pubsub_subscription` | The state outputs `drift_pubsub_topic` and `drift_pubsub_subscription`.                                                                                                                                                         |
-| `VERTEX_MANAGE_SERVING_PROJECT`                                 | On a `vertex_ai` install, `false` when this prints `0`: `gcloud storage cat <STATE_PATH> \| jq '[.resources[] \| select(.name=="litellm_vertex_user")] \| length'`.                                                             |
-| `SKIP_CERT_MANAGER`                                             | `true` when the cluster runs cert-manager and this prints `0`: `gcloud storage cat <STATE_PATH> \| jq '[.resources[] \| select(.type=="helm_release" and .name=="cert_manager")] \| length'`.                                   |
-| `TF_VAR_extra_helm_values`                                      | `gcloud storage cat <STATE_PATH> \| jq -r '.resources[] \| select(.type=="helm_release" and .name=="kube_agents") \| .instances[0].attributes.values[1]'`. If it is not `{}`, convert it to JSON and write it in single quotes. |
-| `GKE_DB_KMS_KEYRING`, `GKE_DB_KMS_KEY`                          | `gcloud container clusters describe <CLUSTER_NAME> --location <REGION> --format='value(databaseEncryption.keyName)'`. Write the names after `keyRings/` and `cryptoKeys/`. Only for a cluster the install created or encrypted. |
-| `SCOPED_SA_POOL_MAX_ACCOUNTS`                                   | No copy. If the cap is too low for the pool, the plan stops before any change.                                                                                                                                                  |
+| Key                                                                                         | Where to read it                                                                                                                                                                                                                                                     |
+| ------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PLATFORM_AGENT_PERMISSION_SET`, `PLATFORM_AGENT_CUSTOM_ROLES`                              | The state output `agent_project_roles`. If it is not the [`read-only` set](/kube-agents/reference/security-and-iam/#roles-per-set), write `custom` and the roles.                                                                                                    |
+| `ENABLE_GKE_BACKUP_PLAN`                                                                    | The state output `backup_plan_name`. A value means `true`.                                                                                                                                                                                                           |
+| `TF_VAR_drift_pubsub_topic`, `TF_VAR_drift_pubsub_subscription`, `TF_VAR_drift_pubsub_sink` | The state outputs `drift_pubsub_topic` and `drift_pubsub_subscription`. The sink has no output: `gcloud storage cat <STATE_PATH> \| jq -r '.resources[] \| select(.type=="google_logging_project_sink" and .name=="drift_audit") \| .instances[0].attributes.name'`. |
+| `VERTEX_MANAGE_SERVING_PROJECT`                                                             | On a `vertex_ai` install, `false` when this prints `0`: `gcloud storage cat <STATE_PATH> \| jq '[.resources[] \| select(.name=="litellm_vertex_user")] \| length'`.                                                                                                  |
+| `SKIP_CERT_MANAGER`                                                                         | `true` when the cluster runs cert-manager and this prints `0`: `gcloud storage cat <STATE_PATH> \| jq '[.resources[] \| select(.type=="helm_release" and .name=="cert_manager")] \| length'`.                                                                        |
+| `TF_VAR_extra_helm_values`                                                                  | `gcloud storage cat <STATE_PATH> \| jq -r '.resources[] \| select(.type=="helm_release" and .name=="kube_agents") \| .instances[0].attributes.values[1]'`. If it is not `{}`, convert it to JSON and write it in single quotes.                                      |
+| `GKE_DB_KMS_KEYRING`, `GKE_DB_KMS_KEY`                                                      | `gcloud container clusters describe <CLUSTER_NAME> --location <REGION> --format='value(databaseEncryption.keyName)'`. Write the names after `keyRings/` and `cryptoKeys/`. Only for a cluster the install created or encrypted.                                      |
+| `GVISOR_POOL_NAME`                                                                          | On a Standard cluster with gVisor, `gcloud container node-pools list --cluster <CLUSTER_NAME> --location <REGION> --filter='config.sandboxConfig.type=GVISOR' --format='value(name)'`.                                                                               |
+| `SCOPED_SA_POOL_MAX_ACCOUNTS`                                                               | No copy. If the cap is too low for the pool, the plan stops before any change.                                                                                                                                                                                       |
 
 Leave out `CLUSTER_MODE`, `GITHUB_PEM_PATH`, `GEMINI_API_KEY_SECRET_NAME`, `MIGRATE_NODE_POOLS`,
 `ENABLE_NETWORK_POLICY` and `ALLOW_UNENCRYPTED_SECRETS`. They do not change what the upgrade renders
