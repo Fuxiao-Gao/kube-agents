@@ -9,6 +9,8 @@ Audit standalone GCE virtual machines, Managed Instance Groups (MIGs), serial co
 
 # Workflow
 
+A request to run the GCE compute fleet audit, or one that names its SOP, follows the workflow below. Any other question is not a run and takes no `start` or `finish`: handle it as SOUL.md's audit-stream paragraph says.
+
 ## 1. Open the Run, Then Execute Compute Inspection
 
 Open the run first with the `fleet-audit` harness's `start` (SOP §0). `finish` refuses a manifest that finished before `start` did, as an earlier run's. Then call the platform_control `fleet_scope` tool (SOP §1) and run the compute fleet collector with its `collector_args`, which hand it the install's declared scope; an install that declares none passes nothing and the collector sweeps every project the identity can list. It writes a collector manifest to stdout:

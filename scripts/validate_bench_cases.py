@@ -184,6 +184,25 @@ KNOWN_UNREGISTERED = {
         "#2755: stack case held out of the nightly until runner Compute "
         "permission, a scheduled plant sweep and infra-lock room land"
     ),
+    # The chat-route twin of the case above (#2386): it plants the same stack
+    # and is held out of the nightly for the same #2755 preconditions, with
+    # its red and greens run by hand on a dev install. The entry goes when
+    # the case joins hack/eval/nightly-cases.txt, with the 900s audit-band
+    # unit_cost_hint.
+    "networking-chat-request-runs-collector": (
+        "#2755: stack case held out of the nightly until runner Compute "
+        "permission, a scheduled plant sweep and infra-lock room land"
+    ),
+    # A plain AI-security chat request runs collect.py ai-security-audit (#2386).
+    # Has its fixture (its own stack, prebuilt/ai-model-defects on the host) and
+    # belongs in the nightly; held out for the same infra-lock budget as
+    # networking-audit-subnet-range-exhaustion: every case with a `stack:` holds
+    # lock-infra for its whole unit. The entry goes when the chain has room, with
+    # the 900s unit_cost_hint and a roster paragraph carrying the new count.
+    "ai-security-chat-request-runs-collector": (
+        "#2755: stack case held out of the nightly until the infra-lock "
+        "chain has room"
+    ),
     # It grades what a chat channel received, and every CI install deploys with
     # GOOGLE_CHAT_ENABLED and SLACK_ENABLED false (hack/ci-deploy.sh), so the
     # relay posts nowhere there and the case can only fail. Run by hand against
@@ -286,6 +305,11 @@ FIXTURE_NOT_READY = {
     "gce-startup-script-failure": (
         "#2483: needs bench/tf/fleet's startup_fail VM applied to every pool project "
         "(fleet re-apply); no pool project runs a VM whose startup script fails"
+    ),
+    "gce-chat-request-runs-collector": (
+        "#2483: needs bench/tf/fleet's startup_fail VM applied to every pool project "
+        "(fleet re-apply), as gce-startup-script-failure does; until then it runs by "
+        "hand on a dev install with the VM planted"
     ),
     "obtainability-major-pdb-auto-pr": (
         "#2228: needs checkout-gateway declared under clusters/seeded-a/ in "
