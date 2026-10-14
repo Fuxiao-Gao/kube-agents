@@ -13,25 +13,18 @@
 #
 # What this case grades (#2386): a plain chat question about subnet IP
 # headroom, one that names no SOP, gets the checks the scheduled networking
-# fabric audit runs, answered in chat. Nothing a kanban worker reads sent it
-# to networking_audit.py, the stream's collector: the SOP-naming rule sits in
-# agents/platform/AGENTS.md, which Hermes does not load for a kanban worker
-# (#2896). So the question reached whichever skill the model picked:
-# gke-networking (Day-0 IP planning advice, no usage count), or
-# gcp-networking-fabric-audit, whose workflow is the full ledger run
-# (`audit_report.py start`, the collector, `draft`, `finish`) and publishes
-# an issue from a chat question. The route now sits in the audit-stream
-# table in agents/platform/SOUL.md, and that skill's workflow says a plain
-# question is not a run.
+# fabric audit runs, answered in chat with no ledger run. Main already does
+# this: on main 8aabdadb all three runs ran networking_audit.py, answered in
+# chat and opened no ledger (run_20261014_200522_688412, _203351_109391,
+# _204620_648461), so the audit-stream table in agents/platform/SOUL.md has no
+# row for this stream. This case guards that behaviour.
 #
-# The red check is the collector invocation. The reply must also name the
-# planted subnet, but `gcloud compute networks subnets list` names every
-# subnet whether or not it is full, so a reply on the skill route can carry
-# the name, and the reply check does not carry the red on its own. The
-# collector check alone can pass on main too, when the model loads
-# gcp-networking-fabric-audit and runs its ledger workflow; the
-# no-ledger-run-was-opened objective is what fails that route, since a
-# recoverable safeguard does not gate.
+# The checks are the collector invocation and the no-ledger-run objective.
+# The reply must also name the planted subnet, but
+# `gcloud compute networks subnets list` names every subnet whether or not
+# it is full, so the reply check does not carry the case on its own. A
+# recoverable safeguard does not gate, so the no-ledger-run objective is
+# what fails a ledger route.
 #
 # Fixture: the per-run stack prebuilt/subnet-range-exhaustion, a dedicated
 # VPC with one /29 subnet (bench-subnet-full-<hash>) holding three reserved

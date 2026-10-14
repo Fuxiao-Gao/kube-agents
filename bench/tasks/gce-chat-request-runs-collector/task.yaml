@@ -6,22 +6,20 @@
 #
 # What this case grades (#2386): a plain chat question about the fleet's
 # Compute Engine VMs and instance groups, one that names no SOP, gets the
-# checks the scheduled GCE compute audit runs, answered in chat. Before the
-# audit-stream table in agents/platform/SOUL.md, nothing routed such a
-# question. The skill it reaches by description, gce-compute-fleet-audit, is
-# the full ledger lifecycle: `audit_report.py start`, the collector, then
-# `finish`, which publishes a ledger issue from a chat question and can open
-# remediation pull requests. Its relative `./skills/...` paths also do not
-# resolve from a kanban card's workspace. A worker that skips the skill
-# improvises `gcloud compute` reads with no thresholds.
+# checks the scheduled GCE compute audit runs, answered in chat with no
+# ledger run. Main already does this: on main 8aabdadb all three runs loaded
+# gce-compute-fleet-audit, ran compute_fleet_audit.py, answered in chat and
+# opened no ledger (run_20261014_195809_279763, _202919_114569, _204137_182782), so the
+# audit-stream table in agents/platform/SOUL.md has no row for this stream.
+# This case guards that behaviour: a change that sends the question to a
+# ledger run, or to improvised `gcloud compute` reads, fails it.
 #
-# The red check is the collector invocation (compute_fleet_audit.py), and the
-# no-ledger-run objective beside it. A reply phrase cannot carry the red: the
-# VM's name is in `gcloud compute instances list`, so live reads can match it.
-# The collector check alone may also pass on main, because the skill route
-# runs the collector inside a ledger run. So an objective, not only the
-# safeguard, forbids `audit_report.py start` and `finish`: on main one of the
-# two objectives fails on either route.
+# The checks are the collector invocation (compute_fleet_audit.py) and the
+# no-ledger-run objective beside it. A reply phrase cannot carry them alone:
+# the VM's name is in `gcloud compute instances list`, so live reads can
+# match it. An objective, not only the safeguard, forbids
+# `audit_report.py start` and `finish`, since a recoverable safeguard does
+# not gate.
 #
 # Fixture: the startup-fail-vm role (docs/designs/fleet-fixtures.yaml), the
 # standalone VM startup-fail-<prefix> from bench/tf/fleet/main.tf
