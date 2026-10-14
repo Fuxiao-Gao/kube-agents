@@ -121,7 +121,7 @@ Google Cloud and GKE best practices where it helps.
 
 **Run this section only when your card says to.** It does when the install has no GitOps repository
 for the four first-run audits (cost, security, reliability and capacity) to publish to: those audits
-then never run, and this card is all that checks the workloads. When your card says to skip it, skip
+then do not run after the scan, and this card is all that checks the workloads on day one. When your card says to skip it, skip
 it; the audits run these checks and report them with their own evidence.
 
 Add these to Steps 3 and 4, across all namespaces on this cluster:

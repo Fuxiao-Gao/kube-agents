@@ -190,7 +190,7 @@ AUDITS_MAYBE_COVERED_NOTE = (
 )
 # The no-repository skip when the report is the hand-off's no-coverage report
 # (bootstrap_handoff.NO_RANKING): no cluster was audited, so the scan checked nothing in the audits'
-# place, and with no repository the audits never run either.
+# place, and with no repository the first-run audits do not run either.
 AUDITS_UNCHECKED_NOTE = (
     "No cluster was audited either, so nothing has checked probes, requests and limits, autoscaling, "
     "NetworkPolicy or pod security yet."

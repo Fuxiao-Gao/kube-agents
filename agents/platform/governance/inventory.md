@@ -52,7 +52,7 @@ probe, read-only root filesystem, namespace quota, addons, observability and har
 Cluster Agents run. Checks the first-run audits own (liveness and readiness probes, requests and
 limits, HPA, NetworkPolicy and pod security among them) are not part of this scan, unless your card
 tells you to follow that SOP's "Without a GitOps repository" section: it does when the install has
-no GitOps repository, so those audits never run. Then follow it for each cluster you audit here, as
+no GitOps repository, so those audits do not run after the scan. Then follow it for each cluster you audit here, as
 the Cluster Agents do for theirs.
 
 **Pin `kubectl` to each cluster before you run a single command against it.** That SOP is written

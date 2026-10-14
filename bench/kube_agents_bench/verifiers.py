@@ -5330,7 +5330,7 @@ class BootstrapHandoffVerifier(_OnboardingPollVerifier):
       the first-run audits (``FIRST_RUN_AUDIT_CHECKS``), which run after the scan
       and report those checks themselves. A check reported under a slug of its
       own is not caught. It assumes the install has a GitOps repository: with
-      none, the audits never run and the cards report these checks on purpose
+      none, the first-run audits do not run and the cards report these checks on purpose
       (cluster_inventory_audit_sop.md, "Without a GitOps repository").
 
     Fails closed: either pod unreadable, no sweep marker, a sweep the board
