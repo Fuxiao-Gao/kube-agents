@@ -314,8 +314,10 @@ pod first, and LiteLLM runs two replicas and keeps one serving.
 
 In each mode, a chart workload such as LiteLLM also restarts if the target release's chart changed
 it. In CI runs, a harness upgrade made the agent unavailable for 41 seconds to about 3 minutes. A
-full upgrade on staging took about 8 minutes. These are examples, not limits. The script waits up
-to 25 minutes for the agent gateway, which allows for a cold image pull.
+full upgrade on staging took about 8 minutes. These are examples, not limits. In the harness and full modes, and in an
+operator run that added Secret keys, the script waits up to 25 minutes for the agent gateway. That
+allows for a cold image pull. An operator run that re-renders the gateway does not wait for it, so
+the script can end before chat is back.
 
 During the restart:
 
