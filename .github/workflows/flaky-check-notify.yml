@@ -29,7 +29,8 @@ name: Notify on Flaky Check
 # attempts, so a green re-run there is the database changing rather than the
 # check flaking; and the `pull_request_target` automations (`Risk
 # Classification`, `Hold Unresolved Threads`, `Auto Assign Milestone on
-# Merge`, `Merge Gate`), which are not checks on the tree at all.
+# Merge`, `Merge Gate`, `Auto Enqueue`), which are not checks on the tree at
+# all.
 
 on:
   # zizmor: ignore[dangerous-triggers] - workflow_run is only dangerous when it checks

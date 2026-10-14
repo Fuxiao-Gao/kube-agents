@@ -549,6 +549,14 @@ Mutation(
         "permissions: block shows",
     ),
     Mutation(
+        "B2-app-token-scopes-dropped",
+        ".github/workflows/rc-create-tag.yml",
+        ("          permission-contents: write\n          permission-workflows: write\n", ""),
+        "test_B2_app_token_write_grants_are_pinned",
+        "drop the scope inputs from the release bot's minting step, which "
+        "mints the App's full permission set instead",
+    ),
+    Mutation(
         "B3-apply-read-verb",
         "agents/platform/scripts/command_policy.py",
         ('        ("get",),\n', '        ("apply",),\n        ("get",),\n'),

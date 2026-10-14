@@ -557,7 +557,8 @@ class B2AssentIsHumanOrPolicy(unittest.TestCase):
         enqueue sweep above: it turns auto-merge on and off and dequeues, and
         the script scan holds it to that. Its key is read nowhere else, so no
         other workflow can mint the same token. A new grant is a red test and
-        a conversation, as for the holder list above.
+        a conversation, as for the holder list above, and so is a minting step
+        that names no scope, which gets every permission the App holds.
         """
         grants = set()
         key_readers = set()
@@ -568,8 +569,15 @@ class B2AssentIsHumanOrPolicy(unittest.TestCase):
                 for step in (job or {}).get("steps") or []:
                     if "create-github-app-token" not in str(step.get("uses", "")):
                         continue
-                    for name, value in (step.get("with") or {}).items():
-                        if str(name).startswith("permission-") and value == "write":
+                    scopes = {
+                        str(name): value
+                        for name, value in (step.get("with") or {}).items()
+                        if str(name).startswith("permission-")
+                    }
+                    # No `permission-*` input mints every permission the App holds.
+                    self.assertTrue(scopes, f"{path.name} mints an App token with the App's full permission set")
+                    for name, value in scopes.items():
+                        if value == "write":
                             grants.add((path.name, name))
         release = {"permission-contents", "permission-workflows"}
         expected = {(name, scope) for name in (
