@@ -382,17 +382,21 @@ def gen_capabilities() -> str:
         sop = SOP_RE.search(job.get("prompt", ""))
         if not job.get("enabled") or not sop:
             continue
-        expr = job["schedule"].get("expr", "")
-        audits.append((expr, job["name"], sop.group(0)))
+        schedule = job.get("schedule", {})
+        audits.append((schedule.get("expr", ""), schedule.get("display", ""), job["name"], sop.group(0)))
 
-    def run_order(audit: tuple[str, str, str]) -> tuple[bool, int, int]:
-        # Daily audits first, then weekly ones, each in the order they run.
-        minute, hour, _, _, weekday = audit[0].split()
-        return weekday != "*", int(hour), int(minute)
+    def run_order(audit: tuple[str, str, str, str]) -> tuple[bool, int, int]:
+        # Daily audits first, then the rest, each in the order they run. A
+        # schedule with no fixed time of day (an interval, a step) goes last.
+        fields = audit[0].split()
+        if len(fields) != 5 or not (fields[0].isdigit() and fields[1].isdigit()):
+            return True, 24, 0
+        minute, hour, day, _, weekday = fields
+        return (day, weekday) != ("*", "*"), int(hour), int(minute)
 
     audits.sort(key=run_order)
-    for expr, name, sop in audits:
-        cadence = CRON_CADENCE.get(expr, f"`{expr}`")
+    for expr, display, name, sop in audits:
+        cadence = CRON_CADENCE.get(expr) or f"`{expr or display}`"
         link = f"{PLATFORM_HOME}/{sop}"
         out.append(f"| {md_escape(name)} | {cadence} | [`{sop.split('/')[-1]}`]({link}) |")
 
