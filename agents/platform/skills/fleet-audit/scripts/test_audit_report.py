@@ -25752,9 +25752,13 @@ class TestSopPath(unittest.TestCase):
 
     # A skill file (script, SKILL.md, reference page) or an SOP named relative to
     # the profile home, with or without a leading `./` or `../`, or a script named
-    # relative to the skill's own folder (`./scripts/...`).
+    # relative to the skill's own folder: `./scripts/...`, or a bare `scripts/...`
+    # that a command runs (after an interpreter, or at the start of a line). A bare
+    # `scripts/vcs.py` in prose names the file and is left alone.
     RELATIVE = re.compile(
         r"(?<![\w/.-])(?:(?:\.\.?/)*(?:skills/[\w-]+/|governance/[\w-]+\.md\b)|\.\.?/scripts/)"
+        r"|(?:^[ \t]*|\b(?:python3?|bash|sh)[ \t]+)scripts/[\w-]",
+        re.MULTILINE,
     )
 
     def test_skills_and_sops_name_skill_files_and_sops_by_full_path(self):
@@ -25781,6 +25785,8 @@ class TestSopPath(unittest.TestCase):
             "`skills/gke-compute-classes/references/ccc.md`",
             "`governance/compliance_audit_sop.md`",
             "python3 ./scripts/get_chat_users.py",
+            "python3 scripts/get_chat_users.py",
+            "scripts/audit_cluster.sh <cluster-name> <region> <project-id>",
         ):
             with self.subTest(relative=relative):
                 self.assertRegex(relative, self.RELATIVE)
@@ -25788,6 +25794,7 @@ class TestSopPath(unittest.TestCase):
             "/opt/data/profiles/platform/skills/fleet-audit/scripts/collect.py",
             '"$HERMES_HOME"/skills/fleet-audit/scripts/collect.py',
             "/opt/data/profiles/platform/governance/compliance_audit_sop.md",
+            "The script is `scripts/vcs.py`.",
         ):
             with self.subTest(full=full):
                 self.assertNotRegex(full, self.RELATIVE)
