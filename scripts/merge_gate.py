@@ -144,7 +144,7 @@ query($owner: String!, $name: String!, $base: String!, $after: String) {
 ENABLE_MUTATION = "mutation($id: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $id}) { clientMutationId } }"
 DISABLE_MUTATION = "mutation($id: ID!) { disablePullRequestAutoMerge(input: {pullRequestId: $id}) { clientMutationId } }"
 DEQUEUE_MUTATION = "mutation($id: ID!) { dequeuePullRequest(input: {id: $id}) { clientMutationId } }"
-#: The GraphQL type names in a rollup and a timeline.
+#: The GraphQL type name of a commit status in a rollup.
 STATUS_CONTEXT = "StatusContext"
 
 

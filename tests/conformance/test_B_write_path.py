@@ -788,7 +788,7 @@ class B2AssentIsHumanOrPolicy(unittest.TestCase):
                     # No `permission-*` input mints every permission the App holds.
                     self.assertTrue(scopes, f"{path.name} mints an App token with the App's full permission set")
                     for name, value in scopes.items():
-                        if value == "write":
+                        if value != "read":
                             grants.add((path.name, name))
         release = {"permission-contents", "permission-workflows"}
         expected = {(name, scope) for name in (

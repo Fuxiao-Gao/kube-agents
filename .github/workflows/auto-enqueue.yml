@@ -90,6 +90,7 @@ jobs:
       # because on `pull_request_target` the fallback is the pull request's
       # base branch.
       - name: Checkout the default branch
+        continue-on-error: ${{ github.event_name == 'pull_request_target' }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.repository.default_branch }}
@@ -107,7 +108,13 @@ jobs:
           permission-contents: write
           permission-workflows: write
 
+      # On `pull_request_target` the run's check sits on the head of the pull
+      # request whose label started it, and a failure is about the whole
+      # sweep, not that pull request, so it is logged and left to the next
+      # run. A scheduled or dispatched run goes red, so a failure that repeats
+      # stays visible.
       - name: Sweep the open pull requests
+        continue-on-error: ${{ github.event_name == 'pull_request_target' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ENQUEUE_TOKEN: ${{ steps.enqueue-token.outputs.token }}
