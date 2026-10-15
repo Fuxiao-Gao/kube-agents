@@ -277,8 +277,9 @@ WORKFLOW_FILE = ".github/workflows/flaky-check-notify.yml"
 # so a green re-run there is the database changing rather than the check
 # flaking; and the `pull_request_target` automations (`Risk Classification`,
 # `Hold Unresolved Threads`, `Auto Assign Milestone on Merge`, `Merge Gate`,
-# `Auto Enqueue`), which are not checks on the tree at all. `test_integration_contracts.py` holds every
-# pull-request check to this list or to its exclusion list, and
+# `Auto Enqueue`), which are not checks on the tree at all.
+# `test_integration_contracts.py` holds every pull-request check to this list
+# or to its exclusion list, and
 # `test_notify_flaky_check.py` checks that every name here is a workflow's.
 # A rename silently drops one; the sweep goes red on a name it cannot find.
 WATCHED_WORKFLOWS = (
