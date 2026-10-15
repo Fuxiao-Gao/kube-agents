@@ -8,11 +8,12 @@ refuses the blocks, falling back to :func:`headline_fallback` when the fetch or
 the parse fails. The caller must fetch only issues in repositories it manages:
 :func:`ledger_ref` takes the repository from the report's own URL. An issue
 not labelled ``agent:audit`` does not parse. A clean run closes its ledger
-without rewriting the title, so a closed issue's counts are the last run's,
-not this one's: a closed ledger is the clean card ("<Name>: clean. Ledger
-closed."), unless the report's line counts a finding; a zero-finding run that could not read the
-whole fleet, or did not account for a carried finding, leaves the ledger open
-over the same old title, so a finding total in the report's line that
+and then retitles it to 0 findings, but its body still lists the last run's
+findings, so the state decides: a closed ledger is the clean card ("<Name>:
+clean. Ledger closed."), unless the report's line counts a finding; a
+zero-finding run that could not read the whole fleet, or did not account for a
+carried finding, leaves the ledger open over the same old title (or a
+refreshed coverage title), so a finding total in the report's line that
 disagrees with the title also falls back, as does a line with no total that
 counts nothing non-zero or calls the run clean, held or carried; a report that
 is only the link keeps the title. The text goes out through
@@ -498,8 +499,9 @@ def _parse_issue(issue: dict, report: str) -> AuditReport | None:
     ``report`` is the relayed report: its whole ledger line is read for
     gaps and checked against the title. A closed issue, one without the
     ledger label, a zero-finding title and a body listing no finding do not
-    parse: a clean run closes the ledger over its old title
-    (:func:`_clean_name`), and the fallback posts the report's own line.
+    parse: a clean run closes the ledger, then retitles it to 0 findings over
+    the old body (:func:`_clean_name` reads it), and the fallback posts the
+    report's own line.
     Nor does one whose title disagrees with the line's own finding total, or
     one whose line states no total and no non-zero count, or calls the run
     clean, held or carried: a zero-finding partial or held run leaves the old

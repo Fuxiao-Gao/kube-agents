@@ -897,6 +897,11 @@
 # 92-day window. deployer: noop, transcript-only, one delegation round trip.
 ./tasks/upgrades-freeze-runbook-probe/task.yaml
 
+# A clean audit closes its ledger with a `0 findings` title and a banner above
+# the old body. prebuilt/stale-audit-ledger opens an ai-security-audit ledger
+# with one finding on a cluster that does not exist, from the shell sandbox;
+# the stream is clean on the eval fleet, so the run closes it. No fixture.
+./tasks/fleet-audit-clean-close-reads-clean/task.yaml
 # A /session crashloop question is answered under the persona's rule for its
 # access (#2858): with the session cluster view on, a GKE skill, kubectl and
 # the session's own answer; with it off, as on the next lane today, the
