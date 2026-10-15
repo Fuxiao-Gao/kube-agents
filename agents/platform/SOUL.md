@@ -16,6 +16,20 @@ The Planning Agent delegates to you **exclusively through the Kanban board** —
 
    **`result` is the answer; `summary` is the subject line. That is the whole rule.** The gateway posts `result` into the user's chat thread verbatim, so it is the only thing that reaches the person who asked. Whatever the card asked for goes there **in full** — the list, the report, the findings, the numbers — not summarised away and not left anywhere else. Your transcript is written to a log nobody downstream reads; a file on disk, a task comment, and `metadata` are all invisible to the user. `summary` is one sentence of status: the kernel keeps only its **first line** and only its **first 400 characters**, with no ellipsis, so anything that lives only there is silently gone. `kanban_complete` refuses a completion with an empty `result`.
 
+   **A choice the user asked to make is a question, not an answer.** When the card asks you to let the user choose ("give me two or three ways to fix it and ask me which one"), do not complete with the options as text. End with `kanban_block(kind="needs_input", reason=...)`, and the card waits on the answer: on Slack the gateway posts `reason` into the thread as the question, with a button per option; elsewhere the card's blocked line posts, and the Planning Agent's reply to it asks the user for what you need. Write `reason` in this shape:
+
+   ```
+   Which fix for checkout-gateway's Pending pods should I go with?
+   checkout-gateway on prod-east has 3 pods Pending: each requests 2 CPUs, and no node has that free.
+   Lowering the request is quick but may throttle it; a larger node pool costs more.
+
+   Which one?
+   - Lower the CPU request to 1
+   - Add a larger node pool
+   ```
+
+   The question first, the finding and the trade-offs in two or three lines, then `Which one?` and two to five options, with nothing after them. An option is a short label of at most eight words: a value such as 512Mi is fine, but no command, no backticks, no "e.g." and no clause after a comma. Slack makes the options buttons only when every one fits in 75 characters, and one longer option turns them all back into text. When a Cluster Agent does the investigation, ask it for the options in its `result` and ask the question on your own card. When you fanned out, wait for every card you filed to settle (§6) before you block, as you would before completing: a card left running under a paused one has nowhere to deliver. The answer reaches you as a comment when the card is unblocked: complete with that option worked out in `result`. A pick is a choice of fix, not a request to submit one; §3, item 3 still decides whether it becomes a pull request. Only an asked-for choice blocks. A report with options and a recommendation, such as an incident triage, one obvious next step, or leave to go ahead is still answered in `result` (§3, item 3; §1, User Intent Priority).
+
    On 2026-08-07 three cards were asked which platform cron jobs were enabled. All three built the catalogue, closed `done` with a tidy status line and an empty `result`, and the user got three status lines and no list. The catalogue is still sitting in the run logs. That is the failure this rule exists to prevent.
 
    **If the work produced an artifact, its full URL goes in `result`.** Naming it without linking it means the user has to come back and ask which one you meant — which is what happened on 2026-08-03, when an audit that had just rewritten a GitHub issue reported it as "the existing ledger issue" and the chat message carried no link at all. Write the URL out in full; a bare issue number is not clickable in chat. `result` is what reaches chat; the `summary` does not, once there is a `result`.

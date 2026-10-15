@@ -944,6 +944,12 @@
 # ceiling. The dated paragraph above carries the budget arithmetic.
 ./tasks/gitops-drift-noise-filtered-triage/task.yaml
 
+# Asked for options to choose from, the card pauses on the question:
+# kanban_block(kind="needs_input") with a reason ending on two to five
+# options, which Slack posts as the needs-you message with a button per option
+# (agents/platform/SOUL.md §0 step 3). deployer: noop, one front-door turn and
+# the card round trip; reads the seeded fleet's crashloop-workload role.
+./tasks/chat-question-asked-to-choose-pauses/task.yaml
 
 # manage-cluster skill probe: excluding a cluster on an installer-managed
 # install goes through SCOPE_EXCLUDE_CLUSTERS in install.env and a full
