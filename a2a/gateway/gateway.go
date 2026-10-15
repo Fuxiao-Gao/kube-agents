@@ -634,6 +634,14 @@ func (g *Gateway) handleInbound(msg InboundMessage) {
 	// rather than as a guess about timing.
 	defer g.observeTurnFinished(msg.Conversation)
 
+	// Counted before the sender is verified, as the chat_metrics plugin
+	// counts the Hermes-side ingress before its allowlist, so the two halves
+	// of chatMessagesInboundTotal mean the same thing: a message a person
+	// sent, whether or not the gateway went on to answer it.
+	if platform, ok := metricsPlatformLabel(g.backendFor(msg)); ok {
+		g.metrics.messageInbound(platform)
+	}
+
 	backend, principal, ok := g.verifySender(msg)
 	g.observeInboundVerified(msg, ok)
 	if !ok {
