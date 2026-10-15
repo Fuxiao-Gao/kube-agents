@@ -25761,7 +25761,12 @@ class TestSopPath(unittest.TestCase):
     # path counts only where a shell runs it: in a fenced block, as the first word
     # of a command or after a wrapper or interpreter; in inline code, only after a
     # wrapper or interpreter, because a span that is just a path names a file.
-    FENCE = re.compile(r"^[ \t]*(```|~~~).*?^[ \t]*\1[ \t]*$", re.MULTILINE | re.DOTALL)
+    # Only shell fences are read: a fence labelled sh, bash, shell, zsh or console,
+    # or one with no label. A YAML or text fence lists paths, it does not run them.
+    FENCE = re.compile(
+        r"^[ \t]*(```|~~~)[ \t]*([\w+-]*)[^\n]*\n(.*?)^[ \t]*\1[ \t]*$", re.MULTILINE | re.DOTALL
+    )
+    SHELL_FENCES = {"", "sh", "bash", "shell", "zsh", "console"}
     INLINE_CODE = re.compile(r"`([^`\n]+)`")
     COMMAND_BREAK = re.compile(r"&&|\|\||[;|]|\$\(|`")
     ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -25790,7 +25795,10 @@ class TestSopPath(unittest.TestCase):
     def bare_script_commands(cls, text):
         found = []
         for block in cls.FENCE.finditer(text):
-            for line in block.group(0).splitlines()[1:-1]:
+            if block.group(2).lower() not in cls.SHELL_FENCES:
+                continue
+            # A line that ends in a backslash continues on the next one.
+            for line in re.sub(r"\\\n", " ", block.group(3)).splitlines():
                 if line.lstrip().startswith("#"):
                     continue
                 found += [
@@ -25844,6 +25852,9 @@ class TestSopPath(unittest.TestCase):
             "```bash\nexec scripts/x.sh\n```",
             "```bash\nH=$(scripts/x.py open)\n```",
             "```bash\nFOO=1 scripts/x.sh\n```",
+            "```\nscripts/x.sh\n```",
+            "```console\nscripts/x.sh --help\n```",
+            "```bash\nexport V=1 \\\n  && scripts/x.sh\n```",
         ):
             with self.subTest(relative=relative):
                 self.assertTrue(self.relative_references(relative), relative)
@@ -25856,6 +25867,9 @@ class TestSopPath(unittest.TestCase):
             "  scripts/collect.py\n  scripts/fleet_drift.py",
             "```bash\npython3 $V annotate scripts/rotate-keys.sh\n```",
             "```bash\n# run scripts/x.py from the profile home\n```",
+            "```yaml\nsteps:\n  - scripts/x.sh\n```",
+            "```text\nfleet-audit/\n  scripts/\n  scripts/collect.py\n```",
+            "```bash\npython3 $V annotate \\\n  scripts/rotate-keys.sh\n```",
             "```bash\npython3 /opt/data/profiles/platform/skills/x/scripts/y.py\n```",
         ):
             with self.subTest(full=full):
