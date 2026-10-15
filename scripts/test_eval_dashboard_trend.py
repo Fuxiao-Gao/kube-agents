@@ -767,7 +767,8 @@ class TrendLatencyPageTest(unittest.TestCase):
         turn1, agent = charts[2:]
         self.assertIn("Chat turn 1 by night · advisory", app)
         self.assertIn("Agent time by night", app)
-        self.assertIn(">10 s target</text>", turn1)
+        self.assertIn('<line class="thr"', turn1, "the target line")
+        self.assertIn("the end-state target, p95 under 10 s", app, "the legend names it")
         self.assertNotIn("target", agent)
         self.assertIn(">0 s</text>", turn1)
         self.assertIn(">15 s</text>", turn1, "a nice max above the 12 s p90 in 5 s steps")

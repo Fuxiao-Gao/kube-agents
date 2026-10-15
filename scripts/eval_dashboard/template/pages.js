@@ -1936,7 +1936,7 @@ function trendChartHtml(t, points, kind, metric, range, markers, title, key, sca
   } else if (LATENCY_KINDS.includes(kind)) {
     const target = kind === "turn1" ? latencyTarget(t) : null;
     // The target's label sits under its line: the newest night's label sits beside its point, often just above it.
-    if (isNumber(target)) parts.push(`<line class="thr" x1="${g.left}" x2="${g.left + plotW}" y1="${y(target).toFixed(1)}" y2="${y(target).toFixed(1)}"></line><text class="thr-l halo" text-anchor="end" x="${g.left + plotW - 4}" y="${(y(target) - 4).toFixed(1)}">${esc(target)} s target</text>`);
+    if (isNumber(target)) parts.push(`<line class="thr" x1="${g.left}" x2="${g.left + plotW}" y1="${y(target).toFixed(1)}" y2="${y(target).toFixed(1)}"></line>`);
     for (const pctl of ["p90", "p50"]) {
       const field = `${kind}_${pctl}_s`, slow = pctl === "p90" ? " slow" : "";
       const has = (p) => timed(p, kind) && isNumber(p[field]);
