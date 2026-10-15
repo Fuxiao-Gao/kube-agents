@@ -160,21 +160,21 @@ Leave out `CLUSTER_MODE`, `GITHUB_PEM_PATH`, `GEMINI_API_KEY_SECRET_NAME`, `MIGR
 `ENABLE_NETWORK_POLICY` and `ALLOW_UNENCRYPTED_SECRETS`. They do not change what the upgrade renders
 for an existing install.
 
-A missing key takes its default, and some defaults remove or add things on a full upgrade. Do not
-skip step 5:
+A missing key takes its default, and some defaults remove or add things on a full upgrade. The
+installer README lists these keys in its
+[`install.env` section](https://github.com/gke-labs/kube-agents/blob/main/scripts/installer/README.md#the-install-configuration-installenv),
+in the paragraph that starts "That precedence has a sharp edge" and the paragraph after it. A
+rebuilt file has more cases:
 
-- Without the GitHub App keys, the upgrade turns off the token minter and destroys its Cloud KMS
-  key, with the App private key imported into it.
+- Without the GitHub App keys, a full upgrade stops while the token minter runs, and prints the
+  lines to set. See [When an upgrade is refused](#when-an-upgrade-is-refused).
 - Without the GitLab keys, the `PlatformAgent` loses its GitLab repository.
-- Without `PLATFORM_AGENT_MODE=next`, a `next` install goes back to `today`.
 - Without `MODEL_PROVIDER=vertex_ai`, the upgrade deletes the LiteLLM service account and its
   Vertex AI grant.
-- Without `ENABLE_STOCKOUT_INVESTIGATOR=true`, the upgrade deletes its Pub/Sub topic, subscription
-  and log sink.
-- Without `ENABLE_DRIFT_DETECTOR=false`, the upgrade creates the drift log sink, topic and
-  subscription and starts the detector.
 - Without a drift or stockout `TF_VAR_` name that the install changed, the upgrade replaces that
   resource with one that has the default name.
+
+Do not skip step 5.
 
 ## Run the upgrade
 
