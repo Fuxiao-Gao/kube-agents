@@ -1662,7 +1662,10 @@ class FirstRunAuditsTest(unittest.TestCase):
         slugs = self._slug_table()
         self.assertIn("probes-startup", slugs)  # the parse found the table
         self.assertIn("static-sa-key", slugs)  # Step 4's per-pod check; the cluster setting is the audit's
+        self.assertIn("added-capabilities", slugs)  # privileged-container covers only an added SYS_ADMIN
         self.assertEqual(sorted(slugs & owned), [])
+        # Step 5's checks run on every install, so none of them marks the no-repository section as run.
+        self.assertEqual(sorted(slugs & bootstrap_handoff.NO_REPOSITORY_CHECKS), [])
 
     def test_the_sop_has_the_section_the_card_bodies_name(self):
         heading = "## Without a GitOps repository\n"

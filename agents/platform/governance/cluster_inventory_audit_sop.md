@@ -81,7 +81,13 @@ Across all namespaces on this cluster:
      (`kubectl get deployments,statefulsets,daemonsets,jobs -A`).
    - **Startup probes:** Verify whether every workload has a `startupProbe` configured.
    - **Security Context:** Verify whether workloads use read-only root filesystems
-     (`readOnlyRootFilesystem: true`).
+     (`readOnlyRootFilesystem: true`). Check added `capabilities` in the same pass, and record any
+     workload that adds one other than `SYS_ADMIN` as a **high** severity finding naming that
+     workload and the capabilities it adds. An added capability widens what the container can do to
+     the node, which is a different class of problem from a writable root filesystem; scored
+     alongside missing probes it reads as one more hardening gap and the report ranks it out of
+     sight. An added `SYS_ADMIN` is not this check: it counts as a privileged container, which
+     Step 5 leaves to the first-run audits.
 3. **Core Infrastructure Addons:** Check for ingress controllers (GKE Gateway API, NGINX),
    cert-manager, OpenTelemetry collectors (`gke-managed-otel`), and identity integration endpoints
    (`github-token-minter` / `minty`). Record which deployment toolchain manages the cluster —
@@ -133,11 +139,10 @@ Add these to Steps 3 and 4, across all namespaces on this cluster:
 4. **Scaling:** Audit Horizontal Pod Autoscaler settings (`minReplicas`, `maxReplicas`, metrics
    targets).
 5. **Security Context:** Verify whether workloads run as non-root (`runAsNonRoot: true`). Check
-   `privileged`, `hostPID`, `hostNetwork`, `hostIPC`, and added `capabilities` in the same pass, and
-   record any workload that sets one as a **high** severity finding naming that workload. Those five
-   grant escape from the container to the node, which is a different class of problem from a
-   writable root filesystem; scored alongside missing probes they read as one more hardening gap and
-   the report ranks them out of sight.
+   `privileged`, `hostPID`, `hostNetwork`, `hostIPC`, and an added `SYS_ADMIN` capability in the
+   same pass, and record any workload that sets one as a **high** severity finding naming that
+   workload, for the same reason Step 3 gives for added capabilities: those five grant escape from
+   the container to the node.
 6. **Hardening:** On Standard clusters, evaluate Pod Security Admission and whether Workload
    Identity is enabled on the cluster.
 
@@ -174,7 +179,7 @@ Report their findings under these slugs, alongside the Step 5 table:
 | NetworkPolicy                    | `netpol-missing`                      |
 | Workload Identity on the cluster | `workload-identity-off`               |
 | `runAsNonRoot` security context  | `podsecurity-gaps`                    |
-| privileged containers            | `privileged-container`                |
+| privileged or `SYS_ADMIN`        | `privileged-container`                |
 | host namespaces                  | `host-namespace`                      |
 
 ---
@@ -211,7 +216,10 @@ finding the report loses.
       "replicas": "1/1",
       "probes": { "startup": false },
       "telemetry": "otlp | prometheus-scrape | none",
-      "security_context": { "read_only_root_fs": false }
+      "security_context": {
+        "read_only_root_fs": false,
+        "added_capabilities": []
+      }
     }
   ],
   "namespace_governance": [
@@ -238,7 +246,7 @@ finding the report loses.
 
 `check` is a lowercase hyphenated slug naming the condition, stable across sweeps: with the project,
 cluster, namespace and workload it is the finding's identity in the findings queue. These are the
-audit streams' own slugs where a stream has one (`probes-startup`, `readonly-root-fs`, `no-resourcequota` and `static-sa-key` have none yet); use one where it fits. Using them means the same
+audit streams' own slugs where a stream has one (`probes-startup`, `readonly-root-fs`, `no-resourcequota`, `static-sa-key` and `added-capabilities` have none yet); use one where it fits. Using them means the same
 problem carries one identity whichever source found it, and a finding promoted out of the queue
 routes to the stream that owns the check.
 
@@ -252,12 +260,13 @@ routes to the stream that owns the check.
 | Managed Service for Prometheus   | `managed-prometheus` |
 | node auto-upgrade                | `no-autoupgrade`     |
 | pods on static Google Cloud keys | `static-sa-key`      |
+| added capabilities               | `added-capabilities` |
 
 Checks the first-run audits own (cost, security, reliability and capacity: liveness and readiness
 probes, requests and limits, HPA, NetworkPolicy, the cluster's Workload Identity setting
 (`workload-identity-off`; a pod's static keys are `static-sa-key` above), pod security, privileged
-and host-namespace workloads among them) are not reported here, under any slug, unless your card
-has you run "Without a GitOps repository" above. Those audits report them with their own evidence,
+and host-namespace workloads, and an added `SYS_ADMIN` among them) are not reported here, under any
+slug, unless your card has you run "Without a GitOps repository" above. Those audits report them with their own evidence,
 and a second copy from this card reaches the user as a separate problem.
 
 For anything else, write a lowercase hyphenated slug naming the condition, and keep it stable: it

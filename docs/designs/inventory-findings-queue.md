@@ -1309,7 +1309,7 @@ new SOP, and no change to shared code the seven live streams depend on.
 
 ### 10.1 The residue, and the three checks that need a home
 
-Six sweep checks have no owning stream. Two of them cost nothing: SLO and error-budget alerting
+Seven sweep checks have no owning stream. Two of them cost nothing: SLO and error-budget alerting
 practice, and the OTel collector inventory, are unactionable observations caught by §4.4's gate.
 They never reach `remediate`, so the allowlist never sees them; the queue ranks and surfaces them
 with their recommendation and no PR, exactly as §9 says.
@@ -1324,6 +1324,8 @@ cannot serve:
 | namespace has no ResourceQuota / LimitRange | Multi-Tenancy & Governance                                   | `compliance-audit`    |
 
 The sixth, `static-sa-key` (a pod on static Google Cloud keys rather than Workload Identity), was filed under `compliance-audit`'s cluster-level `workload-identity-off` until the sweep left that check to the audit. Its fix spans the pod's ServiceAccount and an IAM binding, so it stays `manual` and is not one of the three.
+
+The seventh, `added-capabilities` (a container adding a Linux capability other than `SYS_ADMIN`), runs on every sweep because no audit covers it: `compliance-audit`'s `privileged-container` flags only `privileged` and an added `SYS_ADMIN`, and `podsecurity-gaps` checks for `drop: ALL` but not what a container adds. Removing a capability the workload may need is the owner's call, so it stays `manual` and is not one of the three either.
 
 Each of the three is a pod-spec or namespace YAML edit — the most promotable kind of finding there is — and each
 would be rejected by `validate_audit_id` for want of a stream. The near misses are worth naming so

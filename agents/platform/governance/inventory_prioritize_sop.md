@@ -338,8 +338,8 @@ A `manual` verification may omit the command; nothing else may.
 
 ### Checks with no owning stream
 
-Four of the checks the sweep emits have no audit stream behind them yet: `probes-startup`,
-`readonly-root-fs`, `no-resourcequota`, and `static-sa-key`. Set `remediation.kind` to `manual` for
+Five of the checks the sweep emits have no audit stream behind them yet: `probes-startup`,
+`readonly-root-fs`, `no-resourcequota`, `static-sa-key`, and `added-capabilities`. Set `remediation.kind` to `manual` for
 those even though most are a YAML edit — there is no stream to route a pull request through until
 they get one.
 
