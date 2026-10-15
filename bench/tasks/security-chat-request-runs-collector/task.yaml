@@ -98,6 +98,20 @@ verification_spec:
       required_runs:
         - script: collect.py
           word_patterns: ["^compliance-audit$"]
+  # A chat answer opens no ledger run, even where a skill's workflow does.
+  # An objective, because a safeguard cannot carry the red: a worker that
+  # takes form 1 (start, the SOP's collector run, finish) fails here, not
+  # only in the recoverable safeguard below. forbidden_runs reads the argv
+  # as the red check does, so a grep of the skill, a --help call or
+  # `audit_report.py draft` does not count.
+  - name: no-ledger-run-was-opened
+    role: objective
+    mode: assert
+    check:
+      type: worker_commands
+      forbidden_runs:
+        - script: audit_report.py
+          word_patterns: ["^(?:start|finish)$"]
   # The planted binding, which the prompt deliberately does not name.
   - name: the-answer-names-the-overgrant
     role: objective
