@@ -50,7 +50,7 @@ The alternative for each of these is a person on a rotation, a static Terraform 
 
 - **Audit → issue → PR** — the agent doesn't just detect drift, it keeps a standing report of it and proposes the mergeable fixes as PRs you review.
 - **Fleet-wide read, mutations through Git** — the Platform Agent reads the fleet via the GKE MCP server and is designed to route every change through a pull request. Which parts of that are _enforced_ rather than _intended_ is set out in [Security &amp; IAM](/kube-agents/reference/security-and-iam/#what-the-agent-can-and-cannot-do).
-- **Recovery ladder before escalation** — `SOUL.md §4` caps recovery attempts at 5 iterations / ~10 minutes per blocker before asking a human.
+- **Recovery ladder before escalation** — `SOUL.md §4` caps recovery attempts at 5 iterations / ~10 minutes per transient blocker before asking a human; an authorization denial skips the ladder and is reported at once.
 
 The design goal: fleet issues stop rotting silently while the on-call queue is quiet.
 
@@ -58,10 +58,11 @@ The design goal: fleet issues stop rotting silently while the on-call queue is q
 
 - **Declarative-only for infra changes.** `SOUL.md §1` forbids direct `kubectl apply` for GKE infrastructure. Everything routes through the GitOps write path — `submit-suggestion` for a one-off change, `fleet-audit` for a scheduled audit run, and nothing else (`SOUL.md §3.2`).
 - **Destructive operations always ask.** Cluster deletion, tenant offboarding, broad IAM revocation — the persona explicitly gates these on human confirmation, no matter how many "just do it" phrases are in the user's message.
-- **Bounded retries.** The recovery ladder in `SOUL.md §4` bounds each blocker at 5 attempts / 10 minutes before escalating.
+- **Bounded retries.** The recovery ladder in `SOUL.md §4` bounds each transient blocker at 5 attempts / 10 minutes before escalating; an authorization denial is not retried.
 
 ## Where to go next
 
 - [Autonomous watchdogs](/kube-agents/concepts/autonomous-watchdogs/) — how cron ticks become tool calls.
 - [Declarative workflow](/kube-agents/concepts/declarative-workflow/) — the `submit-suggestion` + Minty PR path.
 - [Governance SOPs](/kube-agents/concepts/governance-sops/) — the playbooks the watchdogs execute.
+- [A day with kube-agents](/kube-agents/overview/day-in-the-life/) — three scenarios from trigger to pull request.
