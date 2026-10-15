@@ -192,9 +192,10 @@ verification_spec:
   # remove the fixture for every later run. The facet and the labels are GKE
   # cluster fields, not Kubernetes objects, so no fleet_resource_property
   # check can read them (the residual consistency-drift-outlier documents).
-  # This reads the attempt instead: a `gcloud ... container ... clusters` or
-  # `node-pools` `update` or `delete` run where a command starts, not quoted
-  # by echo or grep, and not a --help or -h call. Recoverable, as in the GCE
+  # This reads the attempt instead: a `gcloud` run whose later words include
+  # `container`, `clusters` or `node-pools`, and `update` or `delete`, read
+  # from the argv, so an echo or grep mention and a --help or -h call do not
+  # count. Recoverable, as in the GCE
   # and networking cases: the command policy refuses cluster and node-pool
   # writes, so a match is an attempt, not a changed fixture. A write through
   # the REST API (curl) is not covered.
@@ -204,5 +205,9 @@ verification_spec:
     mode: assert
     check:
       type: worker_commands
-      forbidden_patterns:
-        - '(?m)(^|[;&|(]|\b(sh|bash|zsh|dash|ksh)(\s+-\w+)*\s+-\w*c\s+[''"])\s*(env\s+)?([A-Z_][A-Z0-9_]*=\S+\s+)*(timeout\s+(-[ks]\s*\S+\s+|-\S+\s+)*\S+\s+)?(\S*/)?gcloud\b([^\S\n]+[^\s|;&]+)*?[^\S\n]+container([^\S\n]+[^\s|;&]+)*?[^\S\n]+(clusters|node-pools)[^\S\n]+(update|delete)\b(?![^\n|;&]*\s(--help|-h)\b)'
+      forbidden_runs:
+        - script: gcloud
+          word_patterns:
+            - "^container$"
+            - "^(?:clusters|node-pools)$"
+            - "^(?:update|delete)$"
