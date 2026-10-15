@@ -57,6 +57,7 @@ import argparse
 import atexit
 import bisect
 import contextlib
+import contextvars
 import copy
 import fcntl
 import hashlib
@@ -501,6 +502,10 @@ COLLECTOR_AUDITS = frozenset(
     }
 )
 
+# How many field errors one rejected findings document reports. A worker
+# fixes what the rejection names and runs `finish` again, so one error per
+# call cost a run per field (#2856); past this many, the rest are counted.
+MAX_REPORTED_FINDINGS_ERRORS = 20
 SEVERITIES = ("critical", "major", "minor")
 SEVERITY_RANK = {severity: i for i, severity in enumerate(SEVERITIES)}
 REMEDIATION_KINDS = ("manifest", "gcloud", "manual")
@@ -3365,14 +3370,27 @@ def assert_pushable(branch: str) -> str:
 # --------------------------------------------------------------------------- #
 
 
+# Set while `validate_findings` runs: a missing or empty string field is
+# recorded here and validation goes on, so one rejection names every such
+# field instead of the first.
+_FIELD_ERRORS: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
+    "_FIELD_ERRORS", default=None
+)
+
+
+def _field_error(message: str) -> None:
+    errors = _FIELD_ERRORS.get()
+    if errors is None:
+        raise ValidationError(message)
+    errors.append(message)
+
+
 def _require_str(value: object, where: str, *, allow_empty: bool = True) -> str:
     if not isinstance(value, str):
-        raise ValidationError(
-            f"{where}: expected a string, got {type(value).__name__}"
-        )
-    if not allow_empty and not value.strip():
-        raise ValidationError(f"{where}: required, must be a non-empty string")
-    return value
+        _field_error(f"{where}: expected a string, got {type(value).__name__}")
+    elif not allow_empty and not value.strip():
+        _field_error(f"{where}: required, must be a non-empty string")
+    return value  # type: ignore[return-value]
 
 
 def _sop_pointer(audit_id: str) -> str:
@@ -3745,7 +3763,36 @@ def _scope_spelling_hint(
 
 
 def validate_findings(data: object, audit_id: str) -> dict:
-    """Validate a findings document. Raises ValidationError naming index + field."""
+    """Validate a findings document. Raises one ValidationError naming every
+    missing or empty string field by index, up to MAX_REPORTED_FINDINGS_ERRORS,
+    plus the first other problem it met; a single problem reads as before."""
+    errors: list[str] = []
+    token = _FIELD_ERRORS.set(errors)
+    try:
+        result = _validate_findings_document(data, audit_id)
+    except ValidationError as exc:
+        errors.append(str(exc))
+    except (TypeError, AttributeError, KeyError):
+        # A field already recorded as wrong can break a later check that
+        # assumed its type; the recorded error is the one to report.
+        if not errors:
+            raise
+    finally:
+        _FIELD_ERRORS.reset(token)
+    if not errors:
+        return result
+    if len(errors) == 1:
+        raise ValidationError(errors[0])
+    shown = errors[:MAX_REPORTED_FINDINGS_ERRORS]
+    more = len(errors) - len(shown)
+    lines = [f"{len(errors)} problems in the findings file; fix them all, then run finish again:"]
+    lines += [f"  - {error}" for error in shown]
+    if more:
+        lines.append(f"  ... and {more} more")
+    raise ValidationError("\n".join(lines))
+
+
+def _validate_findings_document(data: object, audit_id: str) -> dict:
     validate_audit_id(audit_id)
 
     if not isinstance(data, dict):
@@ -4138,36 +4185,38 @@ def validate_findings(data: object, audit_id: str) -> dict:
 
         evidence = finding.get("evidence")
         if not isinstance(evidence, dict):
-            raise ValidationError(
+            _field_error(
                 f"findings[{i}].evidence: required object with 'command' and 'excerpt'"
             )
-        if not isinstance(evidence.get("command"), str) or not evidence[
-            "command"
-        ].strip():
-            raise ValidationError(
-                f"findings[{i}].evidence.command: required, must be a non-empty "
-                "string — a finding with no reproducible command is dropped, not softened"
+        else:
+            if not isinstance(evidence.get("command"), str) or not evidence[
+                "command"
+            ].strip():
+                _field_error(
+                    f"findings[{i}].evidence.command: required, must be a non-empty "
+                    "string — a finding with no reproducible command is dropped, not softened"
+                )
+            _require_str(
+                evidence.get("excerpt", ""), f"findings[{i}].evidence.excerpt"
             )
-        _require_str(
-            evidence.get("excerpt", ""), f"findings[{i}].evidence.excerpt"
-        )
 
         # Required on EVERY finding, not only the promotable ones. Deferring the
         # reasoning to promotion time means writing it when the evidence is no
         # longer in front of you.
         recommendation = finding.get("recommendation")
         if not isinstance(recommendation, dict):
-            raise ValidationError(
+            _field_error(
                 f"findings[{i}].recommendation: required object with 'action', "
                 "'rationale' and 'risk'"
             )
-        for field, hint in RECOMMENDATION_FIELDS:
-            value = recommendation.get(field)
-            if not isinstance(value, str) or not value.strip():
-                raise ValidationError(
-                    f"findings[{i}].recommendation.{field}: required, must be a "
-                    f"non-empty string — {hint}"
-                )
+        else:
+            for field, hint in RECOMMENDATION_FIELDS:
+                value = recommendation.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    _field_error(
+                        f"findings[{i}].recommendation.{field}: required, must be a "
+                        f"non-empty string — {hint}"
+                    )
 
         remediation = finding.get("remediation")
         if not isinstance(remediation, dict):
@@ -5150,7 +5199,11 @@ def load_manifest(path: str, audit_id: str | None = None) -> dict:
     """
     manifest_path = Path(path)
     if not manifest_path.is_file():
-        raise ValidationError(f"--manifest-file: {path} does not exist")
+        raise ValidationError(
+            f"--manifest-file: {path} does not exist. Give the path the SOP's collector "
+            "command wrote its manifest to; if the collector did not run, `finish` takes "
+            '--no-collector-manifest "<why>" instead.'
+        )
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -13878,7 +13931,17 @@ def join_harness_declarations(
 def load_findings(path: str, audit_id: str) -> dict:
     findings_file = Path(path)
     if not findings_file.is_file():
-        raise ValidationError(f"--findings-file: {path} does not exist")
+        if audit_id in COLLECTOR_AUDITS:
+            raise ValidationError(
+                f"--findings-file: {path} does not exist. Write it first with "
+                f"`audit_report.py draft --audit {audit_id} --manifest-file <collector manifest> "
+                f"--out {path}`, fill each recommendation, then run `finish` again with "
+                "that --findings-file and the same --manifest-file."
+            )
+        raise ValidationError(
+            f"--findings-file: {path} does not exist. Write the findings document the "
+            "SOP's findings step describes to that path, then run `finish` again."
+        )
     try:
         data = json.loads(findings_file.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -17957,11 +18020,41 @@ def _nonblank(value: str) -> str:
     return value.strip()
 
 
+# What a usage error on these commands adds after argparse's own line: the
+# command that produces the missing input, not only the flag's name (#2856).
+LIFECYCLE_HINT = (
+    "The order is `start`, the SOP's collector command, `draft --audit <id> "
+    "--manifest-file <collector manifest> --out <findings file>`, then `finish "
+    "--audit <id> --findings-file <findings file> --manifest-file <collector manifest>`."
+)
+FINISH_USAGE_HINT = (
+    "`finish` takes --audit, --findings-file (write it with `draft --audit <id> "
+    "--manifest-file <collector manifest> --out <findings file>`) and --manifest-file "
+    '<collector manifest>, or --no-collector-manifest "<why>" when the collector did not run.'
+)
+DRAFT_USAGE_HINT = (
+    "`draft` takes --audit and --manifest-file <the manifest the SOP's collector command "
+    "wrote>, and writes the findings document for `finish` to --out <findings file>."
+)
+
+
+class _HintingParser(argparse.ArgumentParser):
+    """An ArgumentParser whose usage errors end with the next step to take."""
+
+    usage_hint = ""
+
+    def error(self, message: str):  # type: ignore[override]
+        if self.usage_hint:
+            message = f"{message}\n{self.usage_hint}"
+        super().error(message)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _HintingParser(
         description="Deterministic audit-reporting harness for the fleet-audit skill."
     )
-    subparsers = parser.add_subparsers(dest="subcommand", required=True)
+    parser.usage_hint = LIFECYCLE_HINT
+    subparsers = parser.add_subparsers(dest="subcommand", required=True, parser_class=_HintingParser)
 
     start_parser = subparsers.add_parser(
         "start",
@@ -17979,6 +18072,7 @@ def build_parser() -> argparse.ArgumentParser:
     finish_parser = subparsers.add_parser(
         "finish", help="Validate findings and publish/refresh/close the ledger issue."
     )
+    finish_parser.usage_hint = FINISH_USAGE_HINT
     finish_parser.add_argument("--audit", required=True, help="Audit id.")
     finish_parser.add_argument(
         "--findings-file", required=True, help="Path to the findings.json to publish."
@@ -18058,6 +18152,7 @@ def build_parser() -> argparse.ArgumentParser:
         "recommendation fields are left empty and each remediation `manual`, "
         "for you to fill before `finish`.",
     )
+    draft_parser.usage_hint = DRAFT_USAGE_HINT
     draft_parser.add_argument("--audit", required=True, help="Audit id.")
     draft_parser.add_argument("--manifest-file", required=True, help="The manifest the collector wrote.")
     draft_parser.add_argument("--out", default=None, help="Write the document here rather than to stdout.")

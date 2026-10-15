@@ -1475,6 +1475,54 @@ class TestValidation(unittest.TestCase):
             audit_report.validate_findings(doc, AUDIT)
         self.assertIn("findings[1].evidence.command", str(exc.exception))
 
+    def test_usage_errors_name_the_command_that_makes_the_input(self):
+        for argv, hint in (
+            (["draft", "--audit", AUDIT], "--manifest-file <the manifest the SOP's collector command wrote>"),
+            (["finish", "--audit", AUDIT], "write it with `draft --audit <id> --manifest-file"),
+            (["run", "--audit", AUDIT], "then `finish --audit <id> --findings-file"),
+        ):
+            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()) as err:
+                with self.assertRaises(SystemExit) as exit_:
+                    audit_report.build_parser().parse_args(argv)
+                self.assertEqual(exit_.exception.code, 2)
+                self.assertIn(hint, err.getvalue())
+
+    def test_a_missing_findings_file_names_draft(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            absent = str(Path(tmp) / "absent-findings.json")
+            with self.assertRaises(audit_report.ValidationError) as ctx:
+                audit_report.load_findings(absent, "compliance-audit")
+        self.assertIn("does not exist", str(ctx.exception))
+        self.assertIn("draft --audit compliance-audit --manifest-file", str(ctx.exception))
+        self.assertIn(f"--out {absent}", str(ctx.exception))
+
+    def test_every_field_error_is_reported_in_one_call(self):
+        # A worker fixes what the rejection names and runs finish again, so
+        # one field per call costs a run per field (#2856).
+        doc = make_doc(findings=[make_finding(), make_finding(fid="second")])
+        doc["scope"]["clusters"][0]["location"] = None
+        doc["findings"][0]["title"] = None
+        del doc["findings"][1]["evidence"]["command"]
+        with self.assertRaises(audit_report.ValidationError) as exc:
+            audit_report.validate_findings(doc, AUDIT)
+        message = str(exc.exception)
+        self.assertIn("3 problems", message)
+        self.assertIn("scope.clusters[0].location", message)
+        self.assertIn("findings[0].title", message)
+        self.assertIn("findings[1].evidence.command", message)
+
+    def test_reported_field_errors_are_capped(self):
+        findings = [make_finding(fid=f"f{i}") for i in range(25)]
+        doc = make_doc(findings=findings)
+        for finding in doc["findings"]:
+            del finding["evidence"]["command"]
+        with self.assertRaises(audit_report.ValidationError) as exc:
+            audit_report.validate_findings(doc, AUDIT)
+        message = str(exc.exception)
+        self.assertIn("findings[19].evidence.command", message)
+        self.assertNotIn("findings[20].evidence.command", message)
+        self.assertIn("5 more", message)
+
     def test_empty_evidence_command_rejected(self):
         doc = make_doc(findings=[make_finding(command="   ")])
         with self.assertRaises(audit_report.ValidationError) as exc:
@@ -5092,6 +5140,7 @@ class TestStart(HarnessTestCase):
                     ["start", "--audit", AUDIT, "--takeover"]
                 )
         self.assertNotIn("takeover", audit_report.build_parser().format_help().lower())
+
         note.unlink()
         self.assertEqual(self.run_main(["start", "--audit", AUDIT]), 0)
 
@@ -17412,6 +17461,9 @@ class TestLoadManifest(BaseTestCase):
         with self.assertRaises(audit_report.ValidationError) as ctx:
             audit_report.load_manifest(str(self.tmp_path / "absent.json"))
         self.assertIn("does not exist", str(ctx.exception))
+        # The next step, for both cases: the collector ran, or it did not.
+        self.assertIn("collector", str(ctx.exception))
+        self.assertIn("--no-collector-manifest", str(ctx.exception))
 
     def test_malformed_json_is_a_validation_error(self):
         with self.assertRaises(audit_report.ValidationError) as ctx:
