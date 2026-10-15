@@ -144,3 +144,20 @@ def test_ledger_run_is_flagged(command):
 )
 def test_ledger_mention_help_or_draft_is_not_flagged(command):
     assert not _ledger_flagged(command)
+
+
+@pytest.mark.parametrize(
+    ("command", "passes"),
+    [
+        (f"python3 {REPORT} start --audit x", False),
+        (
+            f"python3 {REPORT} finish --audit x --findings-file f.json --manifest-file m.json",
+            False,
+        ),
+        (f"python3 {REPORT} remediate --audit x", True),
+        (f"python3 {REPORT} start --help", True),
+        ('grep -n "audit_report.py start" skills/fleet-audit/SKILL.md', True),
+    ],
+)
+def test_no_ledger_objective_fails_a_form_one_run(command, passes):
+    assert _passes(_check("no-ledger-run-was-opened"), command) is passes
