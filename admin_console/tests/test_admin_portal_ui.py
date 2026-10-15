@@ -752,6 +752,21 @@ class AdminPortalFunctionalTest(unittest.TestCase):
         ).click().run()
         return self.finish_connection_job(app)
 
+    def test_a_switched_page_still_runs_the_app_shell(self):
+        """The sidebar, the connection poll and the sign-in caption come from
+        app.py. A pages/ folder beside app.py turns on streamlit's legacy
+        multipage layout, and AppTest then reruns a page without app.py
+        (#3044). On streamlit 1.66 the connect-job tests catch that; on 1.65
+        only this test does.
+        """
+        self.assertFalse((APP_PATH.parent / "pages").exists())
+        app = self.app().run().switch_page("views/kanban.py").run()
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertTrue(
+            any("Signed in as admin@example.com" in item.value for item in app.sidebar.caption)
+        )
+
     def test_provider_backed_pages_stay_visible_before_connection(self):
         for page, title in (
             ("views/chat.py", "Chat"),
