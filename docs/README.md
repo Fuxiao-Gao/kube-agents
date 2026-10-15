@@ -262,7 +262,7 @@ identifier appears, add its source here.
 | Live-test lease: ConfigMap name, TTL, install-configuration keys read, which commands count as mutations | `scripts/live_test_lease.py` |
 | PR evidence screenshots: publish branch, file-name provenance, caption format | `scripts/pr_evidence_screenshot.sh` |
 | Unresolved-thread hold: the label, the pool condition, the sweep interval, the ownership rule | `scripts/hold_unresolved_threads.py` and `.github/workflows/hold-unresolved-threads.yml` |
-| Merge queue gate checks: the three contexts, what each reads, the smoke skip list it copies from Prow | `scripts/merge_gate.py` and `.github/workflows/merge-gate.yml` |
+| Merge queue gate checks: the two contexts, what each reads, the smoke skip list it copies from Prow | `scripts/merge_gate.py` and `.github/workflows/merge-gate.yml` |
 | Merge queue enqueue sweep: the label predicate, the `MERGE_QUEUE` switch, the sweep interval | `scripts/merge_gate.py` (`sweep`) and `.github/workflows/auto-enqueue.yml` |
 | Issue triage queue: the `needs-triage` label, the `priority:` label prefix it mirrors, and when each event adds or removes it | `.github/workflows/needs-triage.yml` |
 | Flaky-check tracking: the `ci:flaky` label, the watched checks and the exclusions, the sweep window and interval, the one-issue-per-container key, the never-close rule | `scripts/notify_flaky_check.py` (`WATCHED_WORKFLOWS`, `SWEEP_WINDOW_DAYS`) and `.github/workflows/flaky-check-notify.yml`; the exclusion list the contract test enforces is `FLAKY_CHECK_EXCLUDED_WORKFLOWS` in `scripts/test_integration_contracts.py` |

@@ -80,7 +80,6 @@ jobs:
     permissions:
       contents: read # check out the default branch: the script
       pull-requests: read # the open pull requests, their labels and queue state
-      checks: read # the cla/google check run on each head
       statuses: write # re-post the gate statuses
     steps:
       # The default branch, never a pull request head: this job holds a

@@ -697,11 +697,11 @@ Prow's own form of the re-pin — a `[prow:skip-retest]` sentinel written by `/o
 upstream but not in the Prow build this repository merges through; `scripts/pin_smoke_status.py`
 says when to switch.
 
-**A pull request on `main` can also carry `Smoke gate`, `CLA` and `Merge labels` statuses.** They
+**A pull request on `main` can also carry `Smoke gate` and `Merge labels` statuses.** They
 are the gate checks of a GitHub merge queue that `main` does not use yet, posted by
 [`merge-gate.yml`](../.github/workflows/merge-gate.yml), and each restates something Tide already
-decides: the smoke result (or that the change touches only paths the smoke skips), the `cla/google`
-result, and the label query above. Nothing requires them. Because Tide holds on any posted context
+decides: the smoke result (or that the change touches only paths the smoke skips), and the label
+query above. Nothing requires them. Because Tide holds on any posted context
 that is not green, each is posted only when it is green, and a green can go stale until the next
 event. `scripts/merge_gate.py` is the reference for what each one reads.
 
