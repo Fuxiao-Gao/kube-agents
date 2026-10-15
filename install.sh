@@ -4573,6 +4573,23 @@ validate_platform_agent_mode() {
 # URL needs, and the optional key and CA Secret. Each argument names the
 # variable that holds an answer; its current value is the prompt's default.
 # validate_openai_compatible_inputs judges the answers afterwards.
+# The model name step 7 starts from. A model install.env pinned for another
+# provider is not this server's, so on a switch to openai_compatible with no
+# --model-default-name it starts empty and the check that follows stops the
+# run instead of asking the server for the old provider's model. Only a
+# recorded other provider counts: with none, a MODEL_DEFAULT_NAME given in the
+# environment is this run's own answer.
+# $1 the provider, $2 the model so far, $3 whether --model-default-name was
+# typed, $4 the recorded MODEL_PROVIDER.
+openai_compatible_model_for_run() {
+  local provider="${1:-}" model="${2:-}" passed="${3:-false}" recorded="${4:-}"
+  if [ "$provider" = "openai_compatible" ] && [ -n "$recorded" ] &&
+    [ "$recorded" != "openai_compatible" ] && [ "$passed" != "true" ]; then
+    model=""
+  fi
+  printf '%s\n' "$model"
+}
+
 prompt_openai_compatible_settings() {
   local model_var="$1" api_base_var="$2" target_port_var="$3" egress_cidrs_var="$4"
   local api_key_var="$5" ca_name_var="$6" host_port="" host=""
@@ -4592,12 +4609,15 @@ prompt_openai_compatible_settings() {
     prompt_read "Private ranges the server is reached at, comma-separated CIDRs (empty only for a public endpoint on 443; ${OPENAI_COMPATIBLE_CLEAR_ANSWER} clears a recorded value)" "$egress_cidrs_var" "${!egress_cidrs_var:-}"
   fi
   # The label keeps a recorded key off the screen.
-  prompt_read "Server API key (optional; ${OPENAI_COMPATIBLE_CLEAR_ANSWER} clears a recorded key)" "$api_key_var" "${!api_key_var:-}" true "${!api_key_var:+the current key}"
+  # No clear answer for the key: write_tfvars_from_state recovers an empty key
+  # from the live Secret, so clearing it here would not stick. A key a server
+  # no longer checks is harmless; remove it from the Secret to drop it.
+  prompt_read "Server API key (optional)" "$api_key_var" "${!api_key_var:-}" true "${!api_key_var:+the current key}"
   prompt_read "Secret holding a CA, under ca.crt, that signs the server's certificate (optional; ${OPENAI_COMPATIBLE_CLEAR_ANSWER} clears a recorded name)" "$ca_name_var" "${!ca_name_var:-}"
   # prompt_read keeps a recorded value on an empty answer, so an endpoint that
   # no longer needs one of these optional values says so with the clear answer.
   local optional_var
-  for optional_var in "$egress_cidrs_var" "$api_key_var" "$ca_name_var"; do
+  for optional_var in "$egress_cidrs_var" "$ca_name_var"; do
     if [ "${!optional_var:-}" = "$OPENAI_COMPATIBLE_CLEAR_ANSWER" ]; then
       printf -v "$optional_var" '%s' ""
     fi
@@ -6673,16 +6693,7 @@ main() {
   if [ -z "$model_default_name" ]; then
     model_default_name="$(default_model_for_provider "$model_provider")"
   fi
-  # A model install.env pinned for another provider is not this server's. On a
-  # switch with no --model-default-name, start empty, so the check below stops
-  # the run instead of asking the server for the old provider's model. Only a
-  # recorded other provider counts: with none, a MODEL_DEFAULT_NAME given in
-  # the environment is this run's own answer.
-  if [ "$model_provider" = "openai_compatible" ] && [ -n "${MODEL_PROVIDER:-}" ] &&
-    [ "${MODEL_PROVIDER}" != "openai_compatible" ] &&
-    [ "$PARAM_MODEL_DEFAULT_NAME_PASSED" != "true" ]; then
-    model_default_name=""
-  fi
+  model_default_name="$(openai_compatible_model_for_run "$model_provider" "$model_default_name" "$PARAM_MODEL_DEFAULT_NAME_PASSED" "${MODEL_PROVIDER:-}")"
   local model_max_tokens="${PARAM_MODEL_MAX_TOKENS:-${MODEL_MAX_TOKENS:-}}"
   validate_model_max_tokens || exit 1
   local redaction_ip_action="${PARAM_LITELLM_REDACTION_IP_ACTION:-$DEFAULT_LITELLM_REDACTION_IP_ACTION}"

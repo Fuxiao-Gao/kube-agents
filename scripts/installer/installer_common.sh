@@ -136,7 +136,10 @@ readonly PRIVATE_IPV4_LITERAL_PATTERN='^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0
 # An in-cluster Service with its namespace (captured), <svc>.<ns>.svc or
 # <svc>.<ns>.svc.cluster.local, and a two-label host, which is a hostname but
 # may be a Service written without .svc. The chart's own patterns.
-readonly SERVICE_HOST_PATTERN='^[^.]+\.([^.]+)\.svc(\.cluster\.local)?$'
+readonly SERVICE_HOST_PATTERN='^[^.]+\.([^.]+)\.svc(\.cluster\.local)?\.?$'
+# A host that ends like a Service name; one not matching the pattern above is
+# an in-cluster name with a part missing, refused as the chart refuses it.
+readonly SERVICE_SUFFIX_PATTERN='\.(svc|cluster\.local)\.?$'
 readonly TWO_LABEL_HOST_PATTERN='^[^.]*\.[^.]*$'
 
 # ─── Scoped service account pool ──────────────────────────────────────────────
@@ -681,6 +684,10 @@ validate_openai_compatible_inputs() {
 
   local service_namespace
   service_namespace="$(openai_compatible_service_namespace "$host")"
+  if [ -z "$service_namespace" ] && [[ "$host" != \[* ]] && [[ "$host" =~ $SERVICE_SUFFIX_PATTERN ]]; then
+    print_error "OPENAI_COMPATIBLE_API_BASE='${api_base}' ends like an in-cluster Service name but is not <svc>.<ns>.svc or <svc>.<ns>.svc.cluster.local, so the gateway could not be given an egress rule for it. Write the Service with both its name and its namespace."
+    return 1
+  fi
   if [ -n "$service_namespace" ]; then
     if [[ ! "$service_namespace" =~ ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$ ]]; then
       print_error "OPENAI_COMPATIBLE_API_BASE='${api_base}' names a Service in namespace '${service_namespace}', which is not a valid namespace name."

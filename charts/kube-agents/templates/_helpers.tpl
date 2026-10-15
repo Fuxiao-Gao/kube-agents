@@ -492,9 +492,18 @@ openai_compatible.
 {{- if not (or $bracketed $ipv4) -}}
 {{- if eq (len $labels) 1 -}}
 {{- $namespace = .Release.Namespace -}}
-{{- else if regexMatch "^[^.]+\\.[^.]+\\.svc(\\.cluster\\.local)?$" $host -}}
+{{- else if regexMatch "^[^.]+\\.[^.]+\\.svc(\\.cluster\\.local)?\\.?$" $host -}}
+{{- /* A trailing dot is the absolute spelling of the same name. */ -}}
 {{- $namespace = index $labels 1 -}}
 {{- end -}}
+{{- end -}}
+{{- /*
+  A host ending in .svc or .cluster.local that is not <svc>.<ns>.svc[.cluster.local]
+  is an in-cluster name with a part missing or extra (vllm.svc has no namespace).
+  It would otherwise pass as a public hostname and get no rule, so it is refused.
+*/ -}}
+{{- if and (not $namespace) (not $ipv4) (not $bracketed) (regexMatch "\\.(svc|cluster\\.local)\\.?$" $host) -}}
+{{- fail (printf "litellm.openaiCompatible.apiBase %q ends like an in-cluster Service name but is not <svc>.<ns>.svc or <svc>.<ns>.svc.cluster.local, so the gateway could not be given an egress rule for it. Write the Service with both its name and its namespace." $apiBase) -}}
 {{- end -}}
 {{- $egress := dict -}}
 {{- if $namespace -}}

@@ -330,11 +330,27 @@ class RenderRefusalTest(unittest.TestCase):
         ]
         self.assertIn("123", names)
 
+    def test_a_name_ending_like_a_service_but_incomplete_is_refused(self) -> None:
+        for api_base in ("https://vllm.svc/v1", "https://llm.models.svc.k8s.cluster.local/v1"):
+            with self.subTest(api_base):
+                self._assert_fails({"apiBase": api_base}, "ends like an in-cluster Service name")
+
+    def test_the_absolute_spelling_of_a_service_gets_its_namespace_rule(self) -> None:
+        res = _helm_template(
+            *HARNESS_ARGS,
+            "--set", "litellm.modelProvider=openai_compatible",
+            "--set", "litellm.modelDefaultName=m",
+            "--set", "litellm.openaiCompatible.apiBase=https://llm.models.svc.cluster.local./v1",
+            "--set", f"litellm.openaiCompatible.targetPort={SERVER_TARGET_PORT}",
+        )
+        self.assertIn(f'{{"namespace":"models","port":{SERVER_TARGET_PORT}}}', res.stdout)
+
     def test_a_host_already_ending_in_svc_gets_no_svc_hint(self) -> None:
         """vllm.svc is missing its namespace; vllm.svc.svc would be no fix."""
         res = _render({"apiBase": "http://vllm.svc:8000/v1"}, check=False)
         self.assertNotEqual(res.returncode, 0)
-        self.assertNotIn("<svc>.<ns>.svc", res.stderr)
+        self.assertIn("ends like an in-cluster Service name", res.stderr)
+        self.assertNotIn("vllm.svc.svc", res.stderr)
 
     def test_a_private_or_ipv6_literal_needs_egress_cidrs_even_on_443(self) -> None:
         for api_base in (

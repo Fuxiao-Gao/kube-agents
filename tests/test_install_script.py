@@ -1432,6 +1432,9 @@ out_dir=""; acquire_source_repo out_dir "{requested_ref}"; echo "RESOLVED=$out_d
             ('openai_compatible m https://llm./v1 8000 "" ""', "write it as <svc>.<ns>.svc"),
             # Any host that is not a Service ignores a target port.
             ('openai_compatible m https://vllm.corp.internal/v1 8000 "" ""', "OPENAI_COMPATIBLE_TARGET_PORT is not used"),
+            # Ends like a Service name, but has no namespace.
+            ('openai_compatible m https://vllm.svc/v1 "" "" ""', "ends like an in-cluster Service name"),
+            ('openai_compatible m https://llm.models.svc.k8s.cluster.local/v1 "" "" ""', "ends like an in-cluster Service name"),
             # A lone trailing colon leaves an empty hextet the chart refuses.
             ('openai_compatible m "http://[fd00::5]:8000/v1" "" fd00::1:/64 ""', "is not an IPv6 CIDR"),
             # Two labels are a hostname, not <svc>.<ns>, even with a target port,
@@ -1464,7 +1467,8 @@ out_dir=""; acquire_source_repo out_dir "{requested_ref}"; echo "RESOLVED=$out_d
             f'{_SOURCE_INSTALLER_COMMON}validate_openai_compatible_inputs openai_compatible m http://vllm.svc:8000/v1 "" "" ""'
         )
         self.assertNotEqual(proc.returncode, 0)
-        self.assertNotIn("<svc>.<ns>.svc", proc.stderr + proc.stdout)
+        self.assertIn("ends like an in-cluster Service name", proc.stderr + proc.stdout)
+        self.assertNotIn("vllm.svc.svc", proc.stderr + proc.stdout)
 
     def test_plain_http_outside_the_cluster_warns_but_passes(self):
         warning = "is plain http to a server outside the cluster"
@@ -1496,6 +1500,8 @@ out_dir=""; acquire_source_repo out_dir "{requested_ref}"; echo "RESOLVED=$out_d
             'openai_compatible m http://llm.models.svc.cluster.local/v1 8000 "" ""',
             'openai_compatible m http://llm.models.svc:80/v1 8000 "" ""',
             'openai_compatible m http://llm/v1 8000 "" ""',
+            # The absolute spelling of a Service, with its trailing dot.
+            'openai_compatible m https://llm.models.svc.cluster.local./v1 8443 "" ""',
             # A private address, reached through the CIDRs.
             'openai_compatible m http://10.8.0.12:8000/v1 "" "10.8.0.0/24, 10.9.0.0/24" ""',
             'openai_compatible m "http://[fd00::5]:8000/v1" "" fd00::/64 ""',
@@ -1539,7 +1545,7 @@ out_dir=""; acquire_source_repo out_dir "{requested_ref}"; echo "RESOLVED=$out_d
                 self.assertIn(asked, proc.stdout)
                 self.assertNotIn(not_asked, proc.stdout)
                 # A recorded key is not echoed as the default.
-                self.assertIn("Server API key (optional; - clears a recorded key) [the current key]", proc.stdout)
+                self.assertIn("Server API key (optional) [the current key]", proc.stdout)
                 self.assertNotIn("sk-recorded", proc.stdout)
 
     def test_the_interview_clears_the_egress_value_the_url_does_not_use(self):
@@ -1584,15 +1590,28 @@ out_dir=""; acquire_source_repo out_dir "{requested_ref}"; echo "RESOLVED=$out_d
             'prompt_openai_compatible_settings m u p c k ca; echo "c=[$c] k=[$k] ca=[$ca]"'
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("c=[] k=[] ca=[]", proc.stdout)
+        # The key has no clear answer: the generator recovers an empty key from
+        # the live Secret, so "-" is kept as typed rather than promising a clear.
+        self.assertIn("c=[] k=[-] ca=[]", proc.stdout)
 
     def test_only_a_recorded_other_provider_drops_the_model_name(self):
-        # A MODEL_DEFAULT_NAME from the environment, with no provider recorded,
-        # is this run's own answer and is kept.
-        text = _INSTALL_SH.read_text()
-        block = text[text.index("A model install.env pinned for another provider"):]
-        block = block[: block.index('model_default_name=""')]
-        self.assertIn('[ -n "${MODEL_PROVIDER:-}" ]', block)
+        cases = (
+            # A model from the environment with no provider recorded is kept.
+            ("openai_compatible qwen false ''", "[qwen]"),
+            # A model pinned for another recorded provider is dropped...
+            ("openai_compatible gemini-3.7-flash false gemini", "[]"),
+            # ...unless --model-default-name was typed this run.
+            ("openai_compatible qwen true gemini", "[qwen]"),
+            # A re-run of a recorded openai_compatible install keeps its model.
+            ("openai_compatible qwen false openai_compatible", "[qwen]"),
+            # Other providers are untouched.
+            ("gemini gemini-3.7-flash false openai_compatible", "[gemini-3.7-flash]"),
+        )
+        for args, expected in cases:
+            with self.subTest(args=args):
+                proc = self._run_install_func(f'echo "[$(openai_compatible_model_for_run {args})]"')
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertIn(expected, proc.stdout)
 
     def test_step_7_validates_openai_compatible_before_the_apply(self):
         # Fail fast means before step 12 builds anything, on both paths that
