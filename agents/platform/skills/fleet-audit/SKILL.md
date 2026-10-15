@@ -76,7 +76,7 @@ When you are delegated a task or kanban card to execute an audit stream followin
   exited 2 (`FINDINGS REJECTED`) kept the lease, so after it the run is still yours and the next step
   is to fix the document and run `finish` again, never `start`.
 - **Alignment with `AGENTS.md`:** `AGENTS.md` ("'Run the `<x>` cron job now' → trigger the schedule, do not re-enact it") addresses requests asking to trigger the background cron job or to run multiple/all audits in a single session. When delegated a task to execute a single audit stream per its SOP, you are the dedicated worker session for that stream; execute the audit directly.
-- **A card whose result is "queued for later" must NEVER be marked `done` (#1876):** If an audit cannot be run in this session due to missing credentials or infrastructure failure, call `kanban_block` (or ask for input); **never** call `kanban_complete` claiming `done` when zero findings or ledger were produced.
+- **A card whose result is "queued for later" must NEVER be marked `done` (#1876):** If an audit cannot be run in this session due to missing credentials or infrastructure failure, call `kanban_block` (or ask for input); **never** call `kanban_complete` claiming `done` when zero findings or ledger were produced. `kanban_complete` enforces this after your `start`: with no `finish` result line since the `start`, it refuses the first call, and a second call closes the card with "Not published" at the top of your result.
 
 ### 2. Asked to run or trigger the scheduled cron job, or to run multiple/all audits
 
