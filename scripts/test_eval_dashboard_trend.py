@@ -142,6 +142,17 @@ TIMED_RUNS = [
               [timed_task(WRITER_CASE, rep(1, "pass", 200.0, 6.0), rep(2, "pass", 400.0, 8.0)), timed_task("rca-remediation-pr", rep(1, "pass", 999.0, 99.0))]),
 ]
 
+# Two more nights for the page only. Tue 09-01: rca's one rep is lost to
+# infra though it carries timing, so the night has no timed rep that counts
+# and lies outside the drawn range (untimed nights do not widen it). Mon
+# 09-14: a turn 1 over 40 s for upgrades, a scale in 20 s steps.
+PAGE_ONLY_RUNS = [
+    timed_run("2100374000000000002", NIGHT_1_RUN["job"], "2026-09-01T00:00:10+00:00", "2026-09-01T05:00:00+00:00",
+              [timed_task("rca-remediation-pr", rep(1, "infra", 900.0, 80.0))]),
+    timed_run("2100374000000000003", NIGHT_1_RUN["job"], "2026-09-14T00:00:10+00:00", "2026-09-14T05:00:00+00:00",
+              [timed_task("upgrades-fleet-version-table", rep(1, "pass", 200.0, 45.0))]),
+]
+
 
 class NightOneTest(unittest.TestCase):
     """The real first night, alone: one point per case, no line, no band."""
@@ -740,7 +751,7 @@ class TrendLatencyPageTest(unittest.TestCase):
         data = load_fixture()
         data["generated_at"] = NOW
         data["cases"] = [{"name": n, "domain": d, "active": True, "nightly_active": True} for n, d in LATENCY_DOMAINS]
-        data["runs"] += copy.deepcopy(TIMED_RUNS)
+        data["runs"] += copy.deepcopy(TIMED_RUNS + PAGE_ONLY_RUNS)
         with unittest.mock.patch.object(render.classify, "admitted_cases", return_value=frozenset()), \
                 unittest.mock.patch.object(render, "demotion_dates", return_value={}), \
                 unittest.mock.patch.object(render, "recent_merges", return_value=None):
@@ -778,7 +789,8 @@ class TrendLatencyPageTest(unittest.TestCase):
         self.assertEqual(turn1.count('<circle class="dot'), 4)
         self.assertEqual(turn1.count('<circle class="dot slow"'), 2, "the p90 points")
         self.assertNotIn("<path", turn1, "the gap breaks both lines and a lone night is a point")
-        self.assertIn("chat turn 1: no timing that night", turn1)
+        self.assertIn("chat turn 1: no timed rep that counts that night", turn1)
+        self.assertIn("a gap is a night with no timed rep that counts; infra reps never count", app, "the legend names the gap")
         self.assertIn("chat turn 1: p50 4.0 s · p90 12.0 s · 2 reps", turn1, "the tooltip has the values and n")
         self.assertIn("agent time: p50 100.0 s · p90 300.0 s · 2 reps", agent)
         self.assertIn("p50 4.0 s · p90 12.0 s · n=2</text>", turn1, "the newest night is labelled")
@@ -793,9 +805,26 @@ class TrendLatencyPageTest(unittest.TestCase):
         self.assertIn("<td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>", app)
         self.assertIn("<td>5.0 s</td><td>7.0 s</td><td>2</td><td>120.0 s</td><td>140.0 s</td><td>2</td></tr>", app)
 
+    def test_the_y_axis_names_the_target_when_no_tick_does(self):
+        upgrades = re.findall(r'<svg class="tchart".*?</svg>', dom_text(self.page, fragment="#cases=upgrades-fleet-version-table"), re.DOTALL)[2]
+        self.assertIn(">20 s</text>", upgrades, "a 45 s p90 in 20 s steps")
+        self.assertIn('text-anchor="end">10 s</text>', upgrades, "the target's value on the y-axis")
+        self.assertIn('<text class="thr-l"', upgrades)
+        rca = re.findall(r'<svg class="tchart".*?</svg>', dom_text(self.page, fragment="#cases=rca-remediation-pr"), re.DOTALL)[2]
+        self.assertEqual(rca.count(">10 s</text>"), 1, "a 5 s step has the tick already: not drawn twice")
+        self.assertNotIn('<text class="thr-l"', rca)
+
+    def test_a_night_outside_the_drawn_range_is_in_neither_the_chart_nor_the_table(self):
+        app = dom_text(self.page, fragment="#cases=rca-remediation-pr")
+        turn1 = re.findall(r'<svg class="tchart".*?</svg>', app, re.DOTALL)[2]
+        self.assertEqual(turn1.count('<rect class="hit"'), 3, "Tue 09-15 to Thu 09-17, not 09-01")
+        table = re.search(r'<details class="tv" data-tv="case:rca-remediation-pr:latency".*?</details>', app, re.DOTALL).group(0)
+        self.assertIn("Latency table · 3 nights", table)
+        self.assertEqual(table.count("<tr><td>"), 3, "the chart's nights only")
+
     def test_a_scope_without_timing_says_so_from_the_data(self):
         app = dom_text(self.page, fragment="#cases=cluster-agent-crashloop-debug")
-        self.assertIn("No timing on record for this scope yet: no nightly rep in the window carries <code>turn1_s</code> or <code>agent_s</code>.", app)
+        self.assertIn("No timing on record for this scope yet: no timed nightly rep in the window counts (infra reps never count).", app)
         self.assertEqual(app.count('<svg class="tchart"'), 2)
         self.assertNotIn("Latency table", app)
         # The domain's card and its timed case's card both draw the row.

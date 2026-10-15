@@ -1024,8 +1024,9 @@ it recorded a repetition, oldest first: `{night, at, n_turn1, turn1_p50_s,
 turn1_p90_s, n_agent, agent_p50_s, agent_p90_s}`, the nearest-rank p50 and
 `slow_pct` percentile of `turn1_s` and `agent_s` over the scope's reps
 whose `result` is not `infra`, and `n_*` how many such reps carry each. A
-night the scope ran without timing has `n_*` 0 and `null` percentiles,
-which the page draws as a gap.
+night the scope ran with no timed rep that counts (none timed, or every
+timed rep `infra`) has `n_*` 0 and `null` percentiles, which the page draws
+as a gap.
 
 ### `store.json` (written by `store.py`, read by `render.py --store`)
 

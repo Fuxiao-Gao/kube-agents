@@ -1892,8 +1892,8 @@ function secondsScale(values) {
 // One chart: `kind` is "rate" (bars for each night's pass rate, a line for
 // the trailing admission window, the bar), "judged" (a line of means with
 // the spread band; a lone night is a hollow point), or a LATENCY_KINDS
-// series (lines of the p50 and the p90, dashed; a night without timing is a
-// gap; the opening turn carries the advisory target). `scale` is the y-axis.
+// series (lines of the p50 and the p90, dashed; a night with no timed rep
+// that counts is a gap; the opening turn carries the advisory target). `scale` is the y-axis.
 // One series colour, the page accent; text in text tokens; the tooltip
 // carries every value.
 function trendChartHtml(t, points, kind, metric, range, markers, title, key, scale = UNIT_SCALE) {
@@ -1935,8 +1935,13 @@ function trendChartHtml(t, points, kind, metric, range, markers, title, key, sca
     if (last) parts.push(label(x(pointAt(last)), y(last.window.passes / last.window.runs), `${pct(last.window.passes / last.window.runs)} of ${last.window.runs}${last.window.full ? "" : last.window.cut ? " · window reaches past this read" : " · window not full"}`));
   } else if (LATENCY_KINDS.includes(kind)) {
     const target = kind === "turn1" ? latencyTarget(t) : null;
-    // The target's label sits under its line: the newest night's label sits beside its point, often just above it.
-    if (isNumber(target)) parts.push(`<line class="thr" x1="${g.left}" x2="${g.left + plotW}" y1="${y(target).toFixed(1)}" y2="${y(target).toFixed(1)}"></line>`);
+    // The target is a line with no label in the plot: the newest night's
+    // label sits beside its point, often just above it. The y-axis names its
+    // value when no tick does (a 20 s step has no 10 s tick).
+    if (isNumber(target)) {
+      parts.push(`<line class="thr" x1="${g.left}" x2="${g.left + plotW}" y1="${y(target).toFixed(1)}" y2="${y(target).toFixed(1)}"></line>`);
+      if (!scale.ticks.includes(target)) parts.push(`<text class="thr-l" x="${g.left - 6}" y="${(y(target) + 3.5).toFixed(1)}" text-anchor="end">${scale.fmt(target)}</text>`);
+    }
     for (const pctl of ["p90", "p50"]) {
       const field = `${kind}_${pctl}_s`, slow = pctl === "p90" ? " slow" : "";
       const has = (p) => timed(p, kind) && isNumber(p[field]);
@@ -1993,7 +1998,7 @@ function trendChartHtml(t, points, kind, metric, range, markers, title, key, sca
       if (p.window) lines.push(`trailing window: ${fmtRate(p.window.passes, p.window.runs)} across ${plural(p.window.lines, "night")}${p.window.full ? "" : p.window.cut ? " · reaches past this read" : " · not full yet"}`);
       if (p.blocked || p.infra) lines.push(`${p.blocked || 0} blocked · ${p.infra || 0} infra, not in the rate`);
     } else if (LATENCY_KINDS.includes(kind)) {
-      lines.push(timed(p, kind) ? `${LATENCY_WORDS[kind]}: p50 ${secOrDash(p[`${kind}_p50_s`])} · p90 ${secOrDash(p[`${kind}_p90_s`])} · ${plural(p[`n_${kind}`], "rep")}` : `${LATENCY_WORDS[kind]}: no timing that night`);
+      lines.push(timed(p, kind) ? `${LATENCY_WORDS[kind]}: p50 ${secOrDash(p[`${kind}_p50_s`])} · p90 ${secOrDash(p[`${kind}_p90_s`])} · ${plural(p[`n_${kind}`], "rep")}` : `${LATENCY_WORDS[kind]}: no timed rep that counts that night`);
     } else if (metric && p.judged && p.judged[metric]) {
       const j = p.judged[metric], s = j.spread || j;
       lines.push(`${metric}: ${fmtMean(j.mean)} mean · n=${j.n}`);
@@ -2016,35 +2021,41 @@ function trendLegendHtml(kind, metric, t) {
 function trendLatencyLegendHtml(kind, t) {
   const slow = isNumber(trendLatency(t).slow_pct) ? trendLatency(t).slow_pct : 90;
   const target = kind === "turn1" ? `<span><i class="thr"></i>the end-state target, p95 under ${esc(latencyTarget(t))} s: advisory, nothing gates on it</span>` : "";
-  return `<div class="tlegend"><span><i class="line"></i>p50 per night</span><span><i class="line slow"></i>p${esc(slow)} per night (reps in the tooltip; a gap is a night without timing)</span>${target}</div>`;
+  return `<div class="tlegend"><span><i class="line"></i>p50 per night</span><span><i class="line slow"></i>p${esc(slow)} per night (reps in the tooltip; a gap is a night with no timed rep that counts; infra reps never count)</span>${target}</div>`;
 }
+
+// The latency points on the card's time axis: what the row draws and the
+// table lists.
+const latencyDrawn = (points, range) => points.filter((p) => { const ms = pointAt(p); return ms != null && ms >= range.fromMs && ms <= range.toMs; });
 
 // The latency row under a card's charts: the opening chat turn and the
 // agent run by night, on the card's time axis. A series no point carries
 // says so instead of drawing an empty chart.
 function trendLatencyRowHtml(t, points, range, markers, name, key) {
-  const drawn = points.filter((p) => { const ms = pointAt(p); return ms != null && ms >= range.fromMs && ms <= range.toMs; });
+  const drawn = latencyDrawn(points, range);
   const chart = (kind, heading) => {
     const head = `<div class="small mut">${heading}</div>`;
-    if (!drawn.some((p) => timed(p, kind))) return `<div>${head}<p class="mut">No <code>${LATENCY_FIELDS[kind]}</code> on record for this scope in the nightly runs yet.</p></div>`;
+    if (!drawn.some((p) => timed(p, kind))) return `<div>${head}<p class="mut">No timed <code>${LATENCY_FIELDS[kind]}</code> that counts for this scope in the nightly runs yet (infra reps never count).</p></div>`;
     const values = drawn.flatMap((p) => [p[`${kind}_p50_s`], p[`${kind}_p90_s`]]);
     if (kind === "turn1") values.push(latencyTarget(t));
     return `<div>${head}${trendChartHtml(t, drawn, kind, null, range, markers, `${name}: ${LATENCY_WORDS[kind]} by night`, key, secondsScale(values))}${trendLatencyLegendHtml(kind, t)}</div>`;
   };
-  if (!drawn.some(anyTimed)) return `<p class="mut small">No timing on record for this scope yet: no nightly rep in the window carries <code>turn1_s</code> or <code>agent_s</code>.</p>`;
+  if (!drawn.some(anyTimed)) return `<p class="mut small">No timing on record for this scope yet: no timed nightly rep in the window counts (infra reps never count).</p>`;
   return `<div class="tgrid tlat">${chart("turn1", "Chat turn 1 by night · advisory")}${chart("agent", "Agent time by night")}</div>`;
 }
 
-// The table twin of the latency row, newest night first; "" with no timing.
-function trendLatencyTableHtml(t, points, key) {
-  if (!points.some(anyTimed)) return "";
+// The table twin of the latency row, its nights newest first; "" with no
+// timing.
+function trendLatencyTableHtml(t, points, range, key) {
+  const drawn = latencyDrawn(points, range);
+  if (!drawn.some(anyTimed)) return "";
   const tvKey = `${key}:latency`;
-  const rows = points.map((p) => {
+  const rows = drawn.map((p) => {
     const night = trendNight(t, p.night);
     const when = night.href ? `<a href="${esc(night.href)}">${esc(night.label)}</a>` : esc(night.label);
     return `<tr><td>${when}</td>${LATENCY_KINDS.map((kind) => `<td>${esc(secOrDash(p[`${kind}_p50_s`]))}</td><td>${esc(secOrDash(p[`${kind}_p90_s`]))}</td><td>${timed(p, kind) ? p[`n_${kind}`] : "—"}</td>`).join("")}</tr>`;
   }).reverse();
-  return `<details class="tv" data-tv="${esc(tvKey)}"${ui.openTables.has(tvKey) ? " open" : ""}><summary>Latency table · ${plural(points.length, "night")}</summary><table class="tt"><thead><tr><th>Night</th><th>Turn 1 p50</th><th>Turn 1 p90</th><th>Turn 1 reps</th><th>Agent p50</th><th>Agent p90</th><th>Agent reps</th></tr></thead><tbody>${rows.join("")}</tbody></table></details>`;
+  return `<details class="tv" data-tv="${esc(tvKey)}"${ui.openTables.has(tvKey) ? " open" : ""}><summary>Latency table · ${plural(drawn.length, "night")}</summary><table class="tt"><thead><tr><th>Night</th><th>Turn 1 p50</th><th>Turn 1 p90</th><th>Turn 1 reps</th><th>Agent p50</th><th>Agent p90</th><th>Agent reps</th></tr></thead><tbody>${rows.join("")}</tbody></table></details>`;
 }
 
 // The timed latency points, for the card's time axis: a night of the
@@ -2110,7 +2121,7 @@ function trendCardHtml(t, title, sub, points, keyChanges, metric, range, link, p
   return `<div class="tcard"><h3>${title}${sub ? `<small>${sub}</small>` : ""}</h3><div class="tgrid">` +
     `<div><div class="small mut">Pass rate by night</div>${trendChartHtml(t, points, "rate", null, range, markers, `${name}: pass rate by night`, key)}${trendLegendHtml("rate", null, t)}</div>` +
     `<div><div class="small mut">Judged ${esc(metric || "quality")} by night · advisory</div>${metric ? trendChartHtml(t, points, "judged", metric, range, markers, `${name}: ${metric} by night`, key) : `<p class="mut">No judged metric in the store yet.</p>`}${metric ? trendLegendHtml("judged", metric, t) : ""}</div>` +
-    `</div>${trendLatencyRowHtml(t, latency, range, latencyMarkers(markers), name, key)}${footer || ""}${trendTableHtml(t, points, metric, perDomain, key)}${trendLatencyTableHtml(t, latency, key)}</div>`;
+    `</div>${trendLatencyRowHtml(t, latency, range, latencyMarkers(markers), name, key)}${footer || ""}${trendTableHtml(t, points, metric, perDomain, key)}${trendLatencyTableHtml(t, latency, range, key)}</div>`;
 }
 
 function trendStatusHtml(t) {
@@ -2169,7 +2180,8 @@ function trendHtml(link) {
   const allLatency = latencyPoints(t, "all");
   const range = trendRange([...domainNames.map((name) => domains[name].points || []), timedPoints(allLatency)], link);
   // Every case's timing pooled per night, above the domains' cards.
-  const allRow = `<div class="sec"><h2>Latency, all domains</h2>${trendLatencyRowHtml(t, allLatency, range || { fromMs: nowMs() - PAGE.dayMs, toMs: nowMs() }, latencyMarkers(trendMarkers(t, [], link)), "all domains", "all")}${trendLatencyTableHtml(t, allLatency, "all")}</div>`;
+  const allRange = range || { fromMs: nowMs() - PAGE.dayMs, toMs: nowMs() };
+  const allRow = `<div class="sec"><h2>Latency, all domains</h2>${trendLatencyRowHtml(t, allLatency, allRange, latencyMarkers(trendMarkers(t, [], link)), "all domains", "all")}${trendLatencyTableHtml(t, allLatency, allRange, "all")}</div>`;
   body = allRow + domainNames.map((name) => trendCardHtml(t, `<a href="${esc(trendDomainHref(name))}">${esc(domainWords(name))}</a>`, `${plural((domains[name].cases || []).length, "case")} pooled per night`, domains[name].points || [], domains[name].key_changes, metric, range, link, true, "", `domain:${name}`, latencyPoints(t, "domains", name))).join("");
   return head("Scores over time on main") + trendStatusHtml(t) + ctl + readLine + body + footHtml();
 }
