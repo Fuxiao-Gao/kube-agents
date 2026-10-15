@@ -445,8 +445,10 @@ Read off litellm.openaiCompatible.apiBase, first match wins:
 - Anything else fails: a NetworkPolicy cannot name a DNS name, and both copies of the
   443 rule except private space (the static one has no IPv6 peer at all).
 
-Every refusal is a fail naming the value, so a server the gateway could not reach never
-renders green. Callers include it only when litellm.modelProvider is openai_compatible.
+Every refusal is a fail naming the value. One shape it cannot judge: a two-label host on
+443 may be a public endpoint or a short in-cluster Service name, so it renders with no
+rule and NOTES.txt warns. Callers include it only when litellm.modelProvider is
+openai_compatible.
 */}}
 {{- define "kube-agents.openaiCompatibleEgress" -}}
 {{- $values := .Values.litellm.openaiCompatible | default dict -}}
@@ -533,7 +535,8 @@ renders green. Callers include it only when litellm.modelProvider is openai_comp
 {{- if and (not $ipv4) (eq (len $labels) 2) (ne (index $labels 1) "svc") -}}
 {{- $serviceHint = printf " If this is an in-cluster Service, write it as <svc>.<ns>.svc (%s.svc)." $host -}}
 {{- end -}}
-{{- if and $serviceHint (not (or (kindIs "invalid" $values.targetPort) (empty $values.targetPort))) -}}
+{{- /* Any host that is not a Service ignores targetPort, so a set one means a Service was meant. */ -}}
+{{- if not (or (kindIs "invalid" $values.targetPort) (empty $values.targetPort)) -}}
 {{- fail (printf "litellm.openaiCompatible.apiBase %q is a hostname, not an in-cluster Service, so litellm.openaiCompatible.targetPort is not used and no egress rule would reach the server.%s" $apiBase $serviceHint) -}}
 {{- end -}}
 {{- if or $bracketed $privateIPv4 -}}

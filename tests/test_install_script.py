@@ -1427,7 +1427,13 @@ out_dir=""; acquire_source_repo out_dir "{requested_ref}"; echo "RESOLVED=$out_d
             # Go's parser, and so the operator, refuses a leading zero in an octet.
             ('openai_compatible m http://10.8.0.12:8000/v1 "" 010.8.0.0/24 ""', "is not in CIDR form"),
             # A trailing dot leaves an empty namespace label: not a Service.
-            ('openai_compatible m http://llm./v1 8000 "" ""', "set --openai-compatible-egress-cidrs"),
+            ('openai_compatible m http://llm./v1 8000 "" ""', "OPENAI_COMPATIBLE_TARGET_PORT is not used"),
+            # The chart counts the empty label too, so this is a two-label host.
+            ('openai_compatible m https://llm./v1 8000 "" ""', "write it as <svc>.<ns>.svc"),
+            # Any host that is not a Service ignores a target port.
+            ('openai_compatible m https://vllm.corp.internal/v1 8000 "" ""', "OPENAI_COMPATIBLE_TARGET_PORT is not used"),
+            # A lone trailing colon leaves an empty hextet the chart refuses.
+            ('openai_compatible m "http://[fd00::5]:8000/v1" "" fd00::1:/64 ""', "is not an IPv6 CIDR"),
             # Two labels are a hostname, not <svc>.<ns>, even with a target port,
             # and the refusal points at the .svc spelling of a Service.
             ('openai_compatible m http://vllm.inference:8000/v1 "" "" ""',
@@ -1533,7 +1539,7 @@ out_dir=""; acquire_source_repo out_dir "{requested_ref}"; echo "RESOLVED=$out_d
                 self.assertIn(asked, proc.stdout)
                 self.assertNotIn(not_asked, proc.stdout)
                 # A recorded key is not echoed as the default.
-                self.assertIn("Server API key (optional) [the current key]", proc.stdout)
+                self.assertIn("Server API key (optional; - clears a recorded key) [the current key]", proc.stdout)
                 self.assertNotIn("sk-recorded", proc.stdout)
 
     def test_the_interview_clears_the_egress_value_the_url_does_not_use(self):
@@ -1553,6 +1559,40 @@ out_dir=""; acquire_source_repo out_dir "{requested_ref}"; echo "RESOLVED=$out_d
                 )
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertIn(expected, proc.stdout)
+
+    def test_a_two_label_host_on_443_passes_with_the_svc_warning(self):
+        proc = self._run_install_func(
+            f'{_SOURCE_INSTALLER_COMMON}validate_openai_compatible_inputs openai_compatible m https://llm.models/v1 "" "" ""'
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("write it as <svc>.<ns>.svc (llm.models.svc)", proc.stdout + proc.stderr)
+
+    def test_a_url_carrying_userinfo_is_refused_without_echoing_it(self):
+        proc = self._run_install_func(
+            f'{_SOURCE_INSTALLER_COMMON}validate_openai_compatible_inputs openai_compatible m http://svc:sk-do-not-print@llm.models.svc/v1 8000 "" ""'
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("no userinfo", proc.stdout + proc.stderr)
+        self.assertNotIn("sk-do-not-print", proc.stdout + proc.stderr)
+
+    def test_the_interview_clear_answer_empties_a_recorded_optional_value(self):
+        # prompt_read stubbed to answer "-" to every optional question.
+        stub = ('prompt_read() { case "$1" in *optional*|*Private*) printf -v "$2" %s -;; esac; }\n'
+                f"{_SOURCE_INSTALLER_COMMON}")
+        proc = self._run_install_func(
+            stub + 'm=model u=https://llm.example.com/v1 p="" c=10.0.0.0/24 k=sk-old ca=llm-ca; '
+            'prompt_openai_compatible_settings m u p c k ca; echo "c=[$c] k=[$k] ca=[$ca]"'
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("c=[] k=[] ca=[]", proc.stdout)
+
+    def test_only_a_recorded_other_provider_drops_the_model_name(self):
+        # A MODEL_DEFAULT_NAME from the environment, with no provider recorded,
+        # is this run's own answer and is kept.
+        text = _INSTALL_SH.read_text()
+        block = text[text.index("A model install.env pinned for another provider"):]
+        block = block[: block.index('model_default_name=""')]
+        self.assertIn('[ -n "${MODEL_PROVIDER:-}" ]', block)
 
     def test_step_7_validates_openai_compatible_before_the_apply(self):
         # Fail fast means before step 12 builds anything, on both paths that

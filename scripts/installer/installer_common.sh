@@ -137,7 +137,7 @@ readonly PRIVATE_IPV4_LITERAL_PATTERN='^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0
 # <svc>.<ns>.svc.cluster.local, and a two-label host, which is a hostname but
 # may be a Service written without .svc. The chart's own patterns.
 readonly SERVICE_HOST_PATTERN='^[^.]+\.([^.]+)\.svc(\.cluster\.local)?$'
-readonly TWO_LABEL_HOST_PATTERN='^[^.]+\.[^.]+$'
+readonly TWO_LABEL_HOST_PATTERN='^[^.]*\.[^.]*$'
 
 # ─── Scoped service account pool ──────────────────────────────────────────────
 # SCOPED_SA_POOL_ENABLED arms the pool (the composition's scoped_pool_enabled,
@@ -575,6 +575,11 @@ ipv6_groups() {
   local address="${1:-}" head tail group count=0 out="" missing
   [[ "$address" =~ ^[0-9A-Fa-f:]+$ ]] || return 1
   case "$address" in *::*::*) return 1 ;; esac
+  # A colon at either end that is not part of "::" leaves an empty group, which
+  # the chart and Go's parser refuse; bash's split would drop a trailing one.
+  if [[ "$address" =~ ^:[^:] ]] || [[ "$address" =~ [^:]:$ ]]; then
+    return 1
+  fi
   head="$address" tail=""
   if [[ "$address" == *::* ]]; then
     head="${address%%::*}"
@@ -645,7 +650,8 @@ validate_openai_compatible_inputs() {
   fi
   local host_port host port
   if ! host_port="$(openai_compatible_url_host_port "$api_base")"; then
-    print_error "OPENAI_COMPATIBLE_API_BASE='${api_base}' is not an http:// or https:// URL with a host, an optional port from ${TCP_PORT_MIN} to ${TCP_PORT_MAX}, and no userinfo, query or fragment before the path (a key belongs in OPENAI_COMPATIBLE_API_KEY)."
+    # Not echoed: the userinfo this refuses may be the key itself.
+    print_error "OPENAI_COMPATIBLE_API_BASE is not an http:// or https:// URL with a host, an optional port from ${TCP_PORT_MIN} to ${TCP_PORT_MAX}, and no userinfo, query or fragment before the path (a key belongs in OPENAI_COMPATIBLE_API_KEY)."
     return 1
   fi
   host="${host_port% *}"
@@ -692,7 +698,9 @@ validate_openai_compatible_inputs() {
     if [[ "$host" =~ $TWO_LABEL_HOST_PATTERN ]] && [[ "${host#*.}" != "svc" ]]; then
       service_hint=" If this is an in-cluster Service, write it as <svc>.<ns>.svc (${host}.svc)."
     fi
-    if [ -n "$service_hint" ] && [ -n "$target_port" ]; then
+    # Any host that is not a Service ignores the port, so a set one means a
+    # Service was meant (the chart refuses the same).
+    if [ -n "$target_port" ]; then
       print_error "OPENAI_COMPATIBLE_API_BASE='${api_base}' is a hostname, not an in-cluster Service, so OPENAI_COMPATIBLE_TARGET_PORT is not used and no egress rule would reach the server.${service_hint}"
       return 1
     fi
@@ -703,6 +711,12 @@ validate_openai_compatible_inputs() {
     if [ "$port" != "$HTTPS_DEFAULT_PORT" ]; then
       print_error "OPENAI_COMPATIBLE_API_BASE='${api_base}' is not an in-cluster Service and is reached on port ${port}: set --openai-compatible-egress-cidrs (OPENAI_COMPATIBLE_EGRESS_CIDRS in install.env) to the private ranges the server is reached at. NetworkPolicy cannot match a DNS name, and without them the gateway reaches only public addresses on ${HTTPS_DEFAULT_PORT}.${service_hint}"
       return 1
+    fi
+    # A two-label host on 443 may be a public endpoint or a short in-cluster
+    # Service name; neither the chart nor this can tell, so it passes, as in
+    # the chart's NOTES, with a warning.
+    if [ -n "$service_hint" ]; then
+      print_warning "OPENAI_COMPATIBLE_API_BASE='${api_base}' is read as a public hostname, so the gateway gets no egress rule for it.${service_hint}"
     fi
   fi
 

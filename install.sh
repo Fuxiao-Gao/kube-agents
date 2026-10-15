@@ -600,6 +600,8 @@ PARAM_MODEL_DEFAULT_NAME="${MODEL_DEFAULT_NAME:-}"
 # Whether --model-default-name was typed: a switch to openai_compatible does not
 # carry over a model install.env pinned for another provider.
 PARAM_MODEL_DEFAULT_NAME_PASSED="false"
+# The interview answer that clears a recorded optional openai_compatible value.
+readonly OPENAI_COMPATIBLE_CLEAR_ANSWER="-"
 # Empty takes DEFAULT_MODEL_MAX_TOKENS (0, no budget) in the tfvars generator,
 # as an empty MODEL_DEFAULT_NAME takes the provider's default model.
 PARAM_MODEL_MAX_TOKENS="${MODEL_MAX_TOKENS:-}"
@@ -4587,11 +4589,19 @@ prompt_openai_compatible_settings() {
     prompt_read "Server pod port (the gateway's NetworkPolicy matches it, not the Service port)" "$target_port_var" "${!target_port_var:-}"
   elif [ -n "$host" ]; then
     printf -v "$target_port_var" '%s' ""
-    prompt_read "Private ranges the server is reached at, comma-separated CIDRs (empty only for a public endpoint on 443)" "$egress_cidrs_var" "${!egress_cidrs_var:-}"
+    prompt_read "Private ranges the server is reached at, comma-separated CIDRs (empty only for a public endpoint on 443; ${OPENAI_COMPATIBLE_CLEAR_ANSWER} clears a recorded value)" "$egress_cidrs_var" "${!egress_cidrs_var:-}"
   fi
   # The label keeps a recorded key off the screen.
-  prompt_read "Server API key (optional)" "$api_key_var" "${!api_key_var:-}" true "${!api_key_var:+the current key}"
-  prompt_read "Secret holding a CA, under ca.crt, that signs the server's certificate (optional)" "$ca_name_var" "${!ca_name_var:-}"
+  prompt_read "Server API key (optional; ${OPENAI_COMPATIBLE_CLEAR_ANSWER} clears a recorded key)" "$api_key_var" "${!api_key_var:-}" true "${!api_key_var:+the current key}"
+  prompt_read "Secret holding a CA, under ca.crt, that signs the server's certificate (optional; ${OPENAI_COMPATIBLE_CLEAR_ANSWER} clears a recorded name)" "$ca_name_var" "${!ca_name_var:-}"
+  # prompt_read keeps a recorded value on an empty answer, so an endpoint that
+  # no longer needs one of these optional values says so with the clear answer.
+  local optional_var
+  for optional_var in "$egress_cidrs_var" "$api_key_var" "$ca_name_var"; do
+    if [ "${!optional_var:-}" = "$OPENAI_COMPATIBLE_CLEAR_ANSWER" ]; then
+      printf -v "$optional_var" '%s' ""
+    fi
+  done
 }
 
 # Validates explicit values for existing-cluster opt-in flags (loud like --enable-gvisor)
@@ -6665,8 +6675,11 @@ main() {
   fi
   # A model install.env pinned for another provider is not this server's. On a
   # switch with no --model-default-name, start empty, so the check below stops
-  # the run instead of asking the server for the old provider's model.
-  if [ "$model_provider" = "openai_compatible" ] && [ "${MODEL_PROVIDER:-}" != "openai_compatible" ] &&
+  # the run instead of asking the server for the old provider's model. Only a
+  # recorded other provider counts: with none, a MODEL_DEFAULT_NAME given in
+  # the environment is this run's own answer.
+  if [ "$model_provider" = "openai_compatible" ] && [ -n "${MODEL_PROVIDER:-}" ] &&
+    [ "${MODEL_PROVIDER}" != "openai_compatible" ] &&
     [ "$PARAM_MODEL_DEFAULT_NAME_PASSED" != "true" ]; then
     model_default_name=""
   fi

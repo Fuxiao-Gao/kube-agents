@@ -17,6 +17,19 @@ data, and the OPENAI_COMPATIBLE_API_KEY cross the network unencrypted. Serve the
 endpoint over https.
 {{- end }}
 {{- end }}
+{{- if and .Values.litellm.enabled (eq .Values.litellm.modelProvider "openai_compatible") }}
+{{- $openaiCompatibleBase := .Values.litellm.openaiCompatible.apiBase | default "" | toString }}
+{{- $openaiCompatibleHost := $openaiCompatibleBase | trimPrefix "https://" | trimPrefix "http://" | splitList "/" | first | splitList ":" | first | lower }}
+{{- $openaiCompatibleLabels := splitList "." $openaiCompatibleHost }}
+{{- if and (eq (len $openaiCompatibleLabels) 2) (ne (index $openaiCompatibleLabels 1) "svc") (not (include "kube-agents.openaiCompatibleEgress" .)) }}
+
+WARNING: litellm.openaiCompatible.apiBase {{ $openaiCompatibleBase }} names a
+two-label host, which the chart reads as a public hostname, so the gateway gets
+no egress rule for it and reaches it only over its public port-443 rule. If it
+is an in-cluster Service, write it as <svc>.<ns>.svc ({{ $openaiCompatibleHost }}.svc),
+or every model call will time out.
+{{- end }}
+{{- end }}
 
 {{- if .Values.platformAgent.enabled }}
 

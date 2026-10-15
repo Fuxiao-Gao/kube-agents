@@ -303,6 +303,33 @@ class RenderRefusalTest(unittest.TestCase):
         self.assertNotEqual(res.returncode, 0)
         self.assertNotIn("<svc>.<ns>.svc", res.stderr)
 
+    def test_any_non_service_host_with_a_target_port_is_refused(self) -> None:
+        for api_base in ("https://vllm.corp.internal/v1", "https://8.8.8.8/v1"):
+            with self.subTest(api_base):
+                self._assert_fails(
+                    {"apiBase": api_base, "targetPort": SERVER_TARGET_PORT},
+                    "targetPort is not used",
+                )
+
+    def test_a_numeric_namespace_is_quoted_in_the_static_policy(self) -> None:
+        res = _helm_template(
+            *HARNESS_ARGS, *OPERATOR_OFF_ARGS,
+            "--set", "litellm.modelProvider=openai_compatible",
+            "--set", "litellm.modelDefaultName=m",
+            "--set", "litellm.openaiCompatible.apiBase=http://llm.123.svc/v1",
+            "--set", f"litellm.openaiCompatible.targetPort={SERVER_TARGET_PORT}",
+        )
+        self.assertIn('kubernetes.io/metadata.name: "123"', res.stdout)
+        names = [
+            peer["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"]
+            for doc in yaml.safe_load_all(res.stdout)
+            if doc and doc.get("kind") == "NetworkPolicy" and doc["metadata"]["name"] == "litellm-policy"
+            for rule in doc["spec"]["egress"]
+            for peer in rule.get("to", [])
+            if "namespaceSelector" in peer
+        ]
+        self.assertIn("123", names)
+
     def test_a_host_already_ending_in_svc_gets_no_svc_hint(self) -> None:
         """vllm.svc is missing its namespace; vllm.svc.svc would be no fix."""
         res = _render({"apiBase": "http://vllm.svc:8000/v1"}, check=False)
@@ -599,6 +626,18 @@ class PlainHttpNotesTest(unittest.TestCase):
             "litellm.openaiCompatible.egressCIDRs={10.20.0.0/24}",
         )
         self.assertIn(self.WARNING, notes)
+
+    def test_a_two_label_host_on_443_warns_about_the_svc_form(self) -> None:
+        self.assertIn(
+            "write it as <svc>.<ns>.svc (llm.models.svc)",
+            self._notes("litellm.openaiCompatible.apiBase=https://llm.models/v1"),
+        )
+        for sets in (
+            ("litellm.openaiCompatible.apiBase=https://llm.corp.example.com/v1",),
+            ("litellm.openaiCompatible.apiBase=http://vllm.models.svc:8000/v1", "litellm.openaiCompatible.targetPort=8000"),
+        ):
+            with self.subTest(sets):
+                self.assertNotIn("<svc>.<ns>.svc", self._notes(*sets))
 
     def test_an_in_cluster_service_or_https_does_not_warn(self) -> None:
         for sets in (

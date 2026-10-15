@@ -563,7 +563,7 @@ spec:
         {{- if .namespace }}
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: {{ .namespace }}
+              kubernetes.io/metadata.name: {{ .namespace | quote }}
         {{- end }}
         {{- range .cidrs }}
         - ipBlock:
