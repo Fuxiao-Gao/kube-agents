@@ -1734,9 +1734,9 @@ class GatewayDeliveryTest(unittest.TestCase):
         relay.assert_not_called()
         return out.getvalue(), seen
 
-    def test_posts_the_card_into_the_origin_thread_and_prints_nothing(self):
+    def test_posts_the_card_into_the_origin_thread_and_prints_only_the_audits_note(self):
         out, seen = self._run()
-        self.assertEqual(out, "")
+        self.assertEqual(out, bootstrap_delivery.AUDITS_RUNNING_NOTE + "\n")
         self.assertEqual(seen["argv"][:6], ["a2a", "notify", "--platform", "slack", "--chat-file", seen["path"]])
         self.assertEqual(seen["argv"][seen["argv"].index("--thread") + 1], "C1/1.5")
         self.assertEqual(seen["argv"][-1], PRESENTED)
@@ -1745,11 +1745,11 @@ class GatewayDeliveryTest(unittest.TestCase):
 
     def test_a_refusal_prints_the_text(self):
         out, _ = self._run(returncode=1)
-        self.assertEqual(out, PRESENTED)
+        self.assertEqual(out, delivered(PRESENTED))
 
     def test_no_thread_prints_the_text(self):
         out, seen = self._run(origin={"platform": "slack", "chat_id": "C1"})
-        self.assertEqual(out, PRESENTED)
+        self.assertEqual(out, delivered(PRESENTED))
         self.assertEqual(seen, {})
 
 if __name__ == "__main__":
