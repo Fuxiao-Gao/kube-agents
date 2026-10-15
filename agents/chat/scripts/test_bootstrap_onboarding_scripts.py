@@ -1636,11 +1636,21 @@ class FirstRunAuditsTest(unittest.TestCase):
             slugs.update(re.findall(r"`([a-z0-9-]+)`", cells[1]))
         return slugs
 
-    def _note(self, state=None, repositories=("acme/gitops",), no_coverage=False) -> str:
+    def _note(self, state=None, recorded=None, no_coverage=False) -> str:
+        """The note for oobe's ``state`` and the gate's ``recorded`` no_repository value (None: no field)."""
         if state is not None:
             oobe.write_state(self.d, state)
-        with mock.patch.object(oobe, "managed_repositories", return_value=list(repositories)):
+        marker = "task_id=t_sweep\nfiled_at=1\n"
+        if recorded is not None:
+            marker += bootstrap_handoff.no_repository_line(recorded)
+        (self.d / SCAN_FILED).write_text(marker, encoding="utf-8")
+        # The note goes by what the gate recorded, never by the list as it reads now.
+        with mock.patch.object(oobe, "managed_repositories", side_effect=AssertionError("read the list")):
             return bootstrap_delivery._audits_note(self.d, no_coverage)
+
+    def _skipped(self, reason: str) -> None:
+        with contextlib.redirect_stderr(io.StringIO()):
+            oobe.skip(self.d, reason, 1000.0)
 
     def test_the_slug_table_names_no_check_a_first_run_audit_owns(self):
         sys.path.insert(0, str(FLEET_AUDIT_SCRIPTS))
@@ -1657,7 +1667,8 @@ class FirstRunAuditsTest(unittest.TestCase):
     def test_the_sop_has_the_section_the_card_bodies_name(self):
         heading = "## Without a GitOps repository\n"
         self.assertIn(heading, CLUSTER_INVENTORY_SOP.read_text(encoding="utf-8"))
-        for body in (bootstrap_handoff.NO_REPOSITORY_RUN, bootstrap_handoff.NO_REPOSITORY_SKIP):
+        for body in (bootstrap_handoff.NO_REPOSITORY_RUN, bootstrap_handoff.NO_REPOSITORY_UNREAD_RUN,
+                     bootstrap_handoff.NO_REPOSITORY_SKIP):
             self.assertIn(f'"{heading[3:].strip()}"', body)
 
     def test_the_sweep_card_runs_the_no_repository_section_only_without_a_repository(self):
@@ -1673,69 +1684,85 @@ class FirstRunAuditsTest(unittest.TestCase):
             self.assertLess(body.index("**Step 3"), body.index(expected))
             self.assertLess(body.index(expected), body.index("**Step 4"))
 
-    def test_an_unreadable_repository_list_runs_the_no_repository_section(self):
-        # The stage retries the read rather than starting the audits, so the scan cannot count on them.
+    def test_an_unreadable_repository_list_runs_the_no_repository_section_and_says_why(self):
+        # The stage retries the read rather than starting the audits, so the scan cannot count on them,
+        # but nothing found that the install has no repository either.
         with mock.patch.object(oobe, "managed_repositories", side_effect=RuntimeError("no kubectl")), \
                 mock.patch.object(bootstrap_scan_gate, "cluster_agents", return_value=[]), \
                 contextlib.redirect_stderr(io.StringIO()):
-            self.assertIn(bootstrap_handoff.NO_REPOSITORY_RUN, bootstrap_scan_gate._task_body())
+            body = bootstrap_scan_gate._task_body()
+        self.assertIn(bootstrap_handoff.NO_REPOSITORY_UNREAD_RUN, body)
+        self.assertNotIn(bootstrap_handoff.NO_REPOSITORY_RUN, body)
+        self.assertNotIn("was found", bootstrap_handoff.NO_REPOSITORY_UNREAD_RUN)
 
     def test_the_sweep_card_records_what_it_was_told_for_the_hand_off(self):
-        for repositories, expected in (([], bootstrap_handoff.NO_REPOSITORY_RUN),
-                                       (["acme/gitops"], bootstrap_handoff.NO_REPOSITORY_SKIP)):
-            with self.subTest(repositories=repositories):
+        for read_list, expected, recorded in (
+            (mock.Mock(return_value=[]), bootstrap_handoff.NO_REPOSITORY_RUN, bootstrap_handoff.RECORDED_YES),
+            (mock.Mock(return_value=["acme/gitops"]), bootstrap_handoff.NO_REPOSITORY_SKIP, bootstrap_handoff.RECORDED_NO),
+            (mock.Mock(side_effect=RuntimeError("no kubectl")), bootstrap_handoff.NO_REPOSITORY_UNREAD_RUN,
+             bootstrap_handoff.RECORDED_UNKNOWN),
+        ):
+            with self.subTest(recorded=recorded):
                 filed = []
                 kanban = types.ModuleType("hermes_cli.kanban")
                 kanban.run_slash = lambda cmd: filed.append(cmd) or '{"id": "t_sweep"}'
                 modules = {"hermes_cli": types.ModuleType("hermes_cli"), "hermes_cli.kanban": kanban}
                 with mock.patch.dict(sys.modules, modules), \
-                        mock.patch.object(oobe, "managed_repositories", return_value=repositories) as read, \
+                        mock.patch.object(oobe, "managed_repositories", read_list), \
                         mock.patch.object(bootstrap_scan_gate, "cluster_agents", return_value=[]), \
                         contextlib.redirect_stderr(io.StringIO()):
                     self.assertEqual(bootstrap_scan_gate.file_scan_task(self.d), "t_sweep")
-                self.assertEqual(read.call_count, 1)
+                self.assertEqual(read_list.call_count, 1)
                 args = shlex.split(filed[0])
                 self.assertIn(expected, args[args.index("--body") + 1])
-                self.assertIs(
-                    bootstrap_handoff.recorded_no_repository(self.d / SCAN_FILED), expected == bootstrap_handoff.NO_REPOSITORY_RUN
-                )
+                self.assertEqual(bootstrap_handoff.recorded_no_repository(self.d / SCAN_FILED), recorded)
 
-    def test_no_marker_says_the_audits_will_run_when_there_is_a_repository(self):
-        # The stage writes it on its first tick after the ranking card, which delivery can beat.
-        self.assertEqual(self._note(), bootstrap_delivery.AUDITS_RUNNING_NOTE)
+    def test_no_marker_says_the_audits_will_run_unless_the_gate_recorded_no_repository(self):
+        # The stage writes its marker on its first tick after the ranking card, which delivery can beat.
+        for recorded in (None, bootstrap_handoff.RECORDED_NO, bootstrap_handoff.RECORDED_UNKNOWN):
+            with self.subTest(recorded=recorded):
+                self.assertEqual(self._note(recorded=recorded), bootstrap_delivery.AUDITS_RUNNING_NOTE)
 
-    def test_no_marker_and_no_repository_says_the_audits_will_not_run_and_the_report_covers_them(self):
+    def test_no_marker_and_a_recorded_no_repository_says_the_audits_will_not_run_and_the_report_covers_them(self):
         self.assertEqual(
-            self._note(repositories=()),
+            self._note(recorded=bootstrap_handoff.RECORDED_YES),
             f"The first-run audits did not run: {oobe.SKIP_NO_REPOSITORY}. {bootstrap_delivery.AUDITS_COVERED_NOTE}",
         )
 
-    def test_no_marker_and_an_unreadable_list_says_the_audits_will_run(self):
-        with mock.patch.object(oobe, "managed_repositories", side_effect=RuntimeError("no kubectl")):
-            self.assertEqual(bootstrap_delivery._audits_note(self.d, False), bootstrap_delivery.AUDITS_RUNNING_NOTE)
+    def test_a_skip_says_whether_the_report_covers_the_checks_by_what_the_gate_recorded(self):
+        # Recorded no with a skip for no repository: the list emptied between the sweep being filed
+        # and the stage reading it, so neither the scan nor the audits checked them.
+        for recorded, coverage in (
+            (bootstrap_handoff.RECORDED_YES, bootstrap_delivery.AUDITS_COVERED_NOTE),
+            (bootstrap_handoff.RECORDED_NO, bootstrap_delivery.AUDITS_NOT_COVERED_NOTE),
+            (bootstrap_handoff.RECORDED_UNKNOWN, bootstrap_delivery.AUDITS_COVERED_NOTE),
+            (None, bootstrap_delivery.AUDITS_MAYBE_COVERED_NOTE),
+        ):
+            for reason in (oobe.SKIP_NO_REPOSITORY, oobe.SKIP_NOT_NEW, oobe.SKIP_UNSETTLED, oobe.SKIP_NO_SWEEP):
+                with self.subTest(recorded=recorded, reason=reason):
+                    self._skipped(reason)
+                    self.assertEqual(
+                        self._note(recorded=recorded), f"The first-run audits did not run: {reason}. {coverage}"
+                    )
 
-    def test_a_skip_for_no_repository_says_the_report_covers_the_checks(self):
-        with contextlib.redirect_stderr(io.StringIO()):
-            oobe.skip(self.d, oobe.SKIP_NO_REPOSITORY, 1000.0)
-        self.assertEqual(
-            self._note(),
-            f"The first-run audits did not run: {oobe.SKIP_NO_REPOSITORY}. {bootstrap_delivery.AUDITS_COVERED_NOTE}",
-        )
+    def test_the_not_covered_note_does_not_say_the_report_covers_them(self):
+        self.assertNotIn("covers", bootstrap_delivery.AUDITS_NOT_COVERED_NOTE)
+        self.assertIn("does not cover", bootstrap_delivery.AUDITS_NOT_COVERED_NOTE)
 
     def test_a_no_coverage_report_without_a_repository_says_nothing_checked_them(self):
         # The hand-off's own report when no cluster's audit reached the raw file covers none of them.
         unchecked = (
             f"The first-run audits did not run: {oobe.SKIP_NO_REPOSITORY}. {bootstrap_delivery.AUDITS_UNCHECKED_NOTE}"
         )
-        self.assertEqual(self._note(repositories=(), no_coverage=True), unchecked)
-        with contextlib.redirect_stderr(io.StringIO()):
-            oobe.skip(self.d, oobe.SKIP_NO_REPOSITORY, 1000.0)
-        self.assertEqual(self._note(no_coverage=True), unchecked)
+        self.assertEqual(self._note(recorded=bootstrap_handoff.RECORDED_YES, no_coverage=True), unchecked)
+        self._skipped(oobe.SKIP_NO_REPOSITORY)
+        for recorded in (None, *bootstrap_handoff.RECORDED_VALUES):
+            with self.subTest(recorded=recorded):
+                self.assertEqual(self._note(recorded=recorded, no_coverage=True), unchecked)
         self.assertNotIn("covers", unchecked)
 
     def test_a_no_coverage_report_after_another_skip_points_at_the_schedules(self):
-        with contextlib.redirect_stderr(io.StringIO()):
-            oobe.skip(self.d, oobe.SKIP_NOT_NEW, 1000.0)
+        self._skipped(oobe.SKIP_NOT_NEW)
         self.assertEqual(
             self._note(no_coverage=True),
             f"The first-run audits did not run: {oobe.SKIP_NOT_NEW}. {bootstrap_delivery.AUDITS_UNCHECKED_SCHEDULED_NOTE}",
@@ -1747,10 +1774,13 @@ class FirstRunAuditsTest(unittest.TestCase):
         (self.d / bootstrap_handoff.HANDOFF_MARKER).write_text(
             f"sweep=t_sweep\ntask_id={bootstrap_handoff.NO_RANKING}\nfiled_at=1\n", encoding="utf-8"
         )
+        (self.d / SCAN_FILED).write_text(
+            "task_id=t_sweep\nfiled_at=1\n" + bootstrap_handoff.no_repository_line(bootstrap_handoff.RECORDED_YES),
+            encoding="utf-8",
+        )
         out = io.StringIO()
         with (
             mock.patch.object(sandbox_exec, "sandbox_enabled", return_value=False),
-            mock.patch.object(oobe, "managed_repositories", return_value=[]),
             contextlib.redirect_stdout(out),
             contextlib.redirect_stderr(io.StringIO()),
         ):
@@ -1760,16 +1790,6 @@ class FirstRunAuditsTest(unittest.TestCase):
             f"# Report\n\nThe first-run audits did not run: {oobe.SKIP_NO_REPOSITORY}. "
             f"{bootstrap_delivery.AUDITS_UNCHECKED_NOTE}\n",
         )
-
-    def test_any_other_skip_says_the_report_covers_the_checks_only_without_a_repository(self):
-        for reason in (oobe.SKIP_NOT_NEW, oobe.SKIP_UNSETTLED, oobe.SKIP_NO_SWEEP):
-            with self.subTest(reason=reason):
-                with contextlib.redirect_stderr(io.StringIO()):
-                    oobe.skip(self.d, reason, 1000.0)
-                self.assertEqual(
-                    self._note(),
-                    f"The first-run audits did not run: {reason}. {bootstrap_delivery.AUDITS_MAYBE_COVERED_NOTE}",
-                )
 
     def test_a_chain_under_way_says_the_audits_are_running(self):
         note = self._note({oobe.STATE_FIRED: ["fleet-wide-cost-analysis"], oobe.STATE_DONE: False})
@@ -1816,8 +1836,11 @@ class FirstRunAuditsTest(unittest.TestCase):
     def test_the_text_delivery_closes_with_the_skip(self):
         (self.d / INVENTORY).write_text("# Report\n", encoding="utf-8")
         (self.d / ALIGNED).touch()
-        with contextlib.redirect_stderr(io.StringIO()):
-            oobe.skip(self.d, oobe.SKIP_NO_REPOSITORY, 1000.0)
+        (self.d / SCAN_FILED).write_text(
+            "task_id=t_sweep\nfiled_at=1\n" + bootstrap_handoff.no_repository_line(bootstrap_handoff.RECORDED_YES),
+            encoding="utf-8",
+        )
+        self._skipped(oobe.SKIP_NO_REPOSITORY)
         out = io.StringIO()
         with (
             mock.patch.object(sandbox_exec, "sandbox_enabled", return_value=False),

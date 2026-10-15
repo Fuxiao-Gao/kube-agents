@@ -186,18 +186,21 @@ With none, it writes the marker with the reason and starts nothing.
 The onboarding scan reads the same list (`oobe.managed_repositories`) once, when it files the sweep
 card, and records the answer in `.bootstrap_scan_filed` for the Cluster Agents' cards. With none,
 the cards also run the "Without a GitOps repository" section of `cluster_inventory_audit_sop.md`,
-which carries the workload checks the audits would otherwise own, so the report covers them. A list the scan cannot read counts as none: the stage
-retries such a read rather than starting the audits, and a check made twice costs less than one
-nobody makes.
+which carries the workload checks the audits would otherwise own, so the report covers them. A list the scan cannot read
+runs that section too, recorded as `unknown` so the cards and the raw report say the list could not be read rather than
+that there is no repository: the stage retries such a read rather than starting the audits, and a check made twice costs
+less than one nobody makes.
 
 It does not exit non-zero. No repository is a configuration the installer offers, not a fault, and
 a failing per-minute job repeats until something changes. The operator is told instead: the
 interactive installer's "GitOps repository connection skipped" line says the scheduled audits run
 without one but write no ledger issue or pull request,
 and the delivered report closes with a note saying the first-run audits did not run, why, and, when a
-cluster was audited, that the report covers their workload checks instead. Delivery can run before the stage has recorded the
-skip; it then reads the repository list itself and, finding it empty, gives the same note. Beside a
-Slack Block Kit card the note is a second message.
+cluster was audited, whether the report covers their workload checks instead. That last part follows what
+`.bootstrap_scan_filed` recorded the cards were told, not the skip's reason, since the list can change between the two
+reads: it covers them for `yes` or `unknown` (the cards ran the section either way), does not for `no`, and the note hedges for a marker with no answer.
+Delivery can run before the stage has recorded the skip; a recorded `yes` then gives the same note. Beside a Slack Block
+Kit card the note is a second message.
 
 ### 4.5 What the operator sees
 

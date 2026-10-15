@@ -522,7 +522,7 @@ def should_skip(data_dir: Path) -> bool:
     )
 
 
-def _task_body(no_repository: bool | None = None) -> str:
+def _task_body(no_repository: str | None = None) -> str:
     """The sweep card's body; ``no_repository`` is what file_scan_task decided, read here when not given."""
     if no_repository is None:
         no_repository = bootstrap_handoff.no_repository_checks()
@@ -533,9 +533,7 @@ def _task_body(no_repository: bool | None = None) -> str:
     instruction_list = "\n".join(f"  - {p}" for p in INSTRUCTIONS_PATHS)
     cluster_audit_list = "\n".join(f"  - {p}" for p in CLUSTER_AUDIT_INSTRUCTIONS_PATHS)
     roster = "\n".join(f"    - `{a['name']}`: {a['cluster_label']}" for a in cluster_agents()) or "    (none)"
-    no_repository_section = (
-        bootstrap_handoff.NO_REPOSITORY_RUN if no_repository else bootstrap_handoff.NO_REPOSITORY_SKIP
-    )
+    no_repository_section = bootstrap_handoff.no_repository_section(no_repository)
     return (
         "First-time onboarding discovery sweep. Follow the inventory SOP, reading whichever "
         "of these exists:\n"
@@ -660,13 +658,14 @@ def file_scan_task(data_dir: Path) -> str | None:
     return task_id
 
 
-def _mark_filed(data_dir: Path, task_id: str, no_repository: bool) -> None:
+def _mark_filed(data_dir: Path, task_id: str, no_repository: str) -> None:
     """Record the filed card so no later tick files a second one.
 
     Written with the card id and timestamp rather than an empty touch file:
     when someone asks why onboarding is not progressing, this is the file that
     tells them which card to go and look at. It also records whether the card
-    was told to run the no-repository checks, for the hand-off.
+    was told to run the no-repository checks, or that it ran them because the
+    repository list could not be read, for the hand-off and the delivery.
     """
     marker = data_dir / SCAN_FILED_MARKER
     try:

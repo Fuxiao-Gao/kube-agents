@@ -44,7 +44,8 @@ text. A failure after the request was sent may have posted, so that path can sen
 report twice; see ``_posted_as_blocks``.
 
 Every delivery closes with a short note on the first-run audits, read off the ``oobe`` stage's
-marker by ``_audits_note``: the report's scan leaves the workload checks to those audits, and a
+marker and the gate's scan marker by ``_audits_note``: the report's scan leaves the workload checks
+to those audits unless the gate recorded otherwise, and a
 short report would otherwise read as a healthy fleet. The text path appends it to the report; the
 card paths print it on their own, since the card leaves closing lines out.
 
@@ -89,6 +90,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+import bootstrap_handoff  # beside this script in the pod
 import oobe  # beside this script in the pod
 import sandbox_exec
 
@@ -175,14 +177,20 @@ PRESENTED_PLATFORM = "slack"
 # unless its cards ran the cluster inventory SOP's "Without a GitOps repository" section.
 AUDITS_SKIPPED_NOTE = "The first-run audits did not run: {reason}."
 AUDITS_NO_REASON = "no reason was recorded"
-# The scan's cards ran that section because the stage's repository list was empty, which is also
-# what this skip read (bootstrap_handoff.no_repository_checks).
+# Which of the next three follows a skip is what the gate recorded the scan's cards were told
+# (bootstrap_handoff.recorded_no_repository), not the skip's reason: the repository list can change
+# between the sweep being filed and the stage reading it. Recorded yes, or unknown (a list the gate
+# could not read): the cards ran that section.
 AUDITS_COVERED_NOTE = (
     "This scan checked probes, requests and limits, autoscaling, NetworkPolicy and pod security in "
     "their place, so this report covers them."
 )
-# Any other skip comes before the stage reads the list, so the report holds those checks only if
-# the list was empty when the scan's cards were filed.
+# Recorded no: the cards were told the first-run audits would run those checks, and skipped them.
+AUDITS_NOT_COVERED_NOTE = (
+    "This scan did not check probes, requests and limits, autoscaling, NetworkPolicy or pod security "
+    "either, so this report does not cover them."
+)
+# Nothing recorded (a marker written before the field existed), or a list the gate could not read.
 AUDITS_MAYBE_COVERED_NOTE = (
     "This report covers probes, requests and limits, autoscaling, NetworkPolicy and pod security only "
     "if the install had no GitOps repository when the scan ran; otherwise those audits check them on "
@@ -200,8 +208,9 @@ AUDITS_UNCHECKED_SCHEDULED_NOTE = (
     "No cluster was audited either, so this report covers none of probes, requests and limits, "
     "autoscaling, NetworkPolicy or pod security; those audits check them on their schedules."
 )
-# Also the note before the marker exists: the stage writes it on its first tick after the ranking
-# card finishes, which a user already in the chat can beat to this run.
+# Also the note before the marker exists, unless the gate recorded no repository: the stage writes
+# it on its first tick after the ranking card finishes, which a user already in the chat can beat
+# to this run.
 AUDITS_RUNNING_NOTE = (
     "Workload checks (probes, requests and limits, autoscaling, NetworkPolicy, pod security) come "
     "from the cost, security, reliability and capacity audits, which run one after another once this "
@@ -608,24 +617,24 @@ def _presented(content: str) -> str:
 def _audits_note(data_dir: Path, no_coverage: bool) -> str:
     """The note on the first-run audits the delivery closes with, from oobe's marker.
 
-    Before the marker exists the stage has not decided, so its repository list stands in: empty is
-    the skip it will record, anything else (unreadable included, which it retries) the chain.
-    ``no_coverage`` is a report no cluster's audit reached (``_no_ranking``), which covers nothing.
+    Whether the report covers those checks after a skip is what the gate recorded the scan's cards
+    were told (``bootstrap_handoff.recorded_no_repository``). Before oobe's marker exists the stage
+    has not decided, so a recorded "no repository" stands in for the skip it will record; anything
+    else is the chain. ``no_coverage`` is a report no cluster's audit reached (``_no_ranking``),
+    which covers nothing.
     """
+    recorded = bootstrap_handoff.recorded_no_repository(data_dir / oobe.SCAN_FILED_MARKER)
     state = oobe.read_state(data_dir)
-    if not state:
-        try:
-            repositories = oobe.managed_repositories()
-        except Exception:  # noqa: BLE001 - the stage retries an unreadable list rather than skipping
-            repositories = None
-        if repositories == []:
-            state = {oobe.STATE_SKIPPED: True, oobe.STATE_REASON: oobe.SKIP_NO_REPOSITORY}
+    if not state and recorded == bootstrap_handoff.RECORDED_YES:
+        state = {oobe.STATE_SKIPPED: True, oobe.STATE_REASON: oobe.SKIP_NO_REPOSITORY}
     if state.get(oobe.STATE_SKIPPED):
         reason = str(state.get(oobe.STATE_REASON) or AUDITS_NO_REASON)
         if no_coverage:
             coverage = AUDITS_UNCHECKED_NOTE if reason == oobe.SKIP_NO_REPOSITORY else AUDITS_UNCHECKED_SCHEDULED_NOTE
-        elif reason == oobe.SKIP_NO_REPOSITORY:
+        elif recorded in (bootstrap_handoff.RECORDED_YES, bootstrap_handoff.RECORDED_UNKNOWN):
             coverage = AUDITS_COVERED_NOTE
+        elif recorded == bootstrap_handoff.RECORDED_NO:
+            coverage = AUDITS_NOT_COVERED_NOTE
         else:
             coverage = AUDITS_MAYBE_COVERED_NOTE
         return f"{AUDITS_SKIPPED_NOTE.format(reason=reason)} {coverage}"

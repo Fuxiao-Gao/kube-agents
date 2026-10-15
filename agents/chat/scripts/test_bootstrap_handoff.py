@@ -249,7 +249,7 @@ class ComposeTest(unittest.TestCase):
         meta = {"project": "p", "cluster": "c", "workloads": [], "findings": [
             {"check": "workload-identity-off", "issue": "Workload Identity is not enabled"}]}
         state = self._state([("t_w", "done", meta, "")])
-        state[h.NO_REPOSITORY_FIELD] = False
+        state[h.NO_REPOSITORY_FIELD] = h.RECORDED_NO
         text = h.compose(state, timed_out=False, now=NOW)
         self.assertIn("are not checked by this scan: the first-run audits own them", text)
         self.assertIn("| Replicas | Startup Probe | Telemetry | ReadOnlyFS |", text)
@@ -257,9 +257,19 @@ class ComposeTest(unittest.TestCase):
         narrow = {"namespace": "ns", "name": "web", "kind": "Deployment", "replicas": "1/1",
                   "probes": {"startup": True}, "telemetry": "none", "security_context": {"read_only_root_fs": False}}
         state = self._state([("t_n", "done", {"project": "p", "cluster": "d", "workloads": [narrow], "findings": []}, "")])
-        state[h.NO_REPOSITORY_FIELD] = True
+        state[h.NO_REPOSITORY_FIELD] = h.RECORDED_YES
         text = h.compose(state, timed_out=False, now=NOW)
         self.assertIn("this scan also checked liveness and readiness probes", text)
+        self.assertIn("| Probes (Live/Ready/Startup) | Requests/Limits/QoS |", text)
+
+    def test_an_unread_repository_list_says_so_rather_than_that_there_is_no_repository(self):
+        narrow = {"namespace": "ns", "name": "web", "kind": "Deployment", "replicas": "1/1",
+                  "probes": {"startup": True}, "telemetry": "none", "security_context": {"read_only_root_fs": False}}
+        state = self._state([("t_n", "done", {"project": "p", "cluster": "d", "workloads": [narrow], "findings": []}, "")])
+        state[h.NO_REPOSITORY_FIELD] = h.RECORDED_UNKNOWN
+        text = h.compose(state, timed_out=False, now=NOW)
+        self.assertIn(h.UNREAD_POSTURE, text)
+        self.assertNotIn("With no GitOps repository", text)
         self.assertIn("| Probes (Live/Ready/Startup) | Requests/Limits/QoS |", text)
 
     def test_a_blocked_card_is_a_named_gap(self):
@@ -668,10 +678,21 @@ class HandOffTest(unittest.TestCase):
             self._run_roster(roster)
         read.assert_not_called()
 
+    def test_an_unreadable_list_runs_the_section_and_says_the_list_could_not_be_read(self):
+        _board(self.board, clusters=[])
+        sent = []
+        with self._stub_kanban(sent), mock.patch.object(oobe, "managed_repositories", side_effect=RuntimeError("no kubectl")):
+            self._run_roster([self._agent("t_a")])
+        body = (lambda a: a[a.index("--body") + 1])(shlex.split(sent[0]))
+        self.assertIn(h.NO_REPOSITORY_UNREAD_RUN, body)
+        self.assertNotIn(h.NO_REPOSITORY_RUN, body)
+        self.assertNotIn(h.NO_REPOSITORY_SKIP, body)
+
     def test_the_cluster_cards_and_the_report_go_by_what_the_gate_recorded(self):
         for recorded, expected, other, posture in (
-            (True, h.NO_REPOSITORY_RUN, h.NO_REPOSITORY_SKIP, "this scan also checked liveness"),
-            (False, h.NO_REPOSITORY_SKIP, h.NO_REPOSITORY_RUN, "are not checked by this scan"),
+            (h.RECORDED_YES, h.NO_REPOSITORY_RUN, h.NO_REPOSITORY_SKIP, "With no GitOps repository"),
+            (h.RECORDED_NO, h.NO_REPOSITORY_SKIP, h.NO_REPOSITORY_RUN, "are not checked by this scan"),
+            (h.RECORDED_UNKNOWN, h.NO_REPOSITORY_UNREAD_RUN, h.NO_REPOSITORY_RUN, h.UNREAD_POSTURE),
         ):
             with self.subTest(recorded=recorded):
                 self.scan_marker.write_text(f"task_id={SWEEP}\nfiled_at={NOW - 60}\n" + h.no_repository_line(recorded))
@@ -679,7 +700,7 @@ class HandOffTest(unittest.TestCase):
                 sent = []
                 # The list now says the opposite; the cards were told what the sweep card was.
                 with self._stub_kanban(sent), mock.patch.object(
-                        oobe, "managed_repositories", return_value=[] if not recorded else ["acme/gitops"]) as read:
+                        oobe, "managed_repositories", return_value=[] if recorded == h.RECORDED_NO else ["acme/gitops"]) as read:
                     self._run_roster([self._agent("t_a")])
                 read.assert_not_called()
                 body = (lambda a: a[a.index("--body") + 1])(shlex.split(sent[0]))
