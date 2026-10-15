@@ -42,42 +42,42 @@ with st.sidebar:
 pages = {
     "Setup": [
         st.Page(
-            APP_DIRECTORY / "pages" / "connections.py",
+            APP_DIRECTORY / "views" / "connections.py",
             title="Connection",
             icon=":material/cable:",
             default=True,
         ),
         st.Page(
-            APP_DIRECTORY / "pages" / "llm_gateway.py",
+            APP_DIRECTORY / "views" / "llm_gateway.py",
             title="LLM Gateway",
             icon=":material/model_training:",
         ),
     ],
     "Agentic": [
         st.Page(
-            APP_DIRECTORY / "pages" / "chat.py",
+            APP_DIRECTORY / "views" / "chat.py",
             title="Chat",
             icon=":material/forum:",
         ),
     ],
     "Observability": [
         st.Page(
-            APP_DIRECTORY / "pages" / "overview.py",
+            APP_DIRECTORY / "views" / "overview.py",
             title="Overview",
             icon=":material/space_dashboard:",
         ),
         st.Page(
-            APP_DIRECTORY / "pages" / "activity.py",
+            APP_DIRECTORY / "views" / "activity.py",
             title="Activity Explorer",
             icon=":material/account_tree:",
         ),
         st.Page(
-            APP_DIRECTORY / "pages" / "kanban.py",
+            APP_DIRECTORY / "views" / "kanban.py",
             title="Task Kanban",
             icon=":material/view_kanban:",
         ),
         st.Page(
-            APP_DIRECTORY / "pages" / "autonomous.py",
+            APP_DIRECTORY / "views" / "autonomous.py",
             title="Scheduled Cron",
             icon=":material/autorenew:",
             url_path="scheduled-cron",
@@ -85,7 +85,7 @@ pages = {
     ],
     "Integration": [
         st.Page(
-            APP_DIRECTORY / "pages" / "google_chat.py",
+            APP_DIRECTORY / "views" / "google_chat.py",
             title="Google Chat",
             icon=":material/chat:",
         ),
