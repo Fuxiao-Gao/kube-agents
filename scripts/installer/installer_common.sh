@@ -470,6 +470,10 @@ openai_compatible_url_host_port() {
   if [ -n "$after_host" ]; then
     [[ "$after_host" =~ ^:([0-9]+)$ ]] || return 1
     port="${BASH_REMATCH[1]}"
+    # The chart reads the port with atoi, so :0443 is 443 there; strip the
+    # leading zeros here so the two agree on the port and on what it needs.
+    port="${port#"${port%%[!0]*}"}"
+    port="${port:-0}"
   fi
   is_tcp_port "$port" || return 1
   printf '%s %s\n' "$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')" "$port"

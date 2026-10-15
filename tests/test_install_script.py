@@ -1499,6 +1499,9 @@ out_dir=""; acquire_source_repo out_dir "{requested_ref}"; echo "RESOLVED=$out_d
             'openai_compatible m https://8.8.8.8/v1 "" "" ""',
             # A two-label host is a hostname, so a public one on 443 needs nothing.
             'openai_compatible m https://openrouter.ai/api/v1 "" "" ""',
+            # A zero-padded port is the number, as the chart's atoi reads it.
+            'openai_compatible m https://llm.example.com:0443/v1 "" "" ""',
+            'openai_compatible m http://10.0.0.5:000080/v1 "" 10.0.0.0/24 ""',
             'openai_compatible m https://example.ai./v1 "" "" ""',
             # The chart lowercases the host before reading a namespace off it.
             'openai_compatible m http://LLM.Models.svc.cluster.local/v1 8000 "" ""',
@@ -1532,6 +1535,24 @@ out_dir=""; acquire_source_repo out_dir "{requested_ref}"; echo "RESOLVED=$out_d
                 # A recorded key is not echoed as the default.
                 self.assertIn("Server API key (optional) [the current key]", proc.stdout)
                 self.assertNotIn("sk-recorded", proc.stdout)
+
+    def test_the_interview_clears_the_egress_value_the_url_does_not_use(self):
+        # A target port kept from a Service URL would fail validation behind a
+        # prompt that is never shown once the URL is a hostname, and the other
+        # way round for CIDRs.
+        stub = ('prompt_read() { :; }\n'
+                f"{_SOURCE_INSTALLER_COMMON}")
+        for url, expected in (
+            ("https://openrouter.ai/api/v1", "p=[] c=[10.0.0.0/24]"),
+            ("http://llm.models.svc/v1", "p=[8000] c=[]"),
+        ):
+            with self.subTest(url=url):
+                proc = self._run_install_func(
+                    stub + f'm=model u="{url}" p=8000 c=10.0.0.0/24 k="" ca=""; '
+                    'prompt_openai_compatible_settings m u p c k ca; echo "p=[$p] c=[$c]"'
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertIn(expected, proc.stdout)
 
     def test_step_7_validates_openai_compatible_before_the_apply(self):
         # Fail fast means before step 12 builds anything, on both paths that

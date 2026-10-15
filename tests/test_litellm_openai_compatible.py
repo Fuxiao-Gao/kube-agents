@@ -553,9 +553,6 @@ class ExistingProvidersUnchangedTest(unittest.TestCase):
                 self.assertEqual(current, base)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 @unittest.skipUnless(shutil.which("helm"), "helm is not installed")
 class PlainHttpNotesTest(unittest.TestCase):
@@ -611,3 +608,7 @@ class PlainHttpNotesTest(unittest.TestCase):
         ):
             with self.subTest(sets):
                 self.assertNotIn(self.WARNING, self._notes(*sets))
+
+
+if __name__ == "__main__":
+    unittest.main()

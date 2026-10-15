@@ -4579,9 +4579,14 @@ prompt_openai_compatible_settings() {
   if host_port="$(openai_compatible_url_host_port "${!api_base_var:-}")"; then
     host="${host_port% *}"
   fi
+  # Each URL shape reads one of the two egress values and ignores the other.
+  # Clear the one it does not ask for, so a value kept from an earlier URL
+  # cannot fail validation behind a prompt that is never shown.
   if [ -n "$host" ] && [ -n "$(openai_compatible_service_namespace "$host")" ]; then
+    printf -v "$egress_cidrs_var" '%s' ""
     prompt_read "Server pod port (the gateway's NetworkPolicy matches it, not the Service port)" "$target_port_var" "${!target_port_var:-}"
   elif [ -n "$host" ]; then
+    printf -v "$target_port_var" '%s' ""
     prompt_read "Private ranges the server is reached at, comma-separated CIDRs (empty only for a public endpoint on 443)" "$egress_cidrs_var" "${!egress_cidrs_var:-}"
   fi
   # The label keeps a recorded key off the screen.
