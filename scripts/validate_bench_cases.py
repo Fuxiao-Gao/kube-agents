@@ -185,8 +185,9 @@ KNOWN_UNREGISTERED = {
         "permission, a scheduled plant sweep and infra-lock room land"
     ),
     # The chat-route twin of the case above (#2386): it plants the same stack
-    # and is held out of the nightly for the same #2755 preconditions, with
-    # its red and greens run by hand on a dev install. The entry goes when
+    # and is held out of the nightly for the same #2755 preconditions. It is a
+    # regression guard (main already passes it, 3 of 3 on a dev install), run
+    # by hand on a dev install until then. The entry goes when
     # the case joins hack/eval/nightly-cases.txt, with the 900s audit-band
     # unit_cost_hint.
     "networking-chat-request-runs-collector": (

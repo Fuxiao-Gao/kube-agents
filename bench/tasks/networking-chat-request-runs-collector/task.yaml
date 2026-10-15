@@ -103,7 +103,7 @@ verification_spec:
       type: tool_called
       tool_names: ["kanban_create"]
       require_success: true
-  # The red check. The interpreter or the script's path must sit where a
+  # The guard check. The interpreter or the script's path must sit where a
   # command starts (line start, after ; & | or (, or inside sh -c), so an
   # echo or grep that only quotes it is not a run, and a --help or -h call
   # sweeps nothing. The second lookahead rejects `--check
