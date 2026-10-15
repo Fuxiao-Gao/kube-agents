@@ -4,7 +4,7 @@
 Run: cd scripts && python3 -m unittest test_merge_gate
 
 The two wrong answers cost differently. A gate that passes when Tide would
-not merges a pull request that is unapproved, unsigned or unsmoked; a gate
+not merges a pull request that is unapproved or unsmoked; a gate
 that holds when Tide would merge leaves a ready pull request out of the queue
 with nothing on it saying why. So each verdict gets both sides, the smoke
 skip list is checked against the paths Prow skips, and the queue branch is
@@ -48,20 +48,16 @@ def no_files():
 class FakeAPI:
     """Just enough of `GitHubAPI` for the functions that call it."""
 
-    def __init__(self, raw_pull=None, statuses=(), files=(), check_runs=()):
+    def __init__(self, raw_pull=None, statuses=(), files=()):
         self.repo = REPO
         self.raw_pull = raw_pull
         self.statuses = list(statuses)
         self.files = list(files)
-        self.check_runs = list(check_runs)
         self.posts = []
 
     def get(self, path, tolerate=()):
         if path.endswith("/status?per_page=100"):
             return {"statuses": self.statuses}
-        if "/check-runs?check_name=" in path:
-            assert path.endswith(f"&app_id={gate.CLA_APP_ID}"), path
-            return {"check_runs": self.check_runs}
         return self.raw_pull
 
     def get_all(self, path, per_page=100):
@@ -149,46 +145,12 @@ class SmokeTest(unittest.TestCase):
         self.assertFalse(gate.smoke_required(gate.changed_files(api, 7)))
 
 
-class CLATest(unittest.TestCase):
-    def test_signed_passes_and_missing_waits(self):
-        self.assertEqual(gate.verdicts(pull(statuses=green(gate.SMOKE_CONTEXT, gate.CLA_CONTEXT)), no_files)[gate.CLA_GATE][0], gate.SUCCESS)
-        self.assertEqual(gate.verdicts(pull(statuses=green(gate.SMOKE_CONTEXT)), no_files)[gate.CLA_GATE][0], gate.PENDING)
-
-    def test_unsigned_fails(self):
-        statuses = green(gate.SMOKE_CONTEXT) | {gate.CLA_CONTEXT: ("failure", "CLA not signed")}
-        self.assertEqual(gate.verdicts(pull(statuses=statuses), no_files)[gate.CLA_GATE][0], gate.FAILURE)
-
-
-class CheckRunTest(unittest.TestCase):
-    """`cla/google` comes from the CLA app as a check run; no commit status carries it."""
-
-    def run_(self, status, conclusion=None, started="2026-10-05T10:00:00Z"):
-        return {"name": gate.CLA_CONTEXT, "status": status, "conclusion": conclusion, "started_at": started}
-
-    def test_the_cla_check_run_is_read_under_its_name(self):
-        api = FakeAPI(check_runs=[self.run_("completed", "success")])
-        self.assertEqual(gate.latest_statuses(api, SHA)[gate.CLA_CONTEXT][0], gate.SUCCESS)
-
-    def test_the_latest_run_decides(self):
-        runs = [self.run_("completed", "success", "2026-10-05T11:00:00Z"), self.run_("completed", "failure")]
-        self.assertEqual(gate.latest_statuses(FakeAPI(check_runs=runs), SHA)[gate.CLA_CONTEXT][0], gate.SUCCESS)
-
-    def test_running_is_pending_and_anything_but_success_fails(self):
-        self.assertEqual(gate.check_run_state(self.run_("in_progress")), gate.PENDING)
-        for conclusion in ("failure", "neutral", "cancelled", "action_required"):
-            with self.subTest(conclusion=conclusion):
-                self.assertEqual(gate.check_run_state(self.run_("completed", conclusion)), gate.FAILURE)
-
-    def test_no_check_run_leaves_cla_unset(self):
-        self.assertNotIn(gate.CLA_CONTEXT, gate.latest_statuses(FakeAPI(), SHA))
-
-
 class PostTest(unittest.TestCase):
     def test_only_changed_statuses_are_posted(self):
-        statuses = green(gate.SMOKE_CONTEXT, gate.CLA_CONTEXT) | {gate.SMOKE_GATE: ("success", f"{gate.SMOKE_CONTEXT} passed")}
+        statuses = green(gate.SMOKE_CONTEXT) | {gate.SMOKE_GATE: ("success", f"{gate.SMOKE_CONTEXT} passed")}
         api = FakeAPI()
         gate.gate_pull(api, pull(statuses=statuses))
-        self.assertEqual(sorted(payload["context"] for _, payload in api.posts), [gate.CLA_GATE, gate.LABELS_GATE])
+        self.assertEqual(sorted(payload["context"] for _, payload in api.posts), [gate.LABELS_GATE])
         self.assertTrue(all(path == f"/repos/{REPO}/statuses/{SHA}" for path, _ in api.posts))
 
     def test_a_non_green_verdict_is_not_posted_over_nothing(self):
@@ -199,13 +161,13 @@ class PostTest(unittest.TestCase):
 
     def test_a_non_green_verdict_does_not_replace_a_green(self):
         """Nothing may re-post it once the hold goes, and the queue judges the labels again anyway."""
-        statuses = green(gate.SMOKE_CONTEXT, gate.CLA_CONTEXT, gate.LABELS_GATE)
+        statuses = green(gate.SMOKE_CONTEXT, gate.LABELS_GATE)
         api = FakeAPI()
         gate.gate_pull(api, pull(APPROVED | {"do-not-merge/hold"}, statuses=statuses))
         self.assertNotIn(gate.LABELS_GATE, [payload["context"] for _, payload in api.posts])
 
     def test_a_non_green_verdict_does_not_replace_a_non_green(self):
-        statuses = green(gate.SMOKE_CONTEXT, gate.CLA_CONTEXT) | {gate.LABELS_GATE: ("pending", "held by do-not-merge/hold")}
+        statuses = green(gate.SMOKE_CONTEXT) | {gate.LABELS_GATE: ("pending", "held by do-not-merge/hold")}
         api = FakeAPI()
         gate.gate_pull(api, pull({"approved"}, statuses=statuses))
         self.assertNotIn(gate.LABELS_GATE, [payload["context"] for _, payload in api.posts])
@@ -250,12 +212,6 @@ class GroupTest(unittest.TestCase):
         ref = f"gh-readonly-queue/main/pr-42-{BASE_SHA}"
         api = FakeAPI(raw_pull=self.RAW, files=[{"filename": "a2a/x.go"}])
         self.assertFalse(gate.cmd_group(api, ref, gate.SMOKE_GATE)[0])
-        self.assertFalse(gate.cmd_group(api, ref, gate.CLA_GATE)[0])
-
-    def test_a_signed_cla_check_run_passes_the_group(self):
-        ref = f"gh-readonly-queue/main/pr-42-{BASE_SHA}"
-        runs = [{"name": gate.CLA_CONTEXT, "status": "completed", "conclusion": "success", "started_at": "t"}]
-        self.assertTrue(gate.cmd_group(FakeAPI(raw_pull=self.RAW, check_runs=runs), ref, gate.CLA_GATE)[0])
 
     def test_a_ref_that_is_not_a_queue_branch_fails(self):
         for ref in ("refs/heads/main", "refs/heads/gh-readonly-queue/main/pr-42", ""):

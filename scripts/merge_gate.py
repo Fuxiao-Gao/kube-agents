@@ -1,34 +1,32 @@
 #!/usr/bin/env python3
-"""The merge queue's three gate checks.
+"""The merge queue's two gate checks.
 
-Part of the Tide-to-merge-queue migration (#1363). Tide decides three things
-that `main`'s required GitHub checks do not: the smoke test passed, the CLA is
-signed, and the pull request carries `lgtm` and `approved` with no
-`do-not-merge` label. A merge queue only reads required checks, so each of the
-three becomes one, under these names:
+Part of the Tide-to-merge-queue migration (#1363). Tide decides two things
+that `main`'s required GitHub checks do not: the smoke test passed, and the
+pull request carries `lgtm` and `approved` with no `do-not-merge` label. A
+merge queue only reads required checks, so each of the two becomes one, under
+these names:
 
   - `Smoke gate`: the latest `pull-kube-agents-smoke-test` status on the pull
     request head is green (an `/override` included), or there is none and the
     pull request only changes paths the presubmit skips, which is when Tide
     does not wait for it.
-  - `CLA`: the latest `cla/google` check run from the CLA app on the pull
-    request head passed. The app reports on pull request commits only and
-    never on a queue commit, so `cla/google` itself cannot stay a required
-    check.
   - `Merge labels`: Tide's query for this repository, read from the labels.
 
 Tide also holds a merge on any other posted context that is not green, required
 or not, because no `context_options` entry for this repository says otherwise.
-These three checks do not restate that rule. A check that is not required stops
+These two checks do not restate that rule. The CLA needs no gate:
+`cla/google` stays a required check, because the CLA app also posts it on a
+queue commit (it subscribes to `merge_group`). A check that is not required stops
 blocking a merge at cut-over unless the ruleset adds it.
 
 Each check reports in two places, because the queue asks twice. A pull request
 must already pass every required check to enter the queue, so `pull` and
 `status` post the verdicts as commit statuses on its head (green ones only;
 `post_verdicts` says why). A job's own check run cannot carry them: a run
-started by a `status` or `check_run` event attaches to the default branch,
-not the head. Then the queue runs every required check again on its own
-commit, and `group` decides the same three for the pull request named in the
+started by a `status` event attaches to the default branch, not the head.
+Then the queue runs every required check again on its own commit, and `group`
+decides the same two for the pull request named in the
 queue branch, as jobs that carry the check names. That judges only the last
 pull request in a group, which is enough under the `ALLGREEN` grouping the
 queue must use: every pull request ahead of it passed its own group first.
@@ -52,13 +50,9 @@ BASE = "main"
 DRY_RUN_BASE = "merge-queue-dry-run"
 BASES = (BASE, DRY_RUN_BASE)
 SMOKE_CONTEXT = "pull-kube-agents-smoke-test"
-CLA_CONTEXT = "cla/google"
-#: The google-cla app, which posts `cla/google`. A check run of that name from another app does not count.
-CLA_APP_ID = 42202
 SMOKE_GATE = "Smoke gate"
-CLA_GATE = "CLA"
 LABELS_GATE = "Merge labels"
-GATES = (SMOKE_GATE, CLA_GATE, LABELS_GATE)
+GATES = (SMOKE_GATE, LABELS_GATE)
 #: Tide's query for this repository (`prow/oss/config.yaml` in oss-test-infra) wants both.
 REQUIRED_LABELS = ("approved", "lgtm")
 #: The four labels Tide's query for this repository excludes. Any other `do-not-merge/` label
@@ -89,8 +83,6 @@ DEFAULT_SERVER_URL = "https://github.com"
 SHORT_SHA = 12
 
 SUCCESS = "success"
-#: A check run's `status` once it has a conclusion.
-CHECK_COMPLETED = "completed"
 PENDING = "pending"
 FAILURE = "failure"
 
@@ -145,33 +137,14 @@ def verdicts(pull, files):
         smoke_gate = status_verdict(smoke, SMOKE_CONTEXT)
     return {
         SMOKE_GATE: smoke_gate,
-        CLA_GATE: status_verdict(pull["statuses"].get(CLA_CONTEXT), CLA_CONTEXT),
         LABELS_GATE: labels_verdict(pull["labels"]),
     }
 
 
 def latest_statuses(api, sha):
-    """{context: (state, description)}: the latest status per context on a commit.
-
-    `cla/google` is a check run, not a status, so it is read separately and
-    folded in under its name, its conclusion mapped onto a status state. Only
-    the CLA app's runs count: a workflow job can carry the same name.
-    """
+    """{context: (state, description)}: the latest status per context on a commit."""
     combined = api.get(f"/repos/{api.repo}/commits/{sha}/status?per_page={PER_PAGE}") or {}
-    statuses = {s["context"]: (s["state"], s.get("description") or "") for s in combined.get("statuses") or []}
-    runs_path = f"/repos/{api.repo}/commits/{sha}/check-runs?check_name={CLA_CONTEXT}&app_id={CLA_APP_ID}"
-    runs = (api.get(runs_path) or {}).get("check_runs")
-    if runs:
-        latest = max(runs, key=lambda run: run.get("started_at") or "")
-        statuses[CLA_CONTEXT] = check_run_state(latest), latest.get("conclusion") or latest.get("status") or ""
-    return statuses
-
-
-def check_run_state(run):
-    """A check run read as a status state: running is pending, and only success is success."""
-    if run.get("status") != CHECK_COMPLETED:
-        return PENDING
-    return SUCCESS if run.get("conclusion") == SUCCESS else FAILURE
+    return {s["context"]: (s["state"], s.get("description") or "") for s in combined.get("statuses") or []}
 
 
 def changed_files(api, number):
@@ -197,7 +170,7 @@ def post_verdicts(api, pull, results, dry_run=False):
     required or not, and nothing re-posts a status when the hold sweep's own
     label change starts no run, so a non-green posted while Tide still merges
     could hold a pull request after its inputs turned green again. A green that
-    went stale is safe: the queue judges all three again on its own commit.
+    went stale is safe: the queue judges both again on its own commit.
     """
     lines = []
     target_url = None
@@ -225,7 +198,7 @@ def post_verdicts(api, pull, results, dry_run=False):
 
 
 def gate_pull(api, pull, dry_run=False):
-    """Decide and post the three statuses for one pull request on `main`."""
+    """Decide and post the two statuses for one pull request on `main`."""
     if pull["base"] not in BASES:
         return [f"#{pull['number']}: targets {pull['base']}, not {BASE}; left to Tide"]
     results = verdicts(pull, lambda: changed_files(api, pull["number"]))
