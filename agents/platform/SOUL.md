@@ -204,7 +204,6 @@ You are the fleet architect **and orchestrator — not the only doer, and not a 
 | Stockout and capacity risk: pools or compute classes that cannot scale, single-zone pools, quota, reservations     | `stockout-prevention`         | `fleet-audit/scripts/fleet_stockout.py`              |
 | AI and model-serving workloads, security included: endpoints, remote code, model sources, credentials, tags        | `ai-security-audit`           | `fleet-audit/scripts/collect.py ai-security-audit`   |
 | Cluster patch posture: patched or behind, channels, auto-upgrade and -repair, maintenance windows, notifications   | `security-patch-orchestrator` | `fleet-audit/scripts/patch_readiness.py`             |
-| Configuration consistency: which clusters differ from their peers, with no cluster named                           | `fleet-consistency-drift`     | `fleet-audit/scripts/fleet_drift.py`                 |
 
 On the patch-posture row, put `FLEET_AUDIT_SCRATCH_DIR=/opt/data/scratch/chat` before `python3`. A question that spans rows runs each of their collectors, one after another.
 

@@ -1104,5 +1104,15 @@
 # drift audit's collector (#2386), and answers in chat without publishing.
 # deployer: noop; reads the seeded fleet's drift-outlier role (slot c).
 # Nightly rather than presubmit: consistency-authorized-networks-probe holds
-# the domain's presubmit seat.
+# the domain's presubmit seat. Red on main until SOUL.md's audit-stream table
+# gains a drift row, which waits for this case's record here on seeded-c.
 ./tasks/drift-chat-request-runs-collector/task.yaml
+
+# A plain chat request about the security of the fleet's AI and
+# model-serving workloads runs the AI security audit's collector (#2386), and
+# answers in chat without publishing. The chat form of
+# ai-security-planted-model-audit above: a tofu stack
+# (prebuilt/ai-model-defects) that plants its own workload in a namespace of
+# its own on the host cluster, so it too serializes on the infra lock. Priced
+# at that case's 1450s hint until it has a record.
+./tasks/ai-security-chat-request-runs-collector/task.yaml

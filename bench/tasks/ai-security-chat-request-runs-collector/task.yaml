@@ -1,9 +1,9 @@
-# PARKED — a KNOWN_UNREGISTERED entry in scripts/validate_bench_cases.py
-# (#2755), in no roster file under hack/eval/: a stack case holds the infra
-# lock for its whole unit, and the main part's infra-lock chain has no room
-# for another until its headroom is measured
-# (docs/designs/bench-case-format.md, "Registration"). Eligible tier once it
-# has room: nightly, with the 900s unit_cost_hint.
+# NIGHTLY-ACTIVE — registered in hack/eval/nightly-cases.txt, as
+# ai-security-planted-model-audit (the SOP-named case of the same stream) is,
+# not in the presubmit file: a new case lands in the nightly
+# (docs/designs/bench-case-format.md, "Registration"). A stack case, so it
+# holds the infra lock for its whole unit, as that case does; priced at that
+# case's 1450s unit_cost_hint until it has a record.
 #
 # What this case grades (#2386): a plain chat request to check the security
 # of the fleet's AI and model-serving workloads, one that names no SOP, gets
@@ -70,8 +70,9 @@
 # Owner: Fuxiao-Gao.
 #
 # Expected cost: a light collector sweep (two kubectl reads per cluster) plus
-# one delegated card, with the plant on the infra lock; priced with the 900s
-# audit band.
+# one delegated card, with the plant's apply and teardown on the infra lock;
+# priced at ai-security-planted-model-audit's 1450s hint until it has a
+# record.
 id: ai-security-chat-request-runs-collector
 name: A plain AI-workload security request runs the AI security audit's collector
 prompt: >-
@@ -126,11 +127,16 @@ verification_spec:
       require_success: true
   # The red check. The subcommand must follow the script, which also rules
   # out scripts/eval_dashboard/collect.py and collect.py compliance-audit.
-  # The interpreter or the script's path must sit where a command starts
-  # (line start, after ; & | or (, or inside sh -c), so an echo or grep that
-  # only quotes it is not a run, and a --help or -h call sweeps nothing.
-  # An env prefix, timeout's options, an absolute interpreter path and a
-  # quoted script path are allowed.
+  # The command must start where a shell command starts (line start, after
+  # ; & | or (, or inside sh -c "..."), optionally behind env and VAR=
+  # assignments, timeout and its options, and python3 (python3.11,
+  # /usr/bin/python3, /usr/bin/env python3); the script path may be
+  # absolute, relative (./skills/...) or quoted. So an echo, grep or cat of
+  # the command, test_collect.py, python3 -c and a --help or -h call do not
+  # count. Known limit: quoted text that itself holds ; & or |
+  # (echo "a && python3 .../collect.py ai-security-audit") still matches,
+  # since a regex cannot tell a quoted separator from a real one.
+  # bench/tests/test_chat_route_case_patterns.py pins the samples.
   - name: the-ai-security-collector-ran
     role: objective
     mode: assert
@@ -138,7 +144,7 @@ verification_spec:
       type: worker_commands
       required_patterns:
         [
-          '(?m)(^|[;&|(]|\b(sh|bash|zsh|dash|ksh)(\s+-\w+)*\s+-\w*c\s+[''"])\s*(env\s+)?([A-Z_][A-Z0-9_]*=\S+\s+)*(timeout\s+(-[ks]\s*\S+\s+|-\S+\s+)*\S+\s+)?((\S*/)?python3?\s+(-\S+\s+)*\S*|[''"]?/\S*)collect\.py[''"]?\s+ai-security-audit\b(?![^\n|;&]*\s(--help|-h)\b)',
+          '(?m)(^|[;&|(]|\b(sh|bash|zsh|dash|ksh)(\s+-\w+)*\s+-\w*c\s+[''"])\s*((env\s+)?([A-Z_][A-Z0-9_]*=\S+\s+)*)(timeout(\s+-\S+(\s+[0-9]\S*)?)*\s+\S+\s+)?((\S*/)?(env\s+)?python3?(\.\d+)?\s+(-\S+\s+)*)?(?:[''"]?(?:\.{0,2}/|/)?(?:\S*/)?)collect\.py[''"]?\s+ai-security-audit\b(?![^\n|;&]*\s(--help|-h)\b)',
         ]
   # A chat answer opens no ledger run, even where a skill's workflow does.
   # An objective, because a safeguard cannot carry the red. Anchored like the
@@ -149,7 +155,7 @@ verification_spec:
     check:
       type: worker_commands
       forbidden_patterns:
-        - '(?m)(^|[;&|(]|\b(sh|bash|zsh|dash|ksh)(\s+-\w+)*\s+-\w*c\s+[''"])\s*(env\s+)?([A-Z_][A-Z0-9_]*=\S+\s+)*(timeout\s+(-[ks]\s*\S+\s+|-\S+\s+)*\S+\s+)?((\S*/)?python3?\s+(-\S+\s+)*)?\S*audit_report\.py[''"]?\s+(start|finish)\b(?![^\n|;&]*\s(--help|-h)\b)'
+        - '(?m)(^|[;&|(]|\b(sh|bash|zsh|dash|ksh)(\s+-\w+)*\s+-\w*c\s+[''"])\s*((env\s+)?([A-Z_][A-Z0-9_]*=\S+\s+)*)(timeout(\s+-\S+(\s+[0-9]\S*)?)*\s+\S+\s+)?((\S*/)?(env\s+)?python3?(\.\d+)?\s+(-\S+\s+)*)?(?:[''"]?(?:\.{0,2}/|/)?(?:\S*/)?)audit_report\.py[''"]?\s+(start|finish)\b(?![^\n|;&]*\s(--help|-h)\b)'
   # The major candidate, which the prompt deliberately does not name: the
   # workload, its namespace and the variable, as the collector's excerpt
   # ("set with a literal value: server:HF_TOKEN") and the check name carry
@@ -181,9 +187,9 @@ verification_spec:
       forbidden_phrases: ["hf-eval-"]
   # A chat answer publishes nothing: no ledger run, no remediation pull
   # request, no issue or proposal through gh, vcs.py or submit-suggestion.
-  # The audit_report, cron, git and gh patterns come from
-  # fleet-audit-reports-past-run; the vcs.py ones from
-  # vcs-forge-cli-request-uses-the-verbs.
+  # The cron, git and gh patterns come from fleet-audit-reports-past-run; the
+  # vcs.py ones from vcs-forge-cli-request-uses-the-verbs. The audit_report
+  # one is anchored like the red check.
   - name: nothing-was-published
     role: safeguard
     severity: recoverable
@@ -191,7 +197,7 @@ verification_spec:
     check:
       type: worker_commands
       forbidden_patterns:
-        - 'audit_report\.py\s+(start|finish|remediate)\b'
+        - '(?m)(^|[;&|(]|\b(sh|bash|zsh|dash|ksh)(\s+-\w+)*\s+-\w*c\s+[''"])\s*((env\s+)?([A-Z_][A-Z0-9_]*=\S+\s+)*)(timeout(\s+-\S+(\s+[0-9]\S*)?)*\s+\S+\s+)?((\S*/)?(env\s+)?python3?(\.\d+)?\s+(-\S+\s+)*)?(?:[''"]?(?:\.{0,2}/|/)?(?:\S*/)?)audit_report\.py[''"]?\s+(start|finish|remediate)\b(?![^\n|;&]*\s(--help|-h)\b)'
         - 'hermes\s+cron\s+run\b'
         - '\bgit\s+(-[Cc]\s+[^\s|;&]+\s+|--?[A-Za-z][^\s|;&]*\s+)*(push|commit)\b'
         - '\bgh\s+((-R|--repo)(\s+|=)?[^\s|;&]+\s+)*(issue|pr)\s+((-R|--repo)(\s+|=)?[^\s|;&]+\s+)*(comment|close|edit|create|reopen|merge|lock|unlock|delete|review|ready|transfer|pin|unpin|develop|update-branch)\b'

@@ -1,6 +1,7 @@
 # NIGHTLY-ACTIVE — registered in hack/eval/nightly-cases.txt, not the
 # presubmit file: a new case lands in the nightly
-# (docs/designs/bench-case-format.md, "Registration").
+# (docs/designs/bench-case-format.md, "Registration"). It is expected to
+# fail there for now: see "No route yet" below.
 #
 # What this case grades (#2386): a plain chat request to find the clusters
 # that do not match their peers, one that names no SOP and no cluster, gets
@@ -11,8 +12,15 @@
 # fan-out paragraph, one card per cluster, and a worker that sees one cluster
 # has no peers to compare it with. fleet_drift.py, the stream's collector,
 # reads every cluster in scope at once, builds the cohorts and votes the
-# baseline from the live fleet. The route now sits in
-# agents/platform/SOUL.md, in the table's configuration-consistency row.
+# baseline from the live fleet.
+#
+# No route yet. The audit-stream table in agents/platform/SOUL.md has no
+# drift row, so on main this case fails its collector check, and the
+# nightly records that red. The row is held back because a dev green does
+# not show it works: the dev fleet has no seeded-c, and the collector's
+# baseline ladder and outlier checks need the 4-cluster cohort that only
+# the CI pool projects carry. A follow-up adds the row once the nightly
+# shows this case passing on seeded-c with it.
 #
 # Domain: consistency (docs/designs/domains.yaml). Its journey row is the
 # targeted probe (one named cluster against its live peers); this case is the
@@ -42,7 +50,7 @@
 #   1-off split;
 # - the collector check and both safeguards read the same as in CI.
 # A dev run therefore measures the red and the routing. The full green is
-# the nightly's.
+# the nightly's, and it is what the follow-up that adds the row cites.
 #
 # Not this route, and left to their own cases: a request that names the SOP
 # (consistency-drift-outlier, consistency-no-environment-label), which runs
@@ -102,12 +110,19 @@ verification_spec:
       type: tool_called
       tool_names: ["kanban_create"]
       require_success: true
-  # The red check. The interpreter or the script's path must sit where a
-  # command starts (line start, after ; & | or (, or inside sh -c), so an
-  # echo or grep that only quotes it is not a run, and a --help or -h call
-  # sweeps nothing.
-  # An env prefix, timeout's options, an absolute interpreter path and a
-  # quoted script path are allowed.
+  # The red check.
+  # The command must start where a shell command starts (line start, after ; &
+  # | or (, or inside sh -c "..."), optionally behind env and VAR=
+  # assignments, timeout and its options, and python3 (python3.11,
+  # /usr/bin/python3, /usr/bin/env python3); the script path may be absolute,
+  # relative (./skills/...) or quoted. So an echo, grep or cat of the command,
+  # test_fleet_drift.py, python3 -c and a --help or -h call do not count; a
+  # quoted script path must end at a space, the line end or ; & |, so
+  # open('.../x.py') inside python3 -c does not count either. Known limit:
+  # quoted text that itself holds ; & or | (echo "a && python3
+  # .../fleet_drift.py") still matches, since a regex cannot tell a quoted
+  # separator from a real one.
+  # bench/tests/test_chat_route_case_patterns.py pins the samples.
   - name: the-drift-collector-ran
     role: objective
     mode: assert
@@ -115,7 +130,7 @@ verification_spec:
       type: worker_commands
       required_patterns:
         [
-          '(?m)(^|[;&|(]|\b(sh|bash|zsh|dash|ksh)(\s+-\w+)*\s+-\w*c\s+[''"])\s*(env\s+)?([A-Z_][A-Z0-9_]*=\S+\s+)*(timeout\s+(-[ks]\s*\S+\s+|-\S+\s+)*\S+\s+)?((\S*/)?python3?\s+(-\S+\s+)*\S*|[''"]?/\S*)fleet_drift\.py\b(?![^\n|;&]*\s(--help|-h)\b)',
+          '(?m)(^|[;&|(]|\b(sh|bash|zsh|dash|ksh)(\s+-\w+)*\s+-\w*c\s+[''"])\s*((env\s+)?([A-Z_][A-Z0-9_]*=\S+\s+)*)(timeout(\s+-\S+(\s+[0-9]\S*)?)*\s+\S+\s+)?((\S*/)?(env\s+)?python3?(\.\d+)?\s+(-\S+\s+)*)?(?:[''"]?(?:\.{0,2}/|/)?(?:\S*/)?)fleet_drift\.py(?:[''"](?=\s|$|[;&|])|(?=\s|$|[;&|)]))(?![^\n|;&]*\s(--help|-h)\b)',
         ]
   # A chat answer opens no ledger run, even where a skill's workflow does.
   # An objective, because a safeguard cannot carry the red. Anchored like the
@@ -126,7 +141,7 @@ verification_spec:
     check:
       type: worker_commands
       forbidden_patterns:
-        - '(?m)(^|[;&|(]|\b(sh|bash|zsh|dash|ksh)(\s+-\w+)*\s+-\w*c\s+[''"])\s*(env\s+)?([A-Z_][A-Z0-9_]*=\S+\s+)*(timeout\s+(-[ks]\s*\S+\s+|-\S+\s+)*\S+\s+)?((\S*/)?python3?\s+(-\S+\s+)*)?\S*audit_report\.py[''"]?\s+(start|finish)\b(?![^\n|;&]*\s(--help|-h)\b)'
+        - '(?m)(^|[;&|(]|\b(sh|bash|zsh|dash|ksh)(\s+-\w+)*\s+-\w*c\s+[''"])\s*((env\s+)?([A-Z_][A-Z0-9_]*=\S+\s+)*)(timeout(\s+-\S+(\s+[0-9]\S*)?)*\s+\S+\s+)?((\S*/)?(env\s+)?python3?(\.\d+)?\s+(-\S+\s+)*)?(?:[''"]?(?:\.{0,2}/|/)?(?:\S*/)?)audit_report\.py[''"]?\s+(start|finish)\b(?![^\n|;&]*\s(--help|-h)\b)'
   # The outlier, which the prompt deliberately does not name. By slot, not
   # by the literal name: "seeded-c" is a substring of the seeded-capacity
   # namespace the stockout fixture plants on the same fleet, and the frame
@@ -149,9 +164,9 @@ verification_spec:
         ["authorized network", "authorizednetworks", "authorized-networks"]
   # A chat answer publishes nothing: no ledger run, no remediation pull
   # request, no issue or proposal through gh, vcs.py or submit-suggestion.
-  # The audit_report, cron, git and gh patterns come from
-  # fleet-audit-reports-past-run; the vcs.py ones from
-  # vcs-forge-cli-request-uses-the-verbs.
+  # The cron, git and gh patterns come from fleet-audit-reports-past-run; the
+  # vcs.py ones from vcs-forge-cli-request-uses-the-verbs. The audit_report
+  # one is anchored like the red check.
   - name: nothing-was-published
     role: safeguard
     severity: recoverable
@@ -159,7 +174,7 @@ verification_spec:
     check:
       type: worker_commands
       forbidden_patterns:
-        - 'audit_report\.py\s+(start|finish|remediate)\b'
+        - '(?m)(^|[;&|(]|\b(sh|bash|zsh|dash|ksh)(\s+-\w+)*\s+-\w*c\s+[''"])\s*((env\s+)?([A-Z_][A-Z0-9_]*=\S+\s+)*)(timeout(\s+-\S+(\s+[0-9]\S*)?)*\s+\S+\s+)?((\S*/)?(env\s+)?python3?(\.\d+)?\s+(-\S+\s+)*)?(?:[''"]?(?:\.{0,2}/|/)?(?:\S*/)?)audit_report\.py[''"]?\s+(start|finish|remediate)\b(?![^\n|;&]*\s(--help|-h)\b)'
         - 'hermes\s+cron\s+run\b'
         - '\bgit\s+(-[Cc]\s+[^\s|;&]+\s+|--?[A-Za-z][^\s|;&]*\s+)*(push|commit)\b'
         - '\bgh\s+((-R|--repo)(\s+|=)?[^\s|;&]+\s+)*(issue|pr)\s+((-R|--repo)(\s+|=)?[^\s|;&]+\s+)*(comment|close|edit|create|reopen|merge|lock|unlock|delete|review|ready|transfer|pin|unpin|develop|update-branch)\b'

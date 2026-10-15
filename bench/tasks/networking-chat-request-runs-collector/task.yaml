@@ -103,15 +103,21 @@ verification_spec:
       type: tool_called
       tool_names: ["kanban_create"]
       require_success: true
-  # The guard check. The interpreter or the script's path must sit where a
-  # command starts (line start, after ; & | or (, or inside sh -c), so an
-  # echo or grep that only quotes it is not a run, and a --help or -h call
-  # sweeps nothing. The second lookahead rejects `--check
-  # psc-routing-deadlock`, the project-checks-only run, which skips the
-  # subnet sweep. Either output form counts: `--output <file>` or a `>`
+  # The guard check. Either output form counts: `--output <file>` or a `>`
   # redirect of the stdout manifest.
-  # An env prefix, timeout's options, an absolute interpreter path and a
-  # quoted script path are allowed.
+  # The command must start where a shell command starts (line start, after ; &
+  # | or (, or inside sh -c "..."), optionally behind env and VAR=
+  # assignments, timeout and its options, and python3 (python3.11,
+  # /usr/bin/python3, /usr/bin/env python3); the script path may be absolute,
+  # relative (./skills/...) or quoted. So an echo, grep or cat of the command,
+  # test_networking_audit.py, python3 -c and a --help or -h call do not count;
+  # a quoted script path must end at a space, the line end or ; & |, so
+  # open('.../x.py') inside python3 -c does not count either. The second
+  # lookahead rejects `--check psc-routing-deadlock`, the project-checks-only
+  # run, which skips the subnet sweep. Known limit: quoted text that itself
+  # holds ; & or | (echo "a && python3 .../networking_audit.py") still
+  # matches, since a regex cannot tell a quoted separator from a real one.
+  # bench/tests/test_chat_route_case_patterns.py pins the samples.
   - name: the-networking-collector-ran
     role: objective
     mode: assert
@@ -119,7 +125,7 @@ verification_spec:
       type: worker_commands
       required_patterns:
         [
-          '(?m)(^|[;&|(]|\b(sh|bash|zsh|dash|ksh)(\s+-\w+)*\s+-\w*c\s+[''"])\s*(env\s+)?([A-Z_][A-Z0-9_]*=\S+\s+)*(timeout\s+(-[ks]\s*\S+\s+|-\S+\s+)*\S+\s+)?((\S*/)?python3?\s+(-\S+\s+)*\S*|[''"]?/\S*)networking_audit\.py\b(?![^\n|;&]*\s(--help|-h)\b)(?![^\n|;&]*\s--check(\s+|=)psc-routing-deadlock\b)',
+          '(?m)(^|[;&|(]|\b(sh|bash|zsh|dash|ksh)(\s+-\w+)*\s+-\w*c\s+[''"])\s*((env\s+)?([A-Z_][A-Z0-9_]*=\S+\s+)*)(timeout(\s+-\S+(\s+[0-9]\S*)?)*\s+\S+\s+)?((\S*/)?(env\s+)?python3?(\.\d+)?\s+(-\S+\s+)*)?(?:[''"]?(?:\.{0,2}/|/)?(?:\S*/)?)networking_audit\.py(?:[''"](?=\s|$|[;&|])|(?=\s|$|[;&|)]))(?![^\n|;&]*\s(--help|-h)\b)(?![^\n|;&]*\s--check(\s+|=)psc-routing-deadlock\b)',
         ]
   # A chat answer opens no ledger run, even where a skill's workflow does.
   # An objective, because a safeguard cannot carry the red. Anchored like the
@@ -130,7 +136,7 @@ verification_spec:
     check:
       type: worker_commands
       forbidden_patterns:
-        - '(?m)(^|[;&|(]|\b(sh|bash|zsh|dash|ksh)(\s+-\w+)*\s+-\w*c\s+[''"])\s*(env\s+)?([A-Z_][A-Z0-9_]*=\S+\s+)*(timeout\s+(-[ks]\s*\S+\s+|-\S+\s+)*\S+\s+)?((\S*/)?python3?\s+(-\S+\s+)*)?\S*audit_report\.py[''"]?\s+(start|finish)\b(?![^\n|;&]*\s(--help|-h)\b)'
+        - '(?m)(^|[;&|(]|\b(sh|bash|zsh|dash|ksh)(\s+-\w+)*\s+-\w*c\s+[''"])\s*((env\s+)?([A-Z_][A-Z0-9_]*=\S+\s+)*)(timeout(\s+-\S+(\s+[0-9]\S*)?)*\s+\S+\s+)?((\S*/)?(env\s+)?python3?(\.\d+)?\s+(-\S+\s+)*)?(?:[''"]?(?:\.{0,2}/|/)?(?:\S*/)?)audit_report\.py[''"]?\s+(start|finish)\b(?![^\n|;&]*\s(--help|-h)\b)'
   # The planted subnet, which the prompt deliberately does not name, and its
   # headroom as the collector's excerpt states it ("at least 7 of 8 addresses
   # in use (12% available)"). The headroom phrases are loose until a green
@@ -144,8 +150,9 @@ verification_spec:
       any_of_phrases: ["12%", "12.5%", "7 of 8", "/29"]
   # A chat answer publishes nothing: no ledger run, no remediation pull
   # request, no issue or proposal through gh, vcs.py or submit-suggestion.
-  # Copied from security-chat-request-runs-collector. Its first pattern also
-  # catches the gcp-networking-fabric-audit skill's own ledger workflow
+  # Copied from security-chat-request-runs-collector, with the audit_report
+  # pattern anchored like the red check. That first pattern also catches the
+  # gcp-networking-fabric-audit skill's own ledger workflow
   # (`audit_report.py start` and `finish`); the objective above gates it.
   - name: nothing-was-published
     role: safeguard
@@ -154,7 +161,7 @@ verification_spec:
     check:
       type: worker_commands
       forbidden_patterns:
-        - 'audit_report\.py\s+(start|finish|remediate)\b'
+        - '(?m)(^|[;&|(]|\b(sh|bash|zsh|dash|ksh)(\s+-\w+)*\s+-\w*c\s+[''"])\s*((env\s+)?([A-Z_][A-Z0-9_]*=\S+\s+)*)(timeout(\s+-\S+(\s+[0-9]\S*)?)*\s+\S+\s+)?((\S*/)?(env\s+)?python3?(\.\d+)?\s+(-\S+\s+)*)?(?:[''"]?(?:\.{0,2}/|/)?(?:\S*/)?)audit_report\.py[''"]?\s+(start|finish|remediate)\b(?![^\n|;&]*\s(--help|-h)\b)'
         - 'hermes\s+cron\s+run\b'
         - '\bgit\s+(-[Cc]\s+[^\s|;&]+\s+|--?[A-Za-z][^\s|;&]*\s+)*(push|commit)\b'
         - '\bgh\s+((-R|--repo)(\s+|=)?[^\s|;&]+\s+)*(issue|pr)\s+((-R|--repo)(\s+|=)?[^\s|;&]+\s+)*(comment|close|edit|create|reopen|merge|lock|unlock|delete|review|ready|transfer|pin|unpin|develop|update-branch)\b'

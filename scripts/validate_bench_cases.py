@@ -194,16 +194,6 @@ KNOWN_UNREGISTERED = {
         "#2755: stack case held out of the nightly until runner Compute "
         "permission, a scheduled plant sweep and infra-lock room land"
     ),
-    # A plain AI-security chat request runs collect.py ai-security-audit (#2386).
-    # Has its fixture (its own stack, prebuilt/ai-model-defects on the host) and
-    # belongs in the nightly; held out for the same infra-lock budget as
-    # networking-audit-subnet-range-exhaustion: every case with a `stack:` holds
-    # lock-infra for its whole unit. The entry goes when the chain has room, with
-    # the 900s unit_cost_hint and a roster paragraph carrying the new count.
-    "ai-security-chat-request-runs-collector": (
-        "#2755: stack case held out of the nightly until the infra-lock "
-        "chain has room"
-    ),
     # It grades what a chat channel received, and every CI install deploys with
     # GOOGLE_CHAT_ENABLED and SLACK_ENABLED false (hack/ci-deploy.sh), so the
     # relay posts nowhere there and the case can only fail. Run by hand against
