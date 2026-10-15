@@ -25751,20 +25751,23 @@ class TestSopPath(unittest.TestCase):
             )
 
     # A skill file (script, SKILL.md, reference page) or an SOP named relative to
-    # the profile home, with or without a leading `./` or `../`.
-    RELATIVE = re.compile(r"(?<![\w/.-])(?:\.\.?/)*(?:skills/[\w-]+/|governance/[\w-]+\.md\b)")
+    # the profile home, with or without a leading `./` or `../`, or a script named
+    # relative to the skill's own folder (`./scripts/...`).
+    RELATIVE = re.compile(
+        r"(?<![\w/.-])(?:(?:\.\.?/)*(?:skills/[\w-]+/|governance/[\w-]+\.md\b)|\.\.?/scripts/)"
+    )
 
-    def test_audit_documents_name_skill_files_and_sops_by_full_path(self):
-        """A kanban worker starts in its card's workspace, where `./skills/...`
-        and `governance/...` name nothing; the SOPs and the audit skills must
-        not send it there."""
+    def test_skills_and_sops_name_skill_files_and_sops_by_full_path(self):
+        """A kanban worker starts in its card's workspace, where `./skills/...`,
+        `./scripts/...` and `governance/...` name nothing; no SOP and no platform
+        skill may send it there. A mirrored skill's text comes from its overlay's
+        `append.md` or patches, so the generated SKILL.md covers those too."""
         platform = Path(__file__).resolve().parents[3]
-        documents = sorted((platform / "governance").glob("*_sop.md")) + [
-            platform / "skills" / name / "SKILL.md"
-            for name in ("fleet-audit", "gce-compute-fleet-audit", "gcp-networking-fabric-audit")
-        ]
+        documents = sorted((platform / "governance").glob("*_sop.md")) + sorted(
+            (platform / "skills").glob("*/SKILL.md")
+        )
         for document in documents:
-            with self.subTest(document=document.name):
+            with self.subTest(document=str(document.relative_to(platform))):
                 self.assertEqual(
                     [], self.RELATIVE.findall(document.read_text(encoding="utf-8"))
                 )
@@ -25777,6 +25780,7 @@ class TestSopPath(unittest.TestCase):
             "(../skills/fleet-audit/reference.md)",
             "`skills/gke-compute-classes/references/ccc.md`",
             "`governance/compliance_audit_sop.md`",
+            "python3 ./scripts/get_chat_users.py",
         ):
             with self.subTest(relative=relative):
                 self.assertRegex(relative, self.RELATIVE)
