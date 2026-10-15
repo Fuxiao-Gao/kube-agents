@@ -177,6 +177,7 @@ ADDED_AFTER_THE_MOVE = [
     "session-cluster-question-wake-answers-once",  # a session's delegated question ends in a wake's answer
     "gitops-drift-noise-filtered-triage",  # the drift detector's principal classifier, #2739's fixture
     "manage-cluster-exclusion-installer-route-probe",  # the exclusion route on an installer-made install
+    "stop-on-permission-refusal",  # retry after a command-policy refusal, #1948
 ]
 # Taken back out of the nightly file after registering there, each with a
 # KNOWN_UNREGISTERED entry in scripts/validate_bench_cases.py that says why.
