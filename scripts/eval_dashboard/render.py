@@ -26,7 +26,7 @@ writes six pages and two data files into ``out/``:
 * ``cases.html`` -- **the Cases page**: one row per case with its last
   ``STRIP_RUNS`` presubmit outcomes, its 7- and 30-day pass rates per tier,
   its roster status and its last failure; ``#<case>`` lands on the row.
-* ``nightly.html[#build=<prow build id>][&cases=a,b]`` -- **the Nightly
+* ``nightly.html[#build=<prow build id>&cases=a,b]`` (either key may be left out) -- **the Nightly
   report**: last night's run of the nightly tier (or the night ``build``
   names), its cases by domain with pass / partial / fail and the grader's
   reason, what is newly failing against the night before, the wall clock

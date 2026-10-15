@@ -728,7 +728,7 @@ the question imports it.
 `run.html#build=<prow build id>`
 `grid.html#since=<ISO 8601 UTC>&until=<ISO 8601 UTC>&cases=a,b[&window=6h|24h|36h|7d][&rows=all|admitted|failing]`
 `cases.html#<case id>`, or `cases.html#sort=worst|domain|name&show=all|blocking|held`
-`nightly.html[#build=<prow build id>]`, or `nightly.html#cases=a,b`
+`nightly.html[#build=<prow build id>&cases=a,b]` (either key may be left out)
 `trend.html#cases=a,b`, or `trend.html#domain=<domain>`, each `[&metric=<judged metric>][&since=<ISO 8601 UTC>[&until=<ISO 8601 UTC>]]`
 
 Every parameter travels in the URL fragment as `key=value` pairs joined
@@ -774,7 +774,8 @@ gate comment, the tracking issue) and `briefHref` / `gridHref` / `runHref`
 - `nightly.html#cases=a,b` adds a table per case under "Timing, night over
   night" (state, reps, turn-1 and agent p50 and p90 for each night on the
   page) and scrolls there; a case row's "timing" link
-  (`nightTimingHref`) writes it.
+  (`nightTimingHref`) writes it with the night's `build`, and a night in
+  those tables links with the same `cases`.
 - `window`, `rows`, `sort` and `show` are the Grid's and the Cases page's
   chips as parameters; a value outside the vocabulary is the default.
 - On the Trend page `cases` scopes to those cases (the case-id grammar

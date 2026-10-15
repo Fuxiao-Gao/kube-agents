@@ -803,6 +803,9 @@ class NightlyPageTest(unittest.TestCase):
         first["tasks"] = first["tasks"][1:]
         for r, (agent, turn1) in zip(second["tasks"][0]["reps"], [(100.0, 4.0), (120.0, 11.5), (110.0, 6.0)]):
             r.update(agent_s=agent, turn1_s=turn1)
+        # A name the link grammar refuses (over 80 characters) gets no timing link.
+        refused = "x" * 81
+        second["tasks"].append({**copy.deepcopy(second["tasks"][0]), "name": refused})
         data["runs"] += [first, second]
         with tempfile.TemporaryDirectory() as tmp, \
                 unittest.mock.patch.object(render.classify, "admitted_cases", return_value=frozenset()), \
@@ -814,13 +817,16 @@ class NightlyPageTest(unittest.TestCase):
             self.assertIn(f'<tr><td class="tm"><a href="nightly.html#build={NIGHT_2}">Mon, Sep 7</a></td><td class="num">6.0 s</td><td class="num">11.5 s</td></tr>', app)
             self.assertIn(f'<tr><td class="tm"><a href="nightly.html#build={NIGHT_1}">Sun, Sep 6</a></td><td class="num">—</td><td class="num">—</td></tr>', app)
             self.assertIn("Over every repetition of the night not lost to infra; advisory target p95 &lt; 10 s.", app)
-            self.assertIn('<a href="nightly.html#cases=case-a">timing</a>', app)
+            self.assertIn(f'<a href="nightly.html#build={NIGHT_2}&amp;cases=case-a">timing</a>', app)
+            self.assertNotIn(f"cases={refused}", app)
+            # On an older night, the timing link keeps that night.
+            self.assertIn(f'<a href="nightly.html#build={NIGHT_1}&amp;cases=case-b">timing</a>', dom_text(page, fragment=f"#build={NIGHT_1}"))
             self.assertNotIn("night over night</h3>", app, "no case table without a case in the link")
             app = dom_text(page, fragment="#cases=case-a")
             self.assertIn("<h3><code>case-a</code>, night over night</h3>", app)
-            self.assertIn(f'<tr><td class="tm"><a href="nightly.html#build={NIGHT_2}">Mon, Sep 7</a></td><td><span class="pill p-partial" title="failed some reps">partial</span></td><td class="num">2/3</td>'
+            self.assertIn(f'<tr><td class="tm"><a href="nightly.html#build={NIGHT_2}&amp;cases=case-a">Mon, Sep 7</a></td><td><span class="pill p-partial" title="failed some reps">partial</span></td><td class="num">2/3</td>'
                           '<td class="num tm">6.0 s</td><td class="num tm">11.5 s</td><td class="num tm">110.0 s</td><td class="num tm">120.0 s</td></tr>', app)
-            self.assertIn(f'<tr><td class="tm"><a href="nightly.html#build={NIGHT_1}">Sun, Sep 6</a></td><td class="mut" colspan="6">not recorded</td></tr>', app)
+            self.assertIn(f'<tr><td class="tm"><a href="nightly.html#build={NIGHT_1}&amp;cases=case-a">Sun, Sep 6</a></td><td class="mut" colspan="6">not recorded</td></tr>', app)
             # Scrolled to once on navigation, not on the polls; a plain load does not scroll.
             fast = fast_timers_page(scroll_counting_page(page))
             self.assertEqual(scrolls(dom_html(fast, fragment="#cases=case-a", budget_ms=TWO_POLLS_BUDGET_MS)).group(1), "1")

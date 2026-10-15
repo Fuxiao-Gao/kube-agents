@@ -122,9 +122,6 @@ const PAGE = {
   // The chat-turn target the opening turn's p95 is shown beside, as advice
   // only (nightly.py's TURN1_P95_TARGET_S).
   turn1P95TargetS: 10,
-  // The first night whose reps carry timing; the timing tables say nights
-  // before it have none.
-  timingSince: "2026-10-14",
   // The Trend page (trend.py): a judged metric's name as a URL parameter,
   // the chart geometry (SVG user units; the chart scales to its card), and
   // where "score" is defined once.
@@ -1571,8 +1568,9 @@ function detailHtml() {
 
 const nights = () => (brief.nightly && Array.isArray(brief.nightly.nights) ? brief.nightly.nights.filter((n) => n && typeof n === "object" && n.counts) : []);
 const nightHref = (night) => `${PAGE.pages.nightly}#build=${enc(night.build)}`;
-// The Nightly page with a case's timing night over night (nightTimingHtml).
-const nightTimingHref = (name) => `${PAGE.pages.nightly}#cases=${enc(name)}`;
+// The Nightly page on `night` with the cases' timing night over night
+// (nightTimingHtml), so a link keeps both the night and the cases.
+const nightTimingHref = (night, names) => `${nightHref(night)}&cases=${names.map(enc).join(",")}`;
 const nightParts = (night) => (Array.isArray(night.parts) ? night.parts.filter((p) => p && typeof p === "object") : []);
 // A night is linked by its main part's build; a link to its other part's
 // build opens the same night.
@@ -1659,7 +1657,9 @@ function nightRepText(c) {
 const secOrDash = (v) => (Number.isFinite(v) ? secText(v) : "—");
 
 function nightCaseRow(night, c, newly) {
-  const links = [c.transcript_url ? `<a href="${esc(c.transcript_url)}">transcript</a>` : "", `<a href="${esc(caseHref(c.case))}">history</a>`, `<a href="${esc(nightTimingHref(c.case))}">timing</a>`].filter(Boolean).join(" · ");
+  const links = [c.transcript_url ? `<a href="${esc(c.transcript_url)}">transcript</a>` : "", `<a href="${esc(caseHref(c.case))}">history</a>`,
+    // A name the link grammar refuses could not reach the timing section.
+    linkCaseIds([c.case]).length ? `<a href="${esc(nightTimingHref(night, [c.case]))}">timing</a>` : ""].filter(Boolean).join(" · ");
   const p90 = Number.isFinite(c.turn1_p90_s) || Number.isFinite(c.agent_p90_s) ? `<br><small class="mut">p90 ${esc(secOrDash(c.turn1_p90_s))} / ${esc(secOrDash(c.agent_p90_s))}</small>` : "";
   return `<tr class="${newly.has(c.case) ? "newly" : ""}"><td class="nm">${esc(c.case)}</td>` +
     `<td>${nightStatePill(c)}</td>` +
@@ -1700,7 +1700,7 @@ function nightChangesHtml(night) {
 // names (`#cases=`, a row's "timing" link).
 function nightTimingHtml(link) {
   const list = nights().slice(0, PAGE.nightsListed);
-  const nightCell = (n) => `<td class="tm"><a href="${esc(nightHref(n))}">${esc(nightDay(n))}</a></td>`;
+  const nightCell = (n) => `<td class="tm"><a href="${esc(link.cases.size ? nightTimingHref(n, [...link.cases]) : nightHref(n))}">${esc(nightDay(n))}</a></td>`;
   const whole = list.map((n) => `<tr>${nightCell(n)}<td class="num">${esc(secOrDash(n.turn1_p50_s))}</td><td class="num">${esc(secOrDash(n.turn1_p95_s))}</td></tr>`).join("");
   const parts = [`<h3>The whole night</h3><table class="rel"><thead><tr><th>Night</th><th>Chat turn 1 p50</th><th>Chat turn 1 p95</th></tr></thead><tbody>${whole}</tbody></table>` +
     `<p class="mut small">Over every repetition of the night not lost to infra; advisory target p95 &lt; ${esc(PAGE.turn1P95TargetS)} s.</p>`];
@@ -1720,7 +1720,7 @@ function nightTimingHtml(link) {
   }
   if (!link.cases.size) parts.push(`<p class="mut small">A case's "timing" link in the table above adds its own table here.</p>`);
   return `<div class="sec" id="timing"><h2>Timing, night over night</h2>${parts.join("")}` +
-    `<p class="mut small">The last ${plural(list.length, "night")} on record, newest first. p50 and p90 are nearest rank over the night's repetitions not lost to infra; with the nightly's few repetitions, p90 is the slowest one. Nights before ${esc(PAGE.timingSince)} carry no timing.</p></div>`;
+    `<p class="mut small">The last ${plural(list.length, "night")} on record, newest first. p50 and p90 are nearest rank over the night's repetitions not lost to infra; with the nightly's few repetitions, p90 is the slowest one. A dash is a night whose reps carried no timing.</p></div>`;
 }
 
 function nightsListHtml(current) {
