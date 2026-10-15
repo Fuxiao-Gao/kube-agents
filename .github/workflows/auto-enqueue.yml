@@ -77,6 +77,9 @@ jobs:
         github.event.label.name == 'approved' ||
         startsWith(github.event.label.name, 'do-not-merge'))
     runs-on: ubuntu-latest
+    # One concurrency group and no cancel: a hung call would hold every
+    # enqueue until the 6-hour job limit. A sweep takes well under a minute.
+    timeout-minutes: 10
     permissions:
       contents: read # check out the default branch: the script
       pull-requests: read # the open pull requests, their labels and queue state
