@@ -1810,7 +1810,14 @@ const timed = (p, kind) => isNumber(p[`n_${kind}`]) && p[`n_${kind}`] > 0;
 const anyTimed = (p) => LATENCY_KINDS.some((kind) => timed(p, kind));
 const LATENCY_WORDS = { turn1: "chat turn 1", agent: "agent time" };
 const LATENCY_FIELDS = { turn1: "turn1_s", agent: "agent_s" };
+const LATENCY_HEADS = { turn1: "Turn 1", agent: "Agent" };
 const latencyTarget = (t) => (isNumber(trendLatency(t).target_s) ? trendLatency(t).target_s : PAGE.turn1P95TargetS);
+// A series' slow percentile as trend.json has it (trend.py LATENCY_SLOW_PCT:
+// the opening turn's p95, which its target is defined on; the agent run's
+// p90), its name, and the point field that carries it.
+const latencyPct = (t, kind) => { const pct = trendLatency(t).pct; return pct && isNumber(pct[kind]) ? pct[kind] : null; };
+const slowName = (t, kind) => (latencyPct(t, kind) != null ? `p${latencyPct(t, kind)}` : "the slow percentile");
+const slowField = (t, kind) => `${kind}_p${latencyPct(t, kind)}_s`;
 const pointAt = (p) => parseIso(p.at);
 const fmtRate = (passes, runs) => (runs ? `${pct(passes / runs)} (${passes}/${runs})` : "no graded run");
 const fmtMean = (value) => (isNumber(value) ? value.toFixed(2) : "—");
@@ -1892,8 +1899,9 @@ function secondsScale(values) {
 // One chart: `kind` is "rate" (bars for each night's pass rate, a line for
 // the trailing admission window, the bar), "judged" (a line of means with
 // the spread band; a lone night is a hollow point), or a LATENCY_KINDS
-// series (lines of the p50 and the p90, dashed; a night with no timed rep
-// that counts is a gap; the opening turn carries the advisory target). `scale` is the y-axis.
+// series (lines of the p50 and the series' slow percentile, dashed; a night
+// with no timed rep that counts is a gap; the opening turn carries the
+// advisory target). `scale` is the y-axis.
 // One series colour, the page accent; text in text tokens; the tooltip
 // carries every value.
 function trendChartHtml(t, points, kind, metric, range, markers, title, key, scale = UNIT_SCALE) {
@@ -1942,16 +1950,16 @@ function trendChartHtml(t, points, kind, metric, range, markers, title, key, sca
       parts.push(`<line class="thr" x1="${g.left}" x2="${g.left + plotW}" y1="${y(target).toFixed(1)}" y2="${y(target).toFixed(1)}"></line>`);
       if (!scale.ticks.includes(target)) parts.push(`<text class="thr-l" x="${g.left - 6}" y="${(y(target) + 3.5).toFixed(1)}" text-anchor="end">${scale.fmt(target)}</text>`);
     }
-    for (const pctl of ["p90", "p50"]) {
-      const field = `${kind}_${pctl}_s`, slow = pctl === "p90" ? " slow" : "";
+    for (const field of [slowField(t, kind), `${kind}_p50_s`]) {
+      const slow = field === slowField(t, kind) ? " slow" : "";
       const has = (p) => timed(p, kind) && isNumber(p[field]);
       for (const seg of segments(drawn, has, () => true)) parts.push(`<path class="line${slow}" d="${seg.map((p, i) => `${i ? "L" : "M"}${x(pointAt(p)).toFixed(1)},${y(p[field]).toFixed(1)}`).join(" ")}"></path>`);
       for (const p of drawn.filter(has)) parts.push(`<circle class="dot${slow}" cx="${x(pointAt(p)).toFixed(1)}" cy="${y(p[field]).toFixed(1)}" r="${g.dot}"></circle>`);
     }
     const last = drawn.filter((p) => timed(p, kind)).pop();
-    // Above its p90 point, clear of the lines that reach it; the halo keeps
+    // Above its slow point, clear of the lines that reach it; the halo keeps
     // it readable where the target or a line crosses it.
-    if (last) parts.push(label(x(pointAt(last)), y(last[`${kind}_p90_s`]) - g.dot * 3, `p50 ${secOrDash(last[`${kind}_p50_s`])} · p90 ${secOrDash(last[`${kind}_p90_s`])} · n=${last[`n_${kind}`]}`, "lab halo"));
+    if (last) parts.push(label(x(pointAt(last)), y(last[slowField(t, kind)]) - g.dot * 3, `p50 ${secOrDash(last[`${kind}_p50_s`])} · ${slowName(t, kind)} ${secOrDash(last[slowField(t, kind)])} · n=${last[`n_${kind}`]}`, "lab halo"));
   } else if (metric) {
     const hasMetric = (p) => !!(p.judged && p.judged[metric]);
     const inBand = (p) => { if (!hasMetric(p)) return false; const j = p.judged[metric], s = j.spread || j; return isNumber(s.low) && isNumber(s.high) && (s.nights == null ? (s.cases || 0) > 1 : s.nights > 1); };
@@ -1998,7 +2006,7 @@ function trendChartHtml(t, points, kind, metric, range, markers, title, key, sca
       if (p.window) lines.push(`trailing window: ${fmtRate(p.window.passes, p.window.runs)} across ${plural(p.window.lines, "night")}${p.window.full ? "" : p.window.cut ? " · reaches past this read" : " · not full yet"}`);
       if (p.blocked || p.infra) lines.push(`${p.blocked || 0} blocked · ${p.infra || 0} infra, not in the rate`);
     } else if (LATENCY_KINDS.includes(kind)) {
-      lines.push(timed(p, kind) ? `${LATENCY_WORDS[kind]}: p50 ${secOrDash(p[`${kind}_p50_s`])} · p90 ${secOrDash(p[`${kind}_p90_s`])} · ${plural(p[`n_${kind}`], "rep")}` : `${LATENCY_WORDS[kind]}: no timed rep that counts that night`);
+      lines.push(timed(p, kind) ? `${LATENCY_WORDS[kind]}: p50 ${secOrDash(p[`${kind}_p50_s`])} · ${slowName(t, kind)} ${secOrDash(p[slowField(t, kind)])} · ${plural(p[`n_${kind}`], "rep")}` : `${LATENCY_WORDS[kind]}: no timed rep that counts that night`);
     } else if (metric && p.judged && p.judged[metric]) {
       const j = p.judged[metric], s = j.spread || j;
       lines.push(`${metric}: ${fmtMean(j.mean)} mean · n=${j.n}`);
@@ -2019,9 +2027,8 @@ function trendLegendHtml(kind, metric, t) {
 }
 
 function trendLatencyLegendHtml(kind, t) {
-  const slow = isNumber(trendLatency(t).slow_pct) ? trendLatency(t).slow_pct : 90;
   const target = kind === "turn1" ? `<span><i class="thr"></i>the end-state target, p95 under ${esc(latencyTarget(t))} s: advisory, nothing gates on it</span>` : "";
-  return `<div class="tlegend"><span><i class="line"></i>p50 per night</span><span><i class="line slow"></i>p${esc(slow)} per night (reps in the tooltip; a gap is a night with no timed rep that counts; infra reps never count)</span>${target}</div>`;
+  return `<div class="tlegend"><span><i class="line"></i>p50 per night</span><span><i class="line slow"></i>${esc(slowName(t, kind))} per night (reps in the tooltip; a gap is a night with no timed rep that counts; infra reps never count)</span>${target}</div>`;
 }
 
 // The latency points on the card's time axis: what the row draws and the
@@ -2036,7 +2043,7 @@ function trendLatencyRowHtml(t, points, range, markers, name, key) {
   const chart = (kind, heading) => {
     const head = `<div class="small mut">${heading}</div>`;
     if (!drawn.some((p) => timed(p, kind))) return `<div>${head}<p class="mut">No timed <code>${LATENCY_FIELDS[kind]}</code> that counts for this scope in the nightly runs yet (infra reps never count).</p></div>`;
-    const values = drawn.flatMap((p) => [p[`${kind}_p50_s`], p[`${kind}_p90_s`]]);
+    const values = drawn.flatMap((p) => [p[`${kind}_p50_s`], p[slowField(t, kind)]]);
     if (kind === "turn1") values.push(latencyTarget(t));
     return `<div>${head}${trendChartHtml(t, drawn, kind, null, range, markers, `${name}: ${LATENCY_WORDS[kind]} by night`, key, secondsScale(values))}${trendLatencyLegendHtml(kind, t)}</div>`;
   };
@@ -2053,9 +2060,9 @@ function trendLatencyTableHtml(t, points, range, key) {
   const rows = drawn.map((p) => {
     const night = trendNight(t, p.night);
     const when = night.href ? `<a href="${esc(night.href)}">${esc(night.label)}</a>` : esc(night.label);
-    return `<tr><td>${when}</td>${LATENCY_KINDS.map((kind) => `<td>${esc(secOrDash(p[`${kind}_p50_s`]))}</td><td>${esc(secOrDash(p[`${kind}_p90_s`]))}</td><td>${timed(p, kind) ? p[`n_${kind}`] : "—"}</td>`).join("")}</tr>`;
+    return `<tr><td>${when}</td>${LATENCY_KINDS.map((kind) => `<td>${esc(secOrDash(p[`${kind}_p50_s`]))}</td><td>${esc(secOrDash(p[slowField(t, kind)]))}</td><td>${timed(p, kind) ? p[`n_${kind}`] : "—"}</td>`).join("")}</tr>`;
   }).reverse();
-  return `<details class="tv" data-tv="${esc(tvKey)}"${ui.openTables.has(tvKey) ? " open" : ""}><summary>Latency table · ${plural(drawn.length, "night")}</summary><table class="tt"><thead><tr><th>Night</th><th>Turn 1 p50</th><th>Turn 1 p90</th><th>Turn 1 reps</th><th>Agent p50</th><th>Agent p90</th><th>Agent reps</th></tr></thead><tbody>${rows.join("")}</tbody></table></details>`;
+  return `<details class="tv" data-tv="${esc(tvKey)}"${ui.openTables.has(tvKey) ? " open" : ""}><summary>Latency table · ${plural(drawn.length, "night")}</summary><table class="tt"><thead><tr><th>Night</th>${LATENCY_KINDS.map((kind) => `<th>${LATENCY_HEADS[kind]} p50</th><th>${LATENCY_HEADS[kind]} ${esc(slowName(t, kind))}</th><th>${LATENCY_HEADS[kind]} reps</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table></details>`;
 }
 
 // The timed latency points, for the card's time axis: a night of the
@@ -2138,7 +2145,7 @@ function trendStatusHtml(t) {
 
 function trendHtml(link) {
   const t = trendDoc();
-  const lede = `Every night the nightly tier runs each case against <code>main</code> three times and appends one record per case to the evidence store; this page reads those records back, each night dated by when its record was written. <b>Pass rate is the gate's number</b>: passes over scored repetitions, with the trailing window computed admission reads drawn beside each night. <b>Judged quality is advisory</b> and is never shown as one point: the store carries a mean and its n per night, so the band is the range of nightly means over the last ${esc(t && t.spread_nights || 7)} nights at one version key (a domain's band is the range across its cases). A vertical marker is a night the version key changed, so a step has its explanation next to it. <b>Latency is advisory too</b>: under each card (and over every case above the domain cards), the opening chat turn and the agent run by night, p50 and p${esc(trendLatency(t).slow_pct || 90)} over the scope's repetitions not lost to infra, from the nightly runs on record (the store carries no timing), beside the ${esc(latencyTarget(t))} s chat-turn target. <a href="${PAGE.scoreDocUrl}">What a score is</a> is written once, in the eval-scorer design.`;
+  const lede = `Every night the nightly tier runs each case against <code>main</code> three times and appends one record per case to the evidence store; this page reads those records back, each night dated by when its record was written. <b>Pass rate is the gate's number</b>: passes over scored repetitions, with the trailing window computed admission reads drawn beside each night. <b>Judged quality is advisory</b> and is never shown as one point: the store carries a mean and its n per night, so the band is the range of nightly means over the last ${esc(t && t.spread_nights || 7)} nights at one version key (a domain's band is the range across its cases). A vertical marker is a night the version key changed, so a step has its explanation next to it. <b>Latency is advisory too</b>: under each card (and over every case above the domain cards), the opening chat turn and the agent run by night, p50 and ${esc(slowName(t, "turn1"))} for the turn, p50 and ${esc(slowName(t, "agent"))} for the run, over the scope's repetitions not lost to infra, from the nightly runs on record (the store carries no timing), beside the ${esc(latencyTarget(t))} s chat-turn target. <a href="${PAGE.scoreDocUrl}">What a score is</a> is written once, in the eval-scorer design.`;
   const head = (title) => `<div class="sec head"><h1>${title}</h1><div class="lede">${lede}</div></div>`;
   if (!t || (!t.source && !t.read_at) || !t.records) {
     const why = t && t.source ? `<p class="mut">The store <code>${esc(t.source)}</code> was read ${esc(et(parseIso(t.read_at)))} and holds no record inside its ${esc(t.window_days || "")}-day window yet. The first night that records fills this page.</p>` : "";

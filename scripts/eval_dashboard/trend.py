@@ -38,11 +38,12 @@ timing, so the latency row under each card reads ``data.json``'s nightly
 runs, each night filed as ``nightly.filed_nights`` files it, with its own
 parts only (a main re-run night does not borrow its date's writers part,
 so writers reps count once): per night and scope (a case, a domain's cases,
-every case), the p50 and the ``nightly.SLOW_PCT`` percentile of the opening
-chat turn and of the agent run over the scope's reps that are not
-``infra`` (``nightly.rep_seconds``), with how many reps carry each. A night
-the scope ran without timing is a point without values, which the page
-draws as a gap.
+every case), the p50 and the slow percentile (``LATENCY_SLOW_PCT``: the
+opening chat turn's p95, ``nightly.TURN1_TARGET_PCT``, which its target is
+defined on; the agent run's ``nightly.SLOW_PCT``) over the scope's reps
+that are not ``infra`` (``nightly.rep_seconds``), with how many reps carry
+each. A night the scope ran without timing is a point without values, which
+the page draws as a gap.
 
 ONLY NIGHTLY RECORDS. The store holds what ran on ``main``: only the nightly
 appends to it (a pull request's run is graded against it and never writes),
@@ -89,9 +90,11 @@ DEFAULT_METRIC = "OutcomeValidity"
 DAY_MS = 24 * 3600 * 1000
 KEY_COMPONENTS = ("setup_id", "scoring_version", "judge_model", "fleet", "verifiers")
 DOMAIN_UNKNOWN = nightly.DOMAIN_UNKNOWN
-# The latency row's two series and its percentiles: the median, and the
-# slow-run percentile the Nightly page shows beside it.
+# The latency row's two series and its percentiles: the median, and a slow
+# percentile per series. The opening turn's is the p95 its target is defined
+# on; the agent run's is the slow-run percentile the Nightly page shows.
 LATENCY_SERIES = {"turn1": nightly.REP_TURN1_S, "agent": nightly.REP_AGENT_S}
+LATENCY_SLOW_PCT = {"turn1": nightly.TURN1_TARGET_PCT, "agent": nightly.SLOW_PCT}
 MEDIAN_PCT = 50
 UTC = datetime.timezone.utc
 
@@ -424,7 +427,7 @@ def latency_point(night: str, at: str, seconds: dict[str, list[float]]) -> dict:
     for name, values in seconds.items():
         point[f"n_{name}"] = len(values)
         point[f"{name}_p50_s"] = nightly.percentile(values, MEDIAN_PCT)
-        point[f"{name}_p90_s"] = nightly.percentile(values, nightly.SLOW_PCT)
+        point[f"{name}_p{LATENCY_SLOW_PCT[name]}_s"] = nightly.percentile(values, LATENCY_SLOW_PCT[name])
     return point
 
 
@@ -471,7 +474,7 @@ def latency_document(data: dict, store_nights: list[dict], in_window) -> dict:
     by_at = lambda points: sorted(points, key=at_ms)
     return {
         "target_s": nightly.TURN1_P95_TARGET_S,
-        "slow_pct": nightly.SLOW_PCT,
+        "pct": LATENCY_SLOW_PCT,
         "nights": by_at(nights),
         "all": by_at(scopes["all"][""]),
         "domains": {name: by_at(points) for name, points in sorted(scopes["domains"].items())},

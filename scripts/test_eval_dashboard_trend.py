@@ -358,10 +358,10 @@ class LatencyTest(unittest.TestCase):
         cls.latency = cls.doc["latency"]
 
     def values(self, point):
-        return {k: point[k] for k in ("n_turn1", "turn1_p50_s", "turn1_p90_s", "n_agent", "agent_p50_s", "agent_p90_s")}
+        return {k: point[k] for k in ("n_turn1", "turn1_p50_s", "turn1_p95_s", "n_agent", "agent_p50_s", "agent_p90_s")}
 
     def test_the_nights_are_the_nightly_pages_joined_and_dated_by_the_store_when_it_holds_them(self):
-        self.assertEqual((self.latency["target_s"], self.latency["slow_pct"]), (10, 90))
+        self.assertEqual((self.latency["target_s"], self.latency["pct"]), (10, {"turn1": 95, "agent": 90}))
         self.assertEqual(self.latency["nights"], [
             {"id": f"build:{NIGHT_0_BUILD}", "at": "2026-09-15T05:00:00+00:00", "build": NIGHT_0_BUILD},
             {"id": f"build:{NIGHT_B_BUILD}", "at": "2026-09-16T05:00:00+00:00", "build": NIGHT_B_BUILD},
@@ -373,24 +373,34 @@ class LatencyTest(unittest.TestCase):
     def test_a_case_pools_its_reps_without_infra_and_a_night_without_timing_is_a_gap(self):
         rca = self.latency["cases"]["rca-remediation-pr"]
         self.assertEqual([p["night"] for p in rca], [f"build:{NIGHT_0_BUILD}", f"build:{NIGHT_B_BUILD}", f"build:{NIGHT_1_BUILD}"])
-        self.assertEqual(self.values(rca[0]), {"n_turn1": 2, "turn1_p50_s": 5.0, "turn1_p90_s": 7.0, "n_agent": 2, "agent_p50_s": 120.0, "agent_p90_s": 140.0})
-        self.assertEqual(self.values(rca[1]), {"n_turn1": 0, "turn1_p50_s": None, "turn1_p90_s": None, "n_agent": 0, "agent_p50_s": None, "agent_p90_s": None}, "ran, no timing: a point without values, never zero")
+        self.assertEqual(self.values(rca[0]), {"n_turn1": 2, "turn1_p50_s": 5.0, "turn1_p95_s": 7.0, "n_agent": 2, "agent_p50_s": 120.0, "agent_p90_s": 140.0})
+        self.assertEqual(self.values(rca[1]), {"n_turn1": 0, "turn1_p50_s": None, "turn1_p95_s": None, "n_agent": 0, "agent_p50_s": None, "agent_p90_s": None}, "ran, no timing: a point without values, never zero")
         # The infra rep (900 s, 80 s) is out; the writers part's rca row (999 s) counts as the main part's.
-        self.assertEqual(self.values(rca[2]), {"n_turn1": 2, "turn1_p50_s": 4.0, "turn1_p90_s": 12.0, "n_agent": 2, "agent_p50_s": 100.0, "agent_p90_s": 300.0})
+        self.assertEqual(self.values(rca[2]), {"n_turn1": 2, "turn1_p50_s": 4.0, "turn1_p95_s": 12.0, "n_agent": 2, "agent_p50_s": 100.0, "agent_p90_s": 300.0})
         kanban = self.latency["cases"]["agent-kanban-smoke"]
         self.assertEqual([p["night"] for p in kanban], [f"build:{NIGHT_B_BUILD}", f"build:{NIGHT_1_BUILD}"], "no point on a night the case did not run")
-        self.assertEqual(self.values(kanban[1]), {"n_turn1": 1, "turn1_p50_s": 2.0, "turn1_p90_s": 2.0, "n_agent": 2, "agent_p50_s": 50.0, "agent_p90_s": 60.0}, "each series counts the reps that carry it")
+        self.assertEqual(self.values(kanban[1]), {"n_turn1": 1, "turn1_p50_s": 2.0, "turn1_p95_s": 2.0, "n_agent": 2, "agent_p50_s": 50.0, "agent_p90_s": 60.0}, "each series counts the reps that carry it")
         self.assertNotIn("cluster-agent-crashloop-debug", self.latency["cases"], "a case no nightly run recorded has no series")
 
     def test_a_domain_pools_the_cases_of_both_parts_and_all_domains_pool_every_case(self):
         remediation = self.latency["domains"]["remediation"][-1]
-        self.assertEqual(self.values(remediation), {"n_turn1": 4, "turn1_p50_s": 8.0, "turn1_p90_s": 12.0, "n_agent": 4, "agent_p50_s": 300.0, "agent_p90_s": 400.0})
+        self.assertEqual(self.values(remediation), {"n_turn1": 4, "turn1_p50_s": 8.0, "turn1_p95_s": 12.0, "n_agent": 4, "agent_p50_s": 300.0, "agent_p90_s": 400.0})
         self.assertEqual(self.values(self.latency["cases"][WRITER_CASE][0])["agent_p90_s"], 400.0)
         self.assertEqual(sorted(self.latency["domains"]), ["chat-and-routing", "remediation"])
         everything = self.latency["all"]
         self.assertEqual([p["night"] for p in everything], [n["id"] for n in self.latency["nights"]])
-        self.assertEqual(self.values(everything[-1]), {"n_turn1": 5, "turn1_p50_s": 6.0, "turn1_p90_s": 12.0, "n_agent": 6, "agent_p50_s": 100.0, "agent_p90_s": 300.0})
+        self.assertEqual(self.values(everything[-1]), {"n_turn1": 5, "turn1_p50_s": 6.0, "turn1_p95_s": 12.0, "n_agent": 6, "agent_p50_s": 100.0, "agent_p90_s": 300.0})
         self.assertEqual(self.values(everything[1])["n_turn1"], 1, "kanban's rep the night rca had none")
+
+    def test_turn1_takes_the_p95_its_target_is_on_and_agent_time_the_p90(self):
+        # 21 reps, nearest rank: p90 is index round(0.9 * 20) == 18 and p95
+        # index round(0.95 * 20) == 19, so the two differ.
+        reps = [float(s) for s in range(1, 22)]
+        point = trend.latency_point("n", "at", {"turn1": reps, "agent": reps})
+        self.assertEqual((point["turn1_p50_s"], point["turn1_p95_s"]), (11.0, 20.0))
+        self.assertEqual((point["agent_p50_s"], point["agent_p90_s"]), (11.0, 19.0))
+        self.assertNotIn("turn1_p90_s", point)
+        self.assertNotIn("agent_p95_s", point)
 
     def test_a_main_rerun_night_does_not_borrow_the_writers_part(self):
         rerun = timed_run("2100374258805903999", NIGHT_1_RUN["job"], "2026-09-17T10:00:00+00:00", "2026-09-17T12:00:00+00:00",
@@ -771,7 +781,7 @@ class TrendLatencyPageTest(unittest.TestCase):
         self.assertIn("No timing on record for this scope yet", app, "the domains no nightly run timed say so")
         self.assertEqual(app.count('class="tcard"'), 4, "one card per domain the store holds; the all-domains row is not a card")
 
-    def test_a_case_card_draws_p50_and_p90_on_seconds_with_the_target_and_a_gap(self):
+    def test_a_case_card_draws_p50_and_the_slow_percentile_on_seconds_with_the_target_and_a_gap(self):
         app = dom_text(self.page, fragment="#cases=rca-remediation-pr")
         charts = re.findall(r'<svg class="tchart".*?</svg>', app, re.DOTALL)
         self.assertEqual(len(charts), 4, "pass rate and judged, then turn 1 and agent time")
@@ -782,32 +792,34 @@ class TrendLatencyPageTest(unittest.TestCase):
         self.assertIn("the end-state target, p95 under 10 s", app, "the legend names it")
         self.assertNotIn("target", agent)
         self.assertIn(">0 s</text>", turn1)
-        self.assertIn(">15 s</text>", turn1, "a nice max above the 12 s p90 in 5 s steps")
+        self.assertIn(">15 s</text>", turn1, "a nice max above the 12 s p95 in 5 s steps")
         self.assertNotIn("%</text>", turn1)
         self.assertIn(">300 s</text>", agent)
         # Two timed nights with the untimed one between: four points, no line across the gap.
         self.assertEqual(turn1.count('<circle class="dot'), 4)
-        self.assertEqual(turn1.count('<circle class="dot slow"'), 2, "the p90 points")
+        self.assertEqual(turn1.count('<circle class="dot slow"'), 2, "the p95 points")
         self.assertNotIn("<path", turn1, "the gap breaks both lines and a lone night is a point")
         self.assertIn("chat turn 1: no timed rep that counts that night", turn1)
         self.assertIn("a gap is a night with no timed rep that counts; infra reps never count", app, "the legend names the gap")
-        self.assertIn("chat turn 1: p50 4.0 s · p90 12.0 s · 2 reps", turn1, "the tooltip has the values and n")
+        self.assertIn('<i class="line slow"></i>p95 per night', app, "the turn-1 legend names its p95")
+        self.assertIn('<i class="line slow"></i>p90 per night', app, "the agent legend names its p90")
+        self.assertIn("chat turn 1: p50 4.0 s · p95 12.0 s · 2 reps", turn1, "the tooltip has the values and n")
         self.assertIn("agent time: p50 100.0 s · p90 300.0 s · 2 reps", agent)
-        self.assertIn("p50 4.0 s · p90 12.0 s · n=2</text>", turn1, "the newest night is labelled")
+        self.assertIn("p50 4.0 s · p95 12.0 s · n=2</text>", turn1, "the newest night is labelled")
         self.assertIn('data-hit="case:rca-remediation-pr:turn1:0"', turn1)
         self.assertIn('data-hit="case:rca-remediation-pr:agent:0"', agent)
 
     def test_the_latency_table_has_every_value_and_a_dash_for_the_gap(self):
         app = dom_text(self.page, fragment="#cases=rca-remediation-pr")
         self.assertIn("Latency table · 3 nights", app)
-        self.assertIn("<th>Night</th><th>Turn 1 p50</th><th>Turn 1 p90</th><th>Turn 1 reps</th><th>Agent p50</th><th>Agent p90</th><th>Agent reps</th>", app)
+        self.assertIn("<th>Night</th><th>Turn 1 p50</th><th>Turn 1 p95</th><th>Turn 1 reps</th><th>Agent p50</th><th>Agent p90</th><th>Agent reps</th>", app)
         self.assertIn(f'<a href="nightly.html#build={NIGHT_1_BUILD}">Thu 1:54 AM ET</a></td><td>4.0 s</td><td>12.0 s</td><td>2</td><td>100.0 s</td><td>300.0 s</td><td>2</td></tr>', app, "night one, dated by the store's record")
         self.assertIn("<td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>", app)
         self.assertIn("<td>5.0 s</td><td>7.0 s</td><td>2</td><td>120.0 s</td><td>140.0 s</td><td>2</td></tr>", app)
 
     def test_the_y_axis_names_the_target_when_no_tick_does(self):
         upgrades = re.findall(r'<svg class="tchart".*?</svg>', dom_text(self.page, fragment="#cases=upgrades-fleet-version-table"), re.DOTALL)[2]
-        self.assertIn(">20 s</text>", upgrades, "a 45 s p90 in 20 s steps")
+        self.assertIn(">20 s</text>", upgrades, "a 45 s p95 in 20 s steps")
         self.assertIn('text-anchor="end">10 s</text>', upgrades, "the target's value on the y-axis")
         self.assertIn('<text class="thr-l"', upgrades)
         rca = re.findall(r'<svg class="tchart".*?</svg>', dom_text(self.page, fragment="#cases=rca-remediation-pr"), re.DOTALL)[2]
