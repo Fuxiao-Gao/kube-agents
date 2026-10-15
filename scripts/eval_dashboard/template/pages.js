@@ -1232,13 +1232,14 @@ function runHtml(link) {
 
 /* ---- the per-case record (brief.json's cases{}) ---- */
 
-// A case whose task.yaml names no domain, or is not on this checkout,
-// carries the slug DOMAIN_UNKNOWN (collect.task_domain, nightly.py,
-// render.py, trend.py). The data and the links keep the slug; the page
+// A case carries the slug DOMAIN_UNKNOWN (collect.task_domain, nightly.py,
+// render.py, trend.py) when its task.yaml names no domain, when its
+// task.yaml is not on this checkout, or when the case is not in
+// data.json's cases. The data and the links keep the slug; the page
 // shows the label, and the tooltip on the chips and group headings.
 const DOMAIN_UNKNOWN = "unknown";
 const DOMAIN_UNKNOWN_LABEL = "no domain";
-const DOMAIN_UNKNOWN_TOOLTIP = "cases whose task.yaml names no domain or is not on this checkout";
+const DOMAIN_UNKNOWN_TOOLTIP = "cases with no domain on record";
 
 function caseDocs() {
   const raw = brief.cases && typeof brief.cases === "object" && !Array.isArray(brief.cases) ? brief.cases : {};

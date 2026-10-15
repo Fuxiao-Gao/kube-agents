@@ -464,7 +464,7 @@ class TrendPageTest(unittest.TestCase):
 
     def test_the_no_domain_group_is_labelled_so_and_its_slug_still_scopes(self):
         # sparse-case is not in data.json's cases, so its domain is the slug "unknown".
-        tip = 'title="cases whose task.yaml names no domain or is not on this checkout"'
+        tip = 'title="cases with no domain on record"'
         app = dom_text(self.dense / "trend.html")
         self.assertIn(f'<button type="button" data-scope="unknown" {tip}>no domain</button>', app)
         self.assertIn(f'<h3 {tip}><a href="trend.html#domain=unknown">no domain</a>', app)

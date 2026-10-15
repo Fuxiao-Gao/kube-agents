@@ -761,7 +761,7 @@ class NightlyPageTest(unittest.TestCase):
         cls.tmp.cleanup()
 
     def test_the_no_domain_group_row_carries_the_label_and_tooltip(self):
-        tip = 'title="cases whose task.yaml names no domain or is not on this checkout"'
+        tip = 'title="cases with no domain on record"'
         self.assertIn(f'<tr class="grp"><td colspan="6" {tip}>no domain</td></tr>', dom_text(self.page))
 
     def test_last_nights_report(self):

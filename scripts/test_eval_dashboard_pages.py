@@ -1800,7 +1800,7 @@ class CasesAndGridPagesTest(unittest.TestCase):
         self.assertIn('id="case-retired-probe"', clicked)
 
     def test_the_no_domain_group_rows_carry_the_label_and_tooltip(self):
-        tip = 'title="cases whose task.yaml names no domain or is not on this checkout"'
+        tip = 'title="cases with no domain on record"'
         self.assertIn(f'<tr class="grp"><td colspan="8" {tip}>no domain</td></tr>', dom_text(self.cases_page))
         self.assertIn(f'<div class="grp" {tip}>no domain · blocking</div>', dom_text(self.grid_page))
 
