@@ -176,6 +176,7 @@ def _price_patterns() -> list[str]:
         ("Moving batch to Spot saves 60–90% on those nodes.", True),
         ("That is a 30% reduction in node cost.", True),
         ("You could cut spend by roughly 40 %.", True),
+        ("Lowering requests would trim the bill by 25%.", True),
         # The collector's own figures, which a correct answer quotes.
         (
             "idle-batch-pool on seeded-a: 0% CPU and 0% memory of allocatable over 7 days.",
@@ -183,6 +184,13 @@ def _price_patterns() -> list[str]:
         ),
         ("checkout requests 4 CPU and peaks at 12% of it.", False),
         ("Reducing the request needs a rollout. Usage peaked at 35% last week.", False),
+        # Resource advice that quotes a percentage is not a saving.
+        ("Cut the CPU request to 100m (peak 12% of 4 CPU over 7 days).", False),
+        (
+            "Reduce the pool's floor to zero; it holds 0% workload CPU of allocatable.",
+            False,
+        ),
+        ("That is a 90% reduction in requested CPU.", False),
     ],
 )
 def test_price_check_catches_a_percentage_saving(reply, flagged):
