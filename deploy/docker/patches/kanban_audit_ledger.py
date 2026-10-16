@@ -24,9 +24,14 @@ What this changes
 -----------------
 At ``kanban_complete`` the gate reads this card's own worker session from
 Hermes's session store and looks in the tool outputs, in order, for the result
-lines of ``start`` and ``finish``. It reads the result lines, not the commands,
-so a chained command, a grep of the skill or a ``--help`` neither starts nor
-ends a run.
+lines of ``start`` and ``finish``. It reads the result lines, not the exit
+codes, so a chained command neither hides a run nor ends one; a grep of the
+skill prints no result line. Only the output of a call whose command runs
+``audit_report.py``, or of the ``process`` tool that reads back a background
+job, is read: a line that only looks like a result line, in pod logs or a
+ConfigMap the audit printed, neither ends a run nor puts its URL in chat. A
+line that repeats one already seen is ignored, because Hermes's in-place
+compaction stores a copy of the rows it keeps after the rows it archives.
 
 * No ``start`` result line: not an audit run. Nothing changes.
 * Every ``start`` has a ``finish`` result line after it: accepted. Each ledger
@@ -62,8 +67,10 @@ the card id). A gateway session closing someone else's card, the CLI and the
 scheduler are not affected, and a scheduled audit is a cron run with no card.
 Every read fails open: a missing or unreadable store, an unknown schema, or a
 tool output after the last ``start`` that Hermes replaced with a preview and a
-file path (its per-result size limit) lets the completion through unchanged,
-because the ``finish`` line may be in the part that was moved.
+file path (its per-result size limit) lets the completion through without a
+refusal, because the ``finish`` line may be in the part that was moved; a
+warning line records it. When the refused result cannot be saved on the card,
+the completion is accepted at once, marked "Not published".
 """
 
 from __future__ import annotations
@@ -120,10 +127,17 @@ AUDIT_ID_RE = re.compile(r"findings_([A-Za-z0-9][A-Za-z0-9_-]*)\.json$")
 URL_PREFIXES = ("https://", "http://")
 #: Name used when a ``start`` line names no stream.
 UNKNOWN_AUDIT = "fleet"
+#: A command whose output may carry a ``start`` or ``finish`` result line.
+AUDIT_SCRIPT = "audit_report.py"
+#: The tool that reads back the output of a background job.
+PROCESS_TOOL = "process"
+#: Read-only URI for the session store, so this reader never creates the file
+#: or takes a write lock.
+STATE_DB_URI = "file:{path}?mode=ro"
 
 _MESSAGES_SQL = (
-    "SELECT id, role, content FROM messages "
-    "WHERE session_id IN ({marks}) ORDER BY id"
+    "SELECT id, role, content, tool_call_id, tool_calls FROM messages "
+    "WHERE session_id IN ({marks}) AND role IN ('assistant', 'tool') ORDER BY id"
 )
 _PARENT_SQL = (
     "SELECT p.id FROM sessions s JOIN sessions p ON p.id = s.parent_session_id "
@@ -228,7 +242,11 @@ def _texts(value) -> list[str]:
 
 
 def _result_lines(value):
-    """``("start", audit)`` and ``("finish", url)`` events in a tool result, in order."""
+    """``(kind, value, line)`` events in a tool result, in order.
+
+    ``kind`` is ``"start"`` (``value`` is the stream) or ``"finish"``
+    (``value`` is the ledger URL or ``None``).
+    """
     for text in _texts(value):
         for line in text.splitlines():
             line = line.strip()
@@ -242,31 +260,59 @@ def _result_lines(value):
                 continue
             if all(k in parsed for k in START_KEYS):
                 match = AUDIT_ID_RE.search(str(parsed.get(START_KEYS[1]) or ""))
-                yield "start", match.group(1) if match else UNKNOWN_AUDIT
+                yield "start", match.group(1) if match else UNKNOWN_AUDIT, line
             elif all(k in parsed for k in FINISH_KEYS):
                 url = parsed.get(FINISH_KEYS[1])
                 if url is None:
-                    yield "finish", None
+                    yield "finish", None, line
                 elif isinstance(url, str) and url.startswith(URL_PREFIXES):
-                    yield "finish", url
+                    yield "finish", url, line
+
+
+def _calls(tool_calls) -> dict[str, tuple[str, str]]:
+    """``{call id: (tool name, command)}`` for one assistant message."""
+    found = {}
+    calls = _decode(tool_calls)
+    for call in calls if isinstance(calls, list) else []:
+        if not isinstance(call, dict) or not call.get("id"):
+            continue
+        function = call.get("function") if isinstance(call.get("function"), dict) else {}
+        args = function.get("arguments")
+        if isinstance(args, str):
+            args = _decode(args)
+        command = args.get("command") if isinstance(args, dict) else args
+        found[str(call["id"])] = (str(function.get("name") or ""), command if isinstance(command, str) else "")
+    return found
 
 
 def audit_run(rows) -> dict:
     """What the tool results in ``rows`` say about this card's audit runs.
 
-    ``rows`` are ``(id, role, content)`` in id order. Returns ``started``
-    (a ``start`` result line was seen), ``open_audit`` (the stream of the last
-    ``start`` when no ``finish`` result line follows it, else ``None``),
-    ``urls`` (each ledger URL a ``finish`` printed, in order) and ``hidden``
-    (a tool output after the last ``start`` was replaced by a preview).
+    ``rows`` are ``(id, role, content, tool_call_id, tool_calls)`` in id
+    order. Returns ``started`` (a ``start`` result line was seen),
+    ``open_audit`` (the stream of the last ``start`` when no ``finish`` result
+    line follows it, else ``None``), ``urls`` (each ledger URL a ``finish``
+    printed, in order) and ``hidden`` (a tool output after the last ``start``
+    was replaced by a preview).
     """
     state = {"started": False, "open_audit": None, "urls": [], "hidden": False}
-    for _row_id, role, content in rows:
+    calls: dict[str, tuple[str, str]] = {}
+    seen: set[str] = set()
+    for _row_id, role, content, tool_call_id, tool_calls in rows:
+        if role == "assistant":
+            calls.update(_calls(tool_calls))
+            continue
         if role != "tool":
+            continue
+        tool, command = calls.get(str(tool_call_id), ("", ""))
+        if AUDIT_SCRIPT not in command and tool != PROCESS_TOOL:
             continue
         if state["open_audit"] and PERSISTED_OUTPUT_TAG in str(content or ""):
             state["hidden"] = True
-        for kind, value in _result_lines(_decode(content)):
+        for kind, value, line in _result_lines(_decode(content)):
+            if line in seen:
+                continue
+            seen.add(line)
             if kind == "start":
                 state["started"] = True
                 state["open_audit"] = value
@@ -280,7 +326,7 @@ def audit_run(rows) -> dict:
 
 def _read_rows(state_db: str, session_id: str) -> list:
     with closing(
-        sqlite3.connect(f"file:{state_db}?mode=ro", uri=True, timeout=DB_TIMEOUT_SECONDS)
+        sqlite3.connect(STATE_DB_URI.format(path=state_db), uri=True, timeout=DB_TIMEOUT_SECONDS)
     ) as conn:
         sessions = _lineage(conn, session_id)
         marks = ",".join("?" for _ in sessions)
@@ -341,6 +387,11 @@ def require_audit_ledger(task_id, connect, result, state_db=None):
     missing = [url for url in run["urls"] if url not in text]
     text += "".join(LEDGER_LINE.format(url=url) for url in missing)
     audit = run["open_audit"]
+    if audit is not None and run["hidden"]:
+        logger.warning(
+            "kanban_audit_ledger: %s has a moved tool output after its %s start; "
+            "allowing the completion without a finish result line", key, audit,
+        )
     if audit is None or run["hidden"]:
         return None, text if missing else result
     marked = NOT_PUBLISHED_PREFIX.format(audit=audit) + text
