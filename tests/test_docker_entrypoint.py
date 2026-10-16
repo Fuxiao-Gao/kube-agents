@@ -1193,6 +1193,71 @@ class RemoteMcpUserAgentRepairTest(unittest.TestCase):
         # container, and must not choose where the audit plugin code comes from.
         self.assertEqual(shipped["CLUSTER_SHARED_PLUGINS"], f'CLUSTER_SHARED_PLUGINS="{default}"')
 
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root ignores the read-only fixture")
+    def test_a_failed_plugin_refresh_leaves_the_old_file_whole(self):
+        """A copy that cannot finish keeps the profile's old module intact, and says so.
+
+        Each file is copied to a temporary name beside its target and renamed over it,
+        so the failure here, a plugin folder the copy cannot write into, leaves the old
+        audit_sink.py byte for byte, no temporary file behind, and a WARN that names the
+        plugin. The other plugin is still refreshed: one failure does not stop the loop.
+        """
+        block = _extract_shell_block('if [ -d "$CLUSTER_TEMPLATE" ]; then')
+        source = _ENTRYPOINT.read_text(encoding="utf-8")
+        plugin_list = next(line for line in source.splitlines() if line.startswith("CLUSTER_IMAGE_PLUGINS="))
+        script = "set -e\n"
+        for name in ("sync_profile_skills", "backfill_config_from_template", "repair_remote_mcp_user_agent"):
+            script += _extract_shell_function(name) + "\n"
+        script += plugin_list + "\n" + block
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            template_dir = root / "cluster-template"
+            template_dir.mkdir()
+            shutil.copy(self._CLUSTER_TEMPLATE, template_dir / "config.yaml")
+            shared = root / "defaults" / "plugins"
+            for plugin, module in (("tool_call_audit", "audit.py"), ("common", "audit_sink.py")):
+                (shared / plugin).mkdir(parents=True)
+                (shared / plugin / module).write_text("image\n", encoding="utf-8")
+            profile = root / "data" / "profiles" / "cluster-p-c-us-central1"
+            plugins = profile / "plugins"
+            for plugin, module in (("tool_call_audit", "audit.py"), ("common", "audit_sink.py")):
+                (plugins / plugin).mkdir(parents=True)
+                (plugins / plugin / module).write_text("scaffolded\n", encoding="utf-8")
+            (plugins / "common").chmod(0o555)
+            (profile / "config.yaml").write_text(
+                yaml.safe_dump(self._scaffolded_cluster_profile(self._OLD_HEADER), sort_keys=False),
+                encoding="utf-8",
+            )
+            venv = root / "install" / ".venv" / "bin"
+            venv.mkdir(parents=True)
+            wrapper = venv / "python3"
+            wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
+            wrapper.chmod(0o755)
+            try:
+                proc = subprocess.run(
+                    ["sh", "-c", script],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    env={
+                        "PATH": "/usr/bin:/bin",
+                        "CLUSTER_TEMPLATE": str(template_dir),
+                        "CLUSTER_SHARED_PLUGINS": str(shared),
+                        "TARGET_DIR": str(root / "data"),
+                        "INSTALL_DIR": str(root / "install"),
+                    },
+                )
+                sink = (plugins / "common" / "audit_sink.py").read_text(encoding="utf-8")
+                audit = (plugins / "tool_call_audit" / "audit.py").read_text(encoding="utf-8")
+                leftovers = sorted(p.name for p in plugins.rglob("*.refresh.*"))
+            finally:
+                (plugins / "common").chmod(0o755)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(sink, "scaffolded\n", "a failed copy did not leave the old module whole")
+        self.assertEqual(leftovers, [], "a failed copy left a temporary file behind")
+        self.assertIn("could not refresh the common plugin", proc.stderr)
+        self.assertEqual(audit, "image\n", "one failed plugin stopped the refresh of the other")
+
     def test_the_container_environment_cannot_choose_the_cluster_plugin_source(self):
         """The refresh reads plugin code from a fixed image path, never from the environment.
 
