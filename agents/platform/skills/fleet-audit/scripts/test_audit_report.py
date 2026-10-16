@@ -1487,6 +1487,17 @@ class TestValidation(unittest.TestCase):
                 self.assertEqual(exit_.exception.code, 2)
                 self.assertIn(hint, err.getvalue())
 
+    def test_a_subcommand_typo_gets_no_lifecycle_hint(self):
+        # The root parser reports a subcommand's leftover arguments; telling a
+        # `remediate` caller to go on to `finish` would republish the ledger.
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            with self.assertRaises(SystemExit):
+                audit_report.build_parser().parse_args(
+                    ["remediate", "--audit", AUDIT, "--findings-file", "f", "--finding", "x", "--bogus"]
+                )
+        self.assertIn("unrecognized arguments", err.getvalue())
+        self.assertNotIn(audit_report.LIFECYCLE_HINT, err.getvalue())
+
     def test_a_missing_findings_file_names_draft(self):
         with tempfile.TemporaryDirectory() as tmp:
             absent = str(Path(tmp) / "absent-findings.json")
@@ -1501,6 +1512,8 @@ class TestValidation(unittest.TestCase):
             str(ctx.exception),
         )
         self.assertIn(f"--out {absent}", str(ctx.exception))
+        # A run whose collector did not run is pointed at the manual fallback too.
+        self.assertIn("--no-collector-manifest", str(ctx.exception))
         # `remediate` is not told to run `finish`, which would republish the ledger.
         self.assertEqual(str(remediate.exception), f"--findings-file: {absent} does not exist")
 
@@ -1561,6 +1574,28 @@ class TestValidation(unittest.TestCase):
         message = str(exc.exception)
         for field in ("scope.clusters[0].location", "findings[0].title", "findings[0].evidence", "findings[0].remediation.path"):
             self.assertIn(field, message)
+
+    def test_a_bad_identity_field_does_not_stop_later_findings(self):
+        # A missing key used to end collection at the next `finding[key]` read.
+        doc = make_doc(findings=[make_finding(), make_finding(fid="second", obj="Deployment/other")])
+        del doc["findings"][0]["cluster"]
+        doc["findings"][0]["check"] = None
+        del doc["findings"][1]["evidence"]["command"]
+        with self.assertRaises(audit_report.ValidationError) as exc:
+            audit_report.validate_findings(doc, AUDIT)
+        message = str(exc.exception)
+        for field in ("findings[0].check", "findings[0].cluster", "findings[1].evidence.command"):
+            self.assertIn(field, message)
+        self.assertNotIn("'None' is not a check", message)
+
+    def test_a_duplicate_identity_is_reported_beside_a_recorded_title(self):
+        # The duplicate is a problem of its own, not a repeat of the title.
+        doc = make_doc(findings=[make_finding(), make_finding()])
+        doc["findings"][1]["title"] = None
+        with self.assertRaises(audit_report.ValidationError) as exc:
+            audit_report.validate_findings(doc, AUDIT)
+        self.assertIn("findings[1].title", str(exc.exception))
+        self.assertIn("findings[1]: same identity as findings[0]", str(exc.exception))
 
     def test_reported_field_errors_are_capped(self):
         findings = [make_finding(fid=f"f{i}") for i in range(25)]
@@ -20226,6 +20261,7 @@ class TestCollectorStreamsRequireAManifest(HarnessTestCase):
         self.assertEqual(rc, 2)
         self.assertIn("--manifest-file is required for compliance-audit", self.err)
         self.assertIn("--no-collector-manifest", self.err)
+        self.assertIn(f"--manifest-file {audit_report.manifest_path_for('compliance-audit')}", self.err)
         self.assertFalse(self.harness.matching("issue"))
         self.assertFalse((self.reports_dir / AUDIT).exists())
 

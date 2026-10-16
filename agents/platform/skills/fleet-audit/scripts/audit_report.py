@@ -3835,14 +3835,12 @@ def _repeats_a_recorded_field(message: str, recorded: list[str]) -> bool:
     field = _error_field(message)
     if field is None:
         return False
-    for other in filter(None, map(_error_field, recorded)):
-        if field == other or any(
-            longer.startswith(shorter + sep)
-            for longer, shorter in ((field, other), (other, field))
-            for sep in (".", "[")
-        ):
-            return True
-    return False
+    # Only the same field or one under it: a message about a parent
+    # (`findings[1]: same identity as ...`) is a separate problem.
+    return any(
+        field == other or any(field.startswith(other + sep) for sep in (".", "["))
+        for other in filter(None, map(_error_field, recorded))
+    )
 
 
 def _validate_findings_document(data: object, audit_id: str) -> dict:
@@ -4007,7 +4005,8 @@ def _validate_findings_document(data: object, audit_id: str) -> dict:
                     "nothing, so the claim has to carry the command that backs "
                     f"it. {_sop_pointer(audit_id)}"
                 )
-            _require_str(entry.get("check"), f"{where}.check", allow_empty=False)
+            if not _require_str_ok(entry.get("check"), f"{where}.check", allow_empty=False):
+                continue
             name = str(entry["check"])
             if name not in roster_set:
                 # Deliberately no roster in this message. An error that lists
@@ -4049,7 +4048,8 @@ def _validate_findings_document(data: object, audit_id: str) -> dict:
                     raise ValidationError(
                         f"{where}: expected an object with 'check' and 'reason'"
                     )
-                _require_str(entry.get("check"), f"{where}.check", allow_empty=False)
+                if not _require_str_ok(entry.get("check"), f"{where}.check", allow_empty=False):
+                    continue
                 name = str(entry["check"])
                 if name not in roster_set:
                     # No roster here either, for the reason given above: this
@@ -4082,12 +4082,14 @@ def _validate_findings_document(data: object, audit_id: str) -> dict:
     for i, entry in enumerate(skipped):
         if not isinstance(entry, dict):
             raise ValidationError(f"scope.skipped[{i}]: expected an object")
-        _require_str(
+        cluster_ok = _require_str_ok(
             entry.get("cluster"), f"scope.skipped[{i}].cluster", allow_empty=False
         )
         _require_str(
             entry.get("reason"), f"scope.skipped[{i}].reason", allow_empty=False
         )
+        if not cluster_ok:
+            continue
         name = str(entry["cluster"])
         if name in audited_names:
             raise ValidationError(
@@ -4120,9 +4122,11 @@ def _validate_findings_document(data: object, audit_id: str) -> dict:
         # which meant it was only ever as reliable as the id — and the id was
         # prose. Named explicitly it is checkable against the roster, and it
         # becomes the first component of the derived identity below.
-        _require_str(finding.get("check"), f"findings[{i}].check", allow_empty=False)
-        check = str(finding["check"])
-        if check not in finding_check_set:
+        check_ok = _require_str_ok(
+            finding.get("check"), f"findings[{i}].check", allow_empty=False
+        )
+        check = str(finding.get("check"))
+        if check_ok and check not in finding_check_set:
             # No roster in the message, for the same reason `checks_run` gives
             # none: a rejection that enumerates the valid slugs is an answer
             # key for a run that inspected nothing.
@@ -4140,10 +4144,10 @@ def _validate_findings_document(data: object, audit_id: str) -> dict:
             )
 
         _require_str(finding.get("title"), f"findings[{i}].title", allow_empty=False)
-        _require_str(
+        cluster_ok = _require_str_ok(
             finding.get("cluster"), f"findings[{i}].cluster", allow_empty=False
         )
-        if str(finding["cluster"]) in skipped_names:
+        if cluster_ok and str(finding["cluster"]) in skipped_names:
             raise ValidationError(
                 f"findings[{i}].cluster: {finding['cluster']!r} is listed in "
                 "scope.skipped, so this run claims it could not read it — a finding "
@@ -4154,7 +4158,7 @@ def _validate_findings_document(data: object, audit_id: str) -> dict:
         # scope does not list -- the cost stream files unattributable disks
         # under `project/<id>` -- but not a second spelling of one it does,
         # which derives a second id for the same finding.
-        qualified = _qualified_scope_entries(
+        qualified = cluster_ok and _qualified_scope_entries(
             str(finding["cluster"]), audited_names, qualified_by_leaf
         )
         if qualified:
@@ -4167,72 +4171,77 @@ def _validate_findings_document(data: object, audit_id: str) -> dict:
             )
         # namespace may legitimately be empty for cluster-scoped objects.
         _require_str(finding.get("namespace", ""), f"findings[{i}].namespace")
-        _require_str(finding.get("object"), f"findings[{i}].object", allow_empty=False)
+        object_ok = _require_str_ok(
+            finding.get("object"), f"findings[{i}].object", allow_empty=False
+        )
         # `///` is a non-empty string and an empty name. Caught here, against
         # the field the worker wrote, rather than four lines down against a
         # derived string it has never seen.
-        for field in ("cluster", "object"):
-            if _id_segment(str(finding[field])) == ID_EMPTY_SEGMENT:
+        for field, field_ok in (("cluster", cluster_ok), ("object", object_ok)):
+            if field_ok and _id_segment(str(finding[field])) == ID_EMPTY_SEGMENT:
                 raise ValidationError(
                     f"findings[{i}].{field}: {finding[field]!r} has no letter or "
                     "digit in it, so it names nothing and cannot carry the "
                     "finding's identity"
                 )
 
-        # Identity, computed now that its four components are validated. Any
-        # `id` the document arrived with is discarded rather than rejected: a
-        # worker running against a cached SOP would otherwise fail the whole
-        # document, and `exit 2` on an audit publishes nothing at all.
-        fold_unnamespaced_check(finding)
-        full_id = derive_finding_id(finding)
-        fid = _shorten_id(full_id)
-        try:
-            validate_finding_id(fid, f"findings[{i}] (derived id)")
-        except ValidationError as exc:
-            # Unreachable for any object named `Kind/name`, but the operator
-            # must never be sent to fix a string they did not write: say which
-            # fields produced it.
-            raise ValidationError(
-                f"{exc} — the id is derived from check={check!r}, "
-                f"cluster={finding['cluster']!r}, "
-                f"namespace={finding.get('namespace') or ''!r}, "
-                f"object={finding['object']!r}; change one of those"
-            ) from None
-        # Keyed on the *full* derived id, never on the shortened one. Two long
-        # objects in one long-named namespace shorten to the same string
-        # without being the same finding, and rejecting on that refused the
-        # whole document — exit 2, nothing published — while telling the
-        # operator that two different Deployments were one object. Shortening
-        # now carries a digest (`_shorten_id`) so the pair keeps distinct ids;
-        # what stays a hard error is the real modelling mistake this check was
-        # written for, which is two findings agreeing on all four identity
-        # fields.
-        if full_id in seen_ids:
-            first = seen_ids[full_id]
-            raise ValidationError(
-                f"findings[{i}]: same identity as findings[{first}] — check "
-                f"{check!r} against {finding['object']!r} in "
-                f"{finding['cluster']!r}/{finding.get('namespace') or '(cluster)'} "
-                f"derives the id {fid!r} twice. One finding per (check, object): "
-                "three privileged containers in one Deployment are one finding "
-                "listing all three in evidence.excerpt, not three findings. If "
-                "these really are different problems, they are against different "
-                "objects — say which in `object`."
-            )
-        seen_ids[full_id] = i
-        # A residual collision needs two ids over `MAX_FINDING_ID` whose
-        # digests agree in 24 bits, so it is not expected — but it degrades to
-        # two findings sharing one ledger row rather than to an audit that
-        # publishes nothing. The delta will treat them as one; that is a worse
-        # ledger, not an absent one.
-        if fid in short_ids:
-            log(
-                f"WARNING: findings[{i}] and findings[{short_ids[fid]}] both "
-                f"shorten to {fid!r}; they will share one row on the ledger."
-            )
-        else:
-            short_ids[fid] = i
-        finding["id"] = fid
+        if check_ok and cluster_ok and object_ok:
+            # Identity, computed once its components are valid; a run whose check,
+            # cluster or object was recorded as wrong derives no id, and the rest
+            # of the finding is still checked. Any
+            # `id` the document arrived with is discarded rather than rejected: a
+            # worker running against a cached SOP would otherwise fail the whole
+            # document, and `exit 2` on an audit publishes nothing at all.
+            fold_unnamespaced_check(finding)
+            full_id = derive_finding_id(finding)
+            fid = _shorten_id(full_id)
+            try:
+                validate_finding_id(fid, f"findings[{i}] (derived id)")
+            except ValidationError as exc:
+                # Unreachable for any object named `Kind/name`, but the operator
+                # must never be sent to fix a string they did not write: say which
+                # fields produced it.
+                raise ValidationError(
+                    f"{exc} — the id is derived from check={check!r}, "
+                    f"cluster={finding['cluster']!r}, "
+                    f"namespace={finding.get('namespace') or ''!r}, "
+                    f"object={finding['object']!r}; change one of those"
+                ) from None
+            # Keyed on the *full* derived id, never on the shortened one. Two long
+            # objects in one long-named namespace shorten to the same string
+            # without being the same finding, and rejecting on that refused the
+            # whole document — exit 2, nothing published — while telling the
+            # operator that two different Deployments were one object. Shortening
+            # now carries a digest (`_shorten_id`) so the pair keeps distinct ids;
+            # what stays a hard error is the real modelling mistake this check was
+            # written for, which is two findings agreeing on all four identity
+            # fields.
+            if full_id in seen_ids:
+                first = seen_ids[full_id]
+                raise ValidationError(
+                    f"findings[{i}]: same identity as findings[{first}] — check "
+                    f"{check!r} against {finding['object']!r} in "
+                    f"{finding['cluster']!r}/{finding.get('namespace') or '(cluster)'} "
+                    f"derives the id {fid!r} twice. One finding per (check, object): "
+                    "three privileged containers in one Deployment are one finding "
+                    "listing all three in evidence.excerpt, not three findings. If "
+                    "these really are different problems, they are against different "
+                    "objects — say which in `object`."
+                )
+            seen_ids[full_id] = i
+            # A residual collision needs two ids over `MAX_FINDING_ID` whose
+            # digests agree in 24 bits, so it is not expected — but it degrades to
+            # two findings sharing one ledger row rather than to an audit that
+            # publishes nothing. The delta will treat them as one; that is a worse
+            # ledger, not an absent one.
+            if fid in short_ids:
+                log(
+                    f"WARNING: findings[{i}] and findings[{short_ids[fid]}] both "
+                    f"shorten to {fid!r}; they will share one row on the ledger."
+                )
+            else:
+                short_ids[fid] = i
+            finding["id"] = fid
 
         _require_str(finding.get("impact"), f"findings[{i}].impact", allow_empty=False)
 
@@ -4335,7 +4344,8 @@ def _validate_findings_document(data: object, audit_id: str) -> dict:
                     f"{where}: expected an object with 'check', 'cluster', "
                     "'object' and 'reason' (and 'namespace' unless cluster-scoped)"
                 )
-            _require_str(entry.get("check"), f"{where}.check", allow_empty=False)
+            if not _require_str_ok(entry.get("check"), f"{where}.check", allow_empty=False):
+                continue
             check = str(entry["check"])
             if check not in finding_check_set:
                 # No roster, for the reason `findings[].check` gives none.
@@ -4344,7 +4354,8 @@ def _validate_findings_document(data: object, audit_id: str) -> dict:
                     "SOP. Name checks by the backticked slug in their `####` "
                     f"heading. {_sop_pointer(audit_id)}"
                 )
-            _require_str(entry.get("cluster"), f"{where}.cluster", allow_empty=False)
+            if not _require_str_ok(entry.get("cluster"), f"{where}.cluster", allow_empty=False):
+                continue
             cluster = str(entry["cluster"])
             if cluster not in audited_names:
                 raise ValidationError(
@@ -4353,16 +4364,19 @@ def _validate_findings_document(data: object, audit_id: str) -> dict:
                     + _scope_spelling_hint(cluster, audited_names, qualified_by_leaf)
                 )
             _require_str(entry.get("namespace", ""), f"{where}.namespace")
-            _require_str(entry.get("object"), f"{where}.object", allow_empty=False)
+            if not _require_str_ok(entry.get("object"), f"{where}.object", allow_empty=False):
+                continue
             for field in ("cluster", "object"):
                 if _id_segment(str(entry[field])) == ID_EMPTY_SEGMENT:
                     raise ValidationError(
                         f"{where}.{field}: {entry[field]!r} has no letter or digit "
                         "in it, so it names nothing"
                     )
-            reason = _require_str(
+            if not _require_str_ok(
                 entry.get("reason"), f"{where}.reason", allow_empty=False
-            )
+            ):
+                continue
+            reason = str(entry["reason"])
             if len(reason.strip()) < MIN_RESOLVED_REASON_CHARS:
                 raise ValidationError(
                     f"{where}.reason: {reason!r} is too short to say why the "
@@ -4420,7 +4434,8 @@ def _validate_findings_document(data: object, audit_id: str) -> dict:
                     "no check in it may be moved to `declared` — every candidate "
                     "is a finding. Drop the entry, or omit the key"
                 )
-            _require_str(entry.get("check"), f"{where}.check", allow_empty=False)
+            if not _require_str_ok(entry.get("check"), f"{where}.check", allow_empty=False):
+                continue
             check = str(entry["check"])
             if check not in finding_check_set:
                 # No roster, for the reason `findings[].check` gives none.
@@ -4440,7 +4455,8 @@ def _validate_findings_document(data: object, audit_id: str) -> dict:
                     "move; write this one under `findings`"
                 )
             _require_str(entry.get("title"), f"{where}.title", allow_empty=False)
-            _require_str(entry.get("cluster"), f"{where}.cluster", allow_empty=False)
+            if not _require_str_ok(entry.get("cluster"), f"{where}.cluster", allow_empty=False):
+                continue
             cluster = str(entry["cluster"])
             if cluster not in audited_names:
                 raise ValidationError(
@@ -4450,7 +4466,8 @@ def _validate_findings_document(data: object, audit_id: str) -> dict:
                     + _scope_spelling_hint(cluster, audited_names, qualified_by_leaf)
                 )
             _require_str(entry.get("namespace", ""), f"{where}.namespace")
-            _require_str(entry.get("object"), f"{where}.object", allow_empty=False)
+            if not _require_str_ok(entry.get("object"), f"{where}.object", allow_empty=False):
+                continue
             if check == NAMESPACE_SHAPE_CHECK and not _is_namespace_object(str(entry["object"])):
                 raise ValidationError(
                     f"{where}.object: {str(entry['object'])!r} — a {check} declaration justifies "
@@ -13996,7 +14013,9 @@ def load_findings(path: str, audit_id: str, command: str | None = None) -> dict:
                 f"--findings-file: {path} does not exist. Write it first with "
                 f"`{Path(__file__).resolve()} draft --audit {audit_id} --manifest-file "
                 f"{manifest_path_for(audit_id)} --out {path}`, fill each recommendation, "
-                "then run `finish` again with that --findings-file and the same --manifest-file."
+                "then run `finish` again with that --findings-file and the same --manifest-file. "
+                "If the collector did not run, write the document by hand as the SOP's manual "
+                'fallback says, and pass --no-collector-manifest "<why>" instead of --manifest-file.'
             )
         raise ValidationError(f"--findings-file: {path} does not exist")
     try:
@@ -18082,9 +18101,14 @@ class _HintingParser(argparse.ArgumentParser):
     """An ArgumentParser whose usage errors end with the next step to take."""
 
     usage_hint = ""
+    # The root parser also reports a subcommand's leftover arguments; its hint
+    # is about choosing a subcommand, so it is kept off those.
+    hint_skips_unrecognized = False
 
     def error(self, message: str):  # type: ignore[override]
-        if self.usage_hint:
+        if self.usage_hint and not (
+            self.hint_skips_unrecognized and message.startswith("unrecognized arguments")
+        ):
             message = f"{message}\n{self.usage_hint}"
         super().error(message)
 
@@ -18094,6 +18118,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Deterministic audit-reporting harness for the fleet-audit skill."
     )
     parser.usage_hint = LIFECYCLE_HINT
+    parser.hint_skips_unrecognized = True
     subparsers = parser.add_subparsers(dest="subcommand", required=True, parser_class=_HintingParser)
 
     start_parser = subparsers.add_parser(
