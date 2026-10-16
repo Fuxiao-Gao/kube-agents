@@ -77,6 +77,12 @@ class D1Attributable(unittest.TestCase):
         for name in names:
             config = yaml.safe_load(h.text(name)) or {}
             enabled = (config.get("plugins") or {}).get("enabled") or []
+            # The entrypoint's back-fill turns a template's plugins on for an
+            # existing profile only from a list, so a string or a mapping here
+            # enables nothing, whatever its contents spell.
+            self.assertIsInstance(
+                enabled, list, f"{h.SOURCES[name].path}: plugins.enabled is not a list"
+            )
             self.assertIn(
                 "tool_call_audit",
                 enabled,

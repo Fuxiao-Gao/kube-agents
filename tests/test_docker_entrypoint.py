@@ -1193,6 +1193,65 @@ class RemoteMcpUserAgentRepairTest(unittest.TestCase):
         # container, and must not choose where the audit plugin code comes from.
         self.assertEqual(shipped["CLUSTER_SHARED_PLUGINS"], f'CLUSTER_SHARED_PLUGINS="{default}"')
 
+    def test_the_container_environment_cannot_choose_the_cluster_plugin_source(self):
+        """The refresh reads plugin code from a fixed image path, never from the environment.
+
+        An AgentPlugin's spec.env reaches the agent container with no allowlist. If the
+        source path could come from the environment, that plugin could choose the code
+        copied over every Cluster Agent's audit writer. This runs the shipped definitions
+        with a decoy tree in the environment and checks that nothing from it is copied,
+        whatever spelling an override would take.
+        """
+        block = _extract_shell_block('if [ -d "$CLUSTER_TEMPLATE" ]; then')
+        source = _ENTRYPOINT.read_text(encoding="utf-8")
+        preamble = source[source.index("\nCLUSTER_TEMPLATE=") + 1 : source.index('if [ -d "$CLUSTER_TEMPLATE" ]; then')]
+        self.assertIn("CLUSTER_SHARED_PLUGINS", preamble, "the plugin refresh's definitions moved")
+        # CLUSTER_TEMPLATE comes from the fixture through the environment, as in the sibling test.
+        preamble = "\n".join(line for line in preamble.splitlines() if not line.startswith("CLUSTER_TEMPLATE="))
+        script = "set -e\n"
+        for name in ("sync_profile_skills", "backfill_config_from_template", "repair_remote_mcp_user_agent"):
+            script += _extract_shell_function(name) + "\n"
+        script += preamble + "\n" + block
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            template_dir = root / "cluster-template"
+            template_dir.mkdir()
+            shutil.copy(self._CLUSTER_TEMPLATE, template_dir / "config.yaml")
+            decoy = root / "decoy"
+            for plugin in ("tool_call_audit", "common"):
+                (decoy / plugin).mkdir(parents=True)
+                (decoy / plugin / "decoy.py").write_text("decoy\n", encoding="utf-8")
+            profile = root / "data" / "profiles" / "cluster-p-c-us-central1"
+            (profile / "plugins" / "tool_call_audit").mkdir(parents=True)
+            (profile / "plugins" / "tool_call_audit" / "audit.py").write_text("scaffolded\n", encoding="utf-8")
+            (profile / "config.yaml").write_text(
+                yaml.safe_dump(self._scaffolded_cluster_profile(self._OLD_HEADER), sort_keys=False),
+                encoding="utf-8",
+            )
+            venv = root / "install" / ".venv" / "bin"
+            venv.mkdir(parents=True)
+            wrapper = venv / "python3"
+            wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
+            wrapper.chmod(0o755)
+            proc = subprocess.run(
+                ["sh", "-c", script],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env={
+                    "PATH": "/usr/bin:/bin",
+                    "CLUSTER_TEMPLATE": str(template_dir),
+                    "CLUSTER_SHARED_PLUGINS": str(decoy),
+                    "TARGET_DIR": str(root / "data"),
+                    "INSTALL_DIR": str(root / "install"),
+                },
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            copied = sorted(str(p.relative_to(profile)) for p in profile.rglob("decoy.py"))
+            audit = (profile / "plugins" / "tool_call_audit" / "audit.py").read_text(encoding="utf-8")
+        self.assertEqual(copied, [], "the environment chose the plugin code copied into a cluster profile")
+        self.assertEqual(audit, "scaffolded\n")
+
     def test_the_two_profiles_that_are_not_force_synced_both_take_the_repair(self):
         """The call sites, read off the source: the cluster loop and the front-door fill.
 
