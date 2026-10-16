@@ -77,10 +77,11 @@ Measured on 2026-10-16 with vLLM 0.31.0, a 32,768-token context and `--gpu-memor
 | `google/gemma-4-31B-it-qat-w4a16-ct`      | 2x L4 (TP 2) | 10.67 GiB       | 78,275 tokens (2.39)            | 31.0 s / 3.0 s            | yes       |
 | `RedHatAI/gemma-4-26B-A4B-it-FP8-dynamic` | 2x L4 (TP 2) | 13.74 GiB       | 203,524 tokens (6.21)           | 6.7 s / 0.6 s             | yes       |
 | `google/gemma-4-12B-it` (BF16)            | 2x L4 (TP 2) | 11.81 GiB       | 173,189 tokens (5.29)           | 13.7 s / 1.5 s            | yes       |
-| `google/gemma-4-31B-it-qat-w4a16-ct`      | 1x A100 40GB | A100_WEIGHTS    | A100_KV                         | A100_PROMPT               | A100_TOOL |
+| `google/gemma-4-31B-it-qat-w4a16-ct`      | 1x A100 40GB | 19.78 GiB       | 68,352 tokens (2.09)            | 17.1 s / 1.6 s            | yes       |
 
 - The default is 31B, the size with the highest agent score on the model card (Tau2 76.9%, against 68.2% for 26B-A4B and 69.0% for 12B).
 - 26B-A4B is a mixture-of-experts model with 3.8B active parameters. It reads a long prompt about five times faster and holds more context, at a lower agent score. To use it, change `MODEL_ID` and `--served-model-name`.
+- On one A100 40GB (`a2-highgpu-1g`), set `--tensor-parallel-size=1`, `nvidia.com/gpu: "1"`, a CPU request of at most 10, and the `nvidia-tesla-a100` accelerator label. It reads a long prompt about twice as fast as 2x L4. A100 capacity can run out in a zone: the first pool for this test failed with `GCE_STOCKOUT` in one zone and worked in another.
 - 31B in BF16 (about 62 GB of weights) does not fit 2x L4 or one A100 40GB. 31B in FP8 ran out of memory on 2x L4 at a 32k context in an earlier test.
 - E2B and E4B are too small for agent work (Tau2 24.5% and 42.2%).
 
