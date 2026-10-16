@@ -37,6 +37,8 @@ Neither reads versions against a target.
   --output /opt/data/scratch/fleet_versions.json
 ```
 
+The script lives under the profile home, `/opt/data/profiles/platform` (`/opt/data/profiles/platform/skills/fleet-upgrade-verification/scripts/fleet_upgrade_report.py`).
+
 - `--cluster` is repeatable and, when given, restricts the report to those clusters, as
   `<location>/<name>` or a bare name and in no other form: each half is a GKE name, lowercase
   letters, digits and hyphens, so an empty half (`/prod`, `prod/`), whitespace or an uppercase
