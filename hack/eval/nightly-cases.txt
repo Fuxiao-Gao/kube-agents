@@ -1042,6 +1042,12 @@
 # noop, transcript-only, one delegation round trip.
 ./tasks/alert-config-terraform-promql-probe/task.yaml
 
+# A plain chat request to check the fleet's security posture runs the
+# compliance audit's collector (#2386), and answers in chat without
+# publishing. deployer: noop; reads the seeded fleet's rbac-overgrant role.
+# Nightly rather than presubmit for the collector's full sweep.
+./tasks/security-chat-request-runs-collector/task.yaml
+
 # A plain chat request for a cost analysis runs the waste audit's collector
 # (#2386): the Platform Agent routes a domain request to its stream's
 # collector even when the request names no SOP, and answers in chat without
