@@ -20,7 +20,10 @@
 #
 # Fixture: the seeded fleet's idle-nodepool role (idle-batch-pool on
 # seeded-a, one tainted node, no workload pods). fleet_waste.py flags a pool
-# only once it is 7 days old, which the long-lived fleet meets. orphan-disks
+# only once it is 7 days old. The gate binds to the newest fleet the run
+# lands on: a pool project planted or replanted less than 7 days before the
+# run cannot pass the-answer-names-the-idle-pool (bench/tf/fleet/README.md,
+# the D+7 row; bench/tasks/DRAFTS.md A3). orphan-disks
 # is left out: the collector's 30-day age gate would keep a newly planted
 # fleet from ever showing it inside one eval loop.
 #
@@ -109,7 +112,7 @@ verification_spec:
     mode: assert
     check:
       type: report_contains
-      required_phrases: ["idle-batch-pool"]
+      required_phrases: ["idle-batch-pool", "seeded-a"]
   # The deployment has no pricing data (fleet_wide_cost_analysis_sop.md), so
   # any currency figure was invented. Copied from fleet-cost-idle-pool, read
   # against the chat reply instead of the ledger.

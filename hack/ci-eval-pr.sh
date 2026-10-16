@@ -2695,7 +2695,7 @@ unit_cost_hint() {
     # A plain chat request that runs the compliance collector's sweep (#2386):
     # the audit band, without the ledger write.
     security-chat-request-runs-collector) echo 900 ;;
-    # A plain chat request that now runs the same collector sweep (#2386):
+    # A plain chat request that now runs the waste collector's sweep (#2386):
     # the waste audit's band, without the ledger write.
     cost-chat-request-runs-collector) echo 900 ;;
     # Presubmit again since 2026-09-29, held out (#2013 step 2); nightly-only
