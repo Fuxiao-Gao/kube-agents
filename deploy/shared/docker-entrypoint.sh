@@ -1525,6 +1525,15 @@ fi
 # repairs. Kept after 2.6a only because it is the caller — everything here belongs to
 # 2.6's force-sync, not to it.
 CLUSTER_TEMPLATE="/opt/cluster-template"
+# The plugin code a cluster profile copies once, at scaffold time, from the shared
+# plugins tree (cluster_agent_profile.py), and that no later step refreshes. These two
+# hold no per-profile state, unlike hermes_otel, whose config.yaml carries the
+# profile's pinned collector endpoint. The template enables tool_call_audit, and the
+# back-fill below turns it on for a profile already on the volume, so the loop has to
+# give that profile the image's code too: a copy scaffolded before the plugin wrote
+# logs/audit.jsonl logs its records where the sidecar does not ship them.
+CLUSTER_SHARED_PLUGINS="${CLUSTER_SHARED_PLUGINS:-/opt/defaults/plugins}"
+CLUSTER_IMAGE_PLUGINS="tool_call_audit common"
 if [ -d "$CLUSTER_TEMPLATE" ]; then
     CLUSTER_PROFILE_SCRIPT="/opt/defaults/scripts/cluster_agent_profile.py"
     [ -f "$CLUSTER_PROFILE_SCRIPT" ] || CLUSTER_PROFILE_SCRIPT="$TARGET_DIR/scripts/cluster_agent_profile.py"
@@ -1543,6 +1552,16 @@ if [ -d "$CLUSTER_TEMPLATE" ]; then
                 || echo "WARN: failed to stamp cluster identity into $d/SOUL.md" >&2
         fi
         sync_profile_skills "$CLUSTER_TEMPLATE" "$d"
+        # Refresh the image-owned plugin code (see CLUSTER_IMAGE_PLUGINS). Copied over
+        # the profile's copy, not swapped, the same way the persona files above are:
+        # a plain copy never leaves the directory missing. A symlink is an
+        # operator-mounted plugin volume (step 2.65) and is left alone.
+        for _plugin in $CLUSTER_IMAGE_PLUGINS; do
+            [ -d "$CLUSTER_SHARED_PLUGINS/$_plugin" ] || continue
+            [ -L "$d/plugins/$_plugin" ] && continue
+            { mkdir -p "$d/plugins/$_plugin" && cp -a "$CLUSTER_SHARED_PLUGINS/$_plugin/." "$d/plugins/$_plugin/"; } 2>/dev/null \
+                || echo "WARN: could not refresh the $_plugin plugin in $d; this cluster agent keeps the copy it was scaffolded with" >&2
+        done
         # Targeted self-heal: drop `memory.provider` from cluster configs already
         # on the PVC. The template no longer sets it (per-user memory scopes by
         # gateway user identity, which a dispatcher-spawned worker never has), but
