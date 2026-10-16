@@ -1030,6 +1030,93 @@ class RemoteMcpUserAgentRepairTest(unittest.TestCase):
         self.assertIn("MCP relay repair", proc.stdout)
         self.assertNotIn("WARN", proc.stderr)
 
+    def test_the_cluster_loop_refreshes_the_image_owned_plugin_code(self):
+        """A cluster profile on the volume runs the image's tool_call_audit, not its own.
+
+        The profile copied the shared plugins tree once, when it was scaffolded, and the
+        back-fill in this loop turns tool_call_audit on for it. Without a refresh the
+        profile runs the copy it was scaffolded with, which may predate the writer the
+        sidecar ships from. hermes_otel holds the profile's pinned endpoint and an
+        operator-mounted plugin is a symlink; the loop must leave both as they are.
+        """
+        block = _extract_shell_block('if [ -d "$CLUSTER_TEMPLATE" ]; then')
+        script = "set -e\n"
+        for name in ("sync_profile_skills", "backfill_config_from_template", "repair_remote_mcp_user_agent"):
+            script += _extract_shell_function(name) + "\n"
+        # The two definitions sit above the block's opener; run the shipped lines, not a copy.
+        source = _ENTRYPOINT.read_text(encoding="utf-8")
+        definitions = [
+            line
+            for line in source.splitlines()
+            if line.startswith(("CLUSTER_SHARED_PLUGINS=", "CLUSTER_IMAGE_PLUGINS="))
+        ]
+        self.assertEqual(len(definitions), 2, "the plugin refresh's two definitions moved")
+        script += "\n".join(definitions) + "\n" + block
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            template_dir = root / "cluster-template"
+            template_dir.mkdir()
+            shutil.copy(self._CLUSTER_TEMPLATE, template_dir / "config.yaml")
+            shared = root / "defaults" / "plugins"
+            for plugin, module in (("tool_call_audit", "audit.py"), ("common", "audit_sink.py"), ("hermes_otel", "config.yaml")):
+                (shared / plugin).mkdir(parents=True)
+                (shared / plugin / module).write_text("image\n", encoding="utf-8")
+            profile = root / "data" / "profiles" / "cluster-p-c-us-central1"
+            plugins = profile / "plugins"
+            for plugin, module in (("tool_call_audit", "audit.py"), ("common", "audit_sink.py"), ("hermes_otel", "config.yaml")):
+                (plugins / plugin).mkdir(parents=True)
+                (plugins / plugin / module).write_text("scaffolded\n", encoding="utf-8")
+            mounted = root / "agent-plugins" / "tool_call_audit"
+            mounted.mkdir(parents=True)
+            (mounted / "audit.py").write_text("mounted\n", encoding="utf-8")
+            linked = root / "data" / "profiles" / "cluster-p-d-us-central1"
+            (linked / "plugins").mkdir(parents=True)
+            (linked / "plugins" / "tool_call_audit").symlink_to(mounted)
+            (linked / "config.yaml").write_text(
+                yaml.safe_dump(self._scaffolded_cluster_profile(self._OLD_HEADER), sort_keys=False),
+                encoding="utf-8",
+            )
+            (profile / "config.yaml").write_text(
+                yaml.safe_dump(self._scaffolded_cluster_profile(self._OLD_HEADER), sort_keys=False),
+                encoding="utf-8",
+            )
+            venv = root / "install" / ".venv" / "bin"
+            venv.mkdir(parents=True)
+            wrapper = venv / "python3"
+            wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
+            wrapper.chmod(0o755)
+            proc = subprocess.run(
+                ["sh", "-c", script],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env={
+                    "PATH": "/usr/bin:/bin",
+                    "CLUSTER_TEMPLATE": str(template_dir),
+                    "CLUSTER_SHARED_PLUGINS": str(shared),
+                    "TARGET_DIR": str(root / "data"),
+                    "INSTALL_DIR": str(root / "install"),
+                },
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            audit = (plugins / "tool_call_audit" / "audit.py").read_text(encoding="utf-8")
+            sink = (plugins / "common" / "audit_sink.py").read_text(encoding="utf-8")
+            otel = (plugins / "hermes_otel" / "config.yaml").read_text(encoding="utf-8")
+            is_link = (linked / "plugins" / "tool_call_audit").is_symlink()
+            mounted_text = (mounted / "audit.py").read_text(encoding="utf-8")
+            enabled = yaml.safe_load((profile / "config.yaml").read_text(encoding="utf-8"))["plugins"]["enabled"]
+        self.assertEqual(audit, "image\n", "the profile kept the tool_call_audit it was scaffolded with")
+        self.assertEqual(sink, "image\n", "the profile kept the common modules it was scaffolded with")
+        self.assertEqual(otel, "scaffolded\n", "the loop overwrote hermes_otel's per-profile config")
+        self.assertTrue(is_link, "the loop replaced an operator-mounted plugin")
+        self.assertEqual(mounted_text, "mounted\n", "the loop wrote through an operator-mounted plugin")
+        self.assertIn("tool_call_audit", enabled)
+        self.assertNotIn("WARN", proc.stderr)
+        # The loop refreshes from the tree cluster profiles are scaffolded from.
+        scaffold = (_REPO / "agents" / "platform" / "scripts" / "cluster_agent_profile.py").read_text(encoding="utf-8")
+        default = re.search(r'"SHARED_PLUGINS_DIR", "([^"]+)"', scaffold).group(1)
+        self.assertIn(f'CLUSTER_SHARED_PLUGINS="${{CLUSTER_SHARED_PLUGINS:-{default}}}"', source)
+
     def test_the_two_profiles_that_are_not_force_synced_both_take_the_repair(self):
         """The call sites, read off the source: the cluster loop and the front-door fill.
 
