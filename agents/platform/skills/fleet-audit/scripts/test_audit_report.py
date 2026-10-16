@@ -1597,6 +1597,77 @@ class TestValidation(unittest.TestCase):
         self.assertIn("findings[1].title", str(exc.exception))
         self.assertIn("findings[1]: same identity as findings[0]", str(exc.exception))
 
+    def test_a_null_limitations_still_shows_the_empty_checks_run(self):
+        doc = make_doc()
+        doc["scope"]["clusters"][0]["checks_run"] = []
+        doc["scope"]["clusters"][0]["limitations"] = None
+        with self.assertRaises(audit_report.ValidationError) as exc:
+            audit_report.validate_findings(doc, AUDIT)
+        self.assertIn("scope.clusters[0].limitations", str(exc.exception))
+        self.assertIn("scope.clusters[0].checks_run: empty", str(exc.exception))
+
+    def test_a_bad_scope_name_keeps_collecting_without_false_scope_errors(self):
+        for label, spoil in {
+            "absent": lambda c: c.pop("name"),
+            "null": lambda c: c.__setitem__("name", None),
+        }.items():
+            with self.subTest(name=label):
+                doc = make_doc(findings=[make_finding()])
+                spoil(doc["scope"]["clusters"][0])
+                doc["resolved_because"] = [resolved_entry()]
+                del doc["findings"][0]["evidence"]["command"]
+                with self.assertRaises(audit_report.ValidationError) as exc:
+                    audit_report.validate_findings(doc, AUDIT)
+                message = str(exc.exception)
+                self.assertIn("scope.clusters[0].name", message)
+                self.assertIn("findings[0].evidence.command", message)
+                self.assertNotIn("is not in scope.clusters", message)
+
+    def test_a_recorded_entry_key_does_not_stop_the_next_entry(self):
+        # A second defect behind the recorded one, in each list round 1's
+        # skip covers: both must come back in one rejection.
+        def checks_run(doc):
+            run = doc["scope"]["clusters"][0]["checks_run"]
+            run[0]["check"] = None
+            run[1]["command"] = ""
+            return "scope.clusters[0].checks_run[0].check", "scope.clusters[0].checks_run[1].command"
+
+        def not_applicable(doc):
+            cluster = doc["scope"]["clusters"][0]
+            first, second = cluster["checks_run"][:2]
+            cluster["checks_run"] = cluster["checks_run"][2:]
+            cluster["checks_not_applicable"] = [
+                {"check": None, "reason": "Autopilot: Google manages the node pools here."},
+                {"check": second["check"], "reason": ""},
+            ]
+            del first
+            return "checks_not_applicable[0].check", "checks_not_applicable[1].reason"
+
+        def skipped(doc):
+            doc["scope"]["skipped"] = [{"reason": "the API refused the call"}, {"cluster": "x", "reason": ""}]
+            return "scope.skipped[0].cluster", "scope.skipped[1].reason"
+
+        def resolved(doc):
+            doc["resolved_because"] = [resolved_entry(reason=None), resolved_entry(object="")]
+            return "resolved_because[0].reason", "resolved_because[1].object"
+
+        for spoil in (checks_run, not_applicable, skipped, resolved):
+            with self.subTest(list=spoil.__name__):
+                doc = make_doc()
+                first, second = spoil(doc)
+                with self.assertRaises(audit_report.ValidationError) as exc:
+                    audit_report.validate_findings(doc, AUDIT)
+                self.assertIn(first, str(exc.exception))
+                self.assertIn(second, str(exc.exception))
+
+    def test_a_recorded_declared_key_does_not_stop_the_next_entry(self):
+        doc = declaring_doc()
+        doc["declared"] = [make_declared(check=None), make_declared(obj="")]
+        with self.assertRaises(audit_report.ValidationError) as exc:
+            audit_report.validate_findings(doc, DECLARING_AUDIT)
+        self.assertIn("declared[0].check", str(exc.exception))
+        self.assertIn("declared[1].object", str(exc.exception))
+
     def test_reported_field_errors_are_capped(self):
         findings = [make_finding(fid=f"f{i}") for i in range(25)]
         doc = make_doc(findings=findings)

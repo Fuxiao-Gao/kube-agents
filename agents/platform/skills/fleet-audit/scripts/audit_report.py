@@ -3878,13 +3878,22 @@ def _validate_findings_document(data: object, audit_id: str) -> dict:
     finding_check_set = audit_finding_checks(audit_id)
     audited_names: set[str] = set()
     qualified_by_leaf: dict[str, list[str]] = {}
+    # Set once a cluster's name is recorded as wrong: that cluster is left out
+    # of `audited_names`, so a later reference to it is not called out of scope.
+    scope_name_recorded = False
     for i, cluster in enumerate(clusters):
         if not isinstance(cluster, dict):
             raise ValidationError(f"scope.clusters[{i}]: expected an object")
-        for field in ("name", "location", "project"):
+        name_ok = _require_str_ok(
+            cluster.get("name"), f"scope.clusters[{i}].name", allow_empty=False
+        )
+        for field in ("location", "project"):
             _require_str(
                 cluster.get(field), f"scope.clusters[{i}].{field}", allow_empty=False
             )
+        if not name_ok:
+            scope_name_recorded = True
+            continue
         # A finding names its cluster by this name, and so does every lookup
         # that resolves one back to this table. Two same-named clusters in two
         # projects make that name ambiguous, and the ambiguity is already
@@ -3917,12 +3926,12 @@ def _validate_findings_document(data: object, audit_id: str) -> dict:
         # some checks did not run or do not apply" is a different claim from
         # "I could not read this cluster", and conflating the two produces
         # false all-clears.
-        if "limitations" in cluster:
-            _require_str(
-                cluster.get("limitations"),
-                f"scope.clusters[{i}].limitations",
-                allow_empty=False,
-            )
+        # A note recorded as wrong counts as no note in the empty-checks_run test below.
+        limitations_bad = "limitations" in cluster and not _require_str_ok(
+            cluster.get("limitations"),
+            f"scope.clusters[{i}].limitations",
+            allow_empty=False,
+        )
         if CLUSTERS_LISTED_KEY in cluster:
             listed = cluster[CLUSTERS_LISTED_KEY]
             if not name.startswith(PROJECT_TARGET_PREFIX) or isinstance(listed, bool) or listed != 0:
@@ -3975,7 +3984,7 @@ def _validate_findings_document(data: object, audit_id: str) -> dict:
         )
         if (
             not checks_run
-            and not str(cluster.get("limitations", "")).strip()
+            and (limitations_bad or not str(cluster.get("limitations", "")).strip())
             and not every_check_inapplicable
         ):
             raise ValidationError(
@@ -4357,7 +4366,7 @@ def _validate_findings_document(data: object, audit_id: str) -> dict:
             if not _require_str_ok(entry.get("cluster"), f"{where}.cluster", allow_empty=False):
                 continue
             cluster = str(entry["cluster"])
-            if cluster not in audited_names:
+            if cluster not in audited_names and not scope_name_recorded:
                 raise ValidationError(
                     f"{where}.cluster: {cluster!r} is not in scope.clusters. A "
                     "finding can only be confirmed gone on a cluster this run read."
@@ -4458,7 +4467,7 @@ def _validate_findings_document(data: object, audit_id: str) -> dict:
             if not _require_str_ok(entry.get("cluster"), f"{where}.cluster", allow_empty=False):
                 continue
             cluster = str(entry["cluster"])
-            if cluster not in audited_names:
+            if cluster not in audited_names and not scope_name_recorded:
                 raise ValidationError(
                     f"{where}.cluster: {cluster!r} is not in scope.clusters. A "
                     "declaration justifies a posture this run observed, so the "
@@ -18101,14 +18110,11 @@ class _HintingParser(argparse.ArgumentParser):
     """An ArgumentParser whose usage errors end with the next step to take."""
 
     usage_hint = ""
-    # The root parser also reports a subcommand's leftover arguments; its hint
-    # is about choosing a subcommand, so it is kept off those.
-    hint_skips_unrecognized = False
 
     def error(self, message: str):  # type: ignore[override]
-        if self.usage_hint and not (
-            self.hint_skips_unrecognized and message.startswith("unrecognized arguments")
-        ):
+        # Only the root parser reports leftover arguments, for whichever
+        # subcommand ran; its hint is about choosing one, so it stays off those.
+        if self.usage_hint and not message.startswith("unrecognized arguments"):
             message = f"{message}\n{self.usage_hint}"
         super().error(message)
 
@@ -18118,7 +18124,6 @@ def build_parser() -> argparse.ArgumentParser:
         description="Deterministic audit-reporting harness for the fleet-audit skill."
     )
     parser.usage_hint = LIFECYCLE_HINT
-    parser.hint_skips_unrecognized = True
     subparsers = parser.add_subparsers(dest="subcommand", required=True, parser_class=_HintingParser)
 
     start_parser = subparsers.add_parser(
