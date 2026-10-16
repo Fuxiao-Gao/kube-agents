@@ -445,27 +445,21 @@ func foldUsageBody(body io.Reader, counters []string) (usageReading, error) {
 		}
 		samples[counter] = int64(sum)
 	}
-	dataVolume, ok := usageDataVolumeReading(volume)
-	if !ok {
-		return usageReading{}, &usageScrapeError{Kind: usageScrapeKindSample}
-	}
-	return usageReading{Samples: samples, StartTime: start, Clusters: clusters, DataVolume: dataVolume}, nil
+	return usageReading{Samples: samples, StartTime: start, Clusters: clusters, DataVolume: usageDataVolumeReading(volume)}, nil
 }
 
 // usageDataVolumeReading turns the data volume series a body carried into a
-// reading: nil, and fine, when it carried neither or only one kind; a failed
-// scrape when free exceeds total or either is past int64, which no statfs
-// produces.
-func usageDataVolumeReading(volume map[string]float64) (*usageDataVolume, bool) {
+// reading, or nil when it carried neither kind, only one, or a pair no statfs
+// produces (free past total, or a size past int64). Nil rather than a failed
+// scrape, so a bad volume pair costs the volume fields and not the counters
+// and cluster gauges read from the same body.
+func usageDataVolumeReading(volume map[string]float64) *usageDataVolume {
 	total, hasTotal := volume[dataVolumeKindTotal]
 	free, hasFree := volume[dataVolumeKindFree]
-	if !hasTotal || !hasFree {
-		return nil, true
+	if !hasTotal || !hasFree || total >= float64(math.MaxInt64) || free > total {
+		return nil
 	}
-	if total >= float64(math.MaxInt64) || free > total {
-		return nil, false
-	}
-	return &usageDataVolume{Total: int64(total), Free: int64(free)}, true
+	return &usageDataVolume{Total: int64(total), Free: int64(free)}
 }
 
 // usageLabelsMatch reports whether metric carries, for every label the filter

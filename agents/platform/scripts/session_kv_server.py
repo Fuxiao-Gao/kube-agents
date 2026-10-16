@@ -1541,14 +1541,17 @@ def _data_volume_warned() -> bool:
     return bool(row and row[0])
 
 
-def _set_data_volume_warned(warned: bool) -> None:
+def _set_data_volume_warned(warned: bool) -> bool:
+    """Move the flag to `warned`. True only for the caller that changed it, so
+    of two checks racing to post the warning one claims it and one stands down."""
     with closing(sqlite3.connect(SESSION_KV_DB_PATH, timeout=5.0)) as conn:
         with conn:
-            conn.execute(
-                "INSERT INTO data_volume_warning (id, warned) VALUES (1, ?) "
-                "ON CONFLICT(id) DO UPDATE SET warned = excluded.warned",
-                (int(warned),),
+            conn.execute("INSERT OR IGNORE INTO data_volume_warning (id, warned) VALUES (1, 0)")
+            cur = conn.execute(
+                "UPDATE data_volume_warning SET warned = ? WHERE id = 1 AND warned != ?",
+                (int(warned), int(warned)),
             )
+            return cur.rowcount == 1
 
 
 def _post_data_volume_warning(message: str) -> bool:
@@ -1585,12 +1588,15 @@ def check_data_volume() -> None:
         return
     if percent < DATA_VOLUME_WARN_PERCENT:
         return
+    if not _set_data_volume_warned(True):
+        return
     message = DATA_VOLUME_WARNING.format(
         percent=percent, used=(total - free) / BYTES_PER_GIB, total=total / BYTES_PER_GIB
     )
     logger.warning(message)
-    if _post_data_volume_warning(message):
-        _set_data_volume_warned(True)
+    if not _post_data_volume_warning(message):
+        # Release the claim so the next check posts it.
+        _set_data_volume_warned(False)
 
 
 def _data_volume_monitor() -> None:

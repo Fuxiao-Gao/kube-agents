@@ -18,10 +18,12 @@ import (
 	"context"
 	"fmt"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentv1alpha1 "github.com/gke-labs/kube-agents/k8s-operator/api/v1alpha1"
 )
@@ -48,6 +50,12 @@ const (
 	dataVolumeReasonHasSpace   = "HasSpace"
 
 	dataVolumeNearlyFullHint = "Remove unused cluster profiles, or ask an admin to enlarge it."
+
+	// dataVolumeNewerField keys the byte fields' pruning record: a served CRD
+	// from before this release prunes them, and without the record every poll
+	// would see them missing and write them again. The condition is in every
+	// schema and keeps landing.
+	dataVolumeNewerField = "storageStatus.capacityBytes and storageStatus.freeBytes"
 )
 
 // usageDataVolumeForPoll is the data volume reading this poll projects, and
@@ -75,9 +83,10 @@ func usageDataVolumeForPoll(agent *agentv1alpha1.PlatformAgent, scraped []usageS
 	return reading, true
 }
 
-// dataVolumeUsedPercent is how full the volume is, rounded down.
+// dataVolumeUsedPercent is how full the volume is, rounded down. In floating
+// point, because (Total-Free)*100 overflows int64 on a large enough volume.
 func dataVolumeUsedPercent(v *usageDataVolume) int64 {
-	return (v.Total - v.Free) * 100 / v.Total
+	return int64(float64(v.Total-v.Free) * 100 / float64(v.Total))
 }
 
 // dataVolumeCondition is the condition a reading calls for, given the one the
@@ -124,18 +133,21 @@ func dataVolumeFieldsMoved(status agentv1alpha1.StorageStatus, reading *usageDat
 // The message is left as written while the status holds, so a volume filling
 // slowly does not rewrite the condition every poll; the byte fields carry the
 // current figures. The patch carries the resource version, because it replaces
-// the conditions list whole and the reconciler writes other conditions in it.
+// the conditions list whole and the reconciler writes other conditions in it;
+// a conflict is left for the next poll rather than reported as a failure.
 func (p *UsageCounterPoller) projectDataVolume(ctx context.Context, agent *agentv1alpha1.PlatformAgent, reading *usageDataVolume, known bool) error {
 	if !known {
 		return nil
 	}
 	base := agent.DeepCopy()
 	changed := false
-	if dataVolumeFieldsMoved(agent.Status.StorageStatus, reading) {
+	wroteBytes := false
+	if !p.newerFieldPruned(agent, dataVolumeNewerField) && dataVolumeFieldsMoved(agent.Status.StorageStatus, reading) {
 		if reading == nil {
 			agent.Status.StorageStatus.CapacityBytes, agent.Status.StorageStatus.FreeBytes = nil, nil
 		} else {
 			agent.Status.StorageStatus.CapacityBytes, agent.Status.StorageStatus.FreeBytes = ptr.To(reading.Total), ptr.To(reading.Free)
+			wroteBytes = true
 		}
 		changed = true
 	}
@@ -152,7 +164,15 @@ func (p *UsageCounterPoller) projectDataVolume(ctx context.Context, agent *agent
 		return nil
 	}
 	if err := p.r.Status().Patch(ctx, agent, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		if apierrors.IsConflict(err) {
+			logf.FromContext(ctx).WithName(usagePollerLogName).Info("the CR changed under the data volume status write; it is retried next poll",
+				"platformagent", client.ObjectKeyFromObject(agent).String())
+			return nil
+		}
 		return fmt.Errorf("patching status.storageStatus and the %s condition: %w", dataVolumeNearlyFullCondition, err)
+	}
+	if wroteBytes {
+		p.noteNewerFieldEcho(ctx, agent, dataVolumeNewerField, agent.Status.StorageStatus.CapacityBytes != nil)
 	}
 	return nil
 }

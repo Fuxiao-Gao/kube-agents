@@ -589,8 +589,8 @@ func TestPodUsageSource_TransportUsesNoProxyAndBoundsHeaders(t *testing.T) {
 
 // The watcher's body also carries its data volume reading, total and free,
 // which the poller projects to status.storageStatus. A body carrying one kind
-// or neither yields no reading and is not a failure; one whose free space
-// exceeds the total is refused, since no statfs produces it.
+// or neither yields no reading and is not a failure, and neither is one whose
+// free space exceeds the total, which no statfs produces.
 func TestPodUsageSource_ReadsTheWatchersDataVolume(t *testing.T) {
 	watcher := func(volume ...string) string {
 		return strings.Join(append([]string{
@@ -629,8 +629,11 @@ func TestPodUsageSource_ReadsTheWatchersDataVolume(t *testing.T) {
 		}
 	}
 
-	if _, err := scrape(watcher(`kubeagents_data_volume_bytes{kind="free"} 200`, `kubeagents_data_volume_bytes{kind="total"} 100`)); scrapeKind(t, err) != usageScrapeKindSample {
-		t.Errorf("free past total: %v, want kind %q", err, usageScrapeKindSample)
+	// A pair no statfs produces drops the volume reading and keeps the rest
+	// of the body: the injected counter still counts.
+	reading, err = scrape(watcher(`kubeagents_data_volume_bytes{kind="free"} 200`, `kubeagents_data_volume_bytes{kind="total"} 100`))
+	if err != nil || reading.DataVolume != nil || reading.sample() != 7 {
+		t.Errorf("free past total: reading %+v, err %v; want no volume reading and the sample kept", reading, err)
 	}
 
 	broker := serveBody(t, http.StatusOK, "kubeagents_tool_invocations_total{status=\"success\"} 1\nkubeagents_data_volume_bytes{kind=\"free\"} 1\nkubeagents_data_volume_bytes{kind=\"total\"} 2\n")

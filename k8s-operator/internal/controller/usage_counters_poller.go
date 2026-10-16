@@ -266,7 +266,7 @@ func (p *UsageCounterPoller) noteNewerFieldEcho(ctx context.Context, agent *agen
 	_, fresh := p.prunedNewerFields[key][field]
 	p.prunedNewerFields[key][field] = p.now()
 	if !fresh {
-		logf.FromContext(ctx).Info("the served CRD does not serve a status.usage field this operator writes; apply this release's CRD to get it, which is probed again after the interval",
+		logf.FromContext(ctx).Info("the served CRD does not serve a status field this operator writes; apply this release's CRD to get it, which is probed again after the interval",
 			"platformagent", key, "field", field, "reprobeAfter", usageStatusReprobeInterval.String())
 	}
 }

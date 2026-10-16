@@ -212,3 +212,28 @@ func assertNoDataVolume(t *testing.T, agent *agentv1alpha1.PlatformAgent, when s
 		t.Fatalf("%s: condition %+v, want it removed", when, c)
 	}
 }
+
+// A served CRD from before this release prunes the byte fields. The poller
+// records it from the patch's echo and probes again only after the reprobe
+// interval, as it does for the newer status.usage fields, while
+// the condition, which every schema carries, keeps landing.
+func TestDataVolume_APruningCRDIsProbedNotRewrittenEveryPoll(t *testing.T) {
+	h := dataVolumeHarness(t, usageTestAgent(usageClock(0).Add(-time.Hour)))
+	h.pruningStorage = true
+	h.stub.setDataVolume(gatewayAddr(), testVolume, freeAt(50))
+	h.poll(5)
+	after := h.patches
+	if c := meta.FindStatusCondition(h.agent().Status.Conditions, dataVolumeNearlyFullCondition); c == nil || c.Status != metav1.ConditionFalse {
+		t.Fatalf("the condition did not land under a pruning CRD: %+v", c)
+	}
+	// Inside the reprobe interval nothing is written; past it, one probe.
+	h.poll(7)
+	if h.patches != after {
+		t.Fatalf("the pruned byte fields were rewritten inside the reprobe interval: %d patches, want %d", h.patches, after)
+	}
+	h.stub.setDataVolume(gatewayAddr(), testVolume, freeAt(95))
+	h.poll(15)
+	if !meta.IsStatusConditionTrue(h.agent().Status.Conditions, dataVolumeNearlyFullCondition) {
+		t.Fatal("the condition stopped landing while the byte fields were pruned")
+	}
+}
