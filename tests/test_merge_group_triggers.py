@@ -51,6 +51,10 @@ def _triggers(path: pathlib.Path) -> set[str]:
 
 #: The queue's own gate checks. `main`-only, so the release-line test below does not apply.
 _GATE_WORKFLOW = "merge-gate.yml"
+#: The branches a merge queue serves. On the dry-run branch only, the scratch
+#: branch is added, so its own queue gets the required checks; `main` keeps
+#: `["main"]`.
+_QUEUE_BRANCHES = ["main", "merge-queue-dry-run"]
 
 _PULL_REQUEST = "pull_request"
 _RELEASE_LINE_GLOB = "release/**"
@@ -81,14 +85,14 @@ class MergeGroupTriggerTest(unittest.TestCase):
 
     def test_the_gate_workflow_runs_on_merge_group_for_main(self) -> None:
         on = _on(_WORKFLOWS / _GATE_WORKFLOW)
-        self.assertEqual((on[_MERGE_GROUP] or {}).get("branches"), ["main"])
+        self.assertEqual((on[_MERGE_GROUP] or {}).get("branches"), _QUEUE_BRANCHES)
 
     def test_merge_group_stays_on_main(self) -> None:
         """The merge queue is `main`'s; a release line merges through Tide alone."""
         for name in _REQUIRED_CHECK_WORKFLOWS:
             with self.subTest(workflow=name):
                 on = _on(_WORKFLOWS / name)
-                self.assertEqual((on[_MERGE_GROUP] or {}).get("branches"), ["main"])
+                self.assertEqual((on[_MERGE_GROUP] or {}).get("branches"), _QUEUE_BRANCHES)
 
 
 if __name__ == "__main__":

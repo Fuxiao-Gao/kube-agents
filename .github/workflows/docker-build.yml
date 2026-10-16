@@ -13,9 +13,9 @@ name: Docker Build
 # Cloud Build, on main, after merge. It does add a second image build per merge.
 on:
   pull_request:
-    branches: [main, "release/**"]
+    branches: [main, "release/**", merge-queue-dry-run]
   merge_group:
-    branches: [main]
+    branches: [main, merge-queue-dry-run]
   push:
     branches: [main]
 

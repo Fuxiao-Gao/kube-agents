@@ -27,9 +27,9 @@ name: A2A Module Tests
 # filter below identical.
 on:
   pull_request:
-    branches: [main, "release/**"]
+    branches: [main, "release/**", merge-queue-dry-run]
   merge_group:
-    branches: [main]
+    branches: [main, merge-queue-dry-run]
   push:
     branches: [main]
     paths:

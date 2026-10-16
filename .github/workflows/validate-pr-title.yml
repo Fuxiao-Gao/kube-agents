@@ -8,7 +8,7 @@ on:
       - synchronize
       - reopened
   merge_group:
-    branches: [main]
+    branches: [main, merge-queue-dry-run]
 
 # One run per pull request head, newest wins. Without a group every push and
 # every title or body edit queued a run behind the one before it: on

@@ -36,7 +36,7 @@ on:
     branches: [main, merge-queue-dry-run]
   status:
   merge_group:
-    branches: [main]
+    branches: [main, merge-queue-dry-run]
 
 permissions: {}
 
