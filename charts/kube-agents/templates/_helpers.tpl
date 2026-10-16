@@ -207,6 +207,42 @@ true
 {{- end }}
 
 {{/*
+Whether the agent's ServiceMonitors render. platformAgent.serviceMonitor is a
+tri-state: true and false are answers, and null (the default) follows the
+cluster — the ServiceMonitor API is served where Prometheus Operator is
+installed. Pass --api-versions monitoring.coreos.com/v1/ServiceMonitor to helm
+template to see the default render.
+*/}}
+{{- define "kube-agents.platformAgentServiceMonitor" -}}
+{{- $explicit := .Values.platformAgent.serviceMonitor -}}
+{{- if kindIs "invalid" $explicit -}}
+{{- if .Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor" -}}
+true
+{{- end -}}
+{{- else if $explicit -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+Whether the agent's VMPodScrapes render. platformAgent.vmPodScrape is a
+tri-state: true and false are answers, and null (the default) follows the
+cluster — the VMPodScrape API is served where VictoriaMetrics Operator is
+installed. Pass --api-versions operator.victoriametrics.com/v1beta1/VMPodScrape
+to helm template to see the default render.
+*/}}
+{{- define "kube-agents.platformAgentVMPodScrape" -}}
+{{- $explicit := .Values.platformAgent.vmPodScrape -}}
+{{- if kindIs "invalid" $explicit -}}
+{{- if .Capabilities.APIVersions.Has "operator.victoriametrics.com/v1beta1/VMPodScrape" -}}
+true
+{{- end -}}
+{{- else if $explicit -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
 The OTLP/HTTP collector base URL for the chart's own consumers (the LiteLLM exporter).
 
 Unset means the GKE Managed OpenTelemetry collector, which is what these consumers have
@@ -690,13 +726,13 @@ gitlabNamespaceRegex, all in k8s-operator/api/v1alpha1.
 {{- end -}}
 {{- $host := $f.host | default "" -}}
 {{- /* ASCII only before `lower`, which is Unicode: `gİthub.com` lowers to github.com, and the operator folds ASCII only, so it is another host. */ -}}
+{{- /* A forge at a host other than github.com names its provider, as the CRD's rule, and before the host is judged as a GitHub host, so the remedy named is the provider: left to the default, a forge written for a GitLab instance would become a GitHub Enterprise Server. */ -}}
+{{- if and (not $f.provider) $host (regexMatch "^[A-Za-z0-9.-]+$" $host) (not (has (lower $host) $githubHosts)) -}}
+{{- fail (printf "platformAgent.integration.forges[%d].provider is required: the forge is at %q, not github.com; name it github for a GitHub Enterprise Server or gitlab for a GitLab instance" $i $f.host) -}}
+{{- end -}}
 {{- /* A github forge is at github.com in one of its spellings, or at a GitHub Enterprise Server host: a hostname, label by label, that is not under a domain where GitHub runs its own services and not GitLab's. */ -}}
 {{- if and (eq $provider "github") $host (not (and (regexMatch "^[A-Za-z0-9.-]+$" $host) (has (lower $host) $githubHosts))) (or (not (regexMatch "^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$" $host)) (gt (len $host) 253) (regexMatch $githubReserved (lower $host)) (regexMatch "(^|\\.)gitlab\\.com$" (lower $host))) -}}
 {{- fail (printf "platformAgent.integration.forges[%d].host is %q, which provider github does not serve: name github.com or a GitHub Enterprise Server host" $i $f.host) -}}
-{{- end -}}
-{{- /* A forge at a host other than github.com names its provider, as the CRD's rule: left to the default, a forge written for a GitLab instance would become a GitHub Enterprise Server. */ -}}
-{{- if and (not $f.provider) $host (not (has (lower $host) $githubHosts)) -}}
-{{- fail (printf "platformAgent.integration.forges[%d].provider is required: the forge is at %q, not github.com; name it github for a GitHub Enterprise Server or gitlab for a GitLab instance" $i $f.host) -}}
 {{- end -}}
 {{- /* One host per forge, and one GitHub host per install, as the operator's hostConflicts. */ -}}
 {{- $canon := lower ($host | default "") -}}
