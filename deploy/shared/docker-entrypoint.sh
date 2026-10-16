@@ -1529,15 +1529,26 @@ if [ -d "$CLUSTER_TEMPLATE" ]; then
             [ -f "$CLUSTER_TEMPLATE/$f" ] && cp -f "$CLUSTER_TEMPLATE/$f" "$d/$f" 2>/dev/null || true
         done
         sync_profile_skills "$CLUSTER_TEMPLATE" "$d"
-        # Refresh the image-owned plugin code (see CLUSTER_IMAGE_PLUGINS). Copied over
-        # the profile's copy, not swapped, the same way the persona files above are:
-        # a plain copy never leaves the directory missing. A symlink is an
-        # operator-mounted plugin volume (step 2.65) and is left alone.
+        # Refresh the image-owned plugin code (see CLUSTER_IMAGE_PLUGINS). Each file is
+        # copied to a temporary name beside its target and renamed over it, so a copy
+        # that fails part-way leaves the old file whole, never a truncated module that
+        # stops the plugin loading. The temporary name carries the pod name, because
+        # replicas share this volume. A symlink is an operator-mounted plugin volume
+        # (step 2.65) and is left alone.
+        # shellcheck disable=SC3028 # falls back to $$ where HOSTNAME is unset
+        _refresh_tag="${HOSTNAME:-$$}"
         for _plugin in $CLUSTER_IMAGE_PLUGINS; do
-            [ -d "$CLUSTER_SHARED_PLUGINS/$_plugin" ] || continue
-            [ -L "$d/plugins/$_plugin" ] && continue
-            { mkdir -p "$d/plugins/$_plugin" && cp -a "$CLUSTER_SHARED_PLUGINS/$_plugin/." "$d/plugins/$_plugin/"; } 2>/dev/null \
-                || echo "WARN: could not refresh the $_plugin plugin in $d; this cluster agent keeps the copy it was scaffolded with" >&2
+            _src="$CLUSTER_SHARED_PLUGINS/$_plugin"
+            _dst="$d/plugins/$_plugin"
+            [ -d "$_src" ] || continue
+            [ -L "$_dst" ] && continue
+            if ! (cd "$_src" && find . -type f) | while IFS= read -r _file; do
+                _tmp="$_dst/$_file.refresh.$_refresh_tag"
+                { mkdir -p "$(dirname "$_dst/$_file")" && cp -p "$_src/$_file" "$_tmp" && mv -f "$_tmp" "$_dst/$_file"; } 2>/dev/null \
+                    || { rm -f "$_tmp" 2>/dev/null; exit 1; }
+            done; then
+                echo "WARN: could not refresh the $_plugin plugin in $d; each file not yet replaced keeps the copy it was scaffolded with" >&2
+            fi
         done
         # Targeted self-heal: drop `memory.provider` from cluster configs already
         # on the PVC. The template no longer sets it (per-user memory scopes by
