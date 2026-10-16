@@ -60,6 +60,11 @@ FINISH = (
     "--audit compliance-audit --findings-file /opt/data/scratch/findings_compliance-audit.json"
 )
 LEDGER = "https://github.com/acme/infra/issues/248"
+STARTED = json.dumps({
+    "issue": None, "repo": "acme/infra", "mode": "content",
+    "workspace": "/opt/data/gitops/compliance-audit/acme__infra",
+    "findings_path": "/opt/data/scratch/findings_compliance-audit.json",
+})
 CLAIM = "The detailed ledger and automated fix PRs have been published."
 _calls = [0]
 
@@ -108,13 +113,17 @@ check(
 
 print("a rejected finish, then done:")
 tid = worker_card("Run the compliance audit", "sess-rejected")
-tool_round("sess-rejected", START, '{"workspace": "/opt/data/gitops/compliance-audit/acme__infra"}', 0)
+tool_round("sess-rejected", START, STARTED, 0)
 tool_round("sess-rejected", FINISH, "FINDINGS REJECTED: scope: required object", 2)
 first = complete(CLAIM)
 check("the completion is refused", not first.get("ok"), str(first))
 check("the refusal names the next step", "finish" in json.dumps(first) and "kanban_block" in json.dumps(first), str(first))
 row = card(tid)
-check("the card stays open with the result saved", row is not None and row[0] == "running" and row[1] == CLAIM, repr(row))
+check(
+    "the card stays open with the result saved, marked not published",
+    row is not None and row[0] == "running" and str(row[1]).startswith("⚠️ **Not published:**") and str(row[1]).endswith(CLAIM),
+    repr(row),
+)
 second = complete(CLAIM)
 check("the retry closes the card", second.get("ok"), str(second))
 row = card(tid)
@@ -126,7 +135,7 @@ check(
 
 print("a published run:")
 tid = worker_card("Run the compliance audit again", "sess-published")
-tool_round("sess-published", START, "{}", 0)
+tool_round("sess-published", START, STARTED, 0)
 tool_round("sess-published", FINISH, json.dumps({"status": "OPENED", "issue_url": LEDGER, "new": 11}), 0)
 out = complete("Audit complete, 11 findings.")
 row = card(tid)

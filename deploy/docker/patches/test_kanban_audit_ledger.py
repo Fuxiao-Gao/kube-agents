@@ -38,6 +38,12 @@ FINISH = (
 LEDGER = "https://github.com/acme/infra/issues/248"
 CLAIM = "The detailed ledger and automated fix PRs have been published."
 REJECTED = "FINDINGS REJECTED: scope: required object with 'clusters' and 'skipped'"
+STARTED = json.dumps({
+    "issue": 12, "repo": "acme/infra", "mode": "content",
+    "workspace": "/opt/data/gitops/compliance-audit/acme__infra",
+    "findings_path": "/opt/data/scratch/findings_compliance-audit.json",
+    "pending_remediation_requests": [], "carried": [],
+})
 
 STATE_SCHEMA = """
 CREATE TABLE sessions (
@@ -115,7 +121,7 @@ class Fixture(unittest.TestCase):
 
 class TestTheIncidentShapes(Fixture):
     def test_a_rejected_finish_then_done_is_refused(self):
-        self.run_tool(START, '{"workspace": "/opt/data/gitops/compliance-audit/acme__infra"}')
+        self.run_tool(START, STARTED)
         self.run_tool(FINISH, REJECTED, exit_code=2)
         err, _ = self.complete()
         self.assertIsNotNone(err)
@@ -123,13 +129,13 @@ class TestTheIncidentShapes(Fixture):
         self.assertIn("kanban_block", err)
 
     def test_start_with_no_finish_at_all_is_refused(self):
-        self.run_tool(START, "{}")
+        self.run_tool(START, STARTED)
         self.run_tool("python3 collect.py compliance-audit", "Command timed out after 60s", exit_code=124)
         err, _ = self.complete()
         self.assertIsNotNone(err)
 
     def test_a_background_finish_never_read_is_refused(self):
-        self.run_tool(START, "{}")
+        self.run_tool(START, STARTED)
         self.run_tool(FINISH, "", raw=json.dumps(
             {"output": "", "exit_code": None, "status": "yielded_to_background", "session_id": "proc_1"}
         ))
@@ -137,27 +143,29 @@ class TestTheIncidentShapes(Fixture):
         self.assertIsNotNone(err)
 
     def test_the_refusal_saves_the_result_and_leaves_the_card_open(self):
-        self.run_tool(START, "{}")
+        self.run_tool(START, STARTED)
         self.complete()
-        self.assertEqual(self.card_row(), ("running", CLAIM))
+        status, saved = self.card_row()
+        self.assertEqual(status, "running")
+        self.assertTrue(saved.endswith(CLAIM))
 
 
 class TestPublishedRuns(Fixture):
     def test_a_finish_url_missing_from_the_result_is_appended(self):
-        self.run_tool(START, "{}")
+        self.run_tool(START, STARTED)
         self.run_tool(FINISH, "label-ensure ok\n" + finish_line())
         err, result = self.complete("Audit complete, 24 findings.")
         self.assertIsNone(err)
         self.assertEqual(result, "Audit complete, 24 findings.\n\nLedger: " + LEDGER)
 
     def test_a_result_that_names_the_ledger_is_unchanged(self):
-        self.run_tool(START, "{}")
+        self.run_tool(START, STARTED)
         self.run_tool(FINISH, finish_line())
         report = f"Opened the ledger: {LEDGER}"
         self.assertEqual(self.complete(report), (None, report))
 
     def test_a_finish_read_back_from_a_background_process_counts(self):
-        self.run_tool(START, "{}")
+        self.run_tool(START, STARTED)
         self.run_tool(FINISH, "", raw=json.dumps(
             {"output": "", "exit_code": None, "status": "yielded_to_background", "session_id": "proc_1"}
         ))
@@ -167,17 +175,17 @@ class TestPublishedRuns(Fixture):
         self.assertIn(LEDGER, result)
 
     def test_no_forge_has_no_url_and_is_accepted(self):
-        self.run_tool(START, "{}")
+        self.run_tool(START, STARTED)
         self.run_tool(FINISH, finish_line(status="NO_FORGE", url=None))
         self.assertEqual(self.complete("4 findings."), (None, "4 findings."))
 
     def test_a_clean_run_with_no_earlier_ledger_is_accepted(self):
-        self.run_tool(START, "{}")
+        self.run_tool(START, STARTED)
         self.run_tool(FINISH, finish_line(status="CLEAN", url=None))
         self.assertEqual(self.complete("Clean."), (None, "Clean."))
 
     def test_a_retry_after_a_rejection_that_publishes_is_accepted(self):
-        self.run_tool(START, "{}")
+        self.run_tool(START, STARTED)
         self.run_tool(FINISH, REJECTED, exit_code=2)
         self.run_tool(FINISH, finish_line())
         self.assertEqual(self.complete(LEDGER), (None, LEDGER))
@@ -197,12 +205,12 @@ class TestCardsThatAreNotAuditRuns(Fixture):
         self.assertEqual(self.complete("read it"), (None, "read it"))
 
     def test_another_card_is_untouched(self):
-        self.run_tool(START, "{}")
+        self.run_tool(START, STARTED)
         with mock.patch.dict(os.environ, {WORKER_TASK_ENV: "t_other"}):
             self.assertEqual(self.complete(), (None, CLAIM))
 
     def test_a_gateway_session_with_no_worker_card_is_untouched(self):
-        self.run_tool(START, "{}")
+        self.run_tool(START, STARTED)
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertEqual(self.complete(), (None, CLAIM))
 
@@ -210,7 +218,7 @@ class TestCardsThatAreNotAuditRuns(Fixture):
 class TestTheNudgeIsNeverAWedge(Fixture):
     def setUp(self):
         super().setUp()
-        self.run_tool(START, "{}")
+        self.run_tool(START, STARTED)
         self.err, _ = self.complete()
 
     def test_the_retry_is_accepted_and_says_not_published(self):
@@ -236,22 +244,103 @@ class TestTheNudgeIsNeverAWedge(Fixture):
 
 class TestTheRunBoundary(Fixture):
     def test_a_second_start_forgets_the_first_finish(self):
-        self.run_tool(START, "{}")
+        self.run_tool(START, STARTED)
         self.run_tool(FINISH, finish_line())
-        self.run_tool(START, "{}")
+        self.run_tool(START, STARTED)
         err, _ = self.complete(LEDGER)
         self.assertIsNotNone(err)
 
     def test_a_finish_line_before_any_start_does_not_count(self):
         self.run_tool("cat /opt/data/fleet-audit/reports/latest.json", finish_line())
-        self.run_tool(START, "{}")
+        self.run_tool(START, STARTED)
         err, _ = self.complete()
         self.assertIsNotNone(err)
 
-    def test_the_audit_id_is_read_from_the_equals_form(self):
-        self.run_tool(START.replace("--audit compliance-audit", "--audit=ai-security-audit"), "{}")
+    def test_the_audit_id_is_read_from_the_findings_path(self):
+        self.run_tool(START, STARTED.replace("findings_compliance-audit", "findings_ai-security-audit"))
         err, _ = self.complete()
         self.assertIn("ai-security-audit", err)
+
+
+class TestResultLinesNotCommands(Fixture):
+    def test_start_chained_with_a_collector_that_timed_out_is_a_run(self):
+        self.run_tool(START + " && python3 collect.py compliance-audit", STARTED + "\nCommand timed out", exit_code=124)
+        err, _ = self.complete()
+        self.assertIsNotNone(err)
+
+    def test_start_and_finish_in_one_command_is_published(self):
+        self.run_tool(START + " && " + FINISH, STARTED + "\n" + finish_line())
+        err, result = self.complete("done")
+        self.assertIsNone(err)
+        self.assertIn(LEDGER, result)
+
+    def test_a_grep_that_prints_the_start_syntax_is_not_a_run(self):
+        self.run_tool("grep -rn 'audit_report.py start' skills/", "SKILL.md:16:audit_report.py start --audit x")
+        self.assertEqual(self.complete("read it"), (None, "read it"))
+
+    def test_the_skills_placeholder_finish_example_is_not_a_finish(self):
+        self.run_tool(START, STARTED)
+        example = '{"status":"OPENED","issue_url":"\u2026","new":7,"resolved":0}'
+        self.run_tool("sed -n 438p skills/fleet-audit/SKILL.md", example)
+        err, _ = self.complete()
+        self.assertIsNotNone(err)
+
+
+class TestOneStartPerRepository(Fixture):
+    def test_a_rejected_second_repository_refuses_and_keeps_the_first_ledger(self):
+        self.run_tool(START, STARTED)
+        self.run_tool(FINISH, finish_line())
+        self.run_tool(START, STARTED)
+        self.run_tool(FINISH, REJECTED, exit_code=2)
+        err, _ = self.complete("two repositories")
+        self.assertIsNotNone(err)
+        err, result = self.complete("two repositories")
+        self.assertIsNone(err)
+        self.assertTrue(result.startswith("\u26a0\ufe0f **Not published:**"))
+        self.assertIn(LEDGER, result)
+
+    def test_two_published_ledgers_are_both_appended(self):
+        other = "https://github.com/acme/apps/issues/7"
+        self.run_tool(START, STARTED)
+        self.run_tool(FINISH, finish_line())
+        self.run_tool(START, STARTED)
+        self.run_tool(FINISH, finish_line(url=other))
+        err, result = self.complete("two repositories")
+        self.assertIsNone(err)
+        self.assertIn(LEDGER, result)
+        self.assertIn(other, result)
+
+
+class TestMovedOutputs(Fixture):
+    def test_an_output_moved_out_after_start_lets_the_completion_through(self):
+        self.run_tool(START, STARTED)
+        self.run_tool(FINISH, "", raw="<persisted-output>\nPreview (first 1500 chars):\nlabel-ensure ok\n...")
+        self.assertEqual(self.complete(), (None, CLAIM))
+
+    def test_a_moved_output_before_start_does_not(self):
+        self.run_tool("kubectl get pods -A", "", raw="<persisted-output>\nPreview")
+        self.run_tool(START, STARTED)
+        err, _ = self.complete()
+        self.assertIsNotNone(err)
+
+
+class TestTheSavedResult(Fixture):
+    def test_the_saved_result_is_marked_not_published(self):
+        self.run_tool(START, STARTED)
+        self.complete()
+        status, saved = self.card_row()
+        self.assertEqual(status, "running")
+        self.assertTrue(saved.startswith("\u26a0\ufe0f **Not published:**"))
+        self.assertTrue(saved.endswith(CLAIM))
+
+    def test_a_closed_card_is_not_written_and_not_refused(self):
+        with sqlite3.connect(self.board_path) as conn:
+            conn.execute("UPDATE tasks SET status = 'done', result = 'closed report' WHERE id = ?", (CARD,))
+        self.run_tool(START, STARTED)
+        err, result = self.complete()
+        self.assertIsNone(err)
+        self.assertIn("Not published", result)
+        self.assertEqual(self.card_row(), ("done", "closed report"))
 
 
 class TestCompression(Fixture):
@@ -259,7 +348,7 @@ class TestCompression(Fixture):
         with sqlite3.connect(self.state) as conn:
             conn.execute("UPDATE sessions SET end_reason = 'compression' WHERE id = ?", (SESSION,))
         self.session("sess-child", parent=SESSION, started_at=2.0)
-        self.run_tool(START, "{}")
+        self.run_tool(START, STARTED)
         self.run_tool(FINISH, finish_line(), sid="sess-child")
         err, result = self.complete("done")
         self.assertIsNone(err)
@@ -269,7 +358,7 @@ class TestCompression(Fixture):
         with sqlite3.connect(self.state) as conn:
             conn.execute("UPDATE sessions SET end_reason = 'compression' WHERE id = ?", (SESSION,))
         self.session("sess-child", parent=SESSION, started_at=2.0)
-        self.run_tool(START, "{}")
+        self.run_tool(START, STARTED)
         with mock.patch.dict(os.environ, {SESSION_ID_ENV: "sess-child"}):
             err, _ = self.complete()
         self.assertIsNotNone(err)
@@ -278,31 +367,28 @@ class TestCompression(Fixture):
         self.session("sess-other", started_at=0.5)
         with sqlite3.connect(self.state) as conn:
             conn.execute("UPDATE sessions SET parent_session_id = 'sess-other' WHERE id = ?", (SESSION,))
-        self.run_tool(START, "{}", sid="sess-other")
+        self.run_tool(START, STARTED, sid="sess-other")
         self.assertEqual(self.complete(), (None, CLAIM))
 
 
 class TestStoredShapes(Fixture):
     def test_json_prefixed_content_is_decoded(self):
-        rows = [
-            (1, "assistant", "", None, json.dumps([{"id": "c1", "function": {
-                "name": "terminal", "arguments": json.dumps({"command": START})}}])),
-            (2, "tool", CONTENT_JSON_PREFIX + json.dumps({"output": "{}", "exit_code": 0}), "c1", None),
-        ]
-        self.assertEqual(audit_run(rows), ("compliance-audit", None))
+        rows = [(1, "tool", CONTENT_JSON_PREFIX + json.dumps({"output": STARTED, "exit_code": 0}))]
+        self.assertEqual(audit_run(rows)["open_audit"], "compliance-audit")
 
-    def test_arguments_stored_as_a_dict_are_read(self):
-        rows = [
-            (1, "assistant", "", None, json.dumps([{"id": "c1", "function": {
-                "name": "terminal", "arguments": {"command": START}}}])),
-            (2, "tool", json.dumps({"output": "{}", "exit_code": 0}), "c1", None),
-        ]
-        self.assertEqual(audit_run(rows)[0], "compliance-audit")
+    def test_text_after_the_json_result_is_ignored(self):
+        content = json.dumps({"output": finish_line(), "exit_code": 0}) + "\n\n[Subdirectory context: AGENTS.md]"
+        rows = [(1, "tool", json.dumps({"output": STARTED, "exit_code": 0}) + "\nhint"), (2, "tool", content)]
+        self.assertEqual(audit_run(rows), {"started": True, "open_audit": None, "urls": [LEDGER], "hidden": False})
+
+    def test_a_result_with_no_output_key_is_read(self):
+        rows = [(1, "tool", json.dumps({"stdout": STARTED})), (2, "tool", json.dumps({"status": "exited", "log": finish_line()}))]
+        self.assertEqual(audit_run(rows)["urls"], [LEDGER])
 
 
 class TestFailOpen(Fixture):
     def test_no_session_id_fails_open(self):
-        self.run_tool(START, "{}")
+        self.run_tool(START, STARTED)
         with mock.patch.dict(os.environ, {SESSION_ID_ENV: ""}):
             self.assertEqual(self.complete(), (None, CLAIM))
 

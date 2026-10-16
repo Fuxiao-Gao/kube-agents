@@ -7,10 +7,11 @@ wired into ``tools/kanban_tools.py`` by
 Why
 ---
 A fleet-audit stream publishes its report as a ledger issue:
-``audit_report.py start`` opens the run and ``finish`` publishes it, printing
-one JSON line with ``status`` and ``issue_url``. The skill says a card whose
-audit produced no ledger must not close ``done`` (``fleet-audit/SKILL.md``),
-but that is an instruction only. Issue #2856 measured the cost: on the
+``audit_report.py start`` opens the run and prints one JSON line with
+``workspace`` and ``findings_path``, and ``finish`` publishes it and prints one
+JSON line with ``status`` and ``issue_url``. The skill says a card whose audit
+produced no ledger must not close ``done`` (``fleet-audit/SKILL.md``), but
+that is an instruction only. Issue #2856 measured the cost: on the
 ``compliance-rbac-overgrant`` case more than half of the repetitions closed
 the card with a chat summary ("audit complete, 24 findings") and no ledger.
 The worker ran ``start``, then stopped when ``collect.py`` timed out, or ran
@@ -22,22 +23,23 @@ no issue existed.
 What this changes
 -----------------
 At ``kanban_complete`` the gate reads this card's own worker session from
-Hermes's session store and looks for two things: a successful ``audit_report.py
-start``, and after it a ``finish`` result line (a JSON object with ``status``
-and ``issue_url``).
+Hermes's session store and looks in the tool outputs, in order, for the result
+lines of ``start`` and ``finish``. It reads the result lines, not the commands,
+so a chained command, a grep of the skill or a ``--help`` neither starts nor
+ends a run.
 
-* No successful ``start``: not an audit run. Nothing changes.
-* A ``finish`` line with an ``issue_url`` that ``result`` does not contain:
-  the URL is appended to ``result``. The ledger exists; the report just did
-  not name it.
-* A ``finish`` line with a null ``issue_url`` (``NO_FORGE``, or a ``CLEAN``
-  run with no earlier ledger): accepted unchanged. These runs have no URL to
-  give.
-* ``start`` with no ``finish`` line after it: refused once, with the next
-  step. The submitted ``result`` is saved on the card first, as
-  ``kanban_children_settled`` does, so a run that ends after the refusal does
-  not lose the report.
-* The retry, still with no ``finish`` line: accepted, with ``result``
+* No ``start`` result line: not an audit run. Nothing changes.
+* Every ``start`` has a ``finish`` result line after it: accepted. Each ledger
+  URL a ``finish`` printed that ``result`` does not contain is appended (a
+  stream run once per repository prints one per repository). A null
+  ``issue_url`` (``NO_FORGE``, or a ``CLEAN`` run with no earlier ledger) has
+  no URL to give.
+* The last ``start`` has no ``finish`` result line after it: refused once,
+  with the next step. The submitted ``result`` is saved on the card first,
+  marked "Not published", as ``kanban_children_settled`` saves its own, so a
+  run that ends after the refusal does not lose the report and does not leave
+  a claim of a ledger on the card.
+* The retry, still with no ``finish`` result line: accepted, with ``result``
   prefixed by a "Not published" line. The card never wedges, and the person
   who asked reads that no ledger exists instead of a report that implies one.
 
@@ -58,9 +60,10 @@ Scope and failure
 The gate runs only for the caller's own card (``HERMES_KANBAN_TASK`` equal to
 the card id). A gateway session closing someone else's card, the CLI and the
 scheduler are not affected, and a scheduled audit is a cron run with no card.
-Every read fails open: a missing or unreadable store, an unknown schema or a
-tool output that a turn budget moved out of the message lets the completion
-through unchanged.
+Every read fails open: a missing or unreadable store, an unknown schema, or a
+tool output after the last ``start`` that Hermes replaced with a preview and a
+file path (its per-result size limit) lets the completion through unchanged,
+because the ``finish`` line may be in the part that was moved.
 """
 
 from __future__ import annotations
@@ -97,22 +100,29 @@ COMPRESSION_WALK_MAX = 32
 #: JSON (``SessionDB._CONTENT_JSON_PREFIX``).
 CONTENT_JSON_PREFIX = "\x00json:"
 
+#: The tag Hermes puts on a tool result it replaced with a preview and a file
+#: path (``tools/tool_result_storage.py`` ``PERSISTED_OUTPUT_TAG``).
+PERSISTED_OUTPUT_TAG = "<persisted-output>"
+
 #: How long a refusal stays on file: the same window as the other completion
 #: gates (``DEFAULT_CLAIM_TTL_SECONDS`` in ``hermes_cli/kanban_db.py``).
 NUDGE_TTL_SECONDS = 15 * 60
 
-#: A call that runs the audit lifecycle's ``start``.
-START_RE = re.compile(r"audit_report\.py\b[^\n]*?\sstart\b")
-#: The stream a ``start`` names.
-AUDIT_ID_RE = re.compile(r"--audit[=\s]+[\"']?([A-Za-z0-9][A-Za-z0-9_-]*)")
-#: Text used when the ``start`` command names no stream.
-UNKNOWN_AUDIT = "this"
-
-#: The two keys every ``finish`` result line carries, published or not.
+#: The keys of the one JSON line ``start`` prints.
+START_KEYS = ("workspace", "findings_path")
+#: The keys of the one JSON line ``finish`` prints, published or not.
 FINISH_KEYS = ("status", "issue_url")
+#: The stream a ``start`` line names, read from its ``findings_path``
+#: (``audit_report.py`` ``findings_path_for``).
+AUDIT_ID_RE = re.compile(r"findings_([A-Za-z0-9][A-Za-z0-9_-]*)\.json$")
+#: The prefix of a real ledger URL. A placeholder such as the skill's ``"…"``
+#: example is not one.
+URL_PREFIXES = ("https://", "http://")
+#: Name used when a ``start`` line names no stream.
+UNKNOWN_AUDIT = "fleet"
 
 _MESSAGES_SQL = (
-    "SELECT id, role, content, tool_call_id, tool_calls FROM messages "
+    "SELECT id, role, content FROM messages "
     "WHERE session_id IN ({marks}) ORDER BY id"
 )
 _PARENT_SQL = (
@@ -123,22 +133,23 @@ _CHILD_SQL = (
     "SELECT c.id FROM sessions c JOIN sessions p ON p.id = c.parent_session_id "
     "WHERE p.id = ? AND p.end_reason = ? ORDER BY c.started_at"
 )
+_STASH_SQL = "UPDATE tasks SET result = ? WHERE id = ? AND status = 'running'"
 
 REFUSAL = (
-    "This card ran `audit_report.py start --audit {audit}`, but no `finish` "
-    "result line came back after it, so the {audit} ledger is not published "
-    "and this report has no ledger URL. Your result is saved on the card. "
-    "Run `audit_report.py finish` for {audit} in the foreground, not as a "
-    "background process, and read the JSON line it prints. If it prints an "
-    "`issue_url`, call kanban_complete again with that URL in `result`. If "
-    "`finish` exits 2, fix what its error names and run `finish` again; do not "
-    "run `start` again. If the audit cannot publish, call kanban_block with "
-    "the reason instead of kanban_complete."
+    "This card started a {audit} audit (`audit_report.py start`), but no "
+    "`finish` result line came back after it, so its ledger is not published "
+    "and this report has no ledger URL. Your result is saved on the card, "
+    "marked not published. Run `audit_report.py finish` for {audit} in the "
+    "foreground, not as a background process, and read the JSON line it "
+    "prints. If it prints an `issue_url`, call kanban_complete again with that "
+    "URL in `result`. If `finish` exits 2, fix what its error names and run "
+    "`finish` again; do not run `start` again. If the audit cannot publish, "
+    "call kanban_block with the reason instead of kanban_complete."
 )
 
 NOT_PUBLISHED_PREFIX = (
     "⚠️ **Not published:** the {audit} audit ran `start`, but no `finish` "
-    "published its ledger, so no ledger issue exists for this report.\n\n"
+    "published its ledger, so no ledger issue exists for this run.\n\n"
 )
 
 LEDGER_LINE = "\n\nLedger: {url}"
@@ -185,7 +196,12 @@ def _lineage(conn, session_id: str) -> list[str]:
 
 
 def _decode(content):
-    """A stored message's content as Python data where it is JSON, else text."""
+    """A stored tool result as Python data where it starts with JSON, else text.
+
+    Hermes can append text after a tool's JSON result before it stores it
+    (hints about the directories a command named), so the leading JSON value
+    is read and anything after it is ignored.
+    """
     if content is None:
         return ""
     if isinstance(content, bytes):
@@ -194,87 +210,72 @@ def _decode(content):
     if text.startswith(CONTENT_JSON_PREFIX):
         text = text[len(CONTENT_JSON_PREFIX):]
     try:
-        return json.loads(text)
-    except (TypeError, ValueError):
+        value, _end = json.JSONDecoder().raw_decode(text.lstrip())
+        return value
+    except ValueError:
         return text
 
 
-def _command_text(call) -> str:
-    """The command a tool call ran, or its raw arguments."""
-    if not isinstance(call, dict):
-        return ""
-    function = call.get("function") or {}
-    args = function.get("arguments") if isinstance(function, dict) else None
-    if isinstance(args, str):
-        try:
-            args = json.loads(args)
-        except ValueError:
-            return args
-    if isinstance(args, dict):
-        command = args.get("command")
-        return command if isinstance(command, str) else json.dumps(args)
-    return ""
+def _texts(value) -> list[str]:
+    """Every string a stored tool result carries, outermost first."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [t for v in value.values() for t in _texts(v)]
+    if isinstance(value, list):
+        return [t for v in value for t in _texts(v)]
+    return []
 
 
-def _exit_code(result):
-    return result.get("exit_code") if isinstance(result, dict) else None
+def _result_lines(value):
+    """``("start", audit)`` and ``("finish", url)`` events in a tool result, in order."""
+    for text in _texts(value):
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                parsed = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            if all(k in parsed for k in START_KEYS):
+                match = AUDIT_ID_RE.search(str(parsed.get(START_KEYS[1]) or ""))
+                yield "start", match.group(1) if match else UNKNOWN_AUDIT
+            elif all(k in parsed for k in FINISH_KEYS):
+                url = parsed.get(FINISH_KEYS[1])
+                if url is None:
+                    yield "finish", None
+                elif isinstance(url, str) and url.startswith(URL_PREFIXES):
+                    yield "finish", url
 
 
-def _output_text(result) -> str:
-    if isinstance(result, dict):
-        output = result.get("output")
-        return output if isinstance(output, str) else ""
-    return result if isinstance(result, str) else ""
+def audit_run(rows) -> dict:
+    """What the tool results in ``rows`` say about this card's audit runs.
 
-
-def _finish_line(result):
-    """The last ``finish`` result line in a tool result, or None."""
-    for line in reversed(_output_text(result).splitlines()):
-        text = line.strip()
-        if not text.startswith("{") or FINISH_KEYS[1] not in text:
-            continue
-        try:
-            parsed = json.loads(text)
-        except ValueError:
-            continue
-        if isinstance(parsed, dict) and all(k in parsed for k in FINISH_KEYS):
-            return parsed
-    return None
-
-
-def audit_run(rows) -> tuple[str | None, dict | None]:
-    """``(audit, finish)`` for the last successful ``start`` in ``rows``.
-
-    ``rows`` are ``(id, role, content, tool_call_id, tool_calls)`` in id
-    order. ``audit`` is ``None`` when no ``start`` succeeded. ``finish`` is the
-    last ``finish`` result line after that ``start``, or ``None``. A later
-    successful ``start`` begins a new run and forgets an earlier ``finish``.
+    ``rows`` are ``(id, role, content)`` in id order. Returns ``started``
+    (a ``start`` result line was seen), ``open_audit`` (the stream of the last
+    ``start`` when no ``finish`` result line follows it, else ``None``),
+    ``urls`` (each ledger URL a ``finish`` printed, in order) and ``hidden``
+    (a tool output after the last ``start`` was replaced by a preview).
     """
-    pending: dict[str, str] = {}
-    audit = None
-    finish = None
-    for _row_id, role, content, tool_call_id, tool_calls in rows:
-        if role == "assistant" and tool_calls:
-            calls = _decode(tool_calls)
-            for call in calls if isinstance(calls, list) else []:
-                command = _command_text(call)
-                if START_RE.search(command) and isinstance(call, dict) and call.get("id"):
-                    match = AUDIT_ID_RE.search(command)
-                    pending[str(call["id"])] = match.group(1) if match else UNKNOWN_AUDIT
-            continue
+    state = {"started": False, "open_audit": None, "urls": [], "hidden": False}
+    for _row_id, role, content in rows:
         if role != "tool":
             continue
-        result = _decode(content)
-        started = pending.pop(str(tool_call_id), None) if tool_call_id else None
-        if started is not None:
-            if _exit_code(result) == 0:
-                audit, finish = started, None
-            continue
-        if audit is not None:
-            line = _finish_line(result)
-            if line is not None:
-                finish = line
-    return audit, finish
+        if state["open_audit"] and PERSISTED_OUTPUT_TAG in str(content or ""):
+            state["hidden"] = True
+        for kind, value in _result_lines(_decode(content)):
+            if kind == "start":
+                state["started"] = True
+                state["open_audit"] = value
+                state["hidden"] = False
+            elif state["started"]:
+                state["open_audit"] = None
+                if value and value not in state["urls"]:
+                    state["urls"].append(value)
+    return state
 
 
 def _read_rows(state_db: str, session_id: str) -> list:
@@ -286,20 +287,21 @@ def _read_rows(state_db: str, session_id: str) -> list:
         return conn.execute(_MESSAGES_SQL.format(marks=marks), sessions).fetchall()
 
 
-def _stash_submitted_result(connect, task_id: str, result) -> None:
-    """Save a refused completion's ``result`` on the card, status untouched.
+def _stash_submitted_result(connect, task_id: str, text: str) -> None:
+    """Save a refused completion's result on the running card, status untouched.
 
-    Raises on failure; the caller then accepts the completion, because a
-    refusal that has not saved what it refuses can lose the report.
+    Raises when nothing was saved; the caller then accepts the completion,
+    because a refusal that has not saved what it refuses can lose the report.
+    Only a ``running`` card is written, so a late call on a closed card cannot
+    replace the result it closed with.
     """
-    text = "" if result is None else str(result)
-    if not text.strip():
-        return
     conn = connect()
     try:
-        conn.execute("UPDATE tasks SET result = ? WHERE id = ?", (text, task_id))
+        cursor = conn.execute(_STASH_SQL, (text, task_id))
         if getattr(conn, "in_transaction", False):
             conn.commit()
+        if cursor.rowcount != 1:
+            raise LookupError(f"{task_id} is not a running card")
     finally:
         try:
             conn.close()
@@ -326,34 +328,35 @@ def require_audit_ledger(task_id, connect, result, state_db=None):
         refused_at is not None and time.monotonic() - refused_at <= NUDGE_TTL_SECONDS
     )
     try:
-        audit, finish = audit_run(_read_rows(path, session_id))
+        run = audit_run(_read_rows(path, session_id))
     except Exception as exc:  # noqa: BLE001 — sqlite, schema, JSON: fail open
         logger.warning(
             "kanban_audit_ledger: could not read %s's session %s (allowing the "
             "completion): %r", key, session_id, exc,
         )
         return None, result
-    if audit is None:
+    if not run["started"]:
         return None, result
     text = "" if result is None else str(result)
-    if finish is not None:
-        url = finish.get(FINISH_KEYS[1])
-        if url and str(url) not in text:
-            return None, text + LEDGER_LINE.format(url=url)
-        return None, result
+    missing = [url for url in run["urls"] if url not in text]
+    text += "".join(LEDGER_LINE.format(url=url) for url in missing)
+    audit = run["open_audit"]
+    if audit is None or run["hidden"]:
+        return None, text if missing else result
+    marked = NOT_PUBLISHED_PREFIX.format(audit=audit) + text
     if nudge_spent:
         logger.warning(
             "kanban_audit_ledger: %s is completing the %s audit with no finish "
             "result on its retry; marking it not published", key, audit,
         )
-        return None, NOT_PUBLISHED_PREFIX.format(audit=audit) + text
+        return None, marked
     try:
-        _stash_submitted_result(connect, key, result)
+        _stash_submitted_result(connect, key, marked)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "kanban_audit_ledger: could not save %s's submitted result "
             "(allowing the completion, marked not published): %r", key, exc,
         )
-        return None, NOT_PUBLISHED_PREFIX.format(audit=audit) + text
+        return None, marked
     _refused_at[key] = time.monotonic()
     return REFUSAL.format(audit=audit), result
