@@ -172,7 +172,7 @@ class TestPublishedRuns(Fixture):
         self.run_tool(FINISH, "", raw=json.dumps(
             {"output": "", "exit_code": None, "status": "yielded_to_background", "session_id": "proc_1"}
         ))
-        self.run_tool("", finish_line(), tool="process")
+        self.run_tool("", finish_line(), tool="process_manage")
         err, result = self.complete("Done.")
         self.assertIsNone(err)
         self.assertIn(LEDGER, result)
@@ -400,7 +400,7 @@ class TestStoredShapes(Fixture):
         rows = [
             (1, "assistant", "", None, call("c1", None, arguments={"command": START})),
             (2, "tool", json.dumps({"stdout": STARTED}), "c1", None),
-            (3, "assistant", "", None, call("c2", None, tool="process", arguments={"action": "wait"})),
+            (3, "assistant", "", None, call("c2", None, tool="process_manage", arguments={"action": "wait"})),
             (4, "tool", json.dumps({"status": "exited", "log": finish_line()}), "c2", None),
         ]
         self.assertEqual(audit_run(rows)["urls"], [LEDGER])
@@ -420,16 +420,49 @@ class TestOnlyAuditOutputCounts(Fixture):
         self.assertEqual(self.complete("pods are fine"), (None, "pods are fine"))
 
 
+class TestOtherCallShapes(Fixture):
+    def test_the_legacy_process_tool_name_still_counts(self):
+        self.run_tool(START, STARTED)
+        self.run_tool("", finish_line(), tool="process")
+        err, result = self.complete("done")
+        self.assertIsNone(err)
+        self.assertIn(LEDGER, result)
+
+    def test_a_start_run_through_execute_code_counts(self):
+        self.calls += 1
+        call_id = f"call_{self.calls}"
+        code = "import subprocess; subprocess.run(['python3', 'audit_report.py', 'start', '--audit', 'compliance-audit'])"
+        with sqlite3.connect(self.state) as conn:
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, tool_calls) VALUES (?, 'assistant', '', ?)",
+                (SESSION, call(call_id, None, tool="execute_code", arguments=json.dumps({"code": code}))),
+            )
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, tool_call_id) VALUES (?, 'tool', ?, ?)",
+                (SESSION, json.dumps({"output": STARTED}), call_id),
+            )
+        err, _ = self.complete()
+        self.assertIsNotNone(err)
+
+
 class TestInPlaceCompaction(Fixture):
     def test_a_copied_start_after_its_finish_does_not_reopen_the_run(self):
         self.run_tool(START, STARTED)
         self.run_tool(FINISH, finish_line())
-        # archive_and_compact keeps the head: the same start call and result, new ids.
-        self.calls -= 1
+        # archive_and_compact keeps the head: the same start call and result,
+        # tool call id unchanged, under new row ids.
+        self.calls = 0
         self.run_tool(START, STARTED)
         err, result = self.complete("done")
         self.assertIsNone(err)
         self.assertIn(LEDGER, result)
+
+    def test_a_real_second_start_with_the_same_line_reopens_the_run(self):
+        self.run_tool(START, STARTED)
+        self.run_tool(FINISH, finish_line())
+        self.run_tool(START, STARTED)
+        err, _ = self.complete(LEDGER)
+        self.assertIsNotNone(err)
 
 
 class TestFailOpen(Fixture):

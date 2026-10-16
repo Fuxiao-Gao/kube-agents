@@ -26,12 +26,13 @@ At ``kanban_complete`` the gate reads this card's own worker session from
 Hermes's session store and looks in the tool outputs, in order, for the result
 lines of ``start`` and ``finish``. It reads the result lines, not the exit
 codes, so a chained command neither hides a run nor ends one; a grep of the
-skill prints no result line. Only the output of a call whose command runs
-``audit_report.py``, or of the ``process`` tool that reads back a background
-job, is read: a line that only looks like a result line, in pod logs or a
-ConfigMap the audit printed, neither ends a run nor puts its URL in chat. A
-line that repeats one already seen is ignored, because Hermes's in-place
-compaction stores a copy of the rows it keeps after the rows it archives.
+skill prints no result line. Only the output of a call that runs
+``audit_report.py``, or of the ``process_manage`` tool that reads back a
+background job, is read, so a line that only looks like a result line, in the
+output of a separate ``kubectl`` call, neither ends a run nor puts its URL in
+chat. A result line that repeats with the same tool call id is ignored,
+because Hermes's in-place compaction stores a copy of the rows it keeps, ids
+and content unchanged, after the rows it archives.
 
 * No ``start`` result line: not an audit run. Nothing changes.
 * Every ``start`` has a ``finish`` result line after it: accepted. Each ledger
@@ -66,10 +67,10 @@ The gate runs only for the caller's own card (``HERMES_KANBAN_TASK`` equal to
 the card id). A gateway session closing someone else's card, the CLI and the
 scheduler are not affected, and a scheduled audit is a cron run with no card.
 Every read fails open: a missing or unreadable store, an unknown schema, or a
-tool output after the last ``start`` that Hermes replaced with a preview and a
-file path (its per-result size limit) lets the completion through without a
-refusal, because the ``finish`` line may be in the part that was moved; a
-warning line records it. When the refused result cannot be saved on the card,
+``audit_report.py`` or ``process_manage`` output after the last ``start`` that
+Hermes replaced with a preview and a file path (its per-result size limit)
+lets the completion through without a refusal, because the ``finish`` line may
+be in the part that was moved; a warning line records this case. When the refused result cannot be saved on the card,
 the completion is accepted at once, marked "Not published".
 """
 
@@ -129,8 +130,9 @@ URL_PREFIXES = ("https://", "http://")
 UNKNOWN_AUDIT = "fleet"
 #: A command whose output may carry a ``start`` or ``finish`` result line.
 AUDIT_SCRIPT = "audit_report.py"
-#: The tool that reads back the output of a background job.
-PROCESS_TOOL = "process"
+#: The tool that reads back the output of a background job: ``process_manage``
+#: in the pinned Hermes, ``process`` in older releases (still a dispatch alias).
+PROCESS_TOOLS = ("process_manage", "process")
 #: Read-only URI for the session store, so this reader never creates the file
 #: or takes a write lock.
 STATE_DB_URI = "file:{path}?mode=ro"
@@ -280,8 +282,13 @@ def _calls(tool_calls) -> dict[str, tuple[str, str]]:
         args = function.get("arguments")
         if isinstance(args, str):
             args = _decode(args)
-        command = args.get("command") if isinstance(args, dict) else args
-        found[str(call["id"])] = (str(function.get("name") or ""), command if isinstance(command, str) else "")
+        # The terminal's ``command``, or every argument of another tool, so that
+        # an ``execute_code`` call that runs the script is read too.
+        if isinstance(args, dict):
+            command = args.get("command") if isinstance(args.get("command"), str) else json.dumps(args)
+        else:
+            command = args if isinstance(args, str) else ""
+        found[str(call["id"])] = (str(function.get("name") or ""), command)
     return found
 
 
@@ -297,7 +304,7 @@ def audit_run(rows) -> dict:
     """
     state = {"started": False, "open_audit": None, "urls": [], "hidden": False}
     calls: dict[str, tuple[str, str]] = {}
-    seen: set[str] = set()
+    seen: set[str] = set()  # (tool call id, line): a compaction copy keeps both
     for _row_id, role, content, tool_call_id, tool_calls in rows:
         if role == "assistant":
             calls.update(_calls(tool_calls))
@@ -305,14 +312,15 @@ def audit_run(rows) -> dict:
         if role != "tool":
             continue
         tool, command = calls.get(str(tool_call_id), ("", ""))
-        if AUDIT_SCRIPT not in command and tool != PROCESS_TOOL:
+        if AUDIT_SCRIPT not in command and tool not in PROCESS_TOOLS:
             continue
         if state["open_audit"] and PERSISTED_OUTPUT_TAG in str(content or ""):
             state["hidden"] = True
         for kind, value, line in _result_lines(_decode(content)):
-            if line in seen:
+            copy_key = f"{tool_call_id}\n{line}"
+            if copy_key in seen:
                 continue
-            seen.add(line)
+            seen.add(copy_key)
             if kind == "start":
                 state["started"] = True
                 state["open_audit"] = value
