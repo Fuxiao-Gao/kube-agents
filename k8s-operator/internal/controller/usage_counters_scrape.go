@@ -103,6 +103,15 @@ const (
 	// (GKE's own per-project quotas keep a fleet far below it) and refused, not
 	// clamped, so a body past it reads as the hostile or broken one it is.
 	usageClusterGaugeCeiling int64 = 10000
+	// dataVolumeSeries is the watcher's reading of the agent's data volume,
+	// one series per dataVolumeKindLabel value: the filesystem's size and the
+	// space a non-root writer has left. Read from the watcher's body beside
+	// the cluster gauge, and projected to status.storageStatus
+	// (usage_storage.go).
+	dataVolumeSeries    = "kubeagents_data_volume_bytes"
+	dataVolumeKindLabel = "kind"
+	dataVolumeKindTotal = "total"
+	dataVolumeKindFree  = "free"
 	// toolInvocationsStatusLabel is the broker's outcome label. The outcomes
 	// toolInvocationsCountedStatuses sums are the broker's success and error:
 	// the commands it ran and the requests it rejected or failed on before
@@ -177,6 +186,16 @@ type usageReading struct {
 	Samples   map[string]int64
 	StartTime *float64
 	Clusters  *usageClusterGauges
+	// DataVolume is the watcher's data volume reading, nil when the body
+	// carried no complete one: not the watcher's, or a watcher whose statfs
+	// failed, or one built before it exported the series.
+	DataVolume *usageDataVolume
+}
+
+// usageDataVolume is one reading of the agent's data volume, in bytes.
+type usageDataVolume struct {
+	Total int64
+	Free  int64
 }
 
 // usageClusterGauges is the watcher's view of the fleet in one body: the
@@ -316,6 +335,8 @@ func foldUsageBody(body io.Reader, counters []string) (usageReading, error) {
 	// counter's, the start-time gauge, and the watcher's cluster gauge when
 	// the body is the watcher's.
 	var clusters *usageClusterGauges
+	// volume collects the data volume series; a reading needs both kinds.
+	var volume map[string]float64
 	counterOf := make(map[string]string, len(counters))
 	filters := make(map[string]usageLabelFilter, len(counters))
 	wanted := []string{processStartTimeSeries}
@@ -331,7 +352,8 @@ func foldUsageBody(body io.Reader, counters []string) (usageReading, error) {
 		}
 		if family == eventsInjectedSeries {
 			clusters = &usageClusterGauges{}
-			wanted = append(wanted, clusterUpSeries)
+			volume = map[string]float64{}
+			wanted = append(wanted, clusterUpSeries, dataVolumeSeries)
 		}
 	}
 	reader := bufio.NewReaderSize(body, usageScrapeLineBuffer)
@@ -388,6 +410,12 @@ func foldUsageBody(body io.Reader, counters []string) (usageReading, error) {
 						start = &captured
 						continue
 					}
+					if name == dataVolumeSeries {
+						if kind := usageLabelValue(metric, dataVolumeKindLabel); kind == dataVolumeKindTotal || kind == dataVolumeKindFree {
+							volume[kind] = value
+						}
+						continue
+					}
 					if name == clusterUpSeries {
 						clusters.Registered++
 						if clusters.Registered > usageClusterGaugeCeiling {
@@ -417,7 +445,27 @@ func foldUsageBody(body io.Reader, counters []string) (usageReading, error) {
 		}
 		samples[counter] = int64(sum)
 	}
-	return usageReading{Samples: samples, StartTime: start, Clusters: clusters}, nil
+	dataVolume, ok := usageDataVolumeReading(volume)
+	if !ok {
+		return usageReading{}, &usageScrapeError{Kind: usageScrapeKindSample}
+	}
+	return usageReading{Samples: samples, StartTime: start, Clusters: clusters, DataVolume: dataVolume}, nil
+}
+
+// usageDataVolumeReading turns the data volume series a body carried into a
+// reading: nil, and fine, when it carried neither or only one kind; a failed
+// scrape when free exceeds total or either is past int64, which no statfs
+// produces.
+func usageDataVolumeReading(volume map[string]float64) (*usageDataVolume, bool) {
+	total, hasTotal := volume[dataVolumeKindTotal]
+	free, hasFree := volume[dataVolumeKindFree]
+	if !hasTotal || !hasFree {
+		return nil, true
+	}
+	if total >= float64(math.MaxInt64) || free > total {
+		return nil, false
+	}
+	return &usageDataVolume{Total: int64(total), Free: int64(free)}, true
 }
 
 // usageLabelsMatch reports whether metric carries, for every label the filter

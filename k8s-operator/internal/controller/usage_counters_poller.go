@@ -478,6 +478,9 @@ func (p *UsageCounterPoller) pollAgent(ctx context.Context, cached *agentv1alpha
 				Sample:    reading.Samples[counter],
 				StartTime: reading.StartTime,
 				Clusters:  reading.Clusters,
+				// DataVolume rides with Clusters: both come from the
+				// watcher's body alone.
+				DataVolume: reading.DataVolume,
 			})
 		}
 	}
@@ -490,7 +493,9 @@ func (p *UsageCounterPoller) pollAgent(ctx context.Context, cached *agentv1alpha
 			break
 		}
 	}
-	gauges, gaugesKnown := usageClusterGaugesForPoll(cached, scraped, p.noteGatewayReading(cached, gatewayRead))
+	watcherDown := p.noteGatewayReading(cached, gatewayRead)
+	gauges, gaugesKnown := usageClusterGaugesForPoll(cached, scraped, watcherDown)
+	volume, volumeKnown := usageDataVolumeForPoll(cached, scraped, gatewayRead, watcherDown)
 	// The scrape and ConfigMap causes are not recorded here: both are standing
 	// failures that would each spend one of the CR's event-bucket tokens every
 	// poll, and two per poll drains the bucket and starves one of them. They are
@@ -539,7 +544,10 @@ func (p *UsageCounterPoller) pollAgent(ctx context.Context, cached *agentv1alpha
 	if ctx.Err() == nil {
 		p.recordStandingFailures(cached, failing, nil)
 	}
-	return p.projectStatus(ctx, agent, result.Document, gauges, gaugesKnown)
+	if err := p.projectStatus(ctx, agent, result.Document, gauges, gaugesKnown); err != nil {
+		return err
+	}
+	return p.projectDataVolume(ctx, agent, volume, volumeKnown)
 }
 
 // usageClusterGaugesForPoll is the fleet reading this poll projects, and
