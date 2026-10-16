@@ -537,7 +537,7 @@ still works; on an install whose default is already the session route the bare f
 with a note and `/session <text>` is `<text>`, the ordinary turn; `/session <text>` while a task is still running turns the route on and holds the text, unless the running task is the session's own, in which case the text steers it as a plain message would. On Slack a leading slash belongs to the Slack client, which
 refuses a command it has not registered, so there the form is `@<bot> /session`: the mention is
 stripped before the gateway reads the text, and in a channel thread the next message needs the
-mention too: the adapter forwards an unmentioned reply only once a task has started there, and
+mention too: the adapter forwards an unmentioned reply only once a task has started there (or under the bot's own post), and
 the ack says so. In a Slack DM the next message has to be in the same thread (the Slack
 adapter's conversation keys), and the ack says that instead. The way back is answered even on an install whose spawner has since been disarmed, so a
 record left session-routed by a rollback can always re-home. It is a debugging and opt-in door for the transition,
@@ -1039,7 +1039,8 @@ not be silent about it.
   (`InboundObserver`), because neither is knowable from what the conversation received: the heal
   posts twice before `startTask` announces, so a door concluding "answered without a task" from
   posts alone can tell its caller nothing started while the turn goes on to mint a task that then
-  runs unobserved; and the unverified-sender notice is posted once per sender, so a second
+  runs unobserved; and the unverified-sender notice is posted once per sender (never for an
+  unaddressed message), so a second
   message from the same author posts nothing at all. The notice's own dedupe stays the gateway's.
 
 - `GET /conversations/{key}` returns what the relay posted, as a sequence a caller pages through
@@ -1532,8 +1533,9 @@ The agent could already post the same text to the same channel or conversation t
 `hermes send` under `today`, so the route moves the post to the process holding the credential rather than adding
 a reach. A reply a human types in a notify's thread arrives at the gateway as an ordinary
 message from that human, through the usual ingress checks, and starts a conversation of its
-own: nothing binds it to the investigation that raised the alert. (On Slack a notify thread
-is not a session thread, so the reply needs to mention the bot to be a turn at all.)
+own: nothing binds it to the investigation that raised the alert. (On Slack the bot rooted
+a notify thread, so a reply there is a turn with or without a mention; see "Which messages
+become turns" below and #3246.)
 
 ## The Slack adapter (added 9/4)
 
@@ -1626,15 +1628,18 @@ message; a reply under it roots its own conversation.
 **Which messages become turns.** DMs carry every message, in a thread or not; a DM
 thread needs no task started in it to carry a reply. A channel message must
 mention the bot, and the ask's own ts is the thread the session will live in. A thread
-reply is a turn when it mentions the bot or the thread is a session thread - one the
-gateway has started a task in. That is what lets a session thread carry every message
+reply is a turn when it mentions the bot, when the thread's root is the bot's own post
+(a `chat.notify` alert or report: Slack sends the root's author as `parent_user_id` on every
+reply, the same rule as the today path's Slack adapter, #3246), or when the thread is a
+session thread - one the gateway has started a task in. That is what lets a session thread carry every message
 (the Discord parity) without making every thread in a joined channel a session. A
 thread becomes a session thread only when the gateway starts a task in it - a verified
 sender's mentioned ask, in the channel or in someone else's thread - and the adapter
 learns that from the gateway's `TaskStarted` and, on a cache miss, from the session
 registry, which it asks whether a task has started in that thread (a record alone is
 not enough, since one is minted for any verified turn, a "stop" with nothing running
-included). Nothing is derived from the root message. A mention on its own starts
+included). Apart from the bot-rooted rule above, nothing is derived from the root
+message. A mention on its own starts
 nothing and makes nothing a session thread, whoever typed it, so a channel mention from
 a sender the gateway refuses (another workspace's member, or one the allowlist does not
 admit) roots nothing. A session thread stays one while a
@@ -1707,7 +1712,9 @@ table is maintained by hand, which is honest at the current install count.
 **Unverified senders.** Dropped at ingress, as everywhere (on Slack that is an unlisted
 sender; an unmapped one is attributed by member id, below) - but visibly now: the gateway
 posts a one-line notice to the conversation, once per sender, and keeps the structured
-log line. A silent drop of a real user is a support burden. Per sender, not per
+log line. The exception is a message the sender addressed to nobody (`Unaddressed`: an
+unmentioned Slack reply under one of the bot's own posts, #3246), which is dropped with a
+info-level log line only and does not count as the sender's notice. A silent drop of a real user is a support burden. Per sender, not per
 conversation - a channel mention mints a fresh conversation every time, so a
 conversation-scoped dedupe would be no bound at all. The memory is capped and evicted
 wholesale at the cap, so the worst an unverified sender can do is make one notice

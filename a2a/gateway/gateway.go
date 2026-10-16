@@ -724,22 +724,39 @@ func (g *Gateway) verifySender(msg InboundMessage) (backend, principal string, o
 	backend = g.backendFor(msg)
 	principal = g.resolvePrincipal(backend, msg.AuthorID)
 	if principal == "" {
-		g.log.Warn("dropping message from unverified sender",
-			"backend", backend, "author", msg.AuthorID, "conversation", msg.Conversation)
+		if msg.Unaddressed {
+			// Someone off the list talking under one of the bot's posts, to a
+			// colleague as often as not: routine, so Info rather than a Warn per
+			// message. Not Debug: the gateway's handler drops Debug, and this
+			// line is the only trace the drop leaves.
+			g.log.Info("dropping unaddressed message from unverified sender",
+				"backend", backend, "author", msg.AuthorID, "conversation", msg.Conversation, "unaddressed", true)
+		} else {
+			g.log.Warn("dropping message from unverified sender",
+				"backend", backend, "author", msg.AuthorID, "conversation", msg.Conversation)
+		}
 		// Keyed by backend and case-folded author: one gateway has several
 		// ingresses, and the same id on two of them is not the same sender,
 		// so a notice on one must not silence the other. Case-folded because
 		// an asserted address that varies in case is one person. Bounded the
 		// way the adapters bound their own maps: wholesale eviction at the
 		// cap, which at worst repeats a notice.
-		key := droppedNoticeKey(backend, msg.AuthorID)
-		g.mu.Lock()
-		if len(g.droppedNotices) >= droppedNoticesCap {
-			g.droppedNotices = map[string]bool{}
+		//
+		// Not for a message that addressed nobody (Unaddressed): a member off
+		// the list talking to a colleague under an alert would otherwise get
+		// a public refusal in a thread the channel is reading. Nor is it
+		// counted as notified, so their first real ask still gets the notice.
+		notified := msg.Unaddressed
+		if !notified {
+			key := droppedNoticeKey(backend, msg.AuthorID)
+			g.mu.Lock()
+			if len(g.droppedNotices) >= droppedNoticesCap {
+				g.droppedNotices = map[string]bool{}
+			}
+			notified = g.droppedNotices[key]
+			g.droppedNotices[key] = true
+			g.mu.Unlock()
 		}
-		notified := g.droppedNotices[key]
-		g.droppedNotices[key] = true
-		g.mu.Unlock()
 		if !notified {
 			g.post(msg.Conversation, "⛔ I can't verify who you are on "+backend+
 				" (id "+msg.AuthorID+"), so I can't take asks from you yet — an admin has to add you to "+
