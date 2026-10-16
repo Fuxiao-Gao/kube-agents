@@ -1491,10 +1491,47 @@ class TestValidation(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             absent = str(Path(tmp) / "absent-findings.json")
             with self.assertRaises(audit_report.ValidationError) as ctx:
-                audit_report.load_findings(absent, "compliance-audit")
+                audit_report.load_findings(absent, "compliance-audit", command="finish")
+            with self.assertRaises(audit_report.ValidationError) as remediate:
+                audit_report.load_findings(absent, "compliance-audit", command="remediate")
         self.assertIn("does not exist", str(ctx.exception))
-        self.assertIn("draft --audit compliance-audit --manifest-file", str(ctx.exception))
+        self.assertIn(
+            "audit_report.py draft --audit compliance-audit --manifest-file "
+            + audit_report.manifest_path_for("compliance-audit"),
+            str(ctx.exception),
+        )
         self.assertIn(f"--out {absent}", str(ctx.exception))
+        # `remediate` is not told to run `finish`, which would republish the ledger.
+        self.assertEqual(str(remediate.exception), f"--findings-file: {absent} does not exist")
+
+    def test_one_bad_field_reads_as_before(self):
+        # A single problem must give the same one line as before, with no
+        # second line from a check that read the bad field.
+        def manifest_finding(path):
+            finding = make_finding()
+            finding["remediation"] = {"kind": "manifest", "path": path, "note": "n"}
+            return finding
+
+        cases = {
+            "check null": lambda d: d["findings"][0].__setitem__("check", None),
+            "check empty": lambda d: d["findings"][0].__setitem__("check", ""),
+            "cluster empty": lambda d: d["findings"][0].__setitem__("cluster", ""),
+            "object empty": lambda d: d["findings"][0].__setitem__("object", ""),
+            "title null": lambda d: d["findings"][0].__setitem__("title", None),
+            "path null": lambda d: d["findings"].__setitem__(0, manifest_finding(None)),
+            "path empty": lambda d: d["findings"].__setitem__(0, manifest_finding("")),
+            "checks_run command empty": lambda d: d["scope"]["clusters"][0]["checks_run"][0].__setitem__("command", ""),
+            "cluster name null": lambda d: d["scope"]["clusters"][0].__setitem__("name", None),
+        }
+        for label, spoil in cases.items():
+            with self.subTest(case=label):
+                doc = make_doc()
+                spoil(doc)
+                with self.assertRaises(audit_report.ValidationError) as before:
+                    audit_report._validate_findings_document(copy.deepcopy(doc), AUDIT)
+                with self.assertRaises(audit_report.ValidationError) as now:
+                    audit_report.validate_findings(doc, AUDIT)
+                self.assertEqual(str(now.exception), str(before.exception))
 
     def test_every_field_error_is_reported_in_one_call(self):
         # A worker fixes what the rejection names and runs finish again, so
@@ -1510,6 +1547,20 @@ class TestValidation(unittest.TestCase):
         self.assertIn("scope.clusters[0].location", message)
         self.assertIn("findings[0].title", message)
         self.assertIn("findings[1].evidence.command", message)
+
+    def test_the_gitlab_rep_errors_come_back_together(self):
+        # #2856's GitLab rep 2 took four rejected finish calls for these.
+        finding = make_finding()
+        finding["evidence"] = "kubectl get rolebinding -A"
+        finding["remediation"] = {"kind": "manifest", "path": None, "note": "n"}
+        del finding["title"]
+        doc = make_doc(findings=[finding])
+        doc["scope"]["clusters"][0]["location"] = None
+        with self.assertRaises(audit_report.ValidationError) as exc:
+            audit_report.validate_findings(doc, AUDIT)
+        message = str(exc.exception)
+        for field in ("scope.clusters[0].location", "findings[0].title", "findings[0].evidence", "findings[0].remediation.path"):
+            self.assertIn(field, message)
 
     def test_reported_field_errors_are_capped(self):
         findings = [make_finding(fid=f"f{i}") for i in range(25)]
@@ -5140,7 +5191,6 @@ class TestStart(HarnessTestCase):
                     ["start", "--audit", AUDIT, "--takeover"]
                 )
         self.assertNotIn("takeover", audit_report.build_parser().format_help().lower())
-
         note.unlink()
         self.assertEqual(self.run_main(["start", "--audit", AUDIT]), 0)
 
@@ -17461,9 +17511,21 @@ class TestLoadManifest(BaseTestCase):
         with self.assertRaises(audit_report.ValidationError) as ctx:
             audit_report.load_manifest(str(self.tmp_path / "absent.json"))
         self.assertIn("does not exist", str(ctx.exception))
+
+    def test_a_missing_manifest_names_the_next_step_for_the_command(self):
+        absent = str(self.tmp_path / "absent.json")
+        with self.assertRaises(audit_report.ValidationError) as finish:
+            audit_report.load_manifest(absent, "compliance-audit", command="finish")
         # The next step, for both cases: the collector ran, or it did not.
-        self.assertIn("collector", str(ctx.exception))
-        self.assertIn("--no-collector-manifest", str(ctx.exception))
+        self.assertIn(audit_report.manifest_path_for("compliance-audit"), str(finish.exception))
+        self.assertIn("--no-collector-manifest", str(finish.exception))
+        with self.assertRaises(audit_report.ValidationError) as draft:
+            audit_report.load_manifest(absent, "compliance-audit", command="draft")
+        self.assertIn(audit_report.manifest_path_for("compliance-audit"), str(draft.exception))
+        self.assertNotIn("--no-collector-manifest", str(draft.exception))
+        with self.assertRaises(audit_report.ValidationError) as remediate:
+            audit_report.load_manifest(absent, "compliance-audit", command="remediate")
+        self.assertEqual(str(remediate.exception), f"--manifest-file: {absent} does not exist")
 
     def test_malformed_json_is_a_validation_error(self):
         with self.assertRaises(audit_report.ValidationError) as ctx:

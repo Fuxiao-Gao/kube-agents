@@ -506,6 +506,23 @@ COLLECTOR_AUDITS = frozenset(
 # fixes what the rejection names and runs `finish` again, so one error per
 # call cost a run per field (#2856); past this many, the rest are counted.
 MAX_REPORTED_FINDINGS_ERRORS = 20
+# What a usage error on `finish`, `draft` or an unknown command adds after
+# argparse's own line, and what a missing input names: the command that
+# produces it, not only the flag (#2856).
+DRAFT_COMMAND = "draft --audit <id> --manifest-file <collector manifest> --out <findings file>"
+LIFECYCLE_HINT = (
+    f"The order is `start`, the SOP's collector command, `{DRAFT_COMMAND}`, then "
+    "`finish --audit <id> --findings-file <findings file> --manifest-file <collector manifest>`."
+)
+FINISH_USAGE_HINT = (
+    f"`finish` takes --audit, --findings-file (write it with `{DRAFT_COMMAND}`) and "
+    '--manifest-file <collector manifest>, or --no-collector-manifest "<why>" when the '
+    "collector did not run."
+)
+DRAFT_USAGE_HINT = (
+    "`draft` takes --audit and --manifest-file <the manifest the SOP's collector command "
+    "wrote>, and writes the findings document for `finish` to --out <findings file>."
+)
 SEVERITIES = ("critical", "major", "minor")
 SEVERITY_RANK = {severity: i for i, severity in enumerate(SEVERITIES)}
 REMEDIATION_KINDS = ("manifest", "gcloud", "manual")
@@ -3385,11 +3402,20 @@ def _field_error(message: str) -> None:
     errors.append(message)
 
 
-def _require_str(value: object, where: str, *, allow_empty: bool = True) -> str:
+def _require_str_ok(value: object, where: str, *, allow_empty: bool = True) -> bool:
+    """Whether `value` is a usable string; a failure is raised, or recorded
+    while `validate_findings` collects, and the caller skips what reads it."""
     if not isinstance(value, str):
         _field_error(f"{where}: expected a string, got {type(value).__name__}")
-    elif not allow_empty and not value.strip():
+        return False
+    if not allow_empty and not value.strip():
         _field_error(f"{where}: required, must be a non-empty string")
+        return False
+    return True
+
+
+def _require_str(value: object, where: str, *, allow_empty: bool = True) -> str:
+    _require_str_ok(value, where, allow_empty=allow_empty)
     return value  # type: ignore[return-value]
 
 
@@ -3457,7 +3483,9 @@ def validate_check_command(value: object, where: str, check: str) -> str:
     A run determined to lie can still lie. The mitigation for that is the
     published record, not this function.
     """
-    command = _require_str(value, where, allow_empty=False)
+    if not _require_str_ok(value, where, allow_empty=False):
+        return value  # type: ignore[return-value]
+    command = str(value)
     text = command.strip()
     if len(text) < MIN_CHECK_COMMAND_CHARS:
         raise ValidationError(
@@ -3510,7 +3538,9 @@ def validate_na_reason(value: object, where: str, check: str) -> str:
     excuses, where the same reader who can re-run a command can read "Autopilot
     — Google manages node pools" and judge it.
     """
-    reason = _require_str(value, where, allow_empty=False)
+    if not _require_str_ok(value, where, allow_empty=False):
+        return value  # type: ignore[return-value]
+    reason = str(value)
     text = reason.strip()
     if len(text) < MIN_NA_REASON_CHARS:
         raise ValidationError(
@@ -3771,7 +3801,10 @@ def validate_findings(data: object, audit_id: str) -> dict:
     try:
         result = _validate_findings_document(data, audit_id)
     except ValidationError as exc:
-        errors.append(str(exc))
+        # A check that read a field already recorded as wrong repeats that
+        # field ("'None' is not a check"); the recorded error is the real one.
+        if not _repeats_a_recorded_field(str(exc), errors):
+            errors.append(str(exc))
     except (TypeError, AttributeError, KeyError):
         # A field already recorded as wrong can break a later check that
         # assumed its type; the recorded error is the one to report.
@@ -3785,11 +3818,31 @@ def validate_findings(data: object, audit_id: str) -> dict:
         raise ValidationError(errors[0])
     shown = errors[:MAX_REPORTED_FINDINGS_ERRORS]
     more = len(errors) - len(shown)
-    lines = [f"{len(errors)} problems in the findings file; fix them all, then run finish again:"]
+    lines = [f"{len(errors)} problems in the findings file; fix them all, then run the command again:"]
     lines += [f"  - {error}" for error in shown]
     if more:
         lines.append(f"  ... and {more} more")
     raise ValidationError("\n".join(lines))
+
+
+def _error_field(message: str) -> str | None:
+    """The field path a validation message leads with (`findings[0].check`)."""
+    head = message.split(":", 1)[0]
+    return head if head and " " not in head else None
+
+
+def _repeats_a_recorded_field(message: str, recorded: list[str]) -> bool:
+    field = _error_field(message)
+    if field is None:
+        return False
+    for other in filter(None, map(_error_field, recorded)):
+        if field == other or any(
+            longer.startswith(shorter + sep)
+            for longer, shorter in ((field, other), (other, field))
+            for sep in (".", "[")
+        ):
+            return True
+    return False
 
 
 def _validate_findings_document(data: object, audit_id: str) -> dict:
@@ -4231,10 +4284,10 @@ def _validate_findings_document(data: object, audit_id: str) -> dict:
             )
         path = remediation.get("path", "")
         if kind == "manifest":
-            _require_str(
+            if not _require_str_ok(
                 path, f"findings[{i}].remediation.path", allow_empty=False
-            )
-            assert isinstance(path, str)
+            ):
+                continue
             # Write the normalised spelling back. Grouping, the branch digest
             # and the `git add` pathspec all key on this string; if `a/b.yaml`
             # and `./a/b.yaml` survive as two spellings they become two groups,
@@ -5181,7 +5234,7 @@ def manifest_predates_run(manifest: dict, audit_id: str) -> tuple[str, str] | No
 FINDINGS_DOCUMENT_KEYS = frozenset({"findings", "scope"})
 
 
-def load_manifest(path: str, audit_id: str | None = None) -> dict:
+def load_manifest(path: str, audit_id: str | None = None, command: str | None = None) -> dict:
     """The collector manifest at `path`, or a ValidationError naming why not.
 
     Only the envelope is checked here — an object, with `clusters` a list when
@@ -5199,11 +5252,18 @@ def load_manifest(path: str, audit_id: str | None = None) -> dict:
     """
     manifest_path = Path(path)
     if not manifest_path.is_file():
-        raise ValidationError(
-            f"--manifest-file: {path} does not exist. Give the path the SOP's collector "
-            "command wrote its manifest to; if the collector did not run, `finish` takes "
-            '--no-collector-manifest "<why>" instead.'
-        )
+        hint = ""
+        if command in ("finish", "draft") and audit_id:
+            hint = (
+                " Give the path the SOP's collector command wrote its manifest to "
+                f"({manifest_path_for(audit_id)} in the SOPs)"
+            )
+            hint += (
+                '; if the collector did not run, `finish` takes --no-collector-manifest "<why>" instead.'
+                if command == "finish" else "."
+            )
+        raise ValidationError(f"--manifest-file: {path} does not exist.{hint}" if hint
+                              else f"--manifest-file: {path} does not exist")
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -13928,20 +13988,17 @@ def join_harness_declarations(
     return [str(finding.get("id", "")) for finding in moved] + from_manifest, shielded, shield_filed_namespaces(declarations)
 
 
-def load_findings(path: str, audit_id: str) -> dict:
+def load_findings(path: str, audit_id: str, command: str | None = None) -> dict:
     findings_file = Path(path)
     if not findings_file.is_file():
-        if audit_id in COLLECTOR_AUDITS:
+        if command == "finish" and audit_id in COLLECTOR_AUDITS:
             raise ValidationError(
                 f"--findings-file: {path} does not exist. Write it first with "
-                f"`audit_report.py draft --audit {audit_id} --manifest-file <collector manifest> "
-                f"--out {path}`, fill each recommendation, then run `finish` again with "
-                "that --findings-file and the same --manifest-file."
+                f"`{Path(__file__).resolve()} draft --audit {audit_id} --manifest-file "
+                f"{manifest_path_for(audit_id)} --out {path}`, fill each recommendation, "
+                "then run `finish` again with that --findings-file and the same --manifest-file."
             )
-        raise ValidationError(
-            f"--findings-file: {path} does not exist. Write the findings document the "
-            "SOP's findings step describes to that path, then run `finish` again."
-        )
+        raise ValidationError(f"--findings-file: {path} does not exist")
     try:
         data = json.loads(findings_file.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -15457,7 +15514,7 @@ def draft_findings(manifest: dict, audit_id: str) -> dict:
 def handle_draft(args: argparse.Namespace) -> None:
     """Write the findings document `draft_findings` builds from a manifest."""
     validate_audit_id(args.audit)
-    manifest = load_manifest(args.manifest_file, args.audit)
+    manifest = load_manifest(args.manifest_file, args.audit, command="draft")
     text = json.dumps(draft_findings(manifest, args.audit), indent=2) + "\n"
     if args.out:
         Path(args.out).write_text(text, encoding="utf-8")
@@ -16482,7 +16539,7 @@ def findings_predate_run(path: str, audit_id: str) -> str | None:
 
 
 def _finish(args: argparse.Namespace, audit_id: str) -> None:
-    data = load_findings(args.findings_file, audit_id)
+    data = load_findings(args.findings_file, audit_id, command="finish")
     stale_since = findings_predate_run(args.findings_file, audit_id)
     if stale_since:
         raise ValidationError(
@@ -16507,7 +16564,7 @@ def _finish(args: argparse.Namespace, audit_id: str) -> None:
                 "--manifest-file: give the path of the manifest the collector "
                 "wrote; an empty path is not the same as running without one."
             )
-        manifest = load_manifest(manifest_file, audit_id)
+        manifest = load_manifest(manifest_file, audit_id, command="finish")
         cross_check_manifest(data, manifest)
         # Before anything reads `evidence` — the dry-run preview and the ledger
         # body both do — so what renders is what the collector observed.
@@ -16563,7 +16620,8 @@ def _finish(args: argparse.Namespace, audit_id: str) -> None:
         raise ValidationError(
             f"--manifest-file is required for {audit_id}: its SOP runs a collector, "
             "and without the manifest nothing checks this document against what the "
-            "collector actually ran. Pass the manifest the collector wrote, or, on a "
+            "collector actually ran. Pass the manifest the collector wrote "
+            f"(--manifest-file {manifest_path_for(audit_id)} in the SOPs), or, on a "
             "run where it produced none, --no-collector-manifest '<why>' — which "
             "publishes but reports the run as partial."
         )
@@ -18018,24 +18076,6 @@ def _nonblank(value: str) -> str:
     if not value.strip():
         raise argparse.ArgumentTypeError("must not be blank")
     return value.strip()
-
-
-# What a usage error on these commands adds after argparse's own line: the
-# command that produces the missing input, not only the flag's name (#2856).
-LIFECYCLE_HINT = (
-    "The order is `start`, the SOP's collector command, `draft --audit <id> "
-    "--manifest-file <collector manifest> --out <findings file>`, then `finish "
-    "--audit <id> --findings-file <findings file> --manifest-file <collector manifest>`."
-)
-FINISH_USAGE_HINT = (
-    "`finish` takes --audit, --findings-file (write it with `draft --audit <id> "
-    "--manifest-file <collector manifest> --out <findings file>`) and --manifest-file "
-    '<collector manifest>, or --no-collector-manifest "<why>" when the collector did not run.'
-)
-DRAFT_USAGE_HINT = (
-    "`draft` takes --audit and --manifest-file <the manifest the SOP's collector command "
-    "wrote>, and writes the findings document for `finish` to --out <findings file>."
-)
 
 
 class _HintingParser(argparse.ArgumentParser):
