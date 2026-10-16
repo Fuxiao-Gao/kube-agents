@@ -1585,6 +1585,15 @@ RUN /opt/hermes/.venv/bin/python3 /tmp/kanban-guardrail-exit/apply_state_db_sync
 # gates sit below the _worker_guard line this inserts after.
 # See the module docstring in deploy/docker/patches/kanban_ended_run.py.
 #
+# kanban_self_copy: a Platform Agent worker can't file a card for `platform`
+# that would run alongside it. On eval-next a platform card delegated
+# "propose the manifest" to its own profile and then did it anyway, and the
+# person got two pull requests (#3164). kanban_create refuses such a card
+# unless the creator's own card is in its parents (platform SOUL section 0's
+# queued follow-up, which runs after the creator finishes), and the
+# kanban_scheduling repair never releases such a follow-up early.
+# See the module docstring in deploy/docker/patches/kanban_self_copy.py.
+#
 # credential-redaction: a kanban worker that pasted a GCP access token into a
 # curl left it in plaintext on the PVC (#603). Upstream already redacts
 # agent.log and the terminal-output spill; the two sinks it did not cover are
@@ -1640,6 +1649,9 @@ COPY deploy/docker/patches/kanban_wake_nudge.py \
      deploy/docker/patches/kanban_ended_run.py \
      deploy/docker/patches/apply_kanban_ended_run.py \
      deploy/docker/patches/verify_kanban_ended_run.py \
+     deploy/docker/patches/kanban_self_copy.py \
+     deploy/docker/patches/apply_kanban_self_copy.py \
+     deploy/docker/patches/verify_kanban_self_copy.py \
      deploy/docker/patches/kanban_result_required.py \
      deploy/docker/patches/credential_redaction.py \
      deploy/docker/patches/apply_credential_redaction.py \
@@ -1718,6 +1730,9 @@ RUN install -m 0644 /tmp/latency-patches/kanban_wake_nudge.py /opt/hermes/hermes
     test "$(grep -c '_kanban_refuse_ended_run(tid, _kanban_ended_run_connect)' /opt/hermes/tools/kanban_tools.py)" = "2" && \
     test "$(grep -c '_kanban_ended_run_refusal(tid, conn) or' /opt/hermes/tools/kanban_tools.py)" = "2" && \
     grep -qF 'block_task = _kanban_stop_worker_on_external_block(' /opt/hermes/hermes_cli/kanban_db.py && \
+    cp /tmp/latency-patches/kanban_self_copy.py /opt/hermes/tools/kanban_self_copy.py && \
+    /opt/hermes/.venv/bin/python3 /tmp/latency-patches/apply_kanban_self_copy.py /opt/hermes && \
+    test "$(grep -c '_kanban_refuse_self_copy(self_task, assignee, parents)' /opt/hermes/tools/kanban_tools.py)" = "1" && \
     install -m 0644 /tmp/latency-patches/credential_redaction.py /opt/hermes/agent/credential_redaction.py && \
     /opt/hermes/.venv/bin/python3 /tmp/latency-patches/apply_credential_redaction.py /opt/hermes && \
     test "$(grep -c '_kube_agents_register_patterns()' /opt/hermes/agent/redact.py)" = "1" && \
@@ -1741,6 +1756,7 @@ RUN install -m 0644 /tmp/latency-patches/kanban_wake_nudge.py /opt/hermes/hermes
     /opt/hermes/.venv/bin/python3 /tmp/latency-patches/verify_kanban_wake_guard.py && \
     /opt/hermes/.venv/bin/python3 /tmp/latency-patches/verify_kanban_priority.py && \
     /opt/hermes/.venv/bin/python3 /tmp/latency-patches/verify_kanban_ended_run.py && \
+    /opt/hermes/.venv/bin/python3 /tmp/latency-patches/verify_kanban_self_copy.py && \
     /opt/hermes/.venv/bin/python3 /tmp/latency-patches/verify_credential_redaction.py && \
     /opt/hermes/.venv/bin/python3 /tmp/latency-patches/verify_skill_manage_image_owned.py && \
     rm -rf /tmp/latency-patches
