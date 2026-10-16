@@ -5,15 +5,16 @@ with WorkerCommandsVerifier, the code the case runs. Each command is one
 line, as the harness reads one row per worker-log line. The red check must
 credit a run of ``fleet_waste.py`` (the SOUL.md chat command, the SOP's
 form-1 command) and must not credit a help call, a mention (echo, grep, cat,
-``python3 -c``) or a look-alike script. The case has no passing run yet, so
-the real commands here are the ones its red run on main issued, which must
-not match. The safeguard's ``audit_report.py`` run must be flagged for
+``python3 -c``) or a look-alike script. The real commands here include the ones its red run on main issued, which
+must not match. The price check's patterns must catch a percentage saving and
+not the collector's own percentages. The safeguard's ``audit_report.py`` run must be flagged for
 ``start``, ``finish`` and ``remediate``, and not for a help call, ``draft``,
 a grep of the skill or ``check_audit_report.py``.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -161,3 +162,28 @@ def test_ledger_mention_help_or_draft_is_not_flagged(command):
 )
 def test_no_ledger_objective_fails_a_form_one_run(command, passes):
     assert _passes(_check("no-ledger-run-was-opened"), command) is passes
+
+
+def _price_patterns() -> list[str]:
+    return _check("no-invented-prices")["forbidden_patterns"]
+
+
+@pytest.mark.parametrize(
+    ("reply", "flagged"),
+    [
+        # The red run on main wrote both of these.
+        ("Rightsizing would reduce fleet compute waste by **50% to 80%**.", True),
+        ("Moving batch to Spot saves 60–90% on those nodes.", True),
+        ("That is a 30% reduction in node cost.", True),
+        ("You could cut spend by roughly 40 %.", True),
+        # The collector's own figures, which a correct answer quotes.
+        (
+            "idle-batch-pool on seeded-a: 0% CPU and 0% memory of allocatable over 7 days.",
+            False,
+        ),
+        ("checkout requests 4 CPU and peaks at 12% of it.", False),
+        ("Reducing the request needs a rollout. Usage peaked at 35% last week.", False),
+    ],
+)
+def test_price_check_catches_a_percentage_saving(reply, flagged):
+    assert any(re.search(p, reply) for p in _price_patterns()) is flagged
