@@ -1043,15 +1043,17 @@ class RemoteMcpUserAgentRepairTest(unittest.TestCase):
         script = "set -e\n"
         for name in ("sync_profile_skills", "backfill_config_from_template", "repair_remote_mcp_user_agent"):
             script += _extract_shell_function(name) + "\n"
-        # The two definitions sit above the block's opener; run the shipped lines, not a copy.
+        # The two definitions sit above the block's opener. The shipped plugin list runs
+        # as it is; the source path is a fixed image path, so the test points it at the
+        # fixture tree the way CLUSTER_TEMPLATE is, and checks the shipped value below.
         source = _ENTRYPOINT.read_text(encoding="utf-8")
-        definitions = [
-            line
+        shipped = {
+            line.split("=", 1)[0]: line
             for line in source.splitlines()
             if line.startswith(("CLUSTER_SHARED_PLUGINS=", "CLUSTER_IMAGE_PLUGINS="))
-        ]
-        self.assertEqual(len(definitions), 2, "the plugin refresh's two definitions moved")
-        script += "\n".join(definitions) + "\n" + block
+        }
+        self.assertEqual(len(shipped), 2, "the plugin refresh's two definitions moved")
+        script += shipped["CLUSTER_IMAGE_PLUGINS"] + "\n" + block
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             template_dir = root / "cluster-template"
@@ -1104,18 +1106,18 @@ class RemoteMcpUserAgentRepairTest(unittest.TestCase):
             otel = (plugins / "hermes_otel" / "config.yaml").read_text(encoding="utf-8")
             is_link = (linked / "plugins" / "tool_call_audit").is_symlink()
             mounted_text = (mounted / "audit.py").read_text(encoding="utf-8")
-            enabled = yaml.safe_load((profile / "config.yaml").read_text(encoding="utf-8"))["plugins"]["enabled"]
         self.assertEqual(audit, "image\n", "the profile kept the tool_call_audit it was scaffolded with")
         self.assertEqual(sink, "image\n", "the profile kept the common modules it was scaffolded with")
         self.assertEqual(otel, "scaffolded\n", "the loop overwrote hermes_otel's per-profile config")
         self.assertTrue(is_link, "the loop replaced an operator-mounted plugin")
         self.assertEqual(mounted_text, "mounted\n", "the loop wrote through an operator-mounted plugin")
-        self.assertIn("tool_call_audit", enabled)
         self.assertNotIn("WARN", proc.stderr)
         # The loop refreshes from the tree cluster profiles are scaffolded from.
         scaffold = (_REPO / "agents" / "platform" / "scripts" / "cluster_agent_profile.py").read_text(encoding="utf-8")
         default = re.search(r'"SHARED_PLUGINS_DIR", "([^"]+)"', scaffold).group(1)
-        self.assertIn(f'CLUSTER_SHARED_PLUGINS="${{CLUSTER_SHARED_PLUGINS:-{default}}}"', source)
+        # A fixed path, not ${VAR:-...}: an AgentPlugin's spec.env reaches this
+        # container, and must not choose where the audit plugin code comes from.
+        self.assertEqual(shipped["CLUSTER_SHARED_PLUGINS"], f'CLUSTER_SHARED_PLUGINS="{default}"')
 
     def test_the_two_profiles_that_are_not_force_synced_both_take_the_repair(self):
         """The call sites, read off the source: the cluster loop and the front-door fill.

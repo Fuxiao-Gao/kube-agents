@@ -1520,7 +1520,7 @@ CLUSTER_TEMPLATE="/opt/cluster-template"
 # back-fill below turns it on for a profile already on the volume, so the loop has to
 # give that profile the image's code too: a copy scaffolded before the plugin wrote
 # logs/audit.jsonl logs its records where the sidecar does not ship them.
-CLUSTER_SHARED_PLUGINS="${CLUSTER_SHARED_PLUGINS:-/opt/defaults/plugins}"
+CLUSTER_SHARED_PLUGINS="/opt/defaults/plugins"
 CLUSTER_IMAGE_PLUGINS="tool_call_audit common"
 if [ -d "$CLUSTER_TEMPLATE" ]; then
     for d in "$TARGET_DIR"/profiles/cluster-*; do

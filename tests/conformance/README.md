@@ -317,7 +317,8 @@ they were added on 2026-10-07, and `A3-session-sends-a-notify` (KILLED) on 2026-
 `C4-skills-check-blank-line-escape` and `C4-skills-check-comment-escape`, both KILLED when they were added on 2026-10-13, and
 `B2-script-merge`, `B2-enqueue-predicate-ignores-holds`,
 `B2-app-token-grants-pull-requests` and `B2-app-token-scopes-dropped`, all KILLED
-when they were added on 2026-10-13 and 2026-10-14;
+when they were added on 2026-10-13 and 2026-10-14, and
+`D1-cluster-profile-unaudited`, KILLED when it was added on 2026-10-16;
 re-run the harness rather than trusting these numbers, which is the sentence this
 paragraph exists to make cheap.
 Note that the summary line the harness prints accounts for 113 of the 115: a
