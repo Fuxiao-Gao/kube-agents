@@ -445,6 +445,28 @@ class TestOtherCallShapes(Fixture):
         self.assertIsNotNone(err)
 
 
+class TestToolsThatOnlyMentionTheScript(Fixture):
+    def test_a_session_search_that_quotes_an_old_finish_does_not_end_the_run(self):
+        self.run_tool(START, STARTED)
+        self.calls += 1
+        call_id = f"call_{self.calls}"
+        old = "https://github.com/acme/infra/issues/100"
+        with sqlite3.connect(self.state) as conn:
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, tool_calls) VALUES (?, 'assistant', '', ?)",
+                (SESSION, call(call_id, None, tool="session_search",
+                               arguments=json.dumps({"query": "audit_report.py finish compliance-audit"}))),
+            )
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, tool_call_id) VALUES (?, 'tool', ?, ?)",
+                (SESSION, json.dumps({"results": [{"content": "earlier run:\n" + finish_line(url=old)}]}), call_id),
+            )
+        err, _ = self.complete()
+        self.assertIsNotNone(err)
+        _, result = self.complete()
+        self.assertNotIn(old, result)
+
+
 class TestInPlaceCompaction(Fixture):
     def test_a_copied_start_after_its_finish_does_not_reopen_the_run(self):
         self.run_tool(START, STARTED)

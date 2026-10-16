@@ -26,11 +26,13 @@ At ``kanban_complete`` the gate reads this card's own worker session from
 Hermes's session store and looks in the tool outputs, in order, for the result
 lines of ``start`` and ``finish``. It reads the result lines, not the exit
 codes, so a chained command neither hides a run nor ends one; a grep of the
-skill prints no result line. Only the output of a call that runs
-``audit_report.py``, or of the ``process_manage`` tool that reads back a
-background job, is read, so a line that only looks like a result line, in the
-output of a separate ``kubectl`` call, neither ends a run nor puts its URL in
-chat. A result line that repeats with the same tool call id is ignored,
+skill prints no result line. Only the output of a terminal or
+``execute_code`` call that runs ``audit_report.py``, or of the
+``process_manage`` tool that reads back a background job, is read, so a line
+that only looks like a result line, in the output of a separate foreground
+``kubectl`` call or a session search, neither ends a run nor puts its URL in
+chat. A read-back is read whatever job it reads, so the output of a background
+``kubectl logs`` can still carry such a line. A result line that repeats with the same tool call id is ignored,
 because Hermes's in-place compaction stores a copy of the rows it keeps, ids
 and content unchanged, after the rows it archives.
 
@@ -133,6 +135,8 @@ AUDIT_SCRIPT = "audit_report.py"
 #: The tool that reads back the output of a background job: ``process_manage``
 #: in the pinned Hermes, ``process`` in older releases (still a dispatch alias).
 PROCESS_TOOLS = ("process_manage", "process")
+#: The tool whose arguments are code rather than a ``command``: read whole.
+CODE_TOOL = "execute_code"
 #: Read-only URI for the session store, so this reader never creates the file
 #: or takes a write lock.
 STATE_DB_URI = "file:{path}?mode=ro"
@@ -282,13 +286,17 @@ def _calls(tool_calls) -> dict[str, tuple[str, str]]:
         args = function.get("arguments")
         if isinstance(args, str):
             args = _decode(args)
-        # The terminal's ``command``, or every argument of another tool, so that
-        # an ``execute_code`` call that runs the script is read too.
-        if isinstance(args, dict):
-            command = args.get("command") if isinstance(args.get("command"), str) else json.dumps(args)
+        # The terminal's ``command``, or the whole of an ``execute_code`` call,
+        # so code that runs the script is read too. Another tool's arguments
+        # only mention the script (a session search for it), so they are not.
+        name = str(function.get("name") or "")
+        if isinstance(args, dict) and isinstance(args.get("command"), str):
+            command = args["command"]
+        elif name == CODE_TOOL:
+            command = json.dumps(args) if isinstance(args, dict) else str(args or "")
         else:
-            command = args if isinstance(args, str) else ""
-        found[str(call["id"])] = (str(function.get("name") or ""), command)
+            command = ""
+        found[str(call["id"])] = (name, command)
     return found
 
 
