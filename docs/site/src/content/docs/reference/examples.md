@@ -45,7 +45,7 @@ vLLM's OpenAI-compatible server (`vllm serve`) serving Gemma 4 31B (`google/gemm
 
 ## Layering
 
-Both LiteLLM examples speak OpenAI-compatible Completions. `vllm-gemma` as shipped runs vLLM's demo server, which does not serve the OpenAI API; to layer LiteLLM in front of vLLM, run vLLM's OpenAI-compatible server and set `MODEL_PROVIDER=openai_compatible` ([Inference gateway](/kube-agents/concepts/inference-gateway/#openai-compatible-endpoints-self-hosted-or-private)).
+Both LiteLLM examples speak OpenAI-compatible Completions. `vllm-gemma` serves the OpenAI API too; to put LiteLLM in front of it, set `MODEL_PROVIDER=openai_compatible` with the values in its README ([Inference gateway](/kube-agents/concepts/inference-gateway/#openai-compatible-endpoints-self-hosted-or-private)).
 
 ## Not shipped as examples (but reference-worthy)
 
