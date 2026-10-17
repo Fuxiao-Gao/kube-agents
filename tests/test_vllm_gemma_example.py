@@ -46,6 +46,14 @@ class VllmGemmaExampleTest(unittest.TestCase):
         self.assertIsNotNone(row, "README has no MODEL_DEFAULT_NAME row")
         self.assertEqual(served, row.group(1))
 
+    def test_window_fits_a_scheduled_audit_request(self):
+        # The agent sends its whole context on every request, and a scheduled
+        # audit's request reaches about 83,000 tokens; the gateway asks for
+        # MODEL_MAX_TOKENS (4,096 in the README) of output on top. A 32k window
+        # refused most agent requests.
+        window = int(_arg(_server_container(), "--max-model-len"))
+        self.assertGreaterEqual(window, 83000 + 4096)
+
     def test_no_env_value_relies_on_shell_expansion(self):
         for env in _server_container().get("env", []):
             self.assertNotIn("${", str(env.get("value", "")), env["name"])
