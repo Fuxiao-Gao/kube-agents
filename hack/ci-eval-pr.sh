@@ -90,9 +90,11 @@ readonly EVAL_NOT_RUN_STATUS="failed"
 # other runs sets a private directory: the tests point it at a mktemp -d. It is
 # made absolute and created here: the write runs in a subshell that cds into
 # BENCH_DIR, so a relative value would write in one place and read in another.
+# CDPATH is cleared for that cd: it would send a relative name to another
+# directory and print the path, which the substitution would capture.
 EVAL_LOG_DIR="${EVAL_LOG_DIR:-/tmp}"
 mkdir -p "${EVAL_LOG_DIR}"
-EVAL_LOG_DIR="$(cd "${EVAL_LOG_DIR}" && pwd)"
+EVAL_LOG_DIR="$(CDPATH='' cd -- "${EVAL_LOG_DIR}" && pwd)"
 readonly EVAL_LOG_DIR
 
 # EVAL_MODE_NEXT=1 is the flag hack/ci-deploy.sh flipped the install to

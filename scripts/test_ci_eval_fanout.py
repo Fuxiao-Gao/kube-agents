@@ -76,12 +76,23 @@ class EvalLogDirTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as cwd:
             out = subprocess.run(
                 ["bash", "-c", "set -euo pipefail\n" + self.setup_lines() + '\necho "${EVAL_LOG_DIR}"'],
-                cwd=cwd, env={**os.environ, "EVAL_LOG_DIR": "logs"},
+                cwd=cwd, env={**os.environ, "EVAL_LOG_DIR": "logs", "CDPATH": ""},
                 capture_output=True, text=True, check=True,
             ).stdout.strip()
             self.assertEqual(os.path.realpath(os.path.join(cwd, "logs")), os.path.realpath(out))
             self.assertTrue(os.path.isabs(out))
             self.assertTrue(os.path.isdir(out))
+
+    def test_cdpath_does_not_redirect_a_relative_directory(self):
+        with tempfile.TemporaryDirectory() as cwd, tempfile.TemporaryDirectory() as elsewhere:
+            os.mkdir(os.path.join(elsewhere, "logs"))
+            out = subprocess.run(
+                ["bash", "-c", "set -euo pipefail\n" + self.setup_lines() + '\necho "${EVAL_LOG_DIR}"'],
+                cwd=cwd, env={**os.environ, "EVAL_LOG_DIR": "logs", "CDPATH": elsewhere},
+                capture_output=True, text=True, check=True,
+            ).stdout
+            self.assertEqual(1, len(out.splitlines()), out)
+            self.assertEqual(os.path.realpath(os.path.join(cwd, "logs")), os.path.realpath(out.strip()))
 
     def test_unset_keeps_tmp(self):
         env = {k: v for k, v in os.environ.items() if k != "EVAL_LOG_DIR"}
