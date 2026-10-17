@@ -19,7 +19,7 @@ spec:
     metadata:
       labels:
         app: gemma-server
-        ai.gke.io/model: gemma-4-31b-it
+        ai.gke.io/model: gemma-4-26b-a4b-it
         ai.gke.io/inference-server: vllm
         examples.ai.gke.io/source: user-guide
     spec:
@@ -44,11 +44,13 @@ spec:
               nvidia.com/gpu: "2"
           args:
             - $(MODEL_ID)
-            - --served-model-name=gemma-4-31b-it
+            - --served-model-name=gemma-4-26b-a4b-it
             - --host=0.0.0.0
             - --port=8000
             - --tensor-parallel-size=2
-            - --max-model-len=32768
+            # The agent's requests average about 26k tokens and a scheduled audit's
+            # can reach about 83k, so the window has to be well above 32k.
+            - --max-model-len=131072
             - --gpu-memory-utilization=0.90
             - --max-num-seqs=8
             - --enable-chunked-prefill
@@ -67,7 +69,7 @@ spec:
               type: RuntimeDefault
           env:
             - name: MODEL_ID
-              value: google/gemma-4-31B-it-qat-w4a16-ct
+              value: RedHatAI/gemma-4-26B-A4B-it-FP8-dynamic
             - name: HF_HOME
               value: /models
             - name: OTEL_SERVICE_NAME

@@ -273,7 +273,7 @@ A self-hosted server refuses a request whose prompt and `max_tokens` do not fit 
 
 ### What ships
 
-- [`examples/vllm-gemma/`](https://github.com/gke-labs/kube-agents/tree/main/examples/vllm-gemma) — Gemma 4 31B through vLLM's OpenAI-compatible server on two L4 GPUs. Requires an accelerator node pool; the README gives the command. It runs in the release namespace, unlike the advice above; its README says what that means for the gateway's egress rule.
+- [`examples/vllm-gemma/`](https://github.com/gke-labs/kube-agents/tree/main/examples/vllm-gemma) — Gemma 4 26B-A4B through vLLM's OpenAI-compatible server on two L4 GPUs, with a 128k-token context. Requires an accelerator node pool; the README gives the command. It runs in the release namespace, unlike the advice above; its README says what that means for the gateway's egress rule.
 
 To put the gateway in front of it, point `litellm.openaiCompatible.apiBase` at its Service, as [OpenAI-compatible endpoints](#openai-compatible-endpoints-self-hosted-or-private) describes; the example's README gives the values.
 
