@@ -11,7 +11,7 @@ The model is `google/gemma-4-31B-it-qat-w4a16-ct`, Google's quantization-aware-t
 
   ```bash
   gcloud container node-pools create gemma-l4 \
-    --cluster=<CLUSTER> --region=<REGION> --node-locations=<ZONE> \
+    --cluster=<CLUSTER> --location=<REGION or ZONE> --node-locations=<ZONE> \
     --machine-type=g2-standard-24 \
     --accelerator=type=nvidia-l4,count=2,gpu-driver-version=latest \
     --num-nodes=1 --disk-size=200
@@ -28,7 +28,7 @@ kubectl apply -f networkpolicy.yaml
 kubectl apply -f podmonitoring.yaml
 ```
 
-On a new node, the pod is ready about 10 to 11 minutes after it is scheduled: about 4 minutes to pull the image, then about 8 minutes to download the weights (2 to 2.5 minutes), compile the model (about 2 minutes) and load it:
+On a new node, the pod is ready about 11 to 12 minutes after it is scheduled: about 4 minutes to pull the image, then 7 to 8 minutes to download the weights (2 to 2.5 minutes), compile the model (about 2 minutes) and load it:
 
 ```bash
 kubectl -n kubeagents-system logs -f deploy/vllm-gemma-deployment
