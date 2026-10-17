@@ -87,8 +87,13 @@ readonly EVAL_TIMING_FILE="timing.json"
 readonly EVAL_NOT_RUN_STATUS="failed"
 # Where each unit writes a repetition's log (run_one_unit) and grading reads it
 # back (analyze_eval_phases). CI keeps /tmp. A run that shares the machine with
-# other runs sets a private directory: the tests point it at a mktemp -d.
-readonly EVAL_LOG_DIR="${EVAL_LOG_DIR:-/tmp}"
+# other runs sets a private directory: the tests point it at a mktemp -d. It is
+# made absolute and created here: the write runs in a subshell that cds into
+# BENCH_DIR, so a relative value would write in one place and read in another.
+EVAL_LOG_DIR="${EVAL_LOG_DIR:-/tmp}"
+mkdir -p "${EVAL_LOG_DIR}"
+EVAL_LOG_DIR="$(cd "${EVAL_LOG_DIR}" && pwd)"
+readonly EVAL_LOG_DIR
 
 # EVAL_MODE_NEXT=1 is the flag hack/ci-deploy.sh flipped the install to
 # `spec.mode: next` under, in the same job environment. Under it the matrix

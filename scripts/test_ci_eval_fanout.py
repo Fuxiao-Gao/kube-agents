@@ -23,6 +23,7 @@ and only that unit -- grades and records the case, and a repetition that gave
 up on its lock leaves the case for the loop after the fan-out.
 """
 
+import os
 import pathlib
 import re
 import subprocess
@@ -59,6 +60,36 @@ def run_bash(body: str) -> subprocess.CompletedProcess:
         text=True,
         check=False,
     )
+
+
+class EvalLogDirTest(unittest.TestCase):
+    """EVAL_LOG_DIR is absolute and exists once the script's top has run: the
+    write runs in a subshell that cds into BENCH_DIR, the reads do not."""
+
+    def setup_lines(self) -> str:
+        src = SCRIPT.read_text(encoding="utf-8")
+        match = re.search(r'^EVAL_LOG_DIR="\$\{EVAL_LOG_DIR:-/tmp\}"\n.*?^readonly EVAL_LOG_DIR$', src, re.DOTALL | re.MULTILINE)
+        self.assertIsNotNone(match, "the EVAL_LOG_DIR setup block moved or changed shape")
+        return match.group(0)
+
+    def test_a_relative_directory_is_created_and_made_absolute(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            out = subprocess.run(
+                ["bash", "-c", "set -euo pipefail\n" + self.setup_lines() + '\necho "${EVAL_LOG_DIR}"'],
+                cwd=cwd, env={**os.environ, "EVAL_LOG_DIR": "logs"},
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            self.assertEqual(os.path.realpath(os.path.join(cwd, "logs")), os.path.realpath(out))
+            self.assertTrue(os.path.isabs(out))
+            self.assertTrue(os.path.isdir(out))
+
+    def test_unset_keeps_tmp(self):
+        env = {k: v for k, v in os.environ.items() if k != "EVAL_LOG_DIR"}
+        out = subprocess.run(
+            ["bash", "-c", "set -euo pipefail\n" + self.setup_lines() + '\necho "${EVAL_LOG_DIR}"'],
+            env=env, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        self.assertEqual(os.path.realpath("/tmp"), os.path.realpath(out))
 
 
 class LockTest(unittest.TestCase):
