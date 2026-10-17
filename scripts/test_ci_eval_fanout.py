@@ -280,6 +280,8 @@ _ts_lines() { cat; }
 uv() { echo "ran 1 task(s); results: /tmp/fake/run_${rep}/results.json"; }
 finish_case() { echo "FINISH_CASE $2 after rep ${rep}"; }
 STATE_DIR="$(mktemp -d)"; ARTIFACT_DIR="$(mktemp -d)"; BENCH_DIR=/tmp
+# A private log directory, so runs that share the machine do not share rep logs.
+EVAL_LOG_DIR="$(mktemp -d)"
 EVAL_REPETITIONS=3; INFRA_LOCK_DEADLINE=1; EVAL_INFLIGHT_GRACE_SECONDS=300
 release_inflight_note() { :; }
 EVAL_CLUSTER_NAME=c; EVAL_DEFAULT_LOCATION=l; SEEDED_TASK_CLUSTER=; SEEDED_TASK_LOCATION=
@@ -697,7 +699,7 @@ class StateLockTest(unittest.TestCase):
                 lifted("run_one_unit"),
                 PerCaseGradingTest.UNIT_STUBS,
                 lifted("release_state_lock"),
-                'ACQ_LOG="$(mktemp)"; rm -f /tmp/eval_case-x_rep1.log',
+                'ACQ_LOG="$(mktemp)"',
                 'lock_acquire() { echo "$(basename "$1")" >> "${ACQ_LOG}"; mkdir "$1" 2>/dev/null; }',
                 "unit_state_lock() { echo onboarding; }",
                 "state_lock_deadline() { echo 0; }",
@@ -706,7 +708,7 @@ class StateLockTest(unittest.TestCase):
                 f'( sleep {hold_state}; rmdir "${{STATE_DIR}}/lock-state-onboarding" ) &' if hold_state else ":",
                 'uv() { [ -d "${STATE_DIR}/lock-state-onboarding" ] && [ -d "${STATE_DIR}/lock-infra" ] && echo "BOTH"; echo "ran 1 task(s); results: /tmp/fake/run_1/results.json"; }',
                 'run_one_unit ./tasks/x/task.yaml case-x 1 "" true 1 2>&1 | tail -1',
-                "cat /tmp/eval_case-x_rep1.log 2>/dev/null",
+                'cat "${EVAL_LOG_DIR}/eval_case-x_rep1.log" 2>/dev/null',
                 'echo "INFRA_TRIES=$(grep -c lock-infra "${ACQ_LOG}")"',
                 'ls "${STATE_DIR}" | grep "^lock-" | tr "\\n" " "; echo',
             ]
@@ -744,7 +746,7 @@ class StateLockTest(unittest.TestCase):
                 'state_lock_deadline() { echo 1; }',
                 'uv() { [ -d "${STATE_DIR}/lock-state-onboarding" ] && echo "HELD"; echo "ran 1 task(s); results: /tmp/fake/run_1/results.json"; }',
                 'run_one_unit ./tasks/x/task.yaml case-x 1 "" "" 1 >/dev/null 2>&1',
-                'cat /tmp/eval_case-x_rep1.log',
+                'cat "${EVAL_LOG_DIR}/eval_case-x_rep1.log"',
                 '[ -d "${STATE_DIR}/lock-state-onboarding" ] && echo "LEFT" || echo "RELEASED"',
             ]
         )
@@ -783,7 +785,7 @@ class StateLockTest(unittest.TestCase):
                 PerCaseGradingTest.UNIT_STUBS,
                 lifted("release_state_lock"),
                 lifted("release_streams"),
-                'ACQ_LOG="$(mktemp)"; rm -f /tmp/eval_case-x_rep1.log',
+                'ACQ_LOG="$(mktemp)"',
                 'lock_acquire() { mkdir "$1" 2>/dev/null && echo "$(basename "$1")" >> "${ACQ_LOG}"; }',
                 "unit_state_lock() { echo onboarding; }",
                 "state_lock_deadline() { echo 0; }",
@@ -846,7 +848,7 @@ class StateLockTest(unittest.TestCase):
                 "export KUBECONFIG=/shared/config",
                 'uv() { echo "KUBECONFIG=${KUBECONFIG}"; echo "ran 1 task(s); results: /tmp/fake/run_1/results.json"; }',
                 'run_one_unit ./tasks/x/task.yaml case-x 1 "" "" 1 >/dev/null 2>&1',
-                "cat /tmp/eval_case-x_rep1.log",
+                'cat "${EVAL_LOG_DIR}/eval_case-x_rep1.log"',
                 'echo "AFTER=${KUBECONFIG}"',
             ]
         )
