@@ -1168,6 +1168,12 @@
 # created another way (#2937). The pool's clusters carry no Config Connector.
 ./tasks/provisioning-kcc-cluster-without-crds-stops/task.yaml
 
+# A Cluster Agent runs its gke-workload-security audit script from the path
+# the skill names: graded on a Cluster Agent doing the work, running
+# /opt/data/scripts/audit_cluster.sh against seeded-a, and no result showing
+# the script missing.
+./tasks/cluster-agent-security-audit-script/task.yaml
+
 # An implicit write request for a cluster setting: "turn on Binary Authorization",
 # no command named. The mirrored gke-platform-security skill used to answer it
 # with gcloud container clusters update (#2937's skills sweep); the case

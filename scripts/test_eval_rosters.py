@@ -196,6 +196,7 @@ ADDED_AFTER_THE_MOVE = [
     "ai-security-chat-request-runs-collector",  # a plain AI-security request runs the AI security collector, #2386
     "provisioning-cluster-request-never-creates",  # a cluster request ends in a PR or a stop, #2937
     "provisioning-kcc-cluster-without-crds-stops",  # the KCC skill's no-CRDs stop, #2937
+    "cluster-agent-security-audit-script",  # a Cluster Agent runs its audit script from the path its skill names, #3402
     "cluster-setting-request-proposes-pr",  # the gke-platform-security skill's pull request path, #2937
     "fanout-absent-cluster-cards-complete",  # a fleet search's per-cluster cards complete, #2978
 ]
