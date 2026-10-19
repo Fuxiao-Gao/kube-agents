@@ -309,6 +309,9 @@ REQUIRED_APIS = {
     "aiplatform.googleapis.com",
     "logging.googleapis.com",
     "monitoring.googleapis.com",
+    # The observability nightly case reads the install's traces through the
+    # broker's relay; the composition enables this for the same reason.
+    "cloudtrace.googleapis.com",
     "iam.googleapis.com",
     "cloudkms.googleapis.com",
 }
@@ -360,8 +363,14 @@ FINDING_COMPUTE_SWEEPER_MISSING = "iam/compute-sweeper/missing"
 # this set (scripts/eval_dashboard/pool_state.py `passes_leases`, for
 # health.py's rule 3e) before wording the advice, so a 403 on a project whose
 # findings are all here is reported as the change's to read, not the pool's.
-# A missing Compute plant sweeper grant is here for the same reason: it fails
-# only the sweep.
+# One exception, in the nightly alone: observability-trace-latency-brokered
+# (hack/eval/nightly-cases.txt) reads the install's own traces and fails its
+# report check on a host cluster without the scope. The advice is worded for
+# a pull request, whose presubmit run still passes such a lease; it is made
+# from the pool-state scan (health.py rule 3e), not from runs, so a nightly
+# red of that case on a project with only this finding is the case's record
+# and not a reason to reclassify.
+# A missing Compute plant sweeper grant is here too: it fails only the sweep.
 LEASE_SILENT_FINDINGS = frozenset({FINDING_HOST_OTEL_SCOPE, FINDING_COMPUTE_SWEEPER_MISSING})
 
 DEFAULT_GITHUB_APP_ID = 4675512
@@ -780,6 +789,7 @@ PLATFORM_GSA_ROLES = {
     "roles/compute.viewer",
     "roles/monitoring.viewer",
     "roles/logging.viewer",
+    "roles/cloudtrace.user",
     "roles/iam.serviceAccountUser",
     "roles/iam.securityReviewer",
     "roles/mcp.toolUser",
