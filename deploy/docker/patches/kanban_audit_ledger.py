@@ -29,7 +29,8 @@ codes, so a chained command neither hides a run nor ends one; a grep of the
 skill prints no result line. Only the output of a terminal or
 ``execute_code`` call that runs ``audit_report.py``, or of a
 ``process_manage`` read-back of a background job that such a call started, or
-of Hermes's completion notice for such a job (a ``user`` row), is read, so a line that only looks like a result line, in the output of a
+of Hermes's completion notice for such a job (a ``user`` row; each notice in
+the row is read alone, by its job id), is read, so a line that only looks like a result line, in the output of a
 separate ``kubectl`` call (foreground or background) or a session search,
 neither ends a run nor puts its URL in chat. A result line that repeats with the same tool call id is ignored,
 because Hermes's in-place compaction stores a copy of the rows it keeps, ids
@@ -145,10 +146,13 @@ CODE_TOOL = "execute_code"
 #: backgrounded it, and in the arguments of the read-back that reads it.
 JOB_ID_KEY = "session_id"
 #: How Hermes reports a background job that ended: a ``user`` row that starts
-#: with this text, then ``Command: <cmd>`` and ``Output:`` lines, and a closing
-#: ``]`` after the output (``tools/process_registry_notifications.py``).
+#: with this text and the job id, then ``Command: <cmd>`` and ``Output:`` lines,
+#: and a closing ``]`` after the output (``tools/process_registry_notifications.py``).
+#: One row can hold several notices: a ``chat -q`` worker joins every notice
+#: drained in a round with a blank line (``hermes_cli/quiet_single_query.py``).
 NOTICE_PREFIX = "[IMPORTANT: Background process"
-NOTICE_COMMAND_RE = re.compile(r"^Command: (.*)$", re.MULTILINE)
+NOTICE_SEPARATOR = "\n\n" + NOTICE_PREFIX
+NOTICE_JOB_RE = re.compile(re.escape(NOTICE_PREFIX) + r" (\S+)")
 NOTICE_OUTPUT_MARK = "\nOutput:\n"
 NOTICE_END = "]"
 #: A command whose output could carry the ``finish`` result line.
@@ -291,17 +295,26 @@ def _result_lines(value):
                     yield "finish", url, line
 
 
-def _notice(content) -> tuple[str, str]:
-    """``(command, output)`` of a background-completion notice, else ``("", "")``."""
+def _notices(content) -> list[tuple[str, str]]:
+    """``(job id, output)`` for each background-completion notice in a row.
+
+    A row that does not start with a notice holds none. Each notice is read
+    alone, so one job's output never stands in for another's.
+    """
     text = content if isinstance(content, str) else ""
-    if not text.startswith(NOTICE_PREFIX) or NOTICE_OUTPUT_MARK not in text:
-        return "", ""
-    head, output = text.split(NOTICE_OUTPUT_MARK, 1)
-    match = NOTICE_COMMAND_RE.search(head)
-    output = output.rstrip()
-    if output.endswith(NOTICE_END):
-        output = output[: -len(NOTICE_END)]
-    return (match.group(1) if match else ""), output
+    if not text.startswith(NOTICE_PREFIX):
+        return []
+    found = []
+    for index, part in enumerate(text.split(NOTICE_SEPARATOR)):
+        notice = part if index == 0 else NOTICE_PREFIX + part
+        job = NOTICE_JOB_RE.match(notice)
+        if not job or NOTICE_OUTPUT_MARK not in notice:
+            continue
+        output = notice.split(NOTICE_OUTPUT_MARK, 1)[1].rstrip()
+        if output.endswith(NOTICE_END):
+            output = output[: -len(NOTICE_END)]
+        found.append((job.group(1), output))
+    return found
 
 
 def _calls(tool_calls) -> dict[str, tuple[str, str, str]]:
@@ -352,41 +365,49 @@ def audit_run(rows) -> dict:
             calls.update(_calls(tool_calls))
             continue
         if role == "user":
-            # A background job that ended (``notify_on_complete``) reports here.
-            command, decoded = _notice(content)
+            # A background job that ended (``notify_on_complete``) reports
+            # here. Only a job this run backgrounded with an audit command is
+            # read, under the command recorded when it started.
+            parts = [(jobs[job], output) for job, output in _notices(content) if job in jobs]
         elif role == "tool":
             tool, command, job = calls.get(str(tool_call_id), ("", "", ""))
             if tool in PROCESS_TOOLS:
                 # A read-back speaks for the job it reads, and only an audit
                 # job's output can carry a result line.
                 command = jobs.get(job, "")
-            decoded = _decode(content)
+            parts = [(command, _decode(content))]
         else:
             continue
-        if AUDIT_SCRIPT not in command:
-            continue
-        if isinstance(decoded, dict) and decoded.get(JOB_ID_KEY):
-            jobs[str(decoded[JOB_ID_KEY])] = command
-        if (
-            state["open_audit"]
-            and PERSISTED_OUTPUT_TAG in str(content or "")
-            and FINISH_COMMAND_RE.search(command)
-        ):
-            state["hidden"] = True
-        for kind, value, line in _result_lines(decoded):
-            copy_key = f"{tool_call_id}\n{line}"
-            if copy_key in seen:
-                continue
-            seen.add(copy_key)
-            if kind == "start":
-                state["started"] = True
-                state["open_audit"] = value
-                state["hidden"] = False
-            elif state["started"]:
-                state["open_audit"] = None
-                if value and value not in state["urls"]:
-                    state["urls"].append(value)
+        for command, decoded in parts:
+            _read_part(state, seen, jobs, command, decoded, content, tool_call_id)
     return state
+
+
+def _read_part(state, seen, jobs, command, decoded, content, tool_call_id) -> None:
+    """Fold one output, a tool result or one completion notice, into ``state``."""
+    if AUDIT_SCRIPT not in command:
+        return
+    if isinstance(decoded, dict) and decoded.get(JOB_ID_KEY):
+        jobs[str(decoded[JOB_ID_KEY])] = command
+    if (
+        state["open_audit"]
+        and PERSISTED_OUTPUT_TAG in str(content or "")
+        and FINISH_COMMAND_RE.search(command)
+    ):
+        state["hidden"] = True
+    for kind, value, line in _result_lines(decoded):
+        copy_key = f"{tool_call_id}\n{line}"
+        if copy_key in seen:
+            continue
+        seen.add(copy_key)
+        if kind == "start":
+            state["started"] = True
+            state["open_audit"] = value
+            state["hidden"] = False
+        elif state["started"]:
+            state["open_audit"] = None
+            if value and value not in state["urls"]:
+                state["urls"].append(value)
 
 
 def _read_rows(state_db: str, session_id: str) -> list:
