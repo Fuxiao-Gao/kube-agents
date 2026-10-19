@@ -28,8 +28,8 @@ lines of ``start`` and ``finish``. It reads the result lines, not the exit
 codes, so a chained command neither hides a run nor ends one; a grep of the
 skill prints no result line. Only the output of a terminal or
 ``execute_code`` call that runs ``audit_report.py``, or of a
-``process_manage`` read-back of a background job that such a call started, is
-read, so a line that only looks like a result line, in the output of a
+``process_manage`` read-back of a background job that such a call started, or
+of Hermes's completion notice for such a job (a ``user`` row), is read, so a line that only looks like a result line, in the output of a
 separate ``kubectl`` call (foreground or background) or a session search,
 neither ends a run nor puts its URL in chat. A result line that repeats with the same tool call id is ignored,
 because Hermes's in-place compaction stores a copy of the rows it keeps, ids
@@ -64,6 +64,10 @@ that compressed is read whole.
 
 Scope and failure
 -----------------
+A ``finish`` that a delegated subagent runs is recorded in the child's
+session, not this card's, so it is not read: the skill has the worker run
+``start`` and ``finish`` itself, and a subagent's summary is model text that
+this gate does not trust.
 The gate runs only for the caller's own card (``HERMES_KANBAN_TASK`` equal to
 the card id). A gateway session closing someone else's card, the CLI and the
 scheduler are not affected, and a scheduled audit is a cron run with no card.
@@ -140,6 +144,13 @@ CODE_TOOL = "execute_code"
 #: The key that names a background job: in the result of the call that
 #: backgrounded it, and in the arguments of the read-back that reads it.
 JOB_ID_KEY = "session_id"
+#: How Hermes reports a background job that ended: a ``user`` row that starts
+#: with this text, then ``Command: <cmd>`` and ``Output:`` lines, and a closing
+#: ``]`` after the output (``tools/process_registry_notifications.py``).
+NOTICE_PREFIX = "[IMPORTANT: Background process"
+NOTICE_COMMAND_RE = re.compile(r"^Command: (.*)$", re.MULTILINE)
+NOTICE_OUTPUT_MARK = "\nOutput:\n"
+NOTICE_END = "]"
 #: A command whose output could carry the ``finish`` result line.
 FINISH_COMMAND_RE = re.compile(r"audit_report\.py\b[^\n]*\bfinish\b")
 #: Read-only URI for the session store, so this reader never creates the file
@@ -148,7 +159,7 @@ STATE_DB_URI = "file:{path}?mode=ro"
 
 _MESSAGES_SQL = (
     "SELECT id, role, content, tool_call_id, tool_calls FROM messages "
-    "WHERE session_id IN ({marks}) AND role IN ('assistant', 'tool') ORDER BY id"
+    "WHERE session_id IN ({marks}) AND role IN ('assistant', 'tool', 'user') ORDER BY id"
 )
 _PARENT_SQL = (
     "SELECT p.id FROM sessions s JOIN sessions p ON p.id = s.parent_session_id "
@@ -280,6 +291,19 @@ def _result_lines(value):
                     yield "finish", url, line
 
 
+def _notice(content) -> tuple[str, str]:
+    """``(command, output)`` of a background-completion notice, else ``("", "")``."""
+    text = content if isinstance(content, str) else ""
+    if not text.startswith(NOTICE_PREFIX) or NOTICE_OUTPUT_MARK not in text:
+        return "", ""
+    head, output = text.split(NOTICE_OUTPUT_MARK, 1)
+    match = NOTICE_COMMAND_RE.search(head)
+    output = output.rstrip()
+    if output.endswith(NOTICE_END):
+        output = output[: -len(NOTICE_END)]
+    return (match.group(1) if match else ""), output
+
+
 def _calls(tool_calls) -> dict[str, tuple[str, str, str]]:
     """``{call id: (tool name, command, job id)}`` for one assistant message.
 
@@ -327,16 +351,20 @@ def audit_run(rows) -> dict:
         if role == "assistant":
             calls.update(_calls(tool_calls))
             continue
-        if role != "tool":
+        if role == "user":
+            # A background job that ended (``notify_on_complete``) reports here.
+            command, decoded = _notice(content)
+        elif role == "tool":
+            tool, command, job = calls.get(str(tool_call_id), ("", "", ""))
+            if tool in PROCESS_TOOLS:
+                # A read-back speaks for the job it reads, and only an audit
+                # job's output can carry a result line.
+                command = jobs.get(job, "")
+            decoded = _decode(content)
+        else:
             continue
-        tool, command, job = calls.get(str(tool_call_id), ("", "", ""))
-        if tool in PROCESS_TOOLS:
-            # A read-back speaks for the job it reads, and only an audit job's
-            # output can carry a result line.
-            command = jobs.get(job, "")
         if AUDIT_SCRIPT not in command:
             continue
-        decoded = _decode(content)
         if isinstance(decoded, dict) and decoded.get(JOB_ID_KEY):
             jobs[str(decoded[JOB_ID_KEY])] = command
         if (

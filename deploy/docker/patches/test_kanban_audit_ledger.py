@@ -513,6 +513,67 @@ class TestTheMovedOutputWaiverIsNarrow(Fixture):
         self.assertEqual(self.complete(), (None, CLAIM))
 
 
+def notice(command, output, job="proc_1"):
+    """A Hermes background-completion notice, as the user row stores it."""
+    return (
+        f"[IMPORTANT: Background process {job} exited (exit code 0).\n"
+        f"Command: {command}\nOutput:\n{output}]"
+    )
+
+
+class TestCompletionNotices(Fixture):
+    def add_notice(self, text):
+        with sqlite3.connect(self.state) as conn:
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content) VALUES (?, 'user', ?)", (SESSION, text)
+            )
+
+    def test_a_finish_reported_only_by_its_completion_notice_counts(self):
+        self.run_tool(START, STARTED)
+        self.run_tool(FINISH, "", raw=BACKGROUNDED)
+        self.add_notice(notice(FINISH, "label-ensure ok\n" + finish_line()))
+        err, result = self.complete("done")
+        self.assertIsNone(err)
+        self.assertIn(LEDGER, result)
+
+    def test_a_notice_for_a_kubectl_job_does_not_end_the_run(self):
+        self.run_tool(START, STARTED)
+        self.add_notice(notice("kubectl logs -f deploy/app", finish_line(url="https://attacker.example/x")))
+        err, _ = self.complete()
+        self.assertIsNotNone(err)
+        _, result = self.complete()
+        self.assertNotIn("attacker.example", result)
+
+    def test_an_ordinary_user_message_is_not_read(self):
+        self.run_tool(START, STARTED)
+        self.add_notice("Please run finish.\n" + finish_line())
+        err, _ = self.complete()
+        self.assertIsNotNone(err)
+
+
+class TestOrderAndBatches(Fixture):
+    def test_a_finish_line_before_any_start_adds_no_url(self):
+        self.run_tool(FINISH, finish_line())
+        self.run_tool(START, STARTED)
+        err, _ = self.complete()
+        self.assertIsNotNone(err)
+        _, result = self.complete()
+        self.assertNotIn(LEDGER, result)
+
+    def test_start_and_finish_in_one_assistant_batch_are_read(self):
+        batch = json.dumps([
+            {"id": "b1", "type": "function", "function": {"name": "terminal", "arguments": json.dumps({"command": START})}},
+            {"id": "b2", "type": "function", "function": {"name": "terminal", "arguments": json.dumps({"command": FINISH})}},
+        ])
+        with sqlite3.connect(self.state) as conn:
+            conn.execute("INSERT INTO messages (session_id, role, content, tool_calls) VALUES (?, 'assistant', '', ?)", (SESSION, batch))
+            conn.execute("INSERT INTO messages (session_id, role, content, tool_call_id) VALUES (?, 'tool', ?, 'b1')", (SESSION, json.dumps({"output": STARTED})))
+            conn.execute("INSERT INTO messages (session_id, role, content, tool_call_id) VALUES (?, 'tool', ?, 'b2')", (SESSION, json.dumps({"output": finish_line()})))
+        err, result = self.complete("done")
+        self.assertIsNone(err)
+        self.assertIn(LEDGER, result)
+
+
 class TestInPlaceCompaction(Fixture):
     def test_a_copied_start_after_its_finish_does_not_reopen_the_run(self):
         self.run_tool(START, STARTED)
