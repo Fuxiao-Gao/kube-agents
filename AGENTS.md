@@ -306,3 +306,5 @@ another round. Two traps:
 
 Mechanics, queries, and verdicts live in
 [`.claude/commands/pr-review-batch.md`](.claude/commands/pr-review-batch.md).
+
+<!-- merge-queue dry run (#1363): T3 adds these bytes, fits alone. -->
