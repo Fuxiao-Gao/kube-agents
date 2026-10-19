@@ -31,8 +31,8 @@
 # slot, so on dev it reports status=error unless seeded-a carries the
 # Deployment too; read a dev run on its objectives.
 #
-# Not this route, and left to their own cases: a single-symptom question
-# across a fleet of five clusters or fewer (chat-fanout-fleet-restarts-rows
+# Not this route, and left to their own cases: a single-symptom question on a
+# fleet within SOUL.md's ten-card fan-out bound (chat-fanout-fleet-restarts-rows
 # keeps its one card per cluster), a named cluster or workload
 # (cluster-agent-crashloop-debug), and the audit-stream topics
 # (*-chat-request-runs-collector).

@@ -75,7 +75,7 @@ def querier(hits=None, present=None, errors=None):
                 break
         if metric in errors:
             return [], errors[metric]
-        if promql.startswith("count by"):
+        if not any(cmp in promql for cmp in ("== 1", ">=")):
             ksm = metric == "kube_pod_status_phase"
             return [series(c, loc, ksm=ksm) for c, loc in (present or {}).get(metric, [])], None
         return hits.get(metric, []), None
@@ -127,6 +127,12 @@ class ControlPlaneTest(unittest.TestCase):
         ])
         self.assertEqual(found[2]["excerpt"], "GCE_STOCKOUT: no capacity")
 
+    def test_a_gke_code_wins_over_the_canonical_code(self):
+        both = [{"code": "GCE_QUOTA_EXCEEDED", "canonicalCode": "RESOURCE_EXHAUSTED", "message": "m"}]
+        self.assertEqual(fh.control_plane_candidates(cluster("a", conditions=both))[0]["excerpt"], "GCE_QUOTA_EXCEEDED: m")
+        unknown = [{"code": "UNKNOWN", "canonicalCode": "UNAVAILABLE", "message": "m"}]
+        self.assertEqual(fh.control_plane_candidates(cluster("a", conditions=unknown))[0]["excerpt"], "UNAVAILABLE: m")
+
 
 class MetricsTest(unittest.TestCase):
     def setUp(self):
@@ -162,6 +168,21 @@ class MetricsTest(unittest.TestCase):
             self.assertEqual(project, "acme")
             self.assertIn('project_id="acme"', promql)
 
+    def test_the_queries_drop_young_pending_pods_and_gone_containers(self):
+        query = querier(present=ALL_PRESENT)
+        self.entry(query)
+        text = " ".join(q for _, q in query.calls)
+        self.assertIn('offset 10m == 1', text)
+        self.assertIn(") and on (location, cluster_name, namespace_name, pod_name, container_name)", text)
+        for _, promql in query.calls:
+            self.assertEqual(promql.count("{"), promql.count("}"))
+
+    def test_the_metric_reads_are_recorded_once_per_project(self):
+        manifest = fh.collect_fleet(run=lister({"acme": [cluster("a"), cluster("b")]}), query=querier(present=ALL_PRESENT))
+        self.assertEqual(len(manifest["project_reads"]["acme"]), 6)
+        for entry in manifest["clusters"]:
+            self.assertEqual([c["check"] for c in entry["commands"]], [",".join(fh.CONTROL_PLANE_CHECKS)])
+
     def test_a_cluster_with_no_series_is_unevaluated_not_healthy(self):
         entry = self.entry(querier(present={"node_status_condition": [("a", "us-central1")]}))
         reasons = {u["check"]: u["reason"] for u in entry["checks_unevaluated"]}
@@ -179,10 +200,17 @@ class MetricsTest(unittest.TestCase):
         self.assertEqual(entry["checks_unevaluated"],
                          [{"check": "container-restarting", "reason": "metric read failed: HTTP 403: denied"}])
 
-    def test_a_cluster_that_is_not_running_reports_no_metrics(self):
-        entry = self.entry(querier(present=ALL_PRESENT), cluster("a", status="ERROR"))
-        self.assertEqual(checks(entry), [("cluster-not-running", "critical", "Cluster/a")])
+    def test_a_degraded_cluster_still_gets_its_metric_checks(self):
+        query = querier(present=ALL_PRESENT, hits={"node_status_condition": [series("a", node_name="n1", status="False")]})
+        entry = self.entry(query, cluster("a", status="DEGRADED"))
+        self.assertEqual(checks(entry), [("cluster-not-running", "critical", "Cluster/a"),
+                                         ("node-not-ready", "major", "Node/n1")])
+        self.assertNotIn("checks_unevaluated", entry)
+
+    def test_a_cluster_with_no_series_names_its_status(self):
+        entry = self.entry(querier(), cluster("a", status="ERROR"))
         self.assertEqual({u["check"] for u in entry["checks_unevaluated"]}, set(fh.METRIC_CHECKS))
+        self.assertIn("status ERROR", entry["checks_unevaluated"][0]["reason"])
 
     def test_clusters_with_one_name_in_two_locations_stay_apart(self):
         query = querier(present={"container_restart_count": [("a", "us-central1"), ("a", "europe-west1")]},
@@ -198,7 +226,7 @@ class MetricsTest(unittest.TestCase):
                 for i in range(fh.MAX_METRIC_CANDIDATES_PER_CHECK + 3)]
         entry = self.entry(querier(present=ALL_PRESENT, hits={"container_restart_count": many}))
         self.assertEqual(len(entry["candidates"]), fh.MAX_METRIC_CANDIDATES_PER_CHECK)
-        self.assertEqual(entry["limitations"], ["container-restarting: 3 more not listed"])
+        self.assertEqual(entry["limitations"], "container-restarting lists 20 of 23; the rest are not listed.")
         self.assertNotIn("checks_unevaluated", entry)
 
 
@@ -252,6 +280,35 @@ class FleetTest(unittest.TestCase):
         self.assertEqual([e["name"] for e in manifest["clusters"]], ["acme/us-central1/a"])
         self.assertNotIn("secret-ops", json.dumps(manifest["clusters"][0]["candidates"]))
 
+    def test_excluded_clusters_are_kept_out_of_the_metric_reads(self):
+        fh.declared_scope.set("acme", None, "acme/us-central1/secret-ops")
+        query = querier(present=ALL_PRESENT)
+        fh.collect_fleet(run=lister({"acme": [cluster("a"), cluster("secret-ops")]}), query=query)
+        for _, promql in query.calls:
+            self.assertRegex(promql, r'cluster(_name)?!~"secret-ops"')
+
+    def test_an_excluded_name_an_included_cluster_shares_is_not_matched_out(self):
+        fh.declared_scope.set("acme", None, "acme/europe-west1/a")
+        query = querier(present=ALL_PRESENT)
+        fh.collect_fleet(run=lister({"acme": [cluster("a"), cluster("a", location="europe-west1")]}), query=query)
+        self.assertNotIn("!~", " ".join(q for _, q in query.calls))
+
+    def test_no_monitoring_session_keeps_the_control_plane_checks(self):
+        with mock.patch.object(fh, "default_session", side_effect=RuntimeError("no ADC")):
+            manifest = fh.collect_fleet(run=lister({"acme": [cluster("a", status="ERROR")]}))
+        entry = manifest["clusters"][0]
+        self.assertEqual(checks(entry), [("cluster-not-running", "critical", "Cluster/a")])
+        self.assertEqual({u["check"] for u in entry["checks_unevaluated"]}, set(fh.METRIC_CHECKS))
+        self.assertIn("no Cloud Monitoring session", entry["checks_unevaluated"][0]["reason"])
+
+    def test_projects_past_the_deadline_are_gate_failed_rows(self):
+        manifest = fh.collect_fleet(run=lister({"acme": [cluster("a")], "beta": [cluster("b")]}),
+                                    query=querier(present=ALL_PRESENT), project_budget_s=-1)
+        self.assertEqual({e["name"]: e["outcome"] for e in manifest["clusters"]},
+                         {"project/acme": "gate-failed", "project/beta": "gate-failed"})
+        self.assertIn("--project acme", manifest["clusters"][0]["error"])
+        self.assertIn("no cluster could be read", manifest["error"])
+
     def test_a_project_that_raises_does_not_lose_the_fleet(self):
         def query(project, promql):
             if project == "beta":
@@ -267,8 +324,17 @@ class FleetTest(unittest.TestCase):
                                  "container_restart_count": [("a", "us-central1")]})
         manifest = fh.collect_fleet(run=lister({"acme": [cluster("a")]}), query=query)
         self.assertEqual(fh.summary_lines(manifest)[1],
-                         "not evaluated, so not healthy either -- name each in the answer: pod-pending on "
-                         "acme/us-central1/a (the cluster reported no series for this metric)")
+                         "not evaluated, so not healthy either -- name each in the answer: pod-pending on 1 "
+                         "cluster(s) (acme/us-central1/a): the cluster (status RUNNING) reported no series for this metric")
+
+    def test_the_summary_groups_one_reason_across_many_clusters(self):
+        clusters = [cluster(f"c{i}", packages=("SYSTEM_COMPONENTS",)) for i in range(7)]
+        present = {m: [(f"c{i}", "us-central1") for i in range(7)] for m in ("node_status_condition", "container_restart_count")}
+        manifest = fh.collect_fleet(run=lister({"acme": clusters}), query=querier(present=present))
+        line = fh.summary_lines(manifest)[1]
+        self.assertIn("pod-pending on 7 cluster(s)", line)
+        self.assertIn("and 2 more", line)
+        self.assertEqual(line.count("pod-pending"), 1)
 
     def test_the_summary_counts_clusters_with_a_finding(self):
         manifest = fh.collect_fleet(run=lister({"acme": [cluster("a", status="ERROR"), cluster("b")]}),

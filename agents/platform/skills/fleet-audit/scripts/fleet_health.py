@@ -13,16 +13,19 @@ per cluster:
 - Managed Service for Prometheus, through the credential broker's read-only
   relay (`docs/designs/gcp-api-relay.md`): NotReady nodes
   (`kubernetes_io:node_status_condition`), containers that restarted
-  repeatedly in the last hour (`kubernetes_io:container_restart_count`), and
-  pods stuck Pending (kube-state-metrics `kube_pod_status_phase`, which GKE
-  exports when the cluster's `POD` metrics package is on).
+  repeatedly in the last hour and still exist
+  (`kubernetes_io:container_restart_count`), and pods Pending for the whole
+  window (kube-state-metrics `kube_pod_status_phase`, which GKE exports when
+  the cluster's `POD` metrics package is on).
 
 Each metric is read twice per project: once for the findings and once for
 which clusters report the metric at all, so a cluster with no series is
 "not evaluated", never silently healthy.
 
-The manifest follows docs/designs/fleet-audit-collector-manifest.md. It feeds a
-chat answer only: no ledger stream, no `audit_report.py`.
+The manifest follows docs/designs/fleet-audit-collector-manifest.md, with the
+per-project metric reads recorded once under `project_reads` rather than on
+every cluster. It feeds a chat answer only: no ledger stream, no
+`audit_report.py`.
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -50,6 +54,16 @@ TIMEOUT_RC = 124
 # The credential proxy's admitted count at the operator's default limit;
 # collect.py's MAX_WORKERS comment has the reasoning.
 MAX_WORKERS = 4
+# Project reads stop starting this long after the run starts, so a run over a
+# credential that lists many projects still prints its manifest inside the
+# chat route's 600 s terminal timeout. fleet_waste.py's PROJECT_READ_DEADLINE_S
+# has the reasoning.
+PROJECT_READ_DEADLINE_S = 420
+PROJECT_DEADLINE_ERROR = (
+    "not read: the sweep stops starting project reads {budget} s after it starts, so it can "
+    "end inside its terminal timeout, and this project's turn came after that. Rerun with "
+    "`--project {project}` to read it on its own."
+)
 ERROR_EXCERPT_CHARS = 300
 TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 SUMMARY_MAX_CLUSTER_NAMES = 5
@@ -57,6 +71,7 @@ SUMMARY_MAX_CLUSTER_NAMES = 5
 OUTCOME_COLLECTED = "collected"
 OUTCOME_GATE_FAILED = "gate-failed"
 PROJECT_TARGET_PREFIX = "project/"
+PROJECT_TARGET_LOCATION = "global"
 UNENUMERATED_PROJECTS_TARGET = PROJECT_TARGET_PREFIX + "UNENUMERATED_PROJECTS"
 SCOPED_RUN_NOTE = (
     "scope narrowed to project {project!r} by `--project`: discovery was skipped, so no other "
@@ -84,10 +99,10 @@ ZONE_TIMEOUT_MARKER = "did not respond"
 HEALTHY_STATUS = "RUNNING"
 CLUSTER_CRITICAL_STATUSES = frozenset({"ERROR", "DEGRADED"})
 POOL_CRITICAL_STATUSES = frozenset({"ERROR"})
-POOL_MAJOR_STATUSES = frozenset({"RUNNING_WITH_ERROR"})
 TRANSITIONAL_STATUSES = frozenset({"PROVISIONING", "RECONCILING", "STOPPING"})
-# A cluster in these states serves metrics; any other gives none to read.
-METRICS_STATUSES = frozenset({"RUNNING", "RECONCILING"})
+# A GKE condition's own code (GCE_STOCKOUT) says more than its generic
+# canonicalCode (RESOURCE_EXHAUSTED); either may be absent.
+UNKNOWN_CONDITION_CODE = "UNKNOWN"
 # The cluster's monitoringConfig packages each metric needs.
 SYSTEM_METRICS_PACKAGE = "SYSTEM_COMPONENTS"
 POD_METRICS_PACKAGE = "POD"
@@ -99,13 +114,33 @@ CHECK_POOL_CONDITION = "node-pool-condition"
 CHECK_NODE_NOT_READY = "node-not-ready"
 CHECK_RESTARTING = "container-restarting"
 CHECK_PENDING = "pod-pending"
+CONTROL_PLANE_CHECKS = (CHECK_CLUSTER_STATUS, CHECK_CLUSTER_CONDITION, CHECK_POOL_STATUS, CHECK_POOL_CONDITION)
+METRIC_CHECKS = (CHECK_NODE_NOT_READY, CHECK_RESTARTING, CHECK_PENDING)
 SEVERITY_CRITICAL = "critical"
 SEVERITY_MAJOR = "major"
 SEVERITY_MINOR = "minor"
 
+# Metric label names. The GKE system metrics name their monitored resource's
+# labels `cluster_name`, `namespace_name` and so on; kube-state-metrics uses
+# the bare names. The PromQL `by (...)` lists and the reads below must agree,
+# so both use these.
+LABEL_LOCATION = "location"
+LABEL_SYSTEM_CLUSTER = "cluster_name"
+LABEL_SYSTEM_NAMESPACE = "namespace_name"
+LABEL_SYSTEM_POD = "pod_name"
+LABEL_SYSTEM_CONTAINER = "container_name"
+LABEL_NODE = "node_name"
+LABEL_CONDITION_STATUS = "status"
+LABEL_KSM_CLUSTER = "cluster"
+LABEL_KSM_NAMESPACE = "namespace"
+LABEL_KSM_POD = "pod"
+NOT_READY_FALLBACK_STATUS = "not True"
+
 # The metric reads. Restarts: at least RESTART_THRESHOLD in RESTART_WINDOW is a
-# crash loop, not one rescheduled pod. Pending: the phase held for the whole
-# PENDING_WINDOW, so a pod that is merely being scheduled does not count.
+# crash loop, not one rescheduled pod, and the container must still report, so
+# a pod a rollout already replaced is not listed. Pending: the phase held over
+# the whole PENDING_WINDOW and also at its start, so a pod created a minute ago
+# and still being scheduled does not count.
 RESTART_THRESHOLD = 3
 RESTART_WINDOW = "1h"
 PENDING_WINDOW = "10m"
@@ -114,32 +149,39 @@ MONITORING_SCOPE = "https://www.googleapis.com/auth/monitoring.read"
 MONITORING_TIMEOUT_S = 60
 CREDENTIAL_PROXY_URL_ENV = "CREDENTIAL_PROXY_URL"
 HTTP_OK = 200
-NODE_QUERY = (
-    'kubernetes_io:node_status_condition{{monitored_resource="k8s_node",project_id="{project}",'
-    'condition="Ready",status!="True"}} == 1'
-)
-NODE_PRESENCE_QUERY = (
-    'count by (location, cluster_name) (kubernetes_io:node_status_condition'
-    '{{monitored_resource="k8s_node",project_id="{project}",condition="Ready"}})'
-)
+NO_MONITORING_SESSION = "no Cloud Monitoring session: {error}"
+QUERY_OK_RC = 0
+QUERY_FAILED_RC = 1
+
+# Query templates for `.format(project=..., exclude=...)`: `{{`/`}}` are the
+# PromQL braces, `{project}` and `{exclude}` the fields.
+SYSTEM_BY = LABEL_LOCATION + ", " + LABEL_SYSTEM_CLUSTER
+NODE_SELECTOR = '{{monitored_resource="k8s_node",project_id="{project}",condition="Ready"{exclude}'
+NODE_QUERY = "kubernetes_io:node_status_condition" + NODE_SELECTOR + ',status!="True"}} == 1'
+NODE_PRESENCE_QUERY = "count by (" + SYSTEM_BY + ") (kubernetes_io:node_status_condition" + NODE_SELECTOR + "}})"
+RESTART_SELECTOR = '{{monitored_resource="k8s_container",project_id="{project}"{exclude}}}'
+RESTART_BY = ", ".join((SYSTEM_BY, LABEL_SYSTEM_NAMESPACE, LABEL_SYSTEM_POD, LABEL_SYSTEM_CONTAINER))
 RESTART_QUERY = (
-    "sum by (location, cluster_name, namespace_name, pod_name, container_name) "
-    '(increase(kubernetes_io:container_restart_count{{monitored_resource="k8s_container",'
-    'project_id="{project}"}}[' + RESTART_WINDOW + "])) >= " + str(RESTART_THRESHOLD)
+    "(sum by (" + RESTART_BY + ") (increase(kubernetes_io:container_restart_count" + RESTART_SELECTOR
+    + "[" + RESTART_WINDOW + "])) >= " + str(RESTART_THRESHOLD) + ") and on (" + RESTART_BY
+    + ") (count by (" + RESTART_BY + ") (kubernetes_io:container_restart_count" + RESTART_SELECTOR + "))"
 )
-RESTART_PRESENCE_QUERY = (
-    "count by (location, cluster_name) (kubernetes_io:container_restart_count"
-    '{{monitored_resource="k8s_container",project_id="{project}"}})'
-)
+RESTART_PRESENCE_QUERY = "count by (" + SYSTEM_BY + ") (kubernetes_io:container_restart_count" + RESTART_SELECTOR + ")"
+KSM_BY = LABEL_LOCATION + ", " + LABEL_KSM_CLUSTER
+PENDING_BY = ", ".join((KSM_BY, LABEL_KSM_NAMESPACE, LABEL_KSM_POD))
+PENDING_SELECTOR = '{{project_id="{project}",phase="Pending"{exclude}}}'
 PENDING_QUERY = (
-    'min_over_time(kube_pod_status_phase{{project_id="{project}",phase="Pending"}}['
-    + PENDING_WINDOW + "]) == 1"
+    "count by (" + PENDING_BY + ") ((min_over_time(kube_pod_status_phase" + PENDING_SELECTOR + "["
+    + PENDING_WINDOW + "]) == 1) and (kube_pod_status_phase" + PENDING_SELECTOR + " offset "
+    + PENDING_WINDOW + " == 1))"
 )
-PENDING_PRESENCE_QUERY = 'count by (location, cluster) (kube_pod_status_phase{{project_id="{project}"}})'
-# The label each metric family names its cluster with: the GKE system metrics
-# use the monitored resource's `cluster_name`, kube-state-metrics `cluster`.
-SYSTEM_CLUSTER_LABEL = "cluster_name"
-KSM_CLUSTER_LABEL = "cluster"
+PENDING_PRESENCE_QUERY = "count by (" + KSM_BY + ') (kube_pod_status_phase{{project_id="{project}"{exclude}}})'
+# The excluded clusters' names, so their series never leave the broker.
+EXCLUDE_MATCHER = ',{label}!~"{names}"'
+# A GKE cluster name: nothing in it is special in a regex or a PromQL string,
+# so it goes into the matcher as written. Any other name is left out of the
+# matcher, and its series are dropped after the read.
+GKE_CLUSTER_NAME = re.compile(r"^[a-z0-9-]+$")
 
 # A cluster with hundreds of restarting pods would otherwise put them all in
 # the manifest; the answer names the first ones and counts the rest.
@@ -154,7 +196,6 @@ IMPACT = {
     CHECK_RESTARTING: "The container is crash-looping; its workload is degraded or down.",
     CHECK_PENDING: "The pod has not been scheduled or cannot start.",
 }
-METRIC_CHECKS = (CHECK_NODE_NOT_READY, CHECK_RESTARTING, CHECK_PENDING)
 
 
 def log(msg: str) -> None:
@@ -185,8 +226,9 @@ def default_run(argv: list[str], *, timeout: int = DEFAULT_TIMEOUT_S) -> Run:
         return Run(argv, -1, "", str(exc), time.monotonic() - t0)
 
 
-def _record(argv_str: str, rc: int, duration_s: float, output: str) -> dict:
+def _record(check: str, argv_str: str, rc: int, duration_s: float, output: str) -> dict:
     return {
+        "check": check,
         "command": argv_str,
         "rc": rc,
         "duration_s": round(duration_s, 2),
@@ -226,6 +268,15 @@ def promql_query_fn(session) -> QueryFn:
         if body.get("status") != "success":
             return [], f"{body.get('errorType', 'error')}: {body.get('error', '')}"[:ERROR_EXCERPT_CHARS]
         return list((body.get("data") or {}).get("result") or []), None
+
+    return query
+
+
+def unavailable_query_fn(error: str) -> QueryFn:
+    """Every metric read fails with `error`, so each metric check is unevaluated
+    and the control-plane checks, which need no Monitoring credential, still ship."""
+    def query(project: str, promql: str) -> tuple[list[dict], str | None]:
+        return [], error
 
     return query
 
@@ -284,7 +335,7 @@ def list_clusters(project: str, *, run: RunFn) -> tuple[list[dict], dict | None,
             return [], None, None
         return [], None, f"clusters list rc={result.rc}: {result.stderr.strip()[:ERROR_EXCERPT_CHARS] or 'no stderr'}"
     parsed = declared_scope.drop_excluded(project, parsed)
-    record = _record(shlex.join(argv), result.rc, result.duration_s, result.stdout)
+    record = _record(",".join(CONTROL_PLANE_CHECKS), shlex.join(argv), result.rc, result.duration_s, result.stdout)
     incomplete = [line.strip() for line in result.stderr.splitlines() if ZONE_TIMEOUT_MARKER in line]
     if incomplete:
         return parsed, record, f"clusters list rc=0 but incomplete: {' '.join(incomplete)[:ERROR_EXCERPT_CHARS]}"
@@ -307,9 +358,19 @@ def _conditions_text(conditions: list) -> list[str]:
     texts = []
     for cond in conditions or []:
         if isinstance(cond, dict):
-            code = cond.get("canonicalCode") or cond.get("code") or "UNKNOWN"
+            code = cond.get("code")
+            if not code or code == UNKNOWN_CONDITION_CODE:
+                code = cond.get("canonicalCode") or UNKNOWN_CONDITION_CODE
             texts.append(f"{code}: {cond.get('message', '')}".strip())
     return texts
+
+
+def _status_severity(status: str, critical: frozenset) -> str:
+    if status in critical:
+        return SEVERITY_CRITICAL
+    if status in TRANSITIONAL_STATUSES:
+        return SEVERITY_MINOR
+    return SEVERITY_MAJOR
 
 
 def control_plane_candidates(cluster: dict) -> list[dict]:
@@ -318,35 +379,39 @@ def control_plane_candidates(cluster: dict) -> list[dict]:
     out = []
     status = cluster.get("status", "")
     if status != HEALTHY_STATUS:
-        severity = SEVERITY_MINOR if status in TRANSITIONAL_STATUSES else (
-            SEVERITY_CRITICAL if status in CLUSTER_CRITICAL_STATUSES else SEVERITY_MAJOR)
         message = cluster.get("statusMessage", "")
-        out.append(_candidate(CHECK_CLUSTER_STATUS, severity, f"Cluster/{name}",
-                              f"status {status}" + (f": {message}" if message else "")))
+        out.append(_candidate(CHECK_CLUSTER_STATUS, _status_severity(status, CLUSTER_CRITICAL_STATUSES),
+                              f"Cluster/{name}", f"status {status}" + (f": {message}" if message else "")))
     for text in _conditions_text(cluster.get("conditions")):
         out.append(_candidate(CHECK_CLUSTER_CONDITION, SEVERITY_MAJOR, f"Cluster/{name}", text))
     for pool in cluster.get("nodePools") or []:
         pool_name = pool.get("name", "")
         pool_status = pool.get("status", "")
         if pool_status != HEALTHY_STATUS:
-            if pool_status in POOL_CRITICAL_STATUSES:
-                severity = SEVERITY_CRITICAL
-            elif pool_status in POOL_MAJOR_STATUSES:
-                severity = SEVERITY_MAJOR
-            elif pool_status in TRANSITIONAL_STATUSES:
-                severity = SEVERITY_MINOR
-            else:
-                severity = SEVERITY_MAJOR
             message = pool.get("statusMessage", "")
-            out.append(_candidate(CHECK_POOL_STATUS, severity, f"NodePool/{pool_name}",
+            out.append(_candidate(CHECK_POOL_STATUS, _status_severity(pool_status, POOL_CRITICAL_STATUSES),
+                                  f"NodePool/{pool_name}",
                                   f"status {pool_status}" + (f": {message}" if message else "")))
         for text in _conditions_text(pool.get("conditions")):
             out.append(_candidate(CHECK_POOL_CONDITION, SEVERITY_MAJOR, f"NodePool/{pool_name}", text))
     return out
 
 
-def _cluster_key(labels: dict, cluster_label: str) -> tuple[str, str]:
-    return labels.get("location", ""), labels.get(cluster_label, "")
+def _location(cluster: dict) -> str:
+    return cluster.get("location") or cluster.get("zone") or ""
+
+
+def _exclude_matcher(project: str, listed: list[dict], label: str) -> str:
+    """A matcher that keeps an excluded cluster's series out of the read. By
+    name, which PromQL can match; a name that an included cluster in another
+    location of the same project also carries is left in, and its series are
+    dropped by location after the read instead."""
+    included = {c.get("name", "") for c in listed}
+    names = sorted({name for proj, _loc, name in declared_scope.excluded_clusters
+                    if proj == project and name not in included and GKE_CLUSTER_NAME.match(name)})
+    if not names:
+        return ""
+    return EXCLUDE_MATCHER.format(label=label, names="|".join(names))
 
 
 def _value(row: dict) -> str:
@@ -354,54 +419,51 @@ def _value(row: dict) -> str:
     return str(value[1]) if len(value) > 1 else ""
 
 
-def read_metrics(project: str, *, query: QueryFn) -> dict:
+def read_metrics(project: str, listed: list[dict], *, query: QueryFn) -> dict:
     """The three metric checks for one project, keyed by `(location, cluster)`.
 
     Returns `{"present": {check: set(keys)}, "hits": {check: {key: [candidate]}},
-    "errors": {check: error}, "queries": [record]}`."""
+    "errors": {check: error}, "records": [record]}`."""
+    system_exclude = _exclude_matcher(project, listed, LABEL_SYSTEM_CLUSTER)
+    ksm_exclude = _exclude_matcher(project, listed, LABEL_KSM_CLUSTER)
     reads = (
-        (CHECK_NODE_NOT_READY, NODE_QUERY, NODE_PRESENCE_QUERY, SYSTEM_CLUSTER_LABEL),
-        (CHECK_RESTARTING, RESTART_QUERY, RESTART_PRESENCE_QUERY, SYSTEM_CLUSTER_LABEL),
-        (CHECK_PENDING, PENDING_QUERY, PENDING_PRESENCE_QUERY, KSM_CLUSTER_LABEL),
+        (CHECK_NODE_NOT_READY, NODE_QUERY, NODE_PRESENCE_QUERY, LABEL_SYSTEM_CLUSTER, system_exclude),
+        (CHECK_RESTARTING, RESTART_QUERY, RESTART_PRESENCE_QUERY, LABEL_SYSTEM_CLUSTER, system_exclude),
+        (CHECK_PENDING, PENDING_QUERY, PENDING_PRESENCE_QUERY, LABEL_KSM_CLUSTER, ksm_exclude),
     )
     present: dict[str, set] = {}
     hits: dict[str, dict] = {}
     errors: dict[str, str] = {}
     records = []
-    for check, finding_q, presence_q, cluster_label in reads:
+    for check, finding_q, presence_q, cluster_label, exclude in reads:
         for promql, is_presence in ((presence_q, True), (finding_q, False)):
-            text = promql.format(project=project)
+            text = promql.format(project=project, exclude=exclude)
             t0 = time.monotonic()
             rows, error = query(project, text)
-            records.append(_record(f"promql {project}: {text}", 0 if error is None else 1,
+            records.append(_record(check, f"promql {project}: {text}", QUERY_OK_RC if error is None else QUERY_FAILED_RC,
                                    time.monotonic() - t0, json.dumps(rows, sort_keys=True)))
             if error is not None:
                 errors[check] = error
                 break
             for row in rows:
                 labels = row.get("metric") or {}
-                key = _cluster_key(labels, cluster_label)
+                key = (labels.get(LABEL_LOCATION, ""), labels.get(cluster_label, ""))
                 if is_presence:
                     present.setdefault(check, set()).add(key)
                     continue
                 if check == CHECK_NODE_NOT_READY:
-                    node = labels.get("node_name", "")
-                    cand = _candidate(check, SEVERITY_MAJOR, f"Node/{node}",
-                                      f"Ready condition is {labels.get('status', 'not True')}")
+                    cand = _candidate(check, SEVERITY_MAJOR, f"Node/{labels.get(LABEL_NODE, '')}",
+                                      f"Ready condition is {labels.get(LABEL_CONDITION_STATUS, NOT_READY_FALLBACK_STATUS)}")
                 elif check == CHECK_RESTARTING:
                     restarts = round(float(_value(row) or 0))
-                    cand = _candidate(check, SEVERITY_MAJOR, f"Pod/{labels.get('pod_name', '')}",
-                                      f"container {labels.get('container_name', '')} restarted {restarts} times "
-                                      f"in the last {RESTART_WINDOW}", labels.get("namespace_name", ""))
+                    cand = _candidate(check, SEVERITY_MAJOR, f"Pod/{labels.get(LABEL_SYSTEM_POD, '')}",
+                                      f"container {labels.get(LABEL_SYSTEM_CONTAINER, '')} restarted {restarts} times "
+                                      f"in the last {RESTART_WINDOW}", labels.get(LABEL_SYSTEM_NAMESPACE, ""))
                 else:
-                    cand = _candidate(check, SEVERITY_MAJOR, f"Pod/{labels.get('pod', '')}",
-                                      f"phase Pending for at least {PENDING_WINDOW}", labels.get("namespace", ""))
+                    cand = _candidate(check, SEVERITY_MAJOR, f"Pod/{labels.get(LABEL_KSM_POD, '')}",
+                                      f"phase Pending for at least {PENDING_WINDOW}", labels.get(LABEL_KSM_NAMESPACE, ""))
                 hits.setdefault(check, {}).setdefault(key, []).append(cand)
-    return {"present": present, "hits": hits, "errors": errors, "queries": records}
-
-
-def _location(cluster: dict) -> str:
-    return cluster.get("location") or cluster.get("zone") or ""
+    return {"present": present, "hits": hits, "errors": errors, "records": records}
 
 
 def _packages(cluster: dict) -> set[str]:
@@ -415,78 +477,100 @@ def cluster_entry(project: str, cluster: dict, record: dict | None, metrics: dic
     key = (location, name)
     candidates = control_plane_candidates(cluster)
     unevaluated = []
-    limitations = []
-    status = cluster.get("status", "")
+    truncated = []
     packages = _packages(cluster)
     for check in METRIC_CHECKS:
         needed = POD_METRICS_PACKAGE if check == CHECK_PENDING else SYSTEM_METRICS_PACKAGE
-        if status not in METRICS_STATUSES:
-            unevaluated.append({"check": check, "reason": f"cluster status is {status}; it reports no metrics"})
-        elif check in metrics["errors"]:
+        if check in metrics["errors"]:
             unevaluated.append({"check": check, "reason": f"metric read failed: {metrics['errors'][check]}"})
         elif key not in metrics["present"].get(check, set()):
-            reason = (f"the cluster's {needed} metrics package is off" if packages and needed not in packages
-                      else "the cluster reported no series for this metric")
+            if packages and needed not in packages:
+                reason = f"the cluster's {needed} metrics package is off"
+            else:
+                reason = f"the cluster (status {cluster.get('status', '')}) reported no series for this metric"
             unevaluated.append({"check": check, "reason": reason})
         else:
             found = metrics["hits"].get(check, {}).get(key, [])
             if len(found) > MAX_METRIC_CANDIDATES_PER_CHECK:
-                extra = len(found) - MAX_METRIC_CANDIDATES_PER_CHECK
+                truncated.append(f"{check} lists {MAX_METRIC_CANDIDATES_PER_CHECK} of {len(found)}")
                 found = found[:MAX_METRIC_CANDIDATES_PER_CHECK]
-                limitations.append(f"{check}: {extra} more not listed")
             candidates.extend(found)
     entry = {
         "name": f"{project}/{location}/{name}",
         "project": project,
         "location": location,
         "autopilot": bool((cluster.get("autopilot") or {}).get("enabled")),
-        "status": status,
+        "status": cluster.get("status", ""),
         "outcome": OUTCOME_COLLECTED,
-        "commands": ([record] if record else []) + metrics["queries"],
+        "commands": [record] if record else [],
         "candidates": candidates,
     }
     if unevaluated:
         entry["checks_unevaluated"] = unevaluated
-    if limitations:
-        entry["limitations"] = limitations
+    if truncated:
+        entry["limitations"] = "; ".join(truncated) + "; the rest are not listed."
     return entry
 
 
-def collect_project(project: str, *, run: RunFn, query: QueryFn) -> tuple[list[dict], str | None]:
+def collect_project(project: str, *, run: RunFn, query: QueryFn) -> tuple[list[dict], list[dict], str | None]:
+    """`(cluster entries, metric read records, error)` for one project."""
     clusters, record, error = list_clusters(project, run=run)
     if not clusters:
-        return [], error
-    metrics = read_metrics(project, query=query)
-    return [cluster_entry(project, c, record, metrics) for c in clusters], error
+        return [], [], error
+    metrics = read_metrics(project, clusters, query=query)
+    return [cluster_entry(project, c, record, metrics) for c in clusters], metrics["records"], error
+
+
+def _session_query() -> QueryFn:
+    try:
+        return promql_query_fn(default_session())
+    except Exception as exc:  # noqa: BLE001 -- no credential still leaves the control-plane checks
+        error = NO_MONITORING_SESSION.format(error=f"{type(exc).__name__}: {exc}")[:ERROR_EXCERPT_CHARS]
+        log(f"WARNING: {error}")
+        return unavailable_query_fn(error)
 
 
 def collect_fleet(project: str | None = None, *, run: RunFn = default_run, query: QueryFn | None = None,
-                  max_workers: int = MAX_WORKERS) -> dict:
+                  max_workers: int = MAX_WORKERS, project_budget_s: float = PROJECT_READ_DEADLINE_S) -> dict:
     started_at = time.strftime(TIMESTAMP_FORMAT, time.gmtime())
+    deadline = time.monotonic() + project_budget_s
     discovery = discover_fleet(project, run=run)
     if discovery.projects and query is None:
-        query = promql_query_fn(default_session())
+        query = _session_query()
+
+    def bounded(name: str):
+        if time.monotonic() > deadline:
+            return None
+        return collect_project(name, run=run, query=query)
+
     entries: list[dict] = []
+    project_reads: dict[str, list[dict]] = {}
     failed: dict[str, str] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(collect_project, p, run=run, query=query): p for p in discovery.projects}
+        futures = {pool.submit(bounded, p): p for p in discovery.projects}
         for future in as_completed(futures):
             name = futures[future]
             try:
-                found, error = future.result()
+                result = future.result()
             except Exception as exc:  # noqa: BLE001 -- one bad project must not lose the fleet
-                found, error = [], f"collector raised {type(exc).__name__}: {exc}"[:ERROR_EXCERPT_CHARS]
+                result = ([], [], f"collector raised {type(exc).__name__}: {exc}"[:ERROR_EXCERPT_CHARS])
+            if result is None:
+                failed[name] = PROJECT_DEADLINE_ERROR.format(budget=int(project_budget_s), project=name)
+                continue
+            found, records, error = result
             entries.extend(found)
+            if records:
+                project_reads[name] = records
             if error:
                 failed[name] = error
     entries.sort(key=lambda e: e["name"])
     entries += [
-        {"name": f"{PROJECT_TARGET_PREFIX}{p}", "project": p, "location": "global",
+        {"name": f"{PROJECT_TARGET_PREFIX}{p}", "project": p, "location": PROJECT_TARGET_LOCATION,
          "outcome": OUTCOME_GATE_FAILED, "error": e}
         for p, e in sorted(failed.items())
     ]
     if discovery.partial:
-        entries.append({"name": UNENUMERATED_PROJECTS_TARGET, "project": "", "location": "global",
+        entries.append({"name": UNENUMERATED_PROJECTS_TARGET, "project": "", "location": PROJECT_TARGET_LOCATION,
                         "outcome": OUTCOME_GATE_FAILED, "error": discovery.partial[:ERROR_EXCERPT_CHARS]})
     manifest = {
         "version": MANIFEST_VERSION,
@@ -495,6 +579,7 @@ def collect_fleet(project: str | None = None, *, run: RunFn = default_run, query
         "started_at": started_at,
         "finished_at": time.strftime(TIMESTAMP_FORMAT, time.gmtime()),
         "clusters": entries,
+        "project_reads": dict(sorted(project_reads.items())),
     }
     collected = [e for e in entries if e["outcome"] == OUTCOME_COLLECTED]
     if discovery.error:
@@ -502,14 +587,21 @@ def collect_fleet(project: str | None = None, *, run: RunFn = default_run, query
     elif failed and not collected:
         first, error = sorted(failed.items())[0]
         manifest["error"] = (f"no cluster could be read: {len(failed)} of {len(discovery.projects)} "
-                             f"project(s) failed `clusters list`; {first}: {error}")[:ERROR_EXCERPT_CHARS]
+                             f"project(s) were not read; {first}: {error}")[:ERROR_EXCERPT_CHARS]
     return manifest
+
+
+def _named(names: list[str]) -> str:
+    shown = ", ".join(sorted(names)[:SUMMARY_MAX_CLUSTER_NAMES])
+    if len(names) > SUMMARY_MAX_CLUSTER_NAMES:
+        shown += f", and {len(names) - SUMMARY_MAX_CLUSTER_NAMES} more"
+    return shown
 
 
 def summary_lines(manifest: dict) -> list[str]:
     """The closing stderr lines: clusters read, unhealthy clusters and the checks
-    that fired, then every check left unevaluated and where, so an answer never
-    reports an unread check as healthy."""
+    that fired, then the unevaluated checks grouped by check and reason, so an
+    answer never reports an unread check as healthy."""
     clusters = [c for c in manifest.get("clusters") or [] if isinstance(c, dict)]
     collected = [c for c in clusters if c.get("outcome") == OUTCOME_COLLECTED]
     unread = [c for c in clusters if c.get("outcome") == OUTCOME_GATE_FAILED]
@@ -521,22 +613,17 @@ def summary_lines(manifest: dict) -> list[str]:
     head = f"{len(collected)} cluster(s) read, {len(unhealthy)} with a finding"
     if unread:
         head += f", {len(unread)} target(s) unread"
-    parts = []
-    for check in sorted(by_check):
-        names = sorted(by_check[check])
-        shown = ", ".join(names[:SUMMARY_MAX_CLUSTER_NAMES])
-        if len(names) > SUMMARY_MAX_CLUSTER_NAMES:
-            shown += f", and {len(names) - SUMMARY_MAX_CLUSTER_NAMES} more"
-        parts.append(f"{check}: {len(names)} ({shown})")
+    parts = [f"{check}: {len(names)} ({_named(list(names))})" for check, names in sorted(by_check.items())]
     lines = [head + (" -- " + "; ".join(parts) if parts else "")]
-    skipped: dict[str, list[str]] = {}
+    skipped: dict[tuple[str, str], list[str]] = {}
     for cluster in collected:
         for item in cluster.get("checks_unevaluated") or []:
-            skipped.setdefault(item["check"], []).append(f"{cluster['name']} ({item['reason']})")
+            skipped.setdefault((item["check"], item["reason"]), []).append(cluster["name"])
     if skipped:
         lines.append(
             "not evaluated, so not healthy either -- name each in the answer: "
-            + "; ".join(f"{check} on {', '.join(sorted(where))}" for check, where in sorted(skipped.items()))
+            + "; ".join(f"{check} on {len(names)} cluster(s) ({_named(names)}): {reason}"
+                        for (check, reason), names in sorted(skipped.items()))
         )
     return lines
 
