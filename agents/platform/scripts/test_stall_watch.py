@@ -20,6 +20,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import stall_report  # noqa: E402
 import stall_watch  # noqa: E402
 
 REAL_SESSION_KV = stall_watch.session_kv
@@ -117,9 +118,11 @@ class FakeFleet:
     `project:name` or `project:name@location` in another project. A project
     in `listing_fails` cannot be listed; `listing_stderr` is a string for
     every project or a {project: stderr} map. A project in `listing_hangs`
-    does not answer its listing until its Event is set."""
+    does not answer its listing until its Event is set. `annotations` maps a
+    namespace to the annotations its listing carries."""
 
-    def __init__(self, fleet, namespaces_extra=(), listing_stderr="", hidden=(), served=None, sandbox_dies_at=None, api_resources_rc_one=False, namespaces_fail_once=(), listing_fails=(), listing_hangs=None, fetch_fails=()):
+    def __init__(self, fleet, namespaces_extra=(), listing_stderr="", hidden=(), served=None, sandbox_dies_at=None, api_resources_rc_one=False, namespaces_fail_once=(), listing_fails=(), listing_hangs=None, fetch_fails=(), annotations=None):
+        self.annotations = annotations or {}
         self.api_resources_rc_one = api_resources_rc_one
         # Names whose `get-credentials` the proxy refuses at its admission bound.
         self.fetch_fails = set(fetch_fails)
@@ -176,7 +179,8 @@ class FakeFleet:
             if name in self.namespaces_fail_once:
                 return completed(argv, "", returncode=1, stderr=self.namespaces_fail_once.pop(name))
             names = list(namespaces) + self.namespaces_extra
-            return completed(argv, "".join(f"namespace/{n}\n" for n in names))
+            items = [{"metadata": {"name": n, **({"annotations": self.annotations[n]} if n in self.annotations else {})}} for n in names]
+            return completed(argv, json.dumps({"apiVersion": "v1", "kind": "List", "items": items}))
         if argv[:2] == ["kubectl", "api-resources"]:
             if isinstance(self.served, Exception):
                 raise self.served
@@ -329,7 +333,7 @@ class Base(unittest.TestCase):
         conn.executescript(BOARD_SCHEMA)
         conn.close()
         env = {stall_watch.PROJECT_ENVS[0]: PROJECT, "PLATFORM_AGENT_HOME": self.tmp.name}
-        for var in (stall_watch.KINDS_ENV, stall_watch.REPORT_SCRIPT_ENV, stall_watch.STATE_PATH_ENV, *stall_watch.PROJECT_ENVS[1:]):
+        for var in (stall_watch.KINDS_ENV, stall_watch.EXCLUDE_NAMESPACES_ENV, stall_watch.MIN_AGE_ENV, stall_watch.REPORT_SCRIPT_ENV, stall_watch.STATE_PATH_ENV, *stall_watch.PROJECT_ENVS[1:]):
             env[var] = ""
         patcher = patch.dict(os.environ, env)
         patcher.start()
@@ -2002,6 +2006,155 @@ class Projects(Base):
     def test_a_domain_scoped_project_splits_back_out_of_its_key(self):
         project = "example.com:proj"
         self.assertEqual(stall_watch.split_cluster_id(stall_watch.cluster_id(project, "c", LOCATION)), (project, "c", LOCATION))
+
+
+class Knobs(Base):
+    """spec.harness.stallWatch, as the operator pins it in the managed .env, and
+    the exempt annotation."""
+
+    EXEMPT = {stall_watch.EXEMPT_ANNOTATION: stall_watch.EXEMPT_VALUE}
+
+    def test_a_namespace_the_list_excludes_is_not_read(self):
+        with patch.dict(os.environ, {stall_watch.EXCLUDE_NAMESPACES_ENV: " payments, ,load-test,"}):
+            _, fake = self.run_tick({"c": {"payments": [DEPLOYMENT_ROW | {"namespace": "payments"}], "load-test": [], "checkout": [DEPLOYMENT_ROW]}})
+        self.assertEqual(fake.scanned(), ["checkout"])
+        self.assertEqual([a["namespace"] for a in self.kv.alerts], ["checkout"])
+        self.assertEqual({e["namespace"] for e in self.ledger()["stalls"].values()}, {"checkout"})
+
+    def test_a_namespace_with_the_exempt_annotation_is_not_read(self):
+        annotations = {"payments": self.EXEMPT, "checkout": {stall_watch.EXEMPT_ANNOTATION: "no"}}
+        _, fake = self.run_tick({"c": {"payments": [DEPLOYMENT_ROW | {"namespace": "payments"}], "checkout": [DEPLOYMENT_ROW]}}, annotations=annotations)
+        self.assertEqual(fake.scanned(), ["checkout"], "only the exact value exempts a namespace")
+        self.assertEqual([a["namespace"] for a in self.kv.alerts], ["checkout"])
+
+    def test_an_exempt_objects_rows_raise_no_alert(self):
+        exempt = DEPLOYMENT_ROW | {stall_watch.EXEMPT_FIELD: True}
+        other = finding("checkout", "Deployment/cart-api", "generation-lag", "generation 2 observed 1") | {stall_watch.EXEMPT_FIELD: False}
+        self.run_tick({"c": {"checkout": [exempt, other], "billing": [DEPLOYMENT_ROW | {"namespace": "billing", stall_watch.EXEMPT_FIELD: True}]}})
+        self.assertEqual([a["namespace"] for a in self.kv.alerts], ["checkout"])
+        self.assertEqual([o["object"] for o in self.kv.alerts[0]["objects"]], ["Deployment/cart-api"])
+        self.assertEqual([e["object"] for e in self.ledger()["stalls"].values()], ["Deployment/cart-api"])
+
+    def test_a_young_stall_is_held_and_raises_once_old_enough(self):
+        young = DEPLOYMENT_ROW | {"stalled_seconds": 600}
+        with patch.dict(os.environ, {stall_watch.MIN_AGE_ENV: "30"}):
+            lines, _ = self.run_tick({"c": {"checkout": [young]}}, now="2026-10-02T12:00:00+00:00")
+            self.assertEqual((lines, self.kv.alerts), ([], []), "a held stall says nothing, not even a held line")
+            self.assertEqual([e["stalled_seconds"] for e in self.ledger()["stalls"].values()], [600], "the row is ledgered with its own age")
+            lines, _ = self.run_tick({"c": {"checkout": [young]}}, now="2026-10-02T12:15:00+00:00")
+            self.assertEqual((lines, self.kv.alerts), ([], []))
+            self.run_tick({"c": {"checkout": [young]}}, now="2026-10-02T12:30:00+00:00")
+        self.assertEqual(len(self.kv.alerts), 1, "thirty minutes in the ledger is old enough")
+        self.assertEqual(self.kv.alerts[0]["first_seen"], "2026-10-02T12:00:00+00:00")
+
+    def test_a_stall_already_older_than_the_minimum_raises_at_once(self):
+        with patch.dict(os.environ, {stall_watch.MIN_AGE_ENV: "30"}):
+            self.run_tick({"c": {"checkout": [DEPLOYMENT_ROW | {"stalled_seconds": 3600}]}})
+        self.assertEqual(len(self.kv.alerts), 1)
+
+    def test_a_dry_run_holds_a_young_stall_too(self):
+        self.scaffold("c")
+        fake = FakeFleet({"c": {"checkout": [DEPLOYMENT_ROW | {"stalled_seconds": 60}]}})
+        with patch.dict(os.environ, {stall_watch.MIN_AGE_ENV: "30"}), patch.object(stall_watch, "run_sandbox", fake):
+            lines = stall_watch.tick(self.state, dry_run=True)
+        self.assertEqual(lines, [])
+
+    def test_an_object_joining_an_open_alert_is_not_held(self):
+        with patch.dict(os.environ, {stall_watch.MIN_AGE_ENV: "30"}):
+            self.run_tick({"c": {"checkout": [DEPLOYMENT_ROW | {"stalled_seconds": 3600}]}})
+            joined = finding("checkout", "Deployment/cart-api", "generation-lag", "generation 2 observed 1", stalled_seconds=60)
+            self.run_tick({"c": {"checkout": [DEPLOYMENT_ROW | {"stalled_seconds": 3600}, joined]}})
+        self.assertEqual(len(self.kv.alerts), 1)
+        self.assertIn("Deployment/cart-api", self.board.cards[self.card_of("checkout")]["comments"][0])
+
+    def test_a_namespace_excluded_by_list_closes_its_open_card_as_excluded(self):
+        fleet = {"c": {"checkout": [DEPLOYMENT_ROW], "catalog": []}}
+        self.run_tick(fleet)
+        tid = self.card_of("checkout")
+        with patch.dict(os.environ, {stall_watch.EXCLUDE_NAMESPACES_ENV: "checkout"}):
+            lines, _ = self.run_tick(fleet, now="2026-10-02T12:30:00+00:00")
+        self.assertEqual(self.ledger()["stalls"], {})
+        self.assertNotIn(f"{cid('c')}/checkout", self.ledger()[stall_watch.EPISODES_KEY])
+        card = self.board.cards[tid]
+        self.assertEqual(card["status"], "done")
+        self.assertEqual(card["comments"], ["The namespace `checkout` was excluded from the watch; the watch no longer reads it, as of 2026-10-02T12:30:00+00:00."])
+        self.assertIn("was excluded from the watch", card["result"])
+        self.assertNotIn("cleared at", card["result"])
+        self.assertEqual(lines, [f"{stall_watch.CLEARED_PREFIX} in {label('c')} / `checkout`: the namespace was excluded from the watch; card `{tid}` closed"])
+
+    def test_a_namespace_exempted_by_annotation_closes_its_open_card_as_excluded(self):
+        fleet = {"c": {"checkout": [DEPLOYMENT_ROW]}}
+        self.run_tick(fleet)
+        lines, _ = self.run_tick(fleet, annotations={"checkout": self.EXEMPT})
+        self.assertEqual(len(self.cleared(lines)), 1)
+        self.assertIn("the namespace was excluded from the watch", lines[0])
+        self.assertEqual(len(self.kv.alerts), 1)
+
+    def test_an_excluded_namespace_whose_card_was_running_completes_as_excluded_when_the_cluster_is_unreadable(self):
+        fleet = {"c": {"checkout": [DEPLOYMENT_ROW]}}
+        self.run_tick(fleet)
+        tid = self.card_of("checkout")
+        self.board.cards[tid]["status"] = "running"
+        with patch.dict(os.environ, {stall_watch.EXCLUDE_NAMESPACES_ENV: "checkout"}):
+            self.assertEqual(self.run_tick(fleet)[0], [])
+            self.assertEqual(len(self.board.cards[tid]["comments"]), 1)
+            self.board.cards[tid]["status"] = "ready"
+            lines, _ = self.run_tick({"c": TIMEOUT})
+        self.assertEqual(self.board.cards[tid]["status"], "done")
+        self.assertIn("was excluded from the watch", self.board.cards[tid]["result"])
+        self.assertNotIn("cleared at", self.board.cards[tid]["result"])
+        self.assertEqual(self.cleared(lines), [f"{stall_watch.CLEARED_PREFIX} in {label('c')} / `checkout`: the namespace was excluded from the watch; card `{tid}` closed"])
+
+    def test_an_object_that_becomes_exempt_closes_its_card_as_exempt_at_once(self):
+        fleet = {"c": {"checkout": [DEPLOYMENT_ROW]}}
+        self.run_tick(fleet)
+        tid = self.card_of("checkout")
+        lines, _ = self.run_tick({"c": {"checkout": [DEPLOYMENT_ROW | {stall_watch.EXEMPT_FIELD: True}]}}, now="2026-10-02T12:30:00+00:00")
+        self.assertEqual(self.ledger()["stalls"], {})
+        card = self.board.cards[tid]
+        self.assertEqual(card["status"], "done")
+        self.assertEqual(card["comments"], [f"The watch no longer alerts on Deployment/checkout-api in `checkout`: marked `{stall_watch.EXEMPT_ANNOTATION}: exempt`, as of 2026-10-02T12:30:00+00:00."])
+        self.assertNotIn("cleared at", card["result"])
+        self.assertEqual(lines, [f"{stall_watch.CLEARED_PREFIX} in {label('c')} / `checkout`: Deployment/checkout-api exempted from the watch; card `{tid}` closed"])
+
+    def test_an_exempt_repeating_warning_goes_without_waiting_out_its_missed_scans(self):
+        warning = finding("checkout", "Deployment/checkout-api", "repeating-warnings", "BackOff x9: restarting")
+        self.run_tick({"c": {"checkout": [warning]}})
+        self.run_tick({"c": {"checkout": [warning | {stall_watch.EXEMPT_FIELD: True}]}})
+        self.assertEqual(self.ledger()["stalls"], {})
+        self.assertNotIn(f"{cid('c')}/checkout", self.ledger()[stall_watch.EPISODES_KEY])
+
+    def test_a_deleted_namespace_still_closes_as_cleared(self):
+        self.run_tick({"c": {"checkout": [DEPLOYMENT_ROW], "catalog": []}})
+        with patch.dict(os.environ, {stall_watch.EXCLUDE_NAMESPACES_ENV: "catalog"}):
+            lines, _ = self.run_tick({"c": {"catalog": []}})
+        self.assertEqual(len(self.cleared(lines)), 1)
+        self.assertNotIn("excluded", lines[0])
+
+    def test_env_values_are_parsed_tolerantly(self):
+        cases = {
+            "": ",".join(stall_watch.DEFAULT_KINDS),
+            " , ,": ",".join(stall_watch.DEFAULT_KINDS),
+            " deployments , jobs ,": "deployments,jobs",
+            "ALL": None,
+            " all ": None,
+        }
+        for raw, want in cases.items():
+            with self.subTest(kinds=raw), patch.dict(os.environ, {stall_watch.KINDS_ENV: raw}):
+                self.assertEqual(stall_watch.kinds_argument(), want)
+        for raw, want in {"": frozenset(), " a, ,b ,,": frozenset({"a", "b"})}.items():
+            with self.subTest(namespaces=raw), patch.dict(os.environ, {stall_watch.EXCLUDE_NAMESPACES_ENV: raw}):
+                self.assertEqual(stall_watch.excluded_namespaces(), want)
+        for raw, want, logged in (("", 0, False), (" 45 ", 2700, False), ("0", 0, False), ("abc", 0, True), ("-5", 0, True), ("1.5", 0, True)):
+            with self.subTest(min_age=raw), patch.dict(os.environ, {stall_watch.MIN_AGE_ENV: raw}), patch.object(sys, "stderr", io.StringIO()) as err:
+                self.assertEqual(stall_watch.min_age_seconds(), want)
+                self.assertEqual(len(err.getvalue().splitlines()), 1 if logged else 0, err.getvalue())
+
+    def test_the_annotation_is_the_one_stall_report_marks(self):
+        self.assertEqual(
+            (stall_watch.EXEMPT_ANNOTATION, stall_watch.EXEMPT_VALUE, stall_watch.EXEMPT_FIELD),
+            (stall_report.EXEMPT_ANNOTATION, stall_report.EXEMPT_VALUE, stall_report.EXEMPT_FIELD),
+        )
 
 
 class Output(Base):

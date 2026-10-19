@@ -612,6 +612,43 @@
                 }
               }
             },
+            "stallWatch": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "excludeNamespaces": {
+                  "type": ["array", "null"],
+                  "maxItems": 100,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "maxLength": 63,
+                    "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+                  }
+                },
+                "minStallAgeMinutes": {
+                  "type": ["integer", "null"],
+                  "minimum": 0,
+                  "maximum": 1440
+                },
+                "kinds": {
+                  "type": ["array", "null"],
+                  "maxItems": 20,
+                  "uniqueItems": true,
+                  "not": {
+                    "allOf": [
+                      { "contains": { "const": "all" } },
+                      { "minItems": 2 }
+                    ]
+                  },
+                  "items": {
+                    "type": "string",
+                    "maxLength": 253,
+                    "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+                  }
+                }
+              }
+            },
             "experimental": {
               "type": "object",
               "additionalProperties": false,
