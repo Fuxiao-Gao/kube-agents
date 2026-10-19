@@ -81,7 +81,7 @@ class MergeGroupTriggerTest(unittest.TestCase):
 
     def test_the_gate_workflow_runs_on_merge_group_for_main(self) -> None:
         on = _on(_WORKFLOWS / _GATE_WORKFLOW)
-        self.assertEqual((on[_MERGE_GROUP] or {}).get("branches"), ["main"])
+        self.assertEqual((on[_MERGE_GROUP] or {}).get("branches"), ["main"])  # T5
 
     def test_merge_group_stays_on_main(self) -> None:
         """The merge queue is `main`'s; a release line merges through Tide alone."""
