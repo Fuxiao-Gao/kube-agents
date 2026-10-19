@@ -2117,6 +2117,39 @@ class Knobs(Base):
         self.assertNotIn("cleared at", card["result"])
         self.assertEqual(lines, [f"{stall_watch.CLEARED_PREFIX} in {label('c')} / `checkout`: Deployment/checkout-api exempted from the watch; card `{tid}` closed"])
 
+    def test_an_exempt_close_retried_after_a_failed_comment_still_says_exempt(self):
+        fleet = {"c": {"checkout": [DEPLOYMENT_ROW]}}
+        self.run_tick(fleet)
+        tid = self.card_of("checkout")
+        self.board.fail_comment_once = True
+        exempt = {"c": {"checkout": [DEPLOYMENT_ROW | {stall_watch.EXEMPT_FIELD: True}]}}
+        self.run_tick(exempt)
+        self.assertEqual(self.board.cards[tid]["comments"], [], "the first close failed on the board")
+        lines, _ = self.run_tick(exempt)
+        self.assertEqual(self.board.cards[tid]["status"], "done")
+        self.assertIn("marked `kubeagents.x-k8s.io/stall-watch: exempt`", self.board.cards[tid]["result"])
+        self.assertNotIn("cleared at", self.board.cards[tid]["result"])
+        self.assertIn("exempted from the watch", self.cleared(lines)[0])
+
+    def test_a_reverted_exclusion_lets_the_next_close_say_cleared(self):
+        fleet = {"c": {"checkout": [DEPLOYMENT_ROW]}}
+        self.run_tick(fleet)
+        tid = self.card_of("checkout")
+        self.board.cards[tid]["status"] = "running"
+        with patch.dict(os.environ, {stall_watch.EXCLUDE_NAMESPACES_ENV: "checkout"}):
+            self.run_tick(fleet)
+        self.assertIn("was excluded from the watch", self.board.cards[tid]["comments"][0])
+        self.run_tick(fleet)
+        episode = self.ledger()[stall_watch.EPISODES_KEY][f"{cid('c')}/checkout"]
+        self.assertNotIn(stall_watch.CLEAR_REASON_KEY, episode, "the scope has rows again")
+        self.assertNotIn("cleared_at", episode)
+        self.board.cards[tid]["status"] = "ready"
+        self.run_tick({"c": {"checkout": []}})
+        self.run_tick({"c": {"checkout": []}})
+        self.assertEqual(self.board.cards[tid]["status"], "done")
+        self.assertIn("cleared at", self.board.cards[tid]["result"])
+        self.assertNotIn("excluded", self.board.cards[tid]["result"])
+
     def test_an_exempt_repeating_warning_goes_without_waiting_out_its_missed_scans(self):
         warning = finding("checkout", "Deployment/checkout-api", "repeating-warnings", "BackOff x9: restarting")
         self.run_tick({"c": {"checkout": [warning]}})
@@ -2138,6 +2171,8 @@ class Knobs(Base):
             " deployments , jobs ,": "deployments,jobs",
             "ALL": None,
             " all ": None,
+            "deployments,secrets,Secret/token,cm": "deployments",
+            "secrets": ",".join(stall_watch.DEFAULT_KINDS),
         }
         for raw, want in cases.items():
             with self.subTest(kinds=raw), patch.dict(os.environ, {stall_watch.KINDS_ENV: raw}):

@@ -307,7 +307,9 @@ DaemonSets, Jobs, Gateway API Gateways and HTTPRoutes, and cert-manager Certific
 item as kubectl names the resource, in lower case: `deployments`,
 `gateways.gateway.networking.k8s.io`. The single item `all` scans every namespaced kind the cluster
 serves, with one read per kind in each namespace, which is slow on a large fleet; the API server
-refuses `all` next to another item. Up to 20 items. A kind a cluster does not serve is left out on
+refuses `all` next to another item, and refuses Secrets, ConfigMaps, Events, Endpoints,
+EndpointSlices, ControllerRevisions and Leases, which the scan reports nothing from. Up to 20
+items. A kind a cluster does not serve is left out on
 that cluster.
 
 Separate from this block, the annotation `kubeagents.x-k8s.io/stall-watch: exempt` opts out

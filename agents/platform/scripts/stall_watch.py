@@ -205,6 +205,30 @@ DEFAULT_KINDS = (
     "certificates.cert-manager.io",
 )
 KINDS_SEPARATOR = ","
+# Kinds the watch never asks stall_report.py to read, whatever STALL_WATCH_KINDS
+# says: the resources its whole-namespace scan skips (SCAN_EXCLUDED_RESOURCES
+# there) and their singular and short names. Secrets above all: a listing
+# carries every body, and the scan reports nothing from them. An explicit
+# --kind bypasses the script's own skip list, so the watch refuses them here.
+REFUSED_KINDS = frozenset(
+    {
+        "secrets",
+        "secret",
+        "configmaps",
+        "configmap",
+        "cm",
+        "events",
+        "event",
+        "ev",
+        "events.events.k8s.io",
+        "endpoints",
+        "endpoint",
+        "ep",
+        "controllerrevisions.apps",
+        "endpointslices.discovery.k8s.io",
+        "leases.coordination.k8s.io",
+    }
+)
 
 #: The agent image's copy of stall_report.py, staged by the Dockerfile and not
 #: on the volume, so it is the code at this commit and nothing the model wrote.
@@ -579,11 +603,17 @@ def env_list(name: str, separator: str) -> list[str]:
 
 def kinds_argument() -> str | None:
     """The --kind value for stall_report.py, or None to let it scan every kind.
-    A value with no item in it is the default list, not every kind."""
+    A value with no item in it, or only refused ones, is the default list, not
+    every kind."""
     raw = os.environ.get(KINDS_ENV, "").strip()
     if raw.lower() == ALL_KINDS:
         return None
-    return KINDS_SEPARATOR.join(env_list(KINDS_ENV, KINDS_SEPARATOR) or DEFAULT_KINDS)
+    configured = env_list(KINDS_ENV, KINDS_SEPARATOR)
+    refused = [k for k in configured if k.lower().split("/", 1)[0] in REFUSED_KINDS]
+    if refused:
+        sys.stderr.write(f"stall_watch: {KINDS_ENV} names kinds the watch never reads, ignored: {', '.join(refused)}\n")
+    kept = [k for k in configured if k not in refused]
+    return KINDS_SEPARATOR.join(kept or DEFAULT_KINDS)
 
 
 def excluded_namespaces() -> frozenset[str]:
@@ -1881,10 +1911,20 @@ def episode_lines(state: dict, sweep: Sweep, new_by_scope: dict, cleared_by_scop
             lines.append(INJECT_RECOVERED_LINE)
         state[INJECT_ERROR_KEY] = None
     open_scopes = {scope_key(e["cluster"], e["namespace"]) for e in state["stalls"].values()}
+    for scope in open_scopes & set(episodes):
+        # The scope has rows again: an exclusion or exemption that emptied it
+        # was reverted, or the stall came back. Its next close is judged afresh.
+        episodes[scope].pop(CLEAR_REASON_KEY, None)
+        episodes[scope].pop("cleared_at", None)
     for scope in sorted(set(episodes) - open_scopes):
         episode = episodes[scope]
         leaving = cleared_by_scope.get(scope, [])
         reason = episode.get(CLEAR_REASON_KEY) or clear_reason(sweep, scope, leaving)
+        if not dry_run:
+            # Stored on the tick that saw the rows go: a later tick no longer
+            # holds them, so a close retried after a board error would read
+            # as a plain clearing.
+            episode[CLEAR_REASON_KEY] = reason
         cleared = names_text(object_names(leaving) or episode.get("objects", []))
         if reason == CLEAR_REASON_ROSTER:
             cleared = "the cluster left the Cluster Agent roster"
@@ -1921,7 +1961,6 @@ def episode_lines(state: dict, sweep: Sweep, new_by_scope: dict, cleared_by_scop
                 if not comment_card(card, note):
                     continue
                 episode["cleared_at"] = now
-                episode[CLEAR_REASON_KEY] = reason
             if status == RUNNING_CARD_STATUS:
                 # The worker is on it; it completes its own card. Closed next tick.
                 continue

@@ -97,6 +97,7 @@ class StallWatchBlockRenderTest(unittest.TestCase):
             {"kinds": ["Deployments"]},
             {"kinds": ["deployments,jobs"]},
             {"kinds": ["all", "deployments"]},
+            {"kinds": ["deployments", "secrets"]},
             {"kinds": ["deployments", "deployments"]},
             {"excludeNamespaces": ["payments", "payments"]},
             {"unknown": True},

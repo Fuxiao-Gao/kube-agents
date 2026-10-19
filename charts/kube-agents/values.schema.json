@@ -636,9 +636,34 @@
                   "maxItems": 20,
                   "uniqueItems": true,
                   "not": {
-                    "allOf": [
-                      { "contains": { "const": "all" } },
-                      { "minItems": 2 }
+                    "anyOf": [
+                      {
+                        "allOf": [
+                          { "contains": { "const": "all" } },
+                          { "minItems": 2 }
+                        ]
+                      },
+                      {
+                        "contains": {
+                          "enum": [
+                            "secrets",
+                            "secret",
+                            "configmaps",
+                            "configmap",
+                            "cm",
+                            "events",
+                            "event",
+                            "ev",
+                            "events.events.k8s.io",
+                            "endpoints",
+                            "endpoint",
+                            "ep",
+                            "controllerrevisions.apps",
+                            "endpointslices.discovery.k8s.io",
+                            "leases.coordination.k8s.io"
+                          ]
+                        }
+                      }
                     ]
                   },
                   "items": {

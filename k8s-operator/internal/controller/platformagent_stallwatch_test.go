@@ -168,6 +168,8 @@ func TestStallWatchAdmissionAsDocumented(t *testing.T) {
 		}, true},
 		{"kinds all alone", map[string]interface{}{"kinds": []interface{}{"all"}}, true},
 		{"kinds all with another", map[string]interface{}{"kinds": []interface{}{"all", "deployments"}}, false},
+		{"kinds naming secrets", map[string]interface{}{"kinds": []interface{}{"deployments", "secrets"}}, false},
+		{"kinds naming a configmap short name", map[string]interface{}{"kinds": []interface{}{"cm"}}, false},
 		{"kinds upper case", map[string]interface{}{"kinds": []interface{}{"Deployments"}}, false},
 		{"kinds with a name", map[string]interface{}{"kinds": []interface{}{"deployments/web"}}, false},
 		{"kinds comma list in one item", map[string]interface{}{"kinds": []interface{}{"deployments,jobs"}}, false},
