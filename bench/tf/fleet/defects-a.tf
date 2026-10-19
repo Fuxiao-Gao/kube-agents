@@ -428,7 +428,8 @@ resource "kubernetes_pod_disruption_budget_v1" "burst_ingest" {
 # that check has nothing to shrink. 10m because the slot's default pool runs
 # above 70% CPU requested on both nodes. The budget, spread, default-deny
 # policy and restricted settings are burst-ingest's, so no other stream
-# names the namespace. Asserted by cost-rightsizing-names-dependencies.
+# names it beyond the README's accepted background rows. Asserted by
+# cost-rightsizing-names-dependencies.
 resource "kubernetes_namespace_v1" "seeded_qos" {
   metadata {
     name   = "seeded-qos"

@@ -1,11 +1,11 @@
 ---
 name: gke-rightsizing-checks
-description: Five required checks, and the arithmetic, before any proposal to change a workload's CPU or memory requests or limits, or a node pool's machine type or size. Read-only. For "lower the requests of X", "right-size this deployment", "can this pool use a smaller machine type", and any answer that claims nodes, CPU, memory or a percentage freed.
+description: Five required checks, and the arithmetic, before any proposal to lower a workload's CPU or memory requests or limits, or to change a node pool's machine type or size, and before any claim of capacity freed. Read-only. For "lower the requests of X", "right-size this deployment", "can this pool use a smaller machine type", and any answer that claims nodes, CPU, memory or a percentage freed.
 ---
 
 # GKE Rightsizing Checks
 
-Use this skill before you propose a new request, limit, machine type or node count. A request is rarely just a number: an HPA scales on it, a limit may be tied to it, a budget or a claim may share its pods, and the file that declares it may render other clusters too. A proposal that skips those reads looks right and changes something nobody asked to change.
+Use this skill before you propose a lower request or limit, a machine type or a node count, and before you claim capacity freed. Raising a limit to stop an OOMKill is a fix, not a rightsizing proposal, and this skill does not apply to it. A request is rarely just a number: an HPA scales on it, a limit may be tied to it, a budget or a claim may share its pods, and the file that declares it may render other clusters too. A proposal that skips those reads looks right and changes something nobody asked to change.
 
 The skill is read-only. It produces checks and arithmetic, and a proposal the person applies through the Platform Agent.
 
@@ -36,7 +36,7 @@ kubectl get deploy <name> -n <namespace> -o jsonpath='{range .spec.template.spec
 kubectl top pods -n <namespace> -l <selector> --containers
 ```
 
-`Guaranteed` means requests equal limits on every container, on both dimensions. To keep it `Guaranteed`, a lower request is also a lower limit: a CPU limit throttles the container at that value, and a memory limit OOM-kills it there. Compare usage with the **limit**, not only the request. A container whose CPU use already sits at its limit is throttled now, and a lower figure throttles it harder. Lowering the request alone moves the pod to `Burstable`, so say that too. For `Burstable`, a lower memory request moves the pod earlier in the kubelet's eviction order under memory pressure. One `kubectl top` reading is a snapshot: name it as one, and do not size a limit from it.
+`Guaranteed` means requests equal limits on every container, on both dimensions. To keep it `Guaranteed`, a lower request is also a lower limit: a CPU limit throttles the container at that value, and a memory limit OOM-kills it there. Compare usage with the **limit**, not only the request. A container whose CPU use already sits at its limit is throttled now, and a lower figure throttles it harder. Lowering the request alone moves the pod to `Burstable`, so say that too. For `Burstable`, a lower memory request moves the pod earlier in the kubelet's eviction order under memory pressure. One `kubectl top` reading is a snapshot: name it as one, and do not size a limit from it. A proposed figure needs a peak over a longer window, such as a week of Cloud Monitoring history. If you have none, say that the proposal rests on one snapshot and must be checked against a longer peak before anyone applies it.
 
 ## 3. Other objects that share its pods or its volumes
 
@@ -56,7 +56,14 @@ You read one cluster and hold no repository. Report where the workload says it c
 kubectl get deploy <name> -n <namespace> -o jsonpath='{.metadata.labels}{"\n"}{.metadata.annotations}'
 ```
 
-Name the source the labels show: `helm.sh/chart` and `app.kubernetes.io/managed-by` for a Helm release, `argocd.argoproj.io/instance` or `app.kubernetes.io/instance` for Argo CD, `kustomize.toolkit.fluxcd.io/name` for Flux. Then say that one values file or kustomize base can render this workload on other clusters, so an edit there changes all of them, and that the Platform Agent must confirm which file declares it before a change is written. If the labels show no source, say that.
+Name the source the metadata shows:
+
+- Helm: the `meta.helm.sh/release-name` and `meta.helm.sh/release-namespace` annotations.
+- Argo CD: the `argocd.argoproj.io/tracking-id` annotation, or the `argocd.argoproj.io/instance` or `app.kubernetes.io/instance` label.
+- Flux: the `kustomize.toolkit.fluxcd.io/name` or `helm.toolkit.fluxcd.io/name` label.
+- Config Sync: any `configsync.gke.io/` annotation; `configmanagement.gke.io/source-path` names the file.
+
+Then say that one values file or kustomize base can render this workload on other clusters, so an edit there changes all of them, and that the Platform Agent must confirm which file declares it before a change is written. If the metadata shows no source, say that.
 
 ## 5. Per-node packing, with both vCPU and memory
 
