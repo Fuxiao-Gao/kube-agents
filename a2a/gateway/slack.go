@@ -1277,14 +1277,19 @@ func (s *SlackAdapter) foreignSender(m *slackevents.MessageEvent) bool {
 		if team == "" {
 			team = messageTeam
 		}
-		s.noticeForeignSender(m, team)
+		thread := m.ThreadTimeStamp
+		if thread == "" {
+			thread = m.TimeStamp
+		}
+		s.noticeForeignSender(m.Channel, thread, team, m.User)
 	}
 	return true
 }
 
 // noticeForeignSender tells a refused member of another workspace why the bot
-// will not answer, once per sender: a reply in the thread of the message they
-// addressed the bot with. Keyed by their workspace and member id, so the same
+// will not answer, once per sender: a reply in thread, the thread of the
+// message they addressed the bot with or of the question whose button they
+// clicked. Keyed by their workspace and member id, so the same
 // id in two workspaces is two senders. The notice names only their own member
 // id, which they already know, and nothing about this workspace. Not posted
 // when auth.test gave no team id: then every message that names a workspace is
@@ -1293,11 +1298,11 @@ func (s *SlackAdapter) foreignSender(m *slackevents.MessageEvent) bool {
 // the event pump, as suggestPrompts is, so a slow Slack API does not hold the
 // acks behind it. A failed post is logged and not retried; the sender stays
 // counted as told, as the gateway's own drop notice does.
-func (s *SlackAdapter) noticeForeignSender(m *slackevents.MessageEvent, team string) {
+func (s *SlackAdapter) noticeForeignSender(channel, thread, team, user string) {
 	if s.teamID == "" {
 		return
 	}
-	key := team + slackForeignNoticeKeySep + m.User
+	key := team + slackForeignNoticeKeySep + user
 	s.mu.Lock()
 	if s.foreignNoticed == nil || len(s.foreignNoticed) >= slackForeignNoticesCap {
 		s.foreignNoticed = map[string]bool{}
@@ -1308,11 +1313,6 @@ func (s *SlackAdapter) noticeForeignSender(m *slackevents.MessageEvent, team str
 	if told {
 		return
 	}
-	thread := m.ThreadTimeStamp
-	if thread == "" {
-		thread = m.TimeStamp
-	}
-	channel, user := m.Channel, m.User
 	s.goSession(func() {
 		if _, _, err := s.api.PostMessage(channel,
 			slack.MsgOptionText(fmt.Sprintf(slackForeignNoticeText, user), false),

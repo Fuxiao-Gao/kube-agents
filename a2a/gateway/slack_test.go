@@ -950,6 +950,29 @@ func TestSlackTellsAnotherWorkspacesMemberWhyOnce(t *testing.T) {
 	}
 }
 
+// TestSlackForeignNoticeIsSharedByMessagesAndClicks: a member of another
+// workspace told once through a message is not told again when they click a
+// question's button, and the other way round: one memory, one notice.
+func TestSlackForeignNoticeIsSharedByMessagesAndClicks(t *testing.T) {
+	api := &fakeSlackAPI{}
+	a, _ := newUXSlackAdapter(api)
+	ctx := context.Background()
+	mention := slackMsg("channel", "C1", "UGUEST", "<@UBOT> drain node 4", "2.0", "")
+	mention.UserTeam = "T2"
+	a.inbound(ctx, mention)
+	a.interactive(clickPayload(t, "UGUEST", "T2", "C1", "40.0", "kage.choice.0", "Option A", "x", "65.0"))
+	if len(api.posted) != 1 {
+		t.Errorf("posts = %+v, want one notice across a message and a click", api.posted)
+	}
+	a.interactive(clickPayload(t, "UOTHER", "T2", "C1", "40.0", "kage.choice.0", "Option A", "x", "66.0"))
+	other := slackMsg("im", "D1", "UOTHER", "hello", "3.0", "")
+	other.UserTeam = "T2"
+	a.inbound(ctx, other)
+	if len(api.posted) != 2 || api.posted[1].thread != "40.0" {
+		t.Errorf("posts = %+v, want the clicker's one notice in the question's thread, none for the later DM", api.posted)
+	}
+}
+
 // TestSlackConnectedRecordsTheTeam: auth.test's team id is what the
 // workspace check compares against.
 func TestSlackConnectedRecordsTheTeam(t *testing.T) {

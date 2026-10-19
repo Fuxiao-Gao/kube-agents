@@ -140,7 +140,8 @@ func TestSlackClickWithoutReplySendsItsLabelAndDMKeys(t *testing.T) {
 }
 
 func TestSlackClickThatIsNotOursIsNoTurn(t *testing.T) {
-	a, _ := newUXSlackAdapter(&fakeSlackAPI{})
+	api := &fakeSlackAPI{}
+	a, _ := newUXSlackAdapter(api)
 	if _, ok := a.interactive(clickPayload(t, "U1", "T1", "C1", "40.0", "kage.link.0", "Docs", "", "62.0")); ok {
 		t.Error("a link button is acked and nothing else")
 	}
@@ -153,6 +154,16 @@ func TestSlackClickThatIsNotOursIsNoTurn(t *testing.T) {
 		t.Error("the click refusal's log line does not name the refused member")
 	}
 	a.log = slog.Default()
+	// The refused clicker is told once, in the question's thread, as a refused
+	// message's sender is; a second click gets nothing more.
+	if len(api.posted) != 1 || api.posted[0].channel != "C1" || api.posted[0].thread != "40.0" ||
+		!strings.Contains(api.posted[0].text, "Your member id is U1") {
+		t.Errorf("posts = %+v, want one notice in the question's thread naming the member", api.posted)
+	}
+	a.interactive(clickPayload(t, "U1", "T2", "C1", "40.0", "kage.choice.1", "Option B", "y", "64.0"))
+	if len(api.posted) != 1 {
+		t.Errorf("posts = %+v, want no second notice for the same clicker", api.posted)
+	}
 	if _, ok := a.interactive(json.RawMessage(`{"type":"view_submission"}`)); ok {
 		t.Error("a view submission is not a click")
 	}
