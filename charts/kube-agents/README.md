@@ -221,7 +221,11 @@ uses Workload Identity, and `openai_compatible`, whose key is optional (both bel
 overrides the per-provider default model; `litellm.maxTokens` (default `0`,
 meaning none) puts a `max_tokens` under every alias for a request that names
 none, which a self-hosted backend with one combined prompt-plus-output budget
-needs — a request's own `max_tokens` still wins. On a Claude model the gateway
+needs — a request's own `max_tokens` still wins. `litellm.reasoningEffort`
+(`low`/`medium`/`high`, default empty, meaning none) puts a `reasoning_effort`
+under every alias the same way; LiteLLM maps it to `thinkingLevel` on Gemini 3.x
+([details](https://gke-labs.github.io/kube-agents/concepts/inference-gateway/#setting-the-reasoning-effort)).
+On a Claude model the gateway
 drops `temperature`, `top_p` and `top_k` from every request
 ([why](https://gke-labs.github.io/kube-agents/concepts/inference-gateway/#setting-the-default-model)),
 and only a Claude model gets the prompt-caching breakpoints
