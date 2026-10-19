@@ -90,7 +90,7 @@ Measured on 2026-10-16 and 2026-10-17 with vLLM 0.31.0 and `--gpu-memory-utiliza
 
 - The default, 26B-A4B in FP8, is the size that holds a 128k window on two L4 GPUs. With the settings above, it answered an agent turn through the gateway correctly in 84 seconds.
 - `google/gemma-4-31B-it-qat-w4a16-ct` scores higher for agent work on the model card (Tau2 for the instruction-tuned models: 76.9% for 31B, 69.0% for 12B, 68.2% for 26B-A4B). On 2x L4 its KV cache holds 78,275 tokens, so its window cannot reach a scheduled audit's request. Four L4 GPUs (`g2-standard-48`) would give it more room; that shape was not measured, because no zone had capacity for it at the time.
-- To change the model, change `MODEL_ID`, `--served-model-name` and the `ai.gke.io/model` label, keep `--max-model-len` below the KV cache size the server logs at startup, and set `MODEL_DEFAULT_NAME` to the new served name.
+- To change the model, change `MODEL_ID`, `--served-model-name`, the `ai.gke.io/model` label and the `model` in the [Check it](#check-it) request, keep `--max-model-len` below the KV cache size the server logs at startup, and set `MODEL_DEFAULT_NAME` to the new served name.
 - On one A100 40GB (`a2-highgpu-1g`), set `--tensor-parallel-size=1`, `nvidia.com/gpu: "1"`, a CPU request of at most 10 and the `nvidia-tesla-a100` accelerator label, and keep `--disk-size=200`.
 - 31B in BF16 (about 62 GB of weights) does not fit 2x L4 or one A100 40GB. 31B in FP8 does not fit 2x L4 at a 32k context.
 - E2B and E4B are too small for agent work (Tau2 24.5% and 42.2%).
