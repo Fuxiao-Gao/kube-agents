@@ -868,6 +868,58 @@ func TestSlackRefusesAnotherWorkspacesMember(t *testing.T) {
 	}
 }
 
+// TestSlackTellsAnotherWorkspacesMemberWhyOnce: a refused member of another
+// workspace who addressed the bot gets one reply in the thread of that message,
+// naming their member id, and the refusal's log line names them too. A second
+// ask from them gets no second notice, a message that addressed nobody gets
+// none, and the same member id in another workspace is another sender.
+func TestSlackTellsAnotherWorkspacesMemberWhyOnce(t *testing.T) {
+	api := &fakeSlackAPI{}
+	a := newTestSlackAdapter(api)
+	a.teamID = "T0URS"
+	logs := &recordingHandler{}
+	a.log = slog.New(logs)
+	ctx := context.Background()
+
+	mention := slackMsg("channel", "C1", "UGUEST", "<@UBOT> drain node 4", "2.0", "")
+	mention.UserTeam = "T0THER"
+	if _, ok := a.inbound(ctx, mention); ok {
+		t.Fatal("a mention from another workspace's member was delivered as a turn")
+	}
+	if len(api.posted) != 1 {
+		t.Fatalf("posts = %+v, want one notice", api.posted)
+	}
+	notice := api.posted[0]
+	if notice.channel != "C1" || notice.thread != "2.0" || !strings.Contains(notice.text, "UGUEST") ||
+		!strings.Contains(notice.text, "another workspace") {
+		t.Errorf("notice = %+v, want a reply in the mention's thread naming the member id", notice)
+	}
+	if !logs.has("user", "UGUEST") {
+		t.Error("the refusal's log line does not name the refused member")
+	}
+
+	again := slackMsg("im", "D1", "UGUEST", "drain node 4", "3.0", "")
+	again.UserTeam = "T0THER"
+	a.inbound(ctx, again)
+	if len(api.posted) != 1 {
+		t.Errorf("posts = %+v, want no second notice for the same sender", api.posted)
+	}
+
+	unaddressed := slackMsg("channel", "C1", "UOTHER", "anyone seen node 4?", "4.0", "")
+	unaddressed.UserTeam = "T0THER"
+	a.inbound(ctx, unaddressed)
+	if len(api.posted) != 1 {
+		t.Errorf("posts = %+v, want no notice for a message that addressed nobody", api.posted)
+	}
+
+	elsewhere := slackMsg("im", "D2", "UGUEST", "hello", "5.0", "")
+	elsewhere.UserTeam = "T0THIRD"
+	a.inbound(ctx, elsewhere)
+	if len(api.posted) != 2 || api.posted[1].thread != "5.0" {
+		t.Errorf("posts = %+v, want a notice for the same member id in another workspace", api.posted)
+	}
+}
+
 // TestSlackConnectedRecordsTheTeam: auth.test's team id is what the
 // workspace check compares against.
 func TestSlackConnectedRecordsTheTeam(t *testing.T) {
