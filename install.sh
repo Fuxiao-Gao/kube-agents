@@ -4862,15 +4862,17 @@ validate_gitops_forge_flags() {
       \~/*) PARAM_GITLAB_READ_TOKEN_FILE="${HOME}/${PARAM_GITLAB_READ_TOKEN_FILE#\~/}" ;;
     esac
     check_gitlab_token_source "GITLAB_READ_TOKEN_FILE" "$PARAM_GITLAB_READ_TOKEN_FILE" || return 1
-    # Both tokens from one source would be read into the first and leave the
-    # second empty: one stream such as /dev/stdin cannot carry two tokens.
+    # One source for both tokens is refused. A stream such as /dev/stdin
+    # cannot carry two tokens, and one file would store the write token as the
+    # read token. -ef also catches a second name for the same file or stream.
     if [ -n "${PARAM_GITLAB_TOKEN_FILE:-}" ] && {
-      [ "$PARAM_GITLAB_TOKEN_FILE" = "$PARAM_GITLAB_READ_TOKEN_FILE" ] || {
+      [ "$PARAM_GITLAB_TOKEN_FILE" = "$PARAM_GITLAB_READ_TOKEN_FILE" ] ||
+        [ "$PARAM_GITLAB_TOKEN_FILE" -ef "$PARAM_GITLAB_READ_TOKEN_FILE" ] || {
         gitlab_token_source_is_stdin "$PARAM_GITLAB_TOKEN_FILE" &&
           gitlab_token_source_is_stdin "$PARAM_GITLAB_READ_TOKEN_FILE"
       }
     }; then
-      print_error "--gitlab-token-file and GITLAB_READ_TOKEN_FILE name the same source ('${PARAM_GITLAB_READ_TOKEN_FILE}'). Give each token its own file or stream."
+      print_error "--gitlab-token-file ('${PARAM_GITLAB_TOKEN_FILE}') and GITLAB_READ_TOKEN_FILE ('${PARAM_GITLAB_READ_TOKEN_FILE}') name the same source. Give each token its own file or stream."
       return 1
     fi
   fi
@@ -4896,8 +4898,8 @@ validate_gitops_forge_flags() {
   validate_gitops_ca_inputs "${DEFAULT_GITOPS_CA_SECRET:-gitlab-forge-ca}"
 }
 
-# True when PATH reads this process's standard input, the one stream two token
-# sources would have to share.
+# True when PATH is one of the literal names of this process's standard input.
+# Two such names are one stream even where -ef cannot tell (a pipe on stdin).
 gitlab_token_source_is_stdin() {
   case "$1" in
     /dev/stdin | /dev/fd/0 | /proc/self/fd/0) return 0 ;;
@@ -5292,7 +5294,8 @@ restart_github_minter_for_ca() {
   fi
 }
 
-# Creates (or replaces) the Secret the GitLab forge's credentialsRef names, in
+# Writes the `token` key of the Secret the GitLab forge's credentialsRef names
+# (field manager GITLAB_TOKEN_FIELD_MANAGER, so a read-token key stays), in
 # the agent's namespace, after the apply has made the namespace. The token
 # reaches kubectl through a pipe -- read from the named source, or from a
 # no-echo prompt, into a local that is cleared at once -- so it is never in

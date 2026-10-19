@@ -55,7 +55,7 @@ case "$1 $2" in
     # An existing Secret holds the write token unless STUB_SECRET_HAS_TOKEN=0
     # (a Secret with only the read-token key).
     if [ "${STUB_SECRET_EXISTS_RC:-1}" = 0 ] && [ "${STUB_SECRET_HAS_TOKEN:-1}" = 1 ]; then
-      case "$*" in *jsonpath=*) printf 'dG9rZW4=' ;; esac
+      case "$*" in *'jsonpath={.data.token}'*) printf 'dG9rZW4=' ;; esac
     fi
     exit "${STUB_SECRET_EXISTS_RC:-1}" ;;
   "create secret")
@@ -282,6 +282,19 @@ class GitLabFlagsTest(unittest.TestCase):
                 proc = self._validate(case)
                 self.assertRegex(proc.stdout, r"rc=[1-9]", proc.stderr + proc.stdout)
                 self.assertIn("name the same source", proc.stdout + proc.stderr)
+
+    def test_two_different_sources_for_the_two_tokens_are_accepted(self):
+        write_tok = self._tmp / "write-tok"
+        write_tok.write_text(_SENTINEL)
+        read_tok = self._tmp / "read-tok-2"
+        read_tok.write_text(_READ_SENTINEL)
+        for case in (
+            self._gitlab(PARAM_GITLAB_TOKEN_FILE=str(write_tok), PARAM_GITLAB_READ_TOKEN_FILE=str(read_tok)),
+            self._gitlab(PARAM_GITLAB_TOKEN_FILE="/dev/stdin", PARAM_GITLAB_READ_TOKEN_FILE=str(read_tok)),
+        ):
+            with self.subTest(case=case):
+                proc = self._validate(case)
+                self.assertIn("rc=0", proc.stdout, proc.stderr + proc.stdout)
 
     def test_install_env_records_the_secret_name_only(self):
         tok = self._tmp / "tok"

@@ -308,7 +308,8 @@ whitespace around the token when it reads it, so a trailing newline does no harm
 A context repository is a repository that the agent only reads, for example a Terraform
 repository that an audit reads for declared intent. The broker never presents the write token
 for it. Without a read-only token, the broker clones a context repository with no credential,
-so a private project refuses the clone.
+so a private project refuses the clone. The read-only token needs a release whose
+`install.env.example` lists `GITLAB_READ_TOKEN_FILE`; an older operator does not mount the key.
 
 To read a private context repository, store a read-only token in the same Secret as the write
 token, under the key `read-token`. Use a project access token on the context project, or a
@@ -330,7 +331,7 @@ kubectl patch configmap platform-agent-gitops-state -n kubeagents-system --type 
 ### On a new install
 
 Set `GITLAB_READ_TOKEN_FILE` to a file that holds the read token, in `install.env` or in the
-environment of `install.sh`. The installer reads it as it reads `GITLAB_TOKEN_FILE`, and does
+environment of `install.sh`. The installer reads it as it reads `--gitlab-token-file`, and does
 not record the path. It writes the token into the token Secret under the key `read-token`:
 
 ```bash
