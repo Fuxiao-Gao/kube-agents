@@ -198,7 +198,8 @@ class MetricsTest(unittest.TestCase):
                 for i in range(fh.MAX_METRIC_CANDIDATES_PER_CHECK + 3)]
         entry = self.entry(querier(present=ALL_PRESENT, hits={"container_restart_count": many}))
         self.assertEqual(len(entry["candidates"]), fh.MAX_METRIC_CANDIDATES_PER_CHECK)
-        self.assertEqual(entry["checks_unevaluated"], [{"check": "container-restarting", "reason": "3 more not listed"}])
+        self.assertEqual(entry["limitations"], ["container-restarting: 3 more not listed"])
+        self.assertNotIn("checks_unevaluated", entry)
 
 
 class FleetTest(unittest.TestCase):
@@ -261,11 +262,19 @@ class FleetTest(unittest.TestCase):
         rows = {e["name"]: e["outcome"] for e in manifest["clusters"]}
         self.assertEqual(rows, {"acme/us-central1/a": "collected", "project/beta": "gate-failed"})
 
+    def test_the_summary_names_every_unevaluated_check(self):
+        query = querier(present={"node_status_condition": [("a", "us-central1")],
+                                 "container_restart_count": [("a", "us-central1")]})
+        manifest = fh.collect_fleet(run=lister({"acme": [cluster("a")]}), query=query)
+        self.assertEqual(fh.summary_lines(manifest)[1],
+                         "not evaluated, so not healthy either -- name each in the answer: pod-pending on "
+                         "acme/us-central1/a (the cluster reported no series for this metric)")
+
     def test_the_summary_counts_clusters_with_a_finding(self):
         manifest = fh.collect_fleet(run=lister({"acme": [cluster("a", status="ERROR"), cluster("b")]}),
                                     query=querier(present=ALL_PRESENT))
-        self.assertEqual(fh.summary_lines(manifest),
-                         ["2 cluster(s) read, 1 with a finding -- cluster-not-running: 1 (acme/us-central1/a)"])
+        self.assertEqual(fh.summary_lines(manifest)[0],
+                         "2 cluster(s) read, 1 with a finding -- cluster-not-running: 1 (acme/us-central1/a)")
 
 
 class PromqlQueryFnTest(unittest.TestCase):

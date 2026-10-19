@@ -415,6 +415,7 @@ def cluster_entry(project: str, cluster: dict, record: dict | None, metrics: dic
     key = (location, name)
     candidates = control_plane_candidates(cluster)
     unevaluated = []
+    limitations = []
     status = cluster.get("status", "")
     packages = _packages(cluster)
     for check in METRIC_CHECKS:
@@ -432,7 +433,7 @@ def cluster_entry(project: str, cluster: dict, record: dict | None, metrics: dic
             if len(found) > MAX_METRIC_CANDIDATES_PER_CHECK:
                 extra = len(found) - MAX_METRIC_CANDIDATES_PER_CHECK
                 found = found[:MAX_METRIC_CANDIDATES_PER_CHECK]
-                unevaluated.append({"check": check, "reason": f"{extra} more not listed"})
+                limitations.append(f"{check}: {extra} more not listed")
             candidates.extend(found)
     entry = {
         "name": f"{project}/{location}/{name}",
@@ -446,6 +447,8 @@ def cluster_entry(project: str, cluster: dict, record: dict | None, metrics: dic
     }
     if unevaluated:
         entry["checks_unevaluated"] = unevaluated
+    if limitations:
+        entry["limitations"] = limitations
     return entry
 
 
@@ -504,7 +507,9 @@ def collect_fleet(project: str | None = None, *, run: RunFn = default_run, query
 
 
 def summary_lines(manifest: dict) -> list[str]:
-    """The closing stderr line: clusters read, unhealthy clusters, and the checks that fired."""
+    """The closing stderr lines: clusters read, unhealthy clusters and the checks
+    that fired, then every check left unevaluated and where, so an answer never
+    reports an unread check as healthy."""
     clusters = [c for c in manifest.get("clusters") or [] if isinstance(c, dict)]
     collected = [c for c in clusters if c.get("outcome") == OUTCOME_COLLECTED]
     unread = [c for c in clusters if c.get("outcome") == OUTCOME_GATE_FAILED]
@@ -523,7 +528,17 @@ def summary_lines(manifest: dict) -> list[str]:
         if len(names) > SUMMARY_MAX_CLUSTER_NAMES:
             shown += f", and {len(names) - SUMMARY_MAX_CLUSTER_NAMES} more"
         parts.append(f"{check}: {len(names)} ({shown})")
-    return [head + (" -- " + "; ".join(parts) if parts else "")]
+    lines = [head + (" -- " + "; ".join(parts) if parts else "")]
+    skipped: dict[str, list[str]] = {}
+    for cluster in collected:
+        for item in cluster.get("checks_unevaluated") or []:
+            skipped.setdefault(item["check"], []).append(f"{cluster['name']} ({item['reason']})")
+    if skipped:
+        lines.append(
+            "not evaluated, so not healthy either -- name each in the answer: "
+            + "; ".join(f"{check} on {', '.join(sorted(where))}" for check, where in sorted(skipped.items()))
+        )
+    return lines
 
 
 def main(argv: list[str] | None = None) -> int:
