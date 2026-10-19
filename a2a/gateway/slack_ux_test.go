@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -143,9 +144,15 @@ func TestSlackClickThatIsNotOursIsNoTurn(t *testing.T) {
 	if _, ok := a.interactive(clickPayload(t, "U1", "T1", "C1", "40.0", "kage.link.0", "Docs", "", "62.0")); ok {
 		t.Error("a link button is acked and nothing else")
 	}
+	logs := &recordingHandler{}
+	a.log = slog.New(logs)
 	if _, ok := a.interactive(clickPayload(t, "U1", "T2", "C1", "40.0", "kage.choice.0", "Option A", "x", "63.0")); ok {
 		t.Error("another workspace's member's click must drop")
 	}
+	if !logs.has("user", "U1") {
+		t.Error("the click refusal's log line does not name the refused member")
+	}
+	a.log = slog.Default()
 	if _, ok := a.interactive(json.RawMessage(`{"type":"view_submission"}`)); ok {
 		t.Error("a view submission is not a click")
 	}
