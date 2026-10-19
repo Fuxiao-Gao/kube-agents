@@ -179,8 +179,9 @@ class FakeFleet:
             if name in self.namespaces_fail_once:
                 return completed(argv, "", returncode=1, stderr=self.namespaces_fail_once.pop(name))
             names = list(namespaces) + self.namespaces_extra
-            items = [{"metadata": {"name": n, **({"annotations": self.annotations[n]} if n in self.annotations else {})}} for n in names]
-            return completed(argv, json.dumps({"apiVersion": "v1", "kind": "List", "items": items}))
+            # The jsonpath listing: the name and the exempt annotation's value.
+            lines = [f"{n}\t{self.annotations.get(n, {}).get(stall_watch.EXEMPT_ANNOTATION, '')}\n" for n in names]
+            return completed(argv, "".join(lines))
         if argv[:2] == ["kubectl", "api-resources"]:
             if isinstance(self.served, Exception):
                 raise self.served
@@ -2021,6 +2022,15 @@ class Knobs(Base):
         self.assertEqual([a["namespace"] for a in self.kv.alerts], ["checkout"])
         self.assertEqual({e["namespace"] for e in self.ledger()["stalls"].values()}, {"checkout"})
 
+    def test_the_namespace_listing_is_one_compact_line_per_namespace(self):
+        # A JSON listing carries every label and annotation and can pass the
+        # credential proxy's output cap on a large cluster; the jsonpath form
+        # is the name and the one annotation the watch needs.
+        argv = list(stall_watch.NAMESPACES_ARGV)
+        self.assertEqual(argv[:4], ["kubectl", "get", "namespaces", "-o"])
+        self.assertTrue(argv[4].startswith("jsonpath="), argv[4])
+        self.assertIn(stall_watch.EXEMPT_ANNOTATION.replace(".", "\\."), argv[4])
+
     def test_a_namespace_with_the_exempt_annotation_is_not_read(self):
         annotations = {"payments": self.EXEMPT, "checkout": {stall_watch.EXEMPT_ANNOTATION: "no"}}
         _, fake = self.run_tick({"c": {"payments": [DEPLOYMENT_ROW | {"namespace": "payments"}], "checkout": [DEPLOYMENT_ROW]}}, annotations=annotations)
@@ -2150,6 +2160,20 @@ class Knobs(Base):
         self.assertIn("cleared at", self.board.cards[tid]["result"])
         self.assertNotIn("excluded", self.board.cards[tid]["result"])
 
+    def test_a_reverted_exclusion_whose_stall_also_cleared_closes_as_cleared(self):
+        fleet = {"c": {"checkout": [DEPLOYMENT_ROW]}}
+        self.run_tick(fleet)
+        tid = self.card_of("checkout")
+        self.board.cards[tid]["status"] = "running"
+        with patch.dict(os.environ, {stall_watch.EXCLUDE_NAMESPACES_ENV: "checkout"}):
+            self.run_tick(fleet)
+        self.assertIn("was excluded from the watch", self.board.cards[tid]["comments"][0])
+        self.board.cards[tid]["status"] = "ready"
+        lines, _ = self.run_tick({"c": {"checkout": []}})
+        self.assertEqual(self.board.cards[tid]["status"], "done")
+        self.assertNotIn("excluded", self.board.cards[tid]["result"])
+        self.assertNotIn("excluded", self.cleared(lines)[0])
+
     def test_an_exempt_repeating_warning_goes_without_waiting_out_its_missed_scans(self):
         warning = finding("checkout", "Deployment/checkout-api", "repeating-warnings", "BackOff x9: restarting")
         self.run_tick({"c": {"checkout": [warning]}})
@@ -2172,6 +2196,8 @@ class Knobs(Base):
             "ALL": None,
             " all ": None,
             "deployments,secrets,Secret/token,cm": "deployments",
+            "leases,endpointslices,controllerrevisions,jobs": "jobs",
+            "leases.coordination.k8s.io,controllerrevisions.apps,deployments": "deployments",
             "secrets": ",".join(stall_watch.DEFAULT_KINDS),
         }
         for raw, want in cases.items():

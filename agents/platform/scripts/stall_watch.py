@@ -207,7 +207,8 @@ DEFAULT_KINDS = (
 KINDS_SEPARATOR = ","
 # Kinds the watch never asks stall_report.py to read, whatever STALL_WATCH_KINDS
 # says: the resources its whole-namespace scan skips (SCAN_EXCLUDED_RESOURCES
-# there) and their singular and short names. Secrets above all: a listing
+# there), as plural, singular and short names, matched on the part before the
+# group so `leases` and `leases.coordination.k8s.io` are both refused. Secrets above all: a listing
 # carries every body, and the scan reports nothing from them. An explicit
 # --kind bypasses the script's own skip list, so the watch refuses them here.
 REFUSED_KINDS = frozenset(
@@ -220,13 +221,15 @@ REFUSED_KINDS = frozenset(
         "events",
         "event",
         "ev",
-        "events.events.k8s.io",
         "endpoints",
         "endpoint",
         "ep",
-        "controllerrevisions.apps",
-        "endpointslices.discovery.k8s.io",
-        "leases.coordination.k8s.io",
+        "endpointslices",
+        "endpointslice",
+        "controllerrevisions",
+        "controllerrevision",
+        "leases",
+        "lease",
     }
 )
 
@@ -258,7 +261,19 @@ KUBECONFIG_SLUG_REPLACEMENT = "-"
 #: "could not read" and a "readable again" per cluster per window.
 SWEEPABLE_CLUSTER_STATUSES = frozenset({"RUNNING", "RECONCILING"})
 #: JSON rather than names, so a namespace's annotations are read in the same call.
-NAMESPACES_ARGV = ("kubectl", "get", "namespaces", "-o", "json")
+# One line per namespace, its name and the value of the exempt annotation,
+# tab-separated: about as small as `-o name`. The full JSON listing would carry
+# every label and annotation, and on a cluster with thousands of namespaces it
+# can pass the credential proxy's output cap, which cuts it mid-string and
+# leaves the whole cluster unread every tick.
+NAMESPACE_LINE_SEPARATOR = "\t"
+NAMESPACES_ARGV = (
+    "kubectl",
+    "get",
+    "namespaces",
+    "-o",
+    "jsonpath={range .items[*]}{.metadata.name}{\"\\t\"}{.metadata.annotations.kubeagents\\.x-k8s\\.io/stall-watch}{\"\\n\"}{end}",
+)
 #: The kind list is filtered to what a cluster serves, from one
 #: `kubectl api-resources` per cluster, so a warning from the report script
 #: about a kind it could not scan is always a failure and never "this cluster
@@ -609,7 +624,7 @@ def kinds_argument() -> str | None:
     if raw.lower() == ALL_KINDS:
         return None
     configured = env_list(KINDS_ENV, KINDS_SEPARATOR)
-    refused = [k for k in configured if k.lower().split("/", 1)[0] in REFUSED_KINDS]
+    refused = [k for k in configured if k.lower().split("/", 1)[0].split(".", 1)[0] in REFUSED_KINDS]
     if refused:
         sys.stderr.write(f"stall_watch: {KINDS_ENV} names kinds the watch never reads, ignored: {', '.join(refused)}\n")
     kept = [k for k in configured if k not in refused]
@@ -764,11 +779,6 @@ def is_system_namespace(name: str) -> bool:
     return name in SYSTEM_NAMESPACES or name.startswith(SYSTEM_NAMESPACE_PREFIXES)
 
 
-def is_exempt(metadata: dict) -> bool:
-    annotations = metadata.get("annotations")
-    return isinstance(annotations, dict) and annotations.get(EXEMPT_ANNOTATION) == EXEMPT_VALUE
-
-
 def list_namespaces(kubeconfig: str, excluded: frozenset[str]) -> tuple[list[str], set[str]]:
     """Every non-system namespace the watch reads, Terminating ones included:
     their objects are still listable, and one whose content is gone is how a
@@ -779,15 +789,13 @@ def list_namespaces(kubeconfig: str, excluded: frozenset[str]) -> tuple[list[str
     r = run_sandbox(list(NAMESPACES_ARGV), timeout=NAMESPACE_LIST_TIMEOUT_SECONDS, kubeconfig=kubeconfig)
     if r.returncode != 0:
         raise ReadFailed(f"kubectl get namespaces exited {r.returncode}: {stderr_excerpt(r.stderr)}", r.stderr)
-    listing = parse_json(r.stdout, "kubectl get namespaces")
-    items = listing.get("items") if isinstance(listing, dict) else None
     watched, left_out = [], set()
-    for item in items or []:
-        metadata = (item.get("metadata") if isinstance(item, dict) else None) or {}
-        name = metadata.get("name")
+    for line in r.stdout.splitlines():
+        name, _, annotation = line.partition(NAMESPACE_LINE_SEPARATOR)
+        name = name.strip()
         if not name or is_system_namespace(name):
             continue
-        if name in excluded or is_exempt(metadata):
+        if name in excluded or annotation.strip() == EXEMPT_VALUE:
             left_out.add(name)
         else:
             watched.append(name)
@@ -1920,6 +1928,10 @@ def episode_lines(state: dict, sweep: Sweep, new_by_scope: dict, cleared_by_scop
         episode = episodes[scope]
         leaving = cleared_by_scope.get(scope, [])
         reason = episode.get(CLEAR_REASON_KEY) or clear_reason(sweep, scope, leaving)
+        if reason == CLEAR_REASON_EXCLUDED and scope in sweep.read_scopes:
+            # The watch read the namespace this tick, so the exclusion that
+            # stored the reason has been lifted: judge the close afresh.
+            reason = clear_reason(sweep, scope, leaving)
         if not dry_run:
             # Stored on the tick that saw the rows go: a later tick no longer
             # holds them, so a close retried after a board error would read

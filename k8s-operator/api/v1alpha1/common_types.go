@@ -644,7 +644,7 @@ type StallWatchSpec struct {
 	// +kubebuilder:validation:items:MaxLength=253
 	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	// +kubebuilder:validation:XValidation:rule="!self.exists(k, k == 'all') || self.size() == 1",message="kinds: all must be the only item"
-	// +kubebuilder:validation:XValidation:rule="!self.exists(k, k in ['secrets', 'secret', 'configmaps', 'configmap', 'cm', 'events', 'event', 'ev', 'events.events.k8s.io', 'endpoints', 'endpoint', 'ep', 'controllerrevisions.apps', 'endpointslices.discovery.k8s.io', 'leases.coordination.k8s.io'])",message="kinds: secrets, configmaps, events, endpoints, endpointslices, controllerrevisions and leases are never scanned"
+	// +kubebuilder:validation:XValidation:rule="!self.exists(k, k.split('.')[0] in ['secrets', 'secret', 'configmaps', 'configmap', 'cm', 'events', 'event', 'ev', 'endpoints', 'endpoint', 'ep', 'endpointslices', 'endpointslice', 'controllerrevisions', 'controllerrevision', 'leases', 'lease'])",message="kinds: secrets, configmaps, events, endpoints, endpointslices, controllerrevisions and leases are never scanned"
 	// +optional
 	Kinds []string `json:"kinds,omitempty"`
 }

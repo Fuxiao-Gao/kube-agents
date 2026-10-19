@@ -9607,11 +9607,11 @@ spec:
                                 endpointslices, controllerrevisions and leases are never
                                 scanned"
                               rule:
-                                "!self.exists(k, k in ['secrets', 'secret', 'configmaps',
-                                'configmap', 'cm', 'events', 'event', 'ev',
-                                'events.events.k8s.io', 'endpoints', 'endpoint',
-                                'ep', 'controllerrevisions.apps', 'endpointslices.discovery.k8s.io',
-                                'leases.coordination.k8s.io'])"
+                                "!self.exists(k, k.split('.')[0] in ['secrets',
+                                'secret', 'configmaps', 'configmap', 'cm', 'events',
+                                'event', 'ev', 'endpoints', 'endpoint', 'ep',
+                                'endpointslices', 'endpointslice', 'controllerrevisions',
+                                'controllerrevision', 'leases', 'lease'])"
                         minStallAgeMinutes:
                           description: |-
                             MinStallAgeMinutes holds a new alert until one of the namespace's stalls has
