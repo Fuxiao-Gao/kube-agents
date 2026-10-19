@@ -131,6 +131,36 @@ func TestSlackClickIsATurnFromTheClicker(t *testing.T) {
 	}
 }
 
+// TestSlackRefusedClickKeysOnThePayloadTeamWhenTheUserHasNone: a click whose
+// user names no workspace is keyed by the payload's team, so the same member id
+// clicking from two other workspaces is two senders, each told once.
+func TestSlackRefusedClickKeysOnThePayloadTeamWhenTheUserHasNone(t *testing.T) {
+	api := &fakeSlackAPI{}
+	a, _ := newUXSlackAdapter(api)
+	click := func(team, actionTS string) json.RawMessage {
+		raw, err := json.Marshal(map[string]any{
+			"type":      "block_actions",
+			"user":      map[string]any{"id": "U9"},
+			"team":      map[string]any{"id": team},
+			"channel":   map[string]any{"id": "C1"},
+			"message":   map[string]any{"ts": "50.0", "text": "Which one?", "blocks": json.RawMessage(uxQuestionBlocks)},
+			"actions":   []any{map[string]any{"action_id": "kage.choice.0", "value": "x", "text": map[string]any{"text": "Option A"}}},
+			"action_ts": actionTS,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	if _, ok := a.interactive(click("T2", "70.0")); ok {
+		t.Fatal("a click from another workspace was delivered")
+	}
+	a.interactive(click("T3", "71.0"))
+	if len(api.posted) != 2 {
+		t.Errorf("posts = %+v, want one notice per payload workspace for a user that names none", api.posted)
+	}
+}
+
 func TestSlackClickWithoutReplySendsItsLabelAndDMKeys(t *testing.T) {
 	a, _ := newUXSlackAdapter(&fakeSlackAPI{})
 	msg, ok := a.interactive(clickPayload(t, "U1", "T1", "D9", "", "kage.choice.1", "Option B", "", "61.0"))

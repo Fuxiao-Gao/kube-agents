@@ -44,11 +44,12 @@ const slackThreadsCap = 2048
 // slackForeignNoticesCap bounds the once-per-sender memory of the notice a
 // refused member of another workspace gets (foreignSender); one entry per
 // such sender, evicted wholesale at the cap, which at worst repeats a notice.
-// slackForeignNoticeKeySep joins the sender's workspace and member id in its key.
-const (
-	slackForeignNoticesCap   = 2048
-	slackForeignNoticeKeySep = "/"
-)
+// A var so a test can lower it.
+var slackForeignNoticesCap = 2048
+
+// slackForeignNoticeKeySep joins the sender's workspace and member id in the
+// notice memory's key.
+const slackForeignNoticeKeySep = "/"
 
 // slackForeignNoticeText is what a refused member of another workspace is told,
 // with their member id, the one thing an admin needs to find the refusal in the log.

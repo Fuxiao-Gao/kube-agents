@@ -987,6 +987,35 @@ func TestSlackForeignNoticeIsSharedByMessagesAndClicks(t *testing.T) {
 	}
 }
 
+// TestSlackForeignNoticeMemoryIsBounded: the once-per-sender memory never holds
+// more than slackForeignNoticesCap senders, and at the cap it is wiped whole, so
+// at worst a sender is told twice.
+func TestSlackForeignNoticeMemoryIsBounded(t *testing.T) {
+	saved := slackForeignNoticesCap
+	slackForeignNoticesCap = 2
+	t.Cleanup(func() { slackForeignNoticesCap = saved })
+	api := &fakeSlackAPI{}
+	a := newTestSlackAdapter(api)
+	a.teamID = "T0URS"
+	a.syncSessions = true
+	ctx := context.Background()
+	dm := func(user, ts string) {
+		m := slackMsg("im", "D"+user, user, "hello", ts, "")
+		m.UserTeam = "T0THER"
+		a.inbound(ctx, m)
+	}
+	dm("U1", "1.0")
+	dm("U2", "2.0")
+	dm("U3", "3.0") // the cap is reached: the memory is wiped, then U3 recorded
+	if n := len(a.foreignNoticed); n > slackForeignNoticesCap {
+		t.Fatalf("notice memory holds %d senders, over the cap of %d", n, slackForeignNoticesCap)
+	}
+	dm("U1", "4.0")
+	if len(api.posted) != 4 {
+		t.Errorf("posts = %d, want U1 told again after the wholesale eviction", len(api.posted))
+	}
+}
+
 // TestSlackConnectedRecordsTheTeam: auth.test's team id is what the
 // workspace check compares against.
 func TestSlackConnectedRecordsTheTeam(t *testing.T) {
