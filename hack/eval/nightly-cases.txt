@@ -1208,3 +1208,8 @@
 # not ask about declares no next step (the report-format stanza). Read-only
 # against the no-pdb-workload and crashloop-workload fixtures; one card.
 ./tasks/chat-answer-tangent-offer-declares-no-step/task.yaml
+
+# #3371: a zonal seeded cluster asked about by its region must be found, not
+# declared absent. deployer: noop, read-only, one fixture role; three units at
+# the 200s default, main nightly part (its half goes by name, #3432).
+./tasks/fleet-zonal-cluster-named-by-region/task.yaml
