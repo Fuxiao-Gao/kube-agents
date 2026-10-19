@@ -210,6 +210,10 @@ release as `<RELEASE_VERSION>`. The latest release is on
 GitHub App and no token minter. The installer refuses `--github-app-id` and `--github-pem-path`
 with `--gitops-forge=gitlab`. The Go and Cloud KMS prerequisites of the PEM import do not apply.
 
+To let the agent read a private GitLab context repository, also set `GITLAB_READ_TOKEN_FILE` to a
+read-only token (Reporter role, `read_repository` scope only). See "Private context repositories" on
+the [GitLab install page](docs/site/src/content/docs/install/gitlab.md#private-context-repositories).
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/gke-labs/kube-agents/<RELEASE_VERSION>/install.sh | bash -s -- \
   --non-interactive \

@@ -472,6 +472,11 @@ Rules for the agent:
     lines, use `<(pass show gitlab/agent-token | head -n1)`. The operator unlocks `gpg-agent`
     before the run. Do not use `/dev/stdin` under `curl … | bash`, because standard input is the
     script there.
+- Only when the operator wants the agent to read a private GitLab context repository, also set
+  `GITLAB_READ_TOKEN_FILE` to a source that holds a read-only token (Reporter role,
+  `read_repository` scope only), with the same rules as the token source above. It must not be
+  the same source as `--gitlab-token-file`. The GitLab page's "Private context repositories"
+  section has the setup.
 - Only when a private CA signed the instance's certificate, add `--gitops-ca-file` to the dry run
   and to the stage 3 run. Do not give it for gitlab.com or for a public CA. Ask the operator
   for the CA certificates (public; never a private key) as a regular PEM file: the root CA, and the
