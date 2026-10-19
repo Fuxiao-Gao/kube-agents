@@ -812,6 +812,7 @@ func slackMsg(channelType, channel, user, text, ts, threadTS string) *slackevent
 func TestSlackRefusesAnotherWorkspacesMember(t *testing.T) {
 	a := newTestSlackAdapter(&fakeSlackAPI{})
 	a.teamID = "T0URS"
+	a.syncSessions = true // refusal notices are sent inline, so the post count below is settled
 	ctx := context.Background()
 	foreign := slackMsg("im", "D1", "UGUEST", "drain node 4", "1.0", "")
 	foreign.UserTeam = "T0THER"
@@ -861,7 +862,6 @@ func TestSlackRefusesAnotherWorkspacesMember(t *testing.T) {
 	// No team id from auth.test: a message that names a sender workspace
 	// cannot be shown to be ours, so it is refused.
 	a.teamID = ""
-	a.syncSessions = true
 	posted := len(a.api.(*fakeSlackAPI).posted)
 	unknown := slackMsg("im", "D3", "U3", "hello", "5.0", "")
 	unknown.UserTeam = "T0URS"
