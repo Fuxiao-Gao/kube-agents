@@ -10,7 +10,7 @@ A fleet-audit stream publishes its report as a ledger issue:
 ``audit_report.py start`` opens the run and prints one JSON line with
 ``workspace`` and ``findings_path``, and ``finish`` publishes it and prints one
 JSON line with ``status`` and ``issue_url``. The skill says a card whose audit
-produced no ledger must not close ``done`` (``fleet-audit/SKILL.md``), but
+produced no ledger must not close ``done`` (``fleet-audit/references/on-demand.md``), but
 that is an instruction only. Issue #2856 measured the cost: on the
 ``compliance-rbac-overgrant`` case more than half of the repetitions closed
 the card with a chat summary ("audit complete, 24 findings") and no ledger.
