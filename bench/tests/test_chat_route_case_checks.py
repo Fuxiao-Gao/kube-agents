@@ -73,6 +73,12 @@ CASES = {
         None,
         "gcp-networking-fabric-audit",
     ),
+    "health-chat-request-runs-collector": (
+        "the-health-collector-ran",
+        "fleet-audit/scripts/fleet_health.py",
+        None,
+        "fleet-health",
+    ),
 }
 
 # Collector commands the platform worker ran in dev runs of each case or its
@@ -113,6 +119,11 @@ REAL_RUNS = {
         f"python3 {SKILLS}/gcp-networking-fabric-audit/scripts/networking_audit.py {SCOPE} --output /opt/data/scratch/chat_manifest_gcp-networking-fabric-audit.json",
         f"python3 {SKILLS}/gcp-networking-fabric-audit/scripts/networking_audit.py {SCOPE} --scope-unread declared-scope=unresolved --output /opt/data/scratch/chat_manifest_gcp-networking-fabric-audit.json",
         f"python3 {SKILLS}/gcp-networking-fabric-audit/scripts/networking_audit.py {SCOPE} --output /tmp/manifest_networking.json && cat /tmp/manifest_networking.json",
+    ],
+    "health-chat-request-runs-collector": [
+        f"python3 {SKILLS}/fleet-audit/scripts/fleet_health.py {SCOPE} > /opt/data/scratch/chat_manifest_fleet-health.json",
+        f"python3 {SKILLS}/fleet-audit/scripts/fleet_health.py {SCOPE} --scope-unread declared-scope=unresolved > /opt/data/scratch/chat_manifest_fleet-health.json && cat /opt/data/scratch/chat_manifest_fleet-health.json",
+        f"python3 {SKILLS}/fleet-audit/scripts/fleet_health.py {SCOPE}",
     ],
 }
 

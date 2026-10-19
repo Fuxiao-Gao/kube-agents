@@ -216,6 +216,7 @@ ADDED_AFTER_THE_MOVE = [
     "fleet-zonal-cluster-named-by-region",  # a zonal cluster named by its region, #3371
     "helm-chart-no-reconciler-stops",  # gitops-helm-chart stops where nothing renders charts, #2938
     "delete-namespace-unowned-stops",  # a delete the repository cannot carry ends in a stated stop, #3077
+    "health-chat-request-runs-collector",  # a general fleet health question runs the health sweep, #3302
 ]
 # Taken back out of the nightly file after registering there, each with a
 # KNOWN_UNREGISTERED entry in scripts/validate_bench_cases.py that says why.

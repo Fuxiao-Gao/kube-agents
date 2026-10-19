@@ -981,6 +981,13 @@
 # closed. Its first nightly is its first observation outside a dev install.
 ./tasks/gitops-drift-load-bearing-change-triage/task.yaml
 
+# A general fleet health question ("check if my clusters are all healthy") runs
+# fleet_health.py once and files no per-cluster cards (#3302): on a 209-cluster
+# fleet the per-cluster fan-out queued behind the board's five user slots for
+# over thirty minutes. Reads the crashloop-workload role; read-only; requests
+# no pull request. Nightly from its first merge.
+./tasks/health-chat-request-runs-collector/task.yaml
+
 # Catalogue entry 12 (a node label is removed): seeded-a's
 # seeded-shapes/arch-pinned-worker (deprecated-label-selector), a
 # nodeSelector on beta.kubernetes.io/arch, deprecated and still set.
