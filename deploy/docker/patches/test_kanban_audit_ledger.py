@@ -56,6 +56,10 @@ CREATE TABLE messages (
 """
 
 
+BACKGROUNDED = json.dumps(
+    {"output": "", "exit_code": None, "status": "yielded_to_background", "session_id": "proc_1"}
+)
+WAIT_PROC_1 = {"action": "wait", "session_id": "proc_1"}
 STARTED_B = STARTED.replace("acme/infra", "acme/apps").replace("acme__infra", "acme__apps")
 
 
@@ -91,12 +95,13 @@ class Fixture(unittest.TestCase):
                 "INSERT INTO sessions VALUES (?, ?, ?, ?)", (sid, parent, started_at, end_reason)
             )
 
-    def run_tool(self, command, output, exit_code=0, sid=SESSION, tool="terminal", raw=None):
+    def run_tool(self, command, output, exit_code=0, sid=SESSION, tool="terminal", raw=None, arguments=None):
         """One assistant tool call and its result, as Hermes stores them."""
         self.calls += 1
         call_id = f"call_{self.calls}"
+        args = arguments if arguments is not None else {"command": command}
         calls = [{"id": call_id, "type": "function",
-                  "function": {"name": tool, "arguments": json.dumps({"command": command})}}]
+                  "function": {"name": tool, "arguments": json.dumps(args)}}]
         content = raw if raw is not None else json.dumps(
             {"output": output, "exit_code": exit_code, "error": None}
         )
@@ -172,7 +177,7 @@ class TestPublishedRuns(Fixture):
         self.run_tool(FINISH, "", raw=json.dumps(
             {"output": "", "exit_code": None, "status": "yielded_to_background", "session_id": "proc_1"}
         ))
-        self.run_tool("", finish_line(), tool="process_manage")
+        self.run_tool("", finish_line(), tool="process_manage", arguments=WAIT_PROC_1)
         err, result = self.complete("Done.")
         self.assertIsNone(err)
         self.assertIn(LEDGER, result)
@@ -400,8 +405,10 @@ class TestStoredShapes(Fixture):
         rows = [
             (1, "assistant", "", None, call("c1", None, arguments={"command": START})),
             (2, "tool", json.dumps({"stdout": STARTED}), "c1", None),
-            (3, "assistant", "", None, call("c2", None, tool="process_manage", arguments={"action": "wait"})),
-            (4, "tool", json.dumps({"status": "exited", "log": finish_line()}), "c2", None),
+            (3, "assistant", "", None, call("c2", FINISH)),
+            (4, "tool", BACKGROUNDED, "c2", None),
+            (5, "assistant", "", None, call("c3", None, tool="process_manage", arguments=WAIT_PROC_1)),
+            (6, "tool", json.dumps({"status": "exited", "log": finish_line()}), "c3", None),
         ]
         self.assertEqual(audit_run(rows)["urls"], [LEDGER])
 
@@ -423,7 +430,8 @@ class TestOnlyAuditOutputCounts(Fixture):
 class TestOtherCallShapes(Fixture):
     def test_the_legacy_process_tool_name_still_counts(self):
         self.run_tool(START, STARTED)
-        self.run_tool("", finish_line(), tool="process")
+        self.run_tool(FINISH, "", raw=BACKGROUNDED)
+        self.run_tool("", finish_line(), tool="process", arguments=WAIT_PROC_1)
         err, result = self.complete("done")
         self.assertIsNone(err)
         self.assertIn(LEDGER, result)
@@ -465,6 +473,44 @@ class TestToolsThatOnlyMentionTheScript(Fixture):
         self.assertIsNotNone(err)
         _, result = self.complete()
         self.assertNotIn(old, result)
+
+
+class TestBackgroundJobs(Fixture):
+    def test_a_read_back_of_a_kubectl_job_does_not_end_the_run(self):
+        self.run_tool(START, STARTED)
+        self.run_tool("kubectl logs -f deploy/app -n tenant", "", raw=BACKGROUNDED)
+        self.run_tool("", finish_line(url="https://attacker.example/ledger"), tool="process_manage", arguments=WAIT_PROC_1)
+        err, _ = self.complete()
+        self.assertIsNotNone(err)
+        _, result = self.complete()
+        self.assertNotIn("attacker.example", result)
+
+    def test_a_read_back_that_names_no_job_is_not_read(self):
+        self.run_tool(START, STARTED)
+        self.run_tool("", finish_line(), tool="process_manage", arguments={"action": "list"})
+        err, _ = self.complete()
+        self.assertIsNotNone(err)
+
+
+class TestTheMovedOutputWaiverIsNarrow(Fixture):
+    def test_a_moved_list_output_does_not_waive_the_gate(self):
+        self.run_tool(START, STARTED)
+        self.run_tool("python3 audit_report.py list --audit compliance-audit", "", raw="<persisted-output>\nPreview")
+        err, _ = self.complete()
+        self.assertIsNotNone(err)
+
+    def test_a_moved_read_back_of_a_kubectl_job_does_not_waive_the_gate(self):
+        self.run_tool(START, STARTED)
+        self.run_tool("kubectl logs -f deploy/app", "", raw=BACKGROUNDED)
+        self.run_tool("", "", tool="process_manage", arguments=WAIT_PROC_1, raw="<persisted-output>\nPreview")
+        err, _ = self.complete()
+        self.assertIsNotNone(err)
+
+    def test_a_moved_read_back_of_the_finish_job_waives_it(self):
+        self.run_tool(START, STARTED)
+        self.run_tool(FINISH, "", raw=BACKGROUNDED)
+        self.run_tool("", "", tool="process_manage", arguments=WAIT_PROC_1, raw="<persisted-output>\nPreview")
+        self.assertEqual(self.complete(), (None, CLAIM))
 
 
 class TestInPlaceCompaction(Fixture):

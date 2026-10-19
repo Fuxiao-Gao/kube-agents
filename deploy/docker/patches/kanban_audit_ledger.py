@@ -27,12 +27,11 @@ Hermes's session store and looks in the tool outputs, in order, for the result
 lines of ``start`` and ``finish``. It reads the result lines, not the exit
 codes, so a chained command neither hides a run nor ends one; a grep of the
 skill prints no result line. Only the output of a terminal or
-``execute_code`` call that runs ``audit_report.py``, or of the
-``process_manage`` tool that reads back a background job, is read, so a line
-that only looks like a result line, in the output of a separate foreground
-``kubectl`` call or a session search, neither ends a run nor puts its URL in
-chat. A read-back is read whatever job it reads, so the output of a background
-``kubectl logs`` can still carry such a line. A result line that repeats with the same tool call id is ignored,
+``execute_code`` call that runs ``audit_report.py``, or of a
+``process_manage`` read-back of a background job that such a call started, is
+read, so a line that only looks like a result line, in the output of a
+separate ``kubectl`` call (foreground or background) or a session search,
+neither ends a run nor puts its URL in chat. A result line that repeats with the same tool call id is ignored,
 because Hermes's in-place compaction stores a copy of the rows it keeps, ids
 and content unchanged, after the rows it archives.
 
@@ -69,10 +68,11 @@ The gate runs only for the caller's own card (``HERMES_KANBAN_TASK`` equal to
 the card id). A gateway session closing someone else's card, the CLI and the
 scheduler are not affected, and a scheduled audit is a cron run with no card.
 Every read fails open: a missing or unreadable store, an unknown schema, or a
-``audit_report.py`` or ``process_manage`` output after the last ``start`` that
-Hermes replaced with a preview and a file path (its per-result size limit)
-lets the completion through without a refusal, because the ``finish`` line may
-be in the part that was moved; a warning line records this case. When the refused result cannot be saved on the card,
+``audit_report.py finish`` output after the last ``start`` (or a read-back of a
+``finish`` job) that Hermes replaced with a preview and a file path (its
+per-result size limit) lets the completion through without a refusal, because
+the ``finish`` line may be in the part that was moved; a warning line records
+this case. When the refused result cannot be saved on the card,
 the completion is accepted at once, marked "Not published".
 """
 
@@ -137,6 +137,11 @@ AUDIT_SCRIPT = "audit_report.py"
 PROCESS_TOOLS = ("process_manage", "process")
 #: The tool whose arguments are code rather than a ``command``: read whole.
 CODE_TOOL = "execute_code"
+#: The key that names a background job: in the result of the call that
+#: backgrounded it, and in the arguments of the read-back that reads it.
+JOB_ID_KEY = "session_id"
+#: A command whose output could carry the ``finish`` result line.
+FINISH_COMMAND_RE = re.compile(r"audit_report\.py\b[^\n]*\bfinish\b")
 #: Read-only URI for the session store, so this reader never creates the file
 #: or takes a write lock.
 STATE_DB_URI = "file:{path}?mode=ro"
@@ -275,8 +280,11 @@ def _result_lines(value):
                     yield "finish", url, line
 
 
-def _calls(tool_calls) -> dict[str, tuple[str, str]]:
-    """``{call id: (tool name, command)}`` for one assistant message."""
+def _calls(tool_calls) -> dict[str, tuple[str, str, str]]:
+    """``{call id: (tool name, command, job id)}`` for one assistant message.
+
+    ``job id`` is the background job a read-back names, else ``""``.
+    """
     found = {}
     calls = _decode(tool_calls)
     for call in calls if isinstance(calls, list) else []:
@@ -296,7 +304,8 @@ def _calls(tool_calls) -> dict[str, tuple[str, str]]:
             command = json.dumps(args) if isinstance(args, dict) else str(args or "")
         else:
             command = ""
-        found[str(call["id"])] = (name, command)
+        job = args.get(JOB_ID_KEY) if isinstance(args, dict) else None
+        found[str(call["id"])] = (name, command, str(job) if job else "")
     return found
 
 
@@ -311,7 +320,8 @@ def audit_run(rows) -> dict:
     was replaced by a preview).
     """
     state = {"started": False, "open_audit": None, "urls": [], "hidden": False}
-    calls: dict[str, tuple[str, str]] = {}
+    calls: dict[str, tuple[str, str, str]] = {}
+    jobs: dict[str, str] = {}  # background job id -> the audit command that started it
     seen: set[str] = set()  # (tool call id, line): a compaction copy keeps both
     for _row_id, role, content, tool_call_id, tool_calls in rows:
         if role == "assistant":
@@ -319,12 +329,23 @@ def audit_run(rows) -> dict:
             continue
         if role != "tool":
             continue
-        tool, command = calls.get(str(tool_call_id), ("", ""))
-        if AUDIT_SCRIPT not in command and tool not in PROCESS_TOOLS:
+        tool, command, job = calls.get(str(tool_call_id), ("", "", ""))
+        if tool in PROCESS_TOOLS:
+            # A read-back speaks for the job it reads, and only an audit job's
+            # output can carry a result line.
+            command = jobs.get(job, "")
+        if AUDIT_SCRIPT not in command:
             continue
-        if state["open_audit"] and PERSISTED_OUTPUT_TAG in str(content or ""):
+        decoded = _decode(content)
+        if isinstance(decoded, dict) and decoded.get(JOB_ID_KEY):
+            jobs[str(decoded[JOB_ID_KEY])] = command
+        if (
+            state["open_audit"]
+            and PERSISTED_OUTPUT_TAG in str(content or "")
+            and FINISH_COMMAND_RE.search(command)
+        ):
             state["hidden"] = True
-        for kind, value, line in _result_lines(_decode(content)):
+        for kind, value, line in _result_lines(decoded):
             copy_key = f"{tool_call_id}\n{line}"
             if copy_key in seen:
                 continue
