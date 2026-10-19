@@ -323,7 +323,7 @@ func (s *SlackAdapter) interactive(raw json.RawMessage) (InboundMessage, bool) {
 	}
 	if s.otherWorkspace(p.User.TeamID) || s.otherWorkspace(p.Team.ID) {
 		s.log.Info("slack: ignoring a click from another workspace's member",
-			"userTeam", p.User.TeamID, "team", s.teamID, "channel", p.Channel.ID)
+			"user", p.User.ID, "userTeam", p.User.TeamID, "team", s.teamID, "channel", p.Channel.ID)
 		return InboundMessage{}, false
 	}
 	if s.alreadySeen("click:" + p.Channel.ID + "/" + p.ActionTS) {

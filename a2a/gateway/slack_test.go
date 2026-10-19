@@ -861,10 +861,16 @@ func TestSlackRefusesAnotherWorkspacesMember(t *testing.T) {
 	// No team id from auth.test: a message that names a sender workspace
 	// cannot be shown to be ours, so it is refused.
 	a.teamID = ""
+	a.syncSessions = true
+	posted := len(a.api.(*fakeSlackAPI).posted)
 	unknown := slackMsg("im", "D3", "U3", "hello", "5.0", "")
 	unknown.UserTeam = "T0URS"
 	if _, ok := a.inbound(ctx, unknown); ok {
 		t.Error("with no team id known, a message naming a sender workspace was delivered")
+	}
+	// Refused, but not told it is in another workspace: it may well be ours.
+	if got := a.api.(*fakeSlackAPI).posted[posted:]; len(got) != 0 {
+		t.Errorf("with no team id known, the sender was told it is in another workspace: %+v", got)
 	}
 }
 
@@ -877,6 +883,7 @@ func TestSlackTellsAnotherWorkspacesMemberWhyOnce(t *testing.T) {
 	api := &fakeSlackAPI{}
 	a := newTestSlackAdapter(api)
 	a.teamID = "T0URS"
+	a.syncSessions = true // the notice is sent off the pump; inline here
 	logs := &recordingHandler{}
 	a.log = slog.New(logs)
 	ctx := context.Background()
@@ -917,6 +924,29 @@ func TestSlackTellsAnotherWorkspacesMemberWhyOnce(t *testing.T) {
 	a.inbound(ctx, elsewhere)
 	if len(api.posted) != 2 || api.posted[1].thread != "5.0" {
 		t.Errorf("posts = %+v, want a notice for the same member id in another workspace", api.posted)
+	}
+
+	// A mention inside a thread gets its notice in that thread, on its root.
+	inThread := slackMsg("channel", "C1", "UGUEST2", "<@UBOT> and node 5", "8.0", "100.1")
+	inThread.UserTeam = "T0THER"
+	a.inbound(ctx, inThread)
+	if len(api.posted) != 3 || api.posted[2].thread != "100.1" {
+		t.Errorf("posts = %+v, want the notice in the mention's thread", api.posted)
+	}
+
+	// A sender whose workspace is named only in the message's own team field is
+	// keyed by that workspace, so is a sender of their own.
+	teamOnly := slackMsg("im", "D6", "UGUEST3", "hello", "9.0", "")
+	teamOnly.Message = &slack.Msg{Team: "T0THER"}
+	a.inbound(ctx, teamOnly)
+	if len(api.posted) != 4 || !strings.Contains(api.posted[3].text, "UGUEST3") {
+		t.Errorf("posts = %+v, want a notice for a sender named only in the team field", api.posted)
+	}
+	teamOnlyElsewhere := slackMsg("im", "D7", "UGUEST3", "hello", "10.0", "")
+	teamOnlyElsewhere.Message = &slack.Msg{Team: "T0FIFTH"}
+	a.inbound(ctx, teamOnlyElsewhere)
+	if len(api.posted) != 5 {
+		t.Errorf("posts = %+v, want the same member id in another team-field workspace told too", api.posted)
 	}
 }
 

@@ -118,7 +118,7 @@ The allowlist decides who may talk to the agent. It takes **Slack member IDs**, 
 
 What a member who is not on the list sees:
 
-- **`next`:** the gateway answers once per member with a notice that it cannot verify them, naming their member ID, so an admin can add them. A member of another workspace in a Slack Connect channel is not served, even with an empty list. When they mention the bot or send it a direct message, they get one reply in that thread that says so and names their member ID.
+- **`next`:** the gateway answers once per member with a notice that it cannot verify them, naming their member ID, so an admin can add them. A member of another workspace in a Slack Connect channel is not served, even with an empty list. The first time they mention the bot or send it a direct message, the bot replies once, in the thread of that message, that it answers only its own workspace, and names their member ID.
 - **`today`:** the message is ignored, with no reply.
 
 The pairing step in `INSTALL.md` applies only if you set the Hermes Slack DM policy to `pairing` yourself. A kube-agents install configures the allowlist instead, and the A2A gateway has no pairing.

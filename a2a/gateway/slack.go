@@ -52,8 +52,8 @@ const (
 
 // slackForeignNoticeText is what a refused member of another workspace is told,
 // with their member id, the one thing an admin needs to find the refusal in the log.
-const slackForeignNoticeText = "⛔ I only take asks from members of this Slack workspace. " +
-	"You are posting from another workspace (id %s), so I can't answer you here."
+const slackForeignNoticeText = "⛔ I only take asks from members of this Slack workspace, and you are " +
+	"posting from another workspace, so I can't answer you here. Your member id is %s."
 
 // slackTurnSubtypes are the message subtypes that are genuine user turns.
 // Plain messages have no subtype; thread_broadcast is a thread reply with
@@ -1286,11 +1286,15 @@ func (s *SlackAdapter) foreignSender(m *slackevents.MessageEvent) bool {
 // will not answer, once per sender: a reply in the thread of the message they
 // addressed the bot with. Keyed by their workspace and member id, so the same
 // id in two workspaces is two senders. The notice names only their own member
-// id, which they already know, and nothing about this workspace. A failed post
-// is logged and not retried; the sender stays counted as told, as the
-// gateway's own drop notice does.
+// id, which they already know, and nothing about this workspace. Not posted
+// when auth.test gave no team id: then every message that names a workspace is
+// refused, our own members' included, and telling them they are in another
+// workspace would be false; connected has already warned the admin. Sent off
+// the event pump, as suggestPrompts is, so a slow Slack API does not hold the
+// acks behind it. A failed post is logged and not retried; the sender stays
+// counted as told, as the gateway's own drop notice does.
 func (s *SlackAdapter) noticeForeignSender(m *slackevents.MessageEvent, team string) {
-	if m.User == "" {
+	if s.teamID == "" {
 		return
 	}
 	key := team + slackForeignNoticeKeySep + m.User
@@ -1308,12 +1312,15 @@ func (s *SlackAdapter) noticeForeignSender(m *slackevents.MessageEvent, team str
 	if thread == "" {
 		thread = m.TimeStamp
 	}
-	if _, _, err := s.api.PostMessage(m.Channel,
-		slack.MsgOptionText(fmt.Sprintf(slackForeignNoticeText, m.User), false),
-		slack.MsgOptionTS(thread)); err != nil {
-		s.log.Warn("slack: could not tell another workspace's member why they are refused",
-			"user", m.User, "channel", m.Channel, "err", err)
-	}
+	channel, user := m.Channel, m.User
+	s.goSession(func() {
+		if _, _, err := s.api.PostMessage(channel,
+			slack.MsgOptionText(fmt.Sprintf(slackForeignNoticeText, user), false),
+			slack.MsgOptionTS(thread)); err != nil {
+			s.log.Warn("slack: could not tell another workspace's member why they are refused",
+				"user", user, "channel", channel, "err", err)
+		}
+	})
 }
 
 // otherWorkspace reports a workspace id that is named and is not the bot's.
