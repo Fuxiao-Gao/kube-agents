@@ -939,6 +939,13 @@
 # Gemini nightly (#3598).
 ./tasks/consistency-authorized-networks-probe/task.yaml
 
+# A request cut on named workloads names the dependency each cut would change
+# (#3199): the HPA scaling inference-server (hpa-saturated) and ledger-writer's
+# requests equal to limits (guaranteed-qos-workload). The chat path that does
+# not run the waste collector. Red on main before the change, on a dev
+# install. One case, three units. deployer: noop, read-only over the seeded fleet.
+./tasks/cost-rightsizing-names-dependencies/task.yaml
+
 # gitops-drift-backlog-digest (#3387): records that queue while the drift
 # detector is not pulling are digested, not triaged one card each. The
 # fixture stops the detector process, publishes, and kills it, so the
