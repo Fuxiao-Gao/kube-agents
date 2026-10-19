@@ -426,7 +426,13 @@ class GkeAndCmekTest(unittest.TestCase):
         # it says the opposite. Widening the set is a claim about a finding's
         # effect on a run, made here beside the finding that emits it.
         self.assertEqual(checker.FINDING_HOST_OTEL_SCOPE, "gke/host-otel-scope")
-        self.assertEqual(checker.LEASE_SILENT_FINDINGS, frozenset({checker.FINDING_HOST_OTEL_SCOPE}))
+        self.assertEqual(checker.FINDING_COMPUTE_SWEEPER_MISSING, "iam/compute-sweeper/missing")
+        # The Compute plant sweeper holds nothing a leased run uses, so a
+        # missing grant fails only the hourly sweep.
+        self.assertEqual(
+            checker.LEASE_SILENT_FINDINGS,
+            frozenset({checker.FINDING_HOST_OTEL_SCOPE, checker.FINDING_COMPUTE_SWEEPER_MISSING}),
+        )
 
     def test_fleet_clusters_are_not_held_to_the_otel_scope(self):
         # Nothing reads the seeded clusters' traces, and bench/tf/fleet does not

@@ -349,6 +349,9 @@ REPAIR_HOST_OTEL_SCOPE = (
     f"--managed-otel-scope={HOST_OTEL_SCOPE} (docs/ci-pool-projects.md section 2)"
 )
 FINDING_HOST_OTEL_SCOPE = "gke/host-otel-scope"
+# A missing Compute plant sweeper grant fails the hourly sweep, not a leased
+# run: the sweeper holds nothing an eval run uses.
+FINDING_COMPUTE_SWEEPER_MISSING = "iam/compute-sweeper/missing"
 # Findings a leased run passes with. Every other finding reds the run that
 # leases the project -- a missing grant, API, key or cluster is a 403 or a
 # missing resource in the agent's transcript -- and the health bot's pool-drift
@@ -357,7 +360,9 @@ FINDING_HOST_OTEL_SCOPE = "gke/host-otel-scope"
 # this set (scripts/eval_dashboard/pool_state.py `passes_leases`, for
 # health.py's rule 3e) before wording the advice, so a 403 on a project whose
 # findings are all here is reported as the change's to read, not the pool's.
-LEASE_SILENT_FINDINGS = frozenset({FINDING_HOST_OTEL_SCOPE})
+# A missing Compute plant sweeper grant is here for the same reason: it fails
+# only the sweep.
+LEASE_SILENT_FINDINGS = frozenset({FINDING_HOST_OTEL_SCOPE, FINDING_COMPUTE_SWEEPER_MISSING})
 
 DEFAULT_GITHUB_APP_ID = 4675512
 
@@ -608,13 +613,18 @@ COMPUTE_SWEEP_PERMISSIONS = frozenset({
     "compute.subnetworks.list",
     "compute.subnetworks.delete",
     # `gcloud compute addresses list` (an aggregated list), and
-    # `addresses delete --region` (a regional operation).
+    # `addresses delete --region` (a regional operation). The plant's addresses
+    # are INTERNAL, and GCP checks deleteInternal to delete one; delete covers
+    # an external address. deleteInternal is at the TESTING support level for
+    # custom roles: a role may hold it, and gcloud warns when it does.
     "compute.addresses.list",
     "compute.addresses.delete",
+    "compute.addresses.deleteInternal",
     # A plant address with no region is deleted with `--global`, and the
     # aggregated address list can include global addresses.
     "compute.globalAddresses.list",
     "compute.globalAddresses.delete",
+    "compute.globalAddresses.deleteInternal",
     # gcloud waits on each delete operation until it is done.
     "compute.globalOperations.get",
     "compute.regionOperations.get",
@@ -1593,7 +1603,7 @@ def check_iam_and_service_accounts(project_id: str, project_number: str) -> Chec
             if compute_sweep_role not in compute_sweep_held:
                 passed = False
                 _drift(
-                    details, findings, "iam/compute-sweeper/missing",
+                    details, findings, FINDING_COMPUTE_SWEEPER_MISSING,
                     f"The Compute plant sweeper ({COMPUTE_SWEEP_MEMBER.split(':', 1)[1]}) lacks "
                     f"{compute_sweep_role} on {project_id}, so the periodic Compute plant sweep fails "
                     "here and leftover plant networks stay. Grant it without re-running the provisioning "

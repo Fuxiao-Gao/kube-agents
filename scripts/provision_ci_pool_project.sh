@@ -50,7 +50,7 @@ readonly COMPUTE_SWEEP_SA="serviceAccount:eval-compute-sweeper@kube-agents-prow.
 readonly COMPUTE_SWEEP_ROLE_ID="kubeAgentsComputePlantSweeper"
 readonly COMPUTE_SWEEP_ROLE_TITLE="kube-agents Compute plant sweeper"
 readonly COMPUTE_SWEEP_ROLE_STAGE="GA"
-readonly COMPUTE_SWEEP_PERMISSIONS="compute.addresses.delete,compute.addresses.list,compute.globalAddresses.delete,compute.globalAddresses.list,compute.globalOperations.get,compute.networks.delete,compute.networks.list,compute.regionOperations.get,compute.subnetworks.delete,compute.subnetworks.list"
+readonly COMPUTE_SWEEP_PERMISSIONS="compute.addresses.delete,compute.addresses.deleteInternal,compute.addresses.list,compute.globalAddresses.delete,compute.globalAddresses.deleteInternal,compute.globalAddresses.list,compute.globalOperations.get,compute.networks.delete,compute.networks.list,compute.regionOperations.get,compute.subnetworks.delete,compute.subnetworks.list"
 # The identity the seeded-fleet reconcile runs as (hack/fleet_reconcile.py, a
 # postsubmit and a daily on main). The IAM step before 1.3 grants it what re-applying
 # bench/tf/fleet needs on the project; step 2 grants it the state bucket.
