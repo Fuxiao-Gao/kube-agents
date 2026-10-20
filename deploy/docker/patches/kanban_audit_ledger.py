@@ -29,8 +29,8 @@ codes, so a chained command neither hides a run nor ends one; a grep of the
 skill prints no result line. Only the output of a terminal or
 ``execute_code`` call that runs ``audit_report.py``, or of a
 ``process_manage`` read-back of a background job that such a call started, or
-of Hermes's completion notice for such a job (a ``user`` row; each notice in
-the row is read alone, by its job id), is read, so a line that only looks like a result line, in the output of a
+of Hermes's completion notice for such a job (a ``user`` row that holds that
+one notice and nothing joined to it), is read, so a line that only looks like a result line, in the output of a
 separate ``kubectl`` call (foreground or background) or a session search,
 neither ends a run nor puts its URL in chat. A result line that repeats with the same tool call id is ignored,
 because Hermes's in-place compaction stores a copy of the rows it keeps, ids
@@ -296,25 +296,25 @@ def _result_lines(value):
 
 
 def _notices(content) -> list[tuple[str, str]]:
-    """``(job id, output)`` for each background-completion notice in a row.
+    """``(job id, output)`` of the one background-completion notice in a row.
 
-    A row that does not start with a notice holds none. Each notice is read
-    alone, so one job's output never stands in for another's.
+    A row that does not start with a notice holds none. A row that holds the
+    notice separator anywhere is not read at all: Hermes joins several
+    notices with it, and a job's own output can carry the same text, so a
+    real split point cannot be told from a forged one. Such a row credits no
+    ``finish``; the proof then has to come from a foreground ``finish`` or a
+    read-back of the job (fail closed).
     """
     text = content if isinstance(content, str) else ""
-    if not text.startswith(NOTICE_PREFIX):
+    if not text.startswith(NOTICE_PREFIX) or NOTICE_SEPARATOR in text:
         return []
-    found = []
-    for index, part in enumerate(text.split(NOTICE_SEPARATOR)):
-        notice = part if index == 0 else NOTICE_PREFIX + part
-        job = NOTICE_JOB_RE.match(notice)
-        if not job or NOTICE_OUTPUT_MARK not in notice:
-            continue
-        output = notice.split(NOTICE_OUTPUT_MARK, 1)[1].rstrip()
-        if output.endswith(NOTICE_END):
-            output = output[: -len(NOTICE_END)]
-        found.append((job.group(1), output))
-    return found
+    job = NOTICE_JOB_RE.match(text)
+    if not job or NOTICE_OUTPUT_MARK not in text:
+        return []
+    output = text.split(NOTICE_OUTPUT_MARK, 1)[1].rstrip()
+    if output.endswith(NOTICE_END):
+        output = output[: -len(NOTICE_END)]
+    return [(job.group(1), output)]
 
 
 def _calls(tool_calls) -> dict[str, tuple[str, str, str]]:
