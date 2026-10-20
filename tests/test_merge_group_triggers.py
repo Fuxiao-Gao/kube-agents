@@ -55,6 +55,10 @@ _GATE_WORKFLOW = "merge-gate.yml"
 _PULL_REQUEST = "pull_request"
 _RELEASE_LINE_GLOB = "release/**"
 
+#: Well under the 360-minute default. A queue that requires every check holds
+#: all merges behind a hung job at its front, so each job carries its own bound.
+_MAX_JOB_TIMEOUT_MINUTES = 60
+
 
 class MergeGroupTriggerTest(unittest.TestCase):
     def test_required_check_workflows_run_on_merge_group(self) -> None:
@@ -78,6 +82,22 @@ class MergeGroupTriggerTest(unittest.TestCase):
                 branches = (on[_PULL_REQUEST] or {}).get("branches")
                 if branches is not None:
                     self.assertIn(_RELEASE_LINE_GLOB, branches, f"{name} filters pull_request to {branches}")
+
+    def test_every_job_in_the_queue_sets_a_timeout(self) -> None:
+        """A job with no `timeout-minutes` runs for 360 minutes when it hangs.
+
+        In the queue a hung required job at the front holds every merge until it
+        times out: `Run Python Unit Tests` hung for six hours on 2026-10-08. Each
+        job's bound is about twice its longest successful run in the 14 days
+        before it was set (gke-labs/kube-agents#1363).
+        """
+        for name in (*_REQUIRED_CHECK_WORKFLOWS, _GATE_WORKFLOW):
+            jobs = yaml.safe_load((_WORKFLOWS / name).read_text())["jobs"]
+            for job_id, job in jobs.items():
+                with self.subTest(workflow=name, job=job_id):
+                    minutes = job.get("timeout-minutes")
+                    self.assertIsInstance(minutes, int, f"{name} job {job_id} sets no timeout-minutes")
+                    self.assertLessEqual(minutes, _MAX_JOB_TIMEOUT_MINUTES)
 
     def test_the_gate_workflow_runs_on_merge_group_for_main(self) -> None:
         on = _on(_WORKFLOWS / _GATE_WORKFLOW)
