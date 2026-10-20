@@ -43,6 +43,10 @@ _GOLDEN_DIR = pathlib.Path(__file__).resolve().parent / "testdata" / "gitlab_for
 # bytes as given), and keeps what `apply -f -` was sent. With
 # STUB_APPLY_FAIL=1 the apply fails the way a rejected patch does: it echoes
 # the object it was sent to stderr.
+# install.sh reads these from the environment, so a developer's shell that
+# exports one would leak into every test that does not set it.
+_TOKEN_SOURCE_VARS = ("GITLAB_READ_TOKEN_FILE", "GITLAB_TOKEN_FILE", "GITOPS_CA_FILE")
+
 _KUBECTL_STUB = r"""#!/usr/bin/env bash
 log="$STUB_DIR/kubectl.log"
 # $$, not a count: the two halves of a pipeline run at once.
@@ -178,7 +182,7 @@ class GitLabFlagsTest(unittest.TestCase):
         setup = f'source "{_INSTALLER_COMMON}"\nKUBE_AGENTS_SOURCE_ONLY=true source "{_INSTALL_SH}"\n{func_call}\n'
         overrides = {"KUBE_AGENTS_INSTALL_ENV": str(self._empty_install_env)}
         overrides.update(env or {})
-        return _run_installer_bash(setup, get_isolated_test_env(overrides=overrides))
+        return _run_installer_bash(setup, get_isolated_test_env(overrides=overrides, absent=_TOKEN_SOURCE_VARS))
 
     def test_parse_args_takes_the_four_flags(self):
         proc = self._run_install_func(
@@ -326,7 +330,7 @@ class GitLabFlagsTest(unittest.TestCase):
             ["bash", "-c", body],
             capture_output=True,
             text=True,
-            env=get_isolated_test_env(overrides={"KUBE_AGENTS_INSTALL_ENV": str(self._empty_install_env)}),
+            env=get_isolated_test_env(absent=_TOKEN_SOURCE_VARS, overrides={"KUBE_AGENTS_INSTALL_ENV": str(self._empty_install_env)}),
             cwd=str(_REPO_ROOT),
         )
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
@@ -353,7 +357,7 @@ class GitLabFlagsTest(unittest.TestCase):
             ["bash", "-c", body],
             capture_output=True,
             text=True,
-            env=get_isolated_test_env(overrides={"KUBE_AGENTS_INSTALL_ENV": str(self._empty_install_env)}),
+            env=get_isolated_test_env(absent=_TOKEN_SOURCE_VARS, overrides={"KUBE_AGENTS_INSTALL_ENV": str(self._empty_install_env)}),
             cwd=str(_REPO_ROOT),
         )
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
@@ -383,7 +387,7 @@ class GitLabTokenNeverLeaksTest(unittest.TestCase):
             "GITLAB_TOKEN_SECRET": "gitlab-forge-token",
         }
         overrides.update(extra)
-        return get_isolated_test_env(overrides=overrides, bin_dir=self._bin)
+        return get_isolated_test_env(overrides=overrides, bin_dir=self._bin, absent=_TOKEN_SOURCE_VARS)
 
     def _assert_only_in_the_secret(self, *outputs):
         encoded = base64.b64encode(_SENTINEL.encode()).decode()
@@ -976,7 +980,7 @@ class GitLabPrivateCAFlagsTest(unittest.TestCase):
         )
         proc = subprocess.run(
             ["bash", "-c", body], capture_output=True, text=True,
-            env=get_isolated_test_env(overrides={"KUBE_AGENTS_INSTALL_ENV": str(self._empty_install_env)}),
+            env=get_isolated_test_env(absent=_TOKEN_SOURCE_VARS, overrides={"KUBE_AGENTS_INSTALL_ENV": str(self._empty_install_env)}),
             cwd=str(_REPO_ROOT),
         )
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
@@ -1015,7 +1019,7 @@ class GitLabThroughMainTest(unittest.TestCase):
             f"main {' '.join(shlex.quote(a) for a in args)} && rc=0 || rc=$?\n"
             'echo "rc=$rc"\n'
         )
-        env = get_isolated_test_env(overrides={"KUBE_AGENTS_INSTALL_ENV": str(self._install_env)})
+        env = get_isolated_test_env(absent=_TOKEN_SOURCE_VARS, overrides={"KUBE_AGENTS_INSTALL_ENV": str(self._install_env)})
         return _run_installer_bash(body, env)
 
     def test_a_github_app_with_gitlab_is_refused_before_step_one(self):
@@ -1051,7 +1055,7 @@ class GitLabInstallEnvTest(unittest.TestCase):
         full = f'source "{_INSTALLER_COMMON}"\nKUBE_AGENTS_SOURCE_ONLY=true source "{_INSTALL_SH}"\nPARAM_DRY_RUN=false\n{body}'
         return subprocess.run(
             ["bash", "-c", full], capture_output=True, text=True, cwd=str(_REPO_ROOT),
-            env=get_isolated_test_env(overrides={"KUBE_AGENTS_INSTALL_ENV": str(self._loaded)}),
+            env=get_isolated_test_env(absent=_TOKEN_SOURCE_VARS, overrides={"KUBE_AGENTS_INSTALL_ENV": str(self._loaded)}),
         )
 
     def test_switching_an_existing_github_install_to_gitlab_records_it(self):
@@ -1129,7 +1133,7 @@ class GitLabInstallEnvTest(unittest.TestCase):
         return subprocess.run(
             ["bash", "-c", body], capture_output=True, text=True, cwd=str(_REPO_ROOT),
             stdin=subprocess.DEVNULL, start_new_session=True, timeout=60,
-            env=get_isolated_test_env(overrides={"KUBE_AGENTS_INSTALL_ENV": str(env_file)}),
+            env=get_isolated_test_env(absent=_TOKEN_SOURCE_VARS, overrides={"KUBE_AGENTS_INSTALL_ENV": str(env_file)}),
         )
 
     def test_a_recorded_github_app_does_not_block_a_switch_to_gitlab(self):
@@ -1166,7 +1170,7 @@ class GitLabInstallEnvTest(unittest.TestCase):
         proc = subprocess.run(
             ["bash", "-c", body], capture_output=True, text=True, cwd=str(_REPO_ROOT),
             stdin=subprocess.DEVNULL, start_new_session=True, timeout=60,
-            env=get_isolated_test_env(overrides={
+            env=get_isolated_test_env(absent=_TOKEN_SOURCE_VARS, overrides={
                 "KUBE_AGENTS_INSTALL_ENV": str(env_file), "GITOPS_FORGE": "gitlab",
                 "GITOPS_HOST": "h.example", "GITLAB_TOKEN_SECRET": "x",
             }),
@@ -1280,7 +1284,7 @@ class GitLabEmptyTokenFileEarlyTest(unittest.TestCase):
             f"{preamble}\n"
             'validate_gitops_forge_flags && rc=0 || rc=$?; echo "rc=$rc"\n'
         )
-        env = get_isolated_test_env(overrides={"KUBE_AGENTS_INSTALL_ENV": str(self._empty_install_env)})
+        env = get_isolated_test_env(absent=_TOKEN_SOURCE_VARS, overrides={"KUBE_AGENTS_INSTALL_ENV": str(self._empty_install_env)})
         return _run_installer_bash(setup, env)
 
     def _file(self, content):
@@ -1363,7 +1367,7 @@ class GitOpsSourceIsRereadableTest(unittest.TestCase):
             f"{preamble}\n"
             f'gitops_source_is_rereadable {shlex.quote(path)} && echo "yes" || echo "no"\n'
         )
-        env = get_isolated_test_env(overrides={"KUBE_AGENTS_INSTALL_ENV": str(self._empty_install_env)})
+        env = get_isolated_test_env(absent=_TOKEN_SOURCE_VARS, overrides={"KUBE_AGENTS_INSTALL_ENV": str(self._empty_install_env)})
         return _run_installer_bash(setup, env).stdout.strip().splitlines()[-1]
 
     def test_a_regular_file_is_rereadable(self):

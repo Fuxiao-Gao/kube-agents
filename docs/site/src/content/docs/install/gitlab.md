@@ -344,8 +344,10 @@ GITLAB_READ_TOKEN_FILE=<(pass show gitlab/read-token | head -n1) ./install.sh -y
 
 Add the other flags from [Run the installer](#run-the-installer). For gitlab.com, omit
 `--gitops-host`. For an instance behind a private CA, add `--gitops-ca-file`: the broker
-trusts the CA for the read token's clones too. A later run without `GITLAB_READ_TOKEN_FILE`
-keeps the `read-token` key.
+trusts the CA for the read token's clones too. Set `GITLAB_READ_TOKEN_FILE` only for the run
+that stores or replaces the read token, then remove it from `install.env`: a run with it set
+writes the file again, over a token you rotated since, and stops if the file is gone. A later run
+without `GITLAB_READ_TOKEN_FILE` keeps the `read-token` key.
 
 ### On an existing install
 
@@ -382,7 +384,7 @@ kubectl logs -n kubeagents-system deploy/platform-agent-credential-proxy \
 ```
 
 A line that says the forge "has no usable read-only token" means that the `read-token` file is
-missing or empty, or does not hold one line of printable ASCII: check the key for a space, a
+missing, unreadable or empty, or does not hold one line of printable ASCII: check the key for a space, a
 byte-order mark or a second line. A line that says the broker's config "names no readTokenPath"
 means that the operator predates the read-only token: upgrade the operator.
 
