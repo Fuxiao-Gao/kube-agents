@@ -1353,6 +1353,18 @@ def read_credential_for(registry: providers.Registry, repository: str) -> provid
     # at the clone.
     credential = forge.read_credential(repo)
     if isinstance(credential, providers.NoCredential) and _holds_stored_token(forge):
+        if not getattr(forge, "read_token_path", ""):
+            # The forge was given no read-token path: the forges file came
+            # from an operator older than the read token, so no change to the
+            # Secret can help until the operator is upgraded.
+            LOGGER.warning(
+                "content workspace open repo=%s role=context: the broker's "
+                "config names no readTokenPath for the %s forge (an operator "
+                "older than the read-only token rendered it), so the clone "
+                "presents none; a private repository will refuse it",
+                repository, forge.name,
+            )
+            return credential
         LOGGER.warning(
             "content workspace open repo=%s role=context: the %s forge has no "
             "usable read-only token (key %s in its credentials Secret: missing, "

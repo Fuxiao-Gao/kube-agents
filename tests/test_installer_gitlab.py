@@ -53,9 +53,16 @@ echo "kubectl $*" >> "$log"
 case "$1 $2" in
   "get secret")
     # An existing Secret holds the write token unless STUB_SECRET_HAS_TOKEN=0
-    # (a Secret with only the read-token key).
-    if [ "${STUB_SECRET_EXISTS_RC:-1}" = 0 ] && [ "${STUB_SECRET_HAS_TOKEN:-1}" = 1 ]; then
-      case "$*" in *'jsonpath={.data.token}'*) printf 'dG9rZW4=' ;; esac
+    # (a Secret with only the read-token key). Each query is answered as a
+    # real kubectl would, so a check that asks for the wrong thing reads the
+    # wrong answer instead of an empty one.
+    if [ "${STUB_SECRET_EXISTS_RC:-1}" = 0 ]; then
+      case "$*" in
+        *'jsonpath={.data.token}'*) [ "${STUB_SECRET_HAS_TOKEN:-1}" != 1 ] || printf 'dG9rZW4=' ;;
+        *'jsonpath={.data}'*)
+          if [ "${STUB_SECRET_HAS_TOKEN:-1}" = 1 ]; then printf '{"token":"dG9rZW4="}'
+          else printf '{"read-token":"cmVhZA=="}'; fi ;;
+      esac
     fi
     exit "${STUB_SECRET_EXISTS_RC:-1}" ;;
   "create secret")

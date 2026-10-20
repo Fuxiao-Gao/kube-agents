@@ -2680,8 +2680,9 @@ token, under the optional key `read-token` in the Secret the forge's
 stays. The operator projects the key, when present, beside `token`, and names
 the file to the broker as `readTokenPath`. `read_credential` checks the file on
 each call and returns a `StaticFileCredential` on it, with the same host, header
-and username as the write credential. With no file, or an empty one, it returns
-`NoCredential`, and the clone presents nothing. That reads a public project and
+and username as the write credential. With no path, no file, an empty one, or one
+that does not hold one line of printable ASCII (the rule the git helper applies), it
+returns `NoCredential`, and the clone presents nothing. That reads a public project and
 refuses a private one at the clone, with a log line saying why. The
 recommended token is a project or group access token with the Reporter role and
 only the `read_repository` scope. The write gate is unchanged: `commit`, `push`,
