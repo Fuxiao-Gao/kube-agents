@@ -254,21 +254,19 @@ class GitLabForge(Forge):
         The optional key `read-token` in the forge's credentials Secret, which
         the operator projects next to `token`. The file is checked on each
         call: a Secret without the key mounts no file, and a key added later
-        appears with no restart. With no file, or an empty one, there is
-        nothing to present, and a context repository clones with no
+        appears with no restart. With no file, an empty one, or one that
+        does not hold a token, there is nothing to present, and a context repository clones with no
         credential, as it did before the key existed. Never the write token:
         `credential` is a different file.
         """
         if not self.read_token_path:
             return NoCredential()
-        try:
-            with open(self.read_token_path, "rb") as handle:
-                present = bool(handle.read().strip())
-        except OSError:
-            present = False
-        if not present:
+        credential = self._stored(self.read_token_path)
+        # The credential's own rule, the one the git helper applies: a token
+        # with a space, a byte-order mark or a second line is no token.
+        if not credential.holds_token():
             return NoCredential()
-        return self._stored(self.read_token_path)
+        return credential
 
     #: How many pages of the token account's projects `reach` reads: enough
     #: for an account that belongs to a thousand projects, which is already the

@@ -1355,7 +1355,8 @@ def read_credential_for(registry: providers.Registry, repository: str) -> provid
     if isinstance(credential, providers.NoCredential) and _holds_stored_token(forge):
         LOGGER.warning(
             "content workspace open repo=%s role=context: the %s forge has no "
-            "read-only token (key %s in its credentials Secret) and its stored "
+            "usable read-only token (key %s in its credentials Secret: missing, "
+            "empty, or not one line of printable ASCII) and its stored "
             "token can write, so the clone presents none; a private repository "
             "will refuse it",
             repository, forge.name, FORGE_READ_TOKEN_KEY,

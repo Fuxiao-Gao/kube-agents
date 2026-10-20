@@ -273,7 +273,11 @@ class GitLabFlagsTest(unittest.TestCase):
     def test_one_source_for_both_tokens_is_refused(self):
         both = self._tmp / "both-tokens"
         both.write_text(_SENTINEL)
+        # A second name for the same file: only the -ef clause can refuse it.
+        other_name = self._tmp / "both-tokens-link"
+        other_name.symlink_to(both)
         for case in (
+            self._gitlab(PARAM_GITLAB_TOKEN_FILE=str(both), PARAM_GITLAB_READ_TOKEN_FILE=str(other_name)),
             self._gitlab(PARAM_GITLAB_TOKEN_FILE="/dev/stdin", PARAM_GITLAB_READ_TOKEN_FILE="/dev/stdin"),
             self._gitlab(PARAM_GITLAB_TOKEN_FILE="/dev/stdin", PARAM_GITLAB_READ_TOKEN_FILE="/dev/fd/0"),
             self._gitlab(PARAM_GITLAB_TOKEN_FILE=str(both), PARAM_GITLAB_READ_TOKEN_FILE=str(both)),

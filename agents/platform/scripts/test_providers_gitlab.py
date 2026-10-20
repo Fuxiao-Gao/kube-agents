@@ -232,6 +232,18 @@ class ReadCredentialTest(unittest.TestCase):
                 self.read.write_text(empty)
                 self.assertIsInstance(built.read_credential("acme/notes"), providers.NoCredential)
 
+    def test_a_malformed_read_token_is_no_credential(self):
+        # The git helper drops a token that is not one line of printable ASCII
+        # in silence; the forge refuses it first, by the same rule, so the
+        # broker's "presents none" warning names the key.
+        built = self.built()
+        for bad in ("glpat read\n", "\ufeffglpat-read\n", "glpat-read\nsecond-line\n"):
+            with self.subTest(bad=bad):
+                self.read.write_text(bad, encoding="utf-8")
+                self.assertIsInstance(built.read_credential("acme/notes"), providers.NoCredential)
+        self.read.write_bytes("glpat-read".encode("utf-16"))
+        self.assertIsInstance(built.read_credential("acme/notes"), providers.NoCredential)
+
     def test_a_stored_read_token_is_presented_as_the_write_token_is_and_never_is_it(self):
         self.read.write_text("glpat-read\n")
         built = self.built()
