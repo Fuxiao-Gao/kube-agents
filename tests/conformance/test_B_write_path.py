@@ -717,7 +717,13 @@ class B2AssentIsHumanOrPolicy(unittest.TestCase):
             r"gh\s+pr\s+review[^\n]*--approve",
             r"/pulls/[^\n]*/merge\b",
         )
-        allowed = {("scripts/merge_gate.py", "enablePullRequestAutoMerge")}
+        # The sweep also prints `gh pr merge N ... --auto` in the line for a
+        # pull request it leaves out, so a write user can re-add it by hand. It
+        # is text for a person to run, not a call the script makes.
+        allowed = {
+            ("scripts/merge_gate.py", "enablePullRequestAutoMerge"),
+            ("scripts/merge_gate.py", "gh pr merge"),
+        }
         found = set()
         offences = []
         for path in sorted((h.REPO_ROOT / "scripts").rglob("*")):
