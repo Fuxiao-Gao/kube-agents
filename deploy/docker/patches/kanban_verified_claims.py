@@ -12,8 +12,10 @@ wired in by ``deploy/docker/patches/apply_kanban_verified_claims.py``:
     :func:`apply_completion_rules` runs each rule in :data:`RULES` before the
     card closes. The first, :func:`verified_claims_rule`, checks
     ``kanban_complete``'s new ``verified_claims`` parameter against that
-    record. Another rule can read the record through
-    :func:`card_terminal_calls` and share the one refusal.
+    record, or against the claims the gate already accepted on the cards this
+    card created. Another rule can read the record through
+    :func:`card_terminal_calls`, find a card's descendants through
+    :func:`descendant_card_ids`, and share the one refusal.
 
 Why
 ---
@@ -41,10 +43,24 @@ is not parsed. Each entry gives ``claim``, ``command`` and ``excerpt``:
 - ``excerpt`` must appear, after whitespace is collapsed, in the output of a
   run of that command.
 
-The gate copies ``exit_code`` and ``ran_at`` from the recorded call; the model
-does not supply them. Accepted claims are stored in ``metadata.verified_claims``
-and rendered as an evidence section at the end of ``result``, which is the text
-the notifier posts to chat, so every reader of the card sees the same evidence.
+Neither may hold a code fence, so the rendered section cannot break.
+
+A card that delegated the work did not run the commands itself. Its claim is
+also accepted when it matches a claim the gate already accepted on a card this
+card created, directly or through its own children (``kanban_worker_children``,
+which ``kanban_children_settled.py`` records): the same command, and an excerpt
+inside that claim's excerpt. So a "verified" label on the reply is always one
+the gate checked, on the card that ran the command. No other card's claims
+count.
+
+The gate copies ``exit_code`` and ``ran_at`` from the recorded call, or from
+the child card's accepted claim; the model does not supply them. Accepted
+claims are stored in ``metadata.verified_claims``, which the gate always
+rewrites, so the model cannot put unchecked claims there. They are also
+rendered as an evidence section at the end of ``result``, the text the notifier
+posts to chat. The notifier keeps the head of ``result`` and clips it at
+``kanban_notifier.RESULT_LIMIT``: a body near that limit pushes the section out
+of the chat message, though the card still holds it.
 
 Never wedging the card
 ----------------------
@@ -63,10 +79,12 @@ Limits
 - The record holds the output the model saw: after the head-and-tail cut. An
   excerpt read later from a spill file is not in it.
 - Background processes are not recorded.
+- A child card's claims count only once that card completed with them.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -88,13 +106,30 @@ METADATA_KEY = "verified_claims"
 #: oldest calls forgotten, and a claim citing one is refused like any other.
 MAX_RECORDED_CALLS = 200
 
-#: The most claims one completion may carry, and the longest excerpt and claim.
-#: The evidence section is appended to ``result``, which the notifier clips at
-#: ``kanban_notifier.RESULT_LIMIT`` (30000); these keep the section well
-#: inside it.
+#: The most claims one completion may carry, and the longest claim, command
+#: and excerpt. Together they keep the evidence section under about 15,000
+#: characters, half of ``kanban_notifier.RESULT_LIMIT`` (30000).
 MAX_CLAIMS = 10
-MAX_EXCERPT_CHARS = 600
 MAX_CLAIM_CHARS = 300
+MAX_COMMAND_CHARS = 500
+MAX_EXCERPT_CHARS = 600
+
+#: ``kanban_children_settled.CHILDREN_TABLE``: which card's worker created
+#: which card. Created on the first fan-out, so it can be absent.
+CHILDREN_TABLE = "kanban_worker_children"
+
+#: Every card created by ``task_id``, by its children, and so on down.
+#: ``UNION`` drops repeats, so a cycle in the table cannot loop.
+DESCENDANTS_SQL = (
+    f"WITH RECURSIVE descendants(id) AS ("
+    f" SELECT child_id FROM {CHILDREN_TABLE} WHERE creator_id = ?"
+    f" UNION SELECT c.child_id FROM {CHILDREN_TABLE} c"
+    f" JOIN descendants d ON c.creator_id = d.id"
+    f") SELECT id FROM descendants"
+)
+
+#: The ``task_runs.outcome`` of a run that closed through ``kanban_complete``.
+COMPLETED_OUTCOME = "completed"
 
 #: How long a refusal waits for its retry. The same window as
 #: ``kanban_result_required.NUDGE_TTL_SECONDS``; see that module for why the
@@ -114,13 +149,15 @@ WHITESPACE = re.compile(r"\s+")
 PARAM_DESCRIPTION = (
     "Optional. Every claim you present as verified, checked or confirmed, with "
     "the command that proves it. Each item is {claim, command, excerpt}: "
-    "``command`` is a terminal command you ran in this card, copied exactly; "
-    "``excerpt`` is the lines of its output that prove the claim, copied "
-    "exactly (at most 600 characters). The tool checks that the command ran and "
-    "the excerpt is in its output, adds the exit code and the time it ran, and "
-    "appends the evidence to ``result``. A claim that fails the check is "
-    "refused, and is dropped on the retry. Do not call anything verified in "
-    "``result`` unless it is listed here."
+    "``command`` is a terminal command you ran in this card (at most 500 "
+    "characters), copied exactly; ``excerpt`` is the lines of its output that "
+    "prove the claim, copied exactly (at most 600 characters, no ``` fence). "
+    "You may also repeat a verified claim from a card you created, with its "
+    "command and excerpt as that card gave them. The tool checks each claim, "
+    "adds the exit code and the time the command ran, and appends the evidence "
+    "to ``result``. A claim that fails the check is refused, and is dropped on "
+    "the retry. Do not call anything verified in ``result`` unless it is listed "
+    "here."
 )
 
 PARAM_SCHEMA = {
@@ -147,8 +184,8 @@ PARAM_SCHEMA = {
 REFUSAL_HEAD = (
     "kanban_complete refused: {count} problem(s) below. Your task is still in "
     "flight. Fix each one and call kanban_complete again with the same result. "
-    "The next call is accepted: a verified claim that still fails is dropped, "
-    "not shown as verified."
+    "This check accepts the next call: a verified claim that still fails is "
+    "dropped, not shown as verified."
 )
 
 #: Card id to the calls it ran, oldest first.
@@ -183,41 +220,113 @@ def record_terminal_call(command: object, exit_code: object, output: object, now
     )
 
 
-def _check_claim(calls: list, item: object) -> tuple[dict | None, str | None]:
-    """Return ``(accepted, None)`` or ``(None, reason)`` for one claim."""
+def descendant_card_ids(conn, task_id: object) -> list[str]:
+    """Every card that ``task_id``'s worker created, and their descendants, sorted.
+
+    ``conn`` is an open kanban board connection. The shared lookup for a
+    completion rule that reads child cards. Empty when no card has fanned out
+    yet and the table does not exist.
+    """
+    try:
+        rows = conn.execute(DESCENDANTS_SQL, (str(task_id),)).fetchall()
+    except Exception as exc:  # noqa: BLE001 - most often: no such table yet
+        logger.debug("[kanban] no descendants read for %s: %r", task_id, exc)
+        return []
+    return sorted({str(row[0]) for row in rows} - {str(task_id)})
+
+
+def descendant_verified_claims(conn, task_id: object) -> list[dict]:
+    """The claims the gate accepted on ``task_id``'s descendants, each with its ``card``."""
+    ids = descendant_card_ids(conn, task_id)
+    if not ids:
+        return []
+    marks = ", ".join("?" for _ in ids)
+    rows = conn.execute(
+        f"SELECT task_id, metadata FROM task_runs WHERE outcome = ? AND task_id IN ({marks})",
+        (COMPLETED_OUTCOME, *ids),
+    ).fetchall()
+    claims = []
+    for card, raw in rows:
+        try:
+            stored = (json.loads(raw) if raw else {}).get(METADATA_KEY) or []
+        except (ValueError, AttributeError):
+            continue
+        for claim in stored if isinstance(stored, list) else []:
+            if isinstance(claim, dict) and all(isinstance(claim.get(f), str) for f in ("command", "excerpt")):
+                claims.append({**claim, "card": str(card)})
+    return claims
+
+
+def _load_child_claims(connect, task_id: str) -> list[dict]:
+    """:func:`descendant_verified_claims` on a fresh connection; empty on any error."""
+    if connect is None:
+        return []
+    try:
+        conn = connect()
+        try:
+            return descendant_verified_claims(conn, task_id)
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - a failed read only means no child claims
+        logger.warning("[kanban] card %s: child claims not read: %r", task_id, exc)
+        return []
+
+
+def _from_child(child_claims, wanted: str, needle: str) -> dict | None:
+    for child in child_claims():
+        if _collapse(child["command"]) == wanted and needle in _collapse(child["excerpt"]):
+            return child
+    return None
+
+
+def _check_claim(calls: list, item: object, child_claims) -> tuple[dict | None, str | None]:
+    """Return ``(accepted, None)`` or ``(None, reason)`` for one claim.
+
+    ``child_claims`` is called only when this card's own record does not back
+    the claim, so a card with no delegated work never opens the board.
+    """
     if not isinstance(item, dict):
         return None, "is not an object with claim, command and excerpt"
     for field in ("claim", "command", "excerpt"):
         if not isinstance(item.get(field), str) or not item[field].strip():
             return None, f"has no {field}"
-    claim, command, excerpt = item["claim"].strip(), item["command"], item["excerpt"]
+    claim, command, excerpt = item["claim"].strip(), item["command"].strip(), item["excerpt"].strip("\n")
     if len(claim) > MAX_CLAIM_CHARS:
         return None, f"claim is longer than {MAX_CLAIM_CHARS} characters"
+    if len(command) > MAX_COMMAND_CHARS:
+        return None, f"command is longer than {MAX_COMMAND_CHARS} characters; cite a shorter command that shows the claim"
     if len(excerpt) > MAX_EXCERPT_CHARS:
         return None, f"excerpt is longer than {MAX_EXCERPT_CHARS} characters; keep the lines that prove the claim"
-    wanted = _collapse(command)
+    if FENCE in command or FENCE in excerpt:
+        return None, f"holds a {FENCE} fence; cite lines without one"
+    wanted, needle = _collapse(command), _collapse(excerpt)
+    accepted = {"claim": claim, "command": command, "excerpt": excerpt}
     runs = [call for call in calls if call["command"] == wanted]
-    if not runs:
-        return None, f"command {_quote(command)!r} did not run in this card; copy it exactly as you ran it"
-    needle = _collapse(excerpt)
     for call in reversed(runs):
         if needle in call["output"]:
-            return {
-                "claim": claim,
-                "command": command.strip(),
-                "excerpt": excerpt.strip("\n"),
-                "exit_code": call["exit_code"],
-                "ran_at": call["ran_at"],
-            }, None
+            return {**accepted, "exit_code": call["exit_code"], "ran_at": call["ran_at"]}, None
+    child = _from_child(child_claims, wanted, needle)
+    if child is not None:
+        return {**accepted, "exit_code": child.get("exit_code"), "ran_at": child.get("ran_at"), "card": child["card"]}, None
+    if not runs:
+        return None, (
+            f"command {_quote(command)!r} did not run in this card, and no card it created "
+            "verified it; copy it exactly as it ran"
+        )
     return None, f"excerpt {_quote(excerpt)!r} is not in the output of {_quote(command)!r}; copy it exactly"
 
 
 def render_evidence(claims: list) -> str:
-    """The section appended to ``result``: each claim, then its command and excerpt."""
+    """The section appended to ``result``: each claim, its command in one fence, its excerpt in the next.
+
+    Two fences keep a multi-line command apart from its output. Neither can
+    hold a fence of its own (:func:`_check_claim` refuses one).
+    """
     parts = [EVIDENCE_HEADING]
     for claim in claims:
-        parts.append(f"{claim['claim']} (exit {claim['exit_code']}, {claim['ran_at']})")
-        parts.append(f"{FENCE}\n$ {claim['command']}\n{claim['excerpt']}\n{FENCE}")
+        where = f", on card {claim['card']}" if claim.get("card") else ""
+        parts.append(f"{claim['claim']} (exit {claim['exit_code']}, {claim['ran_at']}{where})")
+        parts.append(f"{FENCE}\n$ {claim['command']}\n{FENCE}\n{FENCE}\n{claim['excerpt']}\n{FENCE}")
     return "\n\n".join(parts)
 
 
@@ -230,23 +339,34 @@ def card_terminal_calls(task_id: object) -> list[dict]:
     return list(_calls.get(str(task_id), ()))
 
 
-def verified_claims_rule(*, args: dict, result: object, metadata: object, calls: list, retry: bool, redact, **_) -> tuple[list, object, object]:
+def verified_claims_rule(
+    *, task_id: str, args: dict, result: object, metadata: object, calls: list, retry: bool, redact, connect=None, **_
+) -> tuple[list, object, object]:
     """The completion rule for ``verified_claims``; see :data:`RULES` for the contract.
 
     On the retry the claims that fail are dropped and the rest are kept, so a
-    dropped claim is never shown as verified.
+    dropped claim is never shown as verified. A ``verified_claims`` key the
+    model put in ``metadata`` itself is always removed.
     """
+    if isinstance(metadata, dict) and METADATA_KEY in metadata:
+        metadata = {key: value for key, value in metadata.items() if key != METADATA_KEY}
     claims = args.get(PARAM)
     if claims is None or claims == []:
         return [], result, metadata
     items = claims if isinstance(claims, list) else [claims]
+    loaded: list = []
+
+    def child_claims() -> list:
+        if not loaded:
+            loaded.append(_load_child_claims(connect, task_id))
+        return loaded[0]
 
     accepted, reasons = [], []
     for index, item in enumerate(items):
         if index >= MAX_CLAIMS:
             claim, reason = None, f"is past the limit of {MAX_CLAIMS} claims"
         else:
-            claim, reason = _check_claim(calls, item)
+            claim, reason = _check_claim(calls, item, child_claims)
         if reason:
             label = _quote(item.get("claim", "")) if isinstance(item, dict) else ""
             reasons.append(f"verified_claims[{index}] {label!r}: {reason}")
@@ -271,8 +391,9 @@ def verified_claims_rule(*, args: dict, result: object, metadata: object, calls:
 
 #: The rules :func:`apply_completion_rules` runs, in order. Each is called with
 #: keyword arguments ``task_id``, ``args`` (the ``kanban_complete`` arguments),
-#: ``result``, ``metadata``, ``calls`` (:func:`card_terminal_calls`), ``retry``
-#: and ``redact``, and returns ``(reasons, result, metadata)``. ``reasons`` is
+#: ``result``, ``metadata``, ``calls`` (:func:`card_terminal_calls`), ``retry``,
+#: ``redact`` and ``connect`` (opens a kanban board connection, or ``None``;
+#: the caller closes what it opens), and returns ``(reasons, result, metadata)``. ``reasons`` is
 #: the list of problems, each one line the worker can act on. ``retry`` is true
 #: when this card was refused inside :data:`NUDGE_TTL_SECONDS`: the completion
 #: is then accepted whatever the reasons, so a rule must return a ``result``
@@ -287,6 +408,7 @@ def apply_completion_rules(
     result: object,
     metadata: object,
     redact=lambda value: value,
+    connect=None,
 ) -> tuple[str | None, object, object]:
     """Run every rule in :data:`RULES` on one ``kanban_complete`` call.
 
@@ -294,7 +416,9 @@ def apply_completion_rules(
     must not be written. One refusal per card covers every rule: the first
     completion with a problem is refused with all the reasons in one message,
     and the retry is accepted. ``redact`` is applied to every string a rule
-    stores, as ``kanban_complete`` applies it to ``result``.
+    stores, as ``kanban_complete`` applies it to ``result``. ``connect`` is
+    ``hermes_cli.kanban_db_connect.connect`` in the image, passed in so this
+    module imports outside it.
     """
     key = str(task_id)
     refused_at = _refused_at.pop(key, None)
@@ -305,7 +429,7 @@ def apply_completion_rules(
     for rule in RULES:
         found, new_result, new_metadata = rule(
             task_id=key, args=args, result=new_result, metadata=new_metadata,
-            calls=calls, retry=retry, redact=redact,
+            calls=calls, retry=retry, redact=redact, connect=connect,
         )
         reasons += found
 

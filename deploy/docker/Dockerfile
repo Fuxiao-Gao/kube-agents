@@ -1044,8 +1044,8 @@ RUN /opt/hermes/.venv/bin/python3 /tmp/kanban-worker-tools/apply_kanban_worker_t
 #     result path records each call of the card, and the gate refuses a claim
 #     whose command did not run in the card or whose excerpt is not in its
 #     output, once, then drops it on the retry. Accepted claims are appended to
-#     `result` as an evidence section. Applied last: it inserts after the
-#     result gate's lines in _handle_complete.
+#     `result` as an evidence section. A card's claim also passes when it
+#     matches one the gate accepted on a card it created.
 # Getting that answer into the chat message is the other half of the fix and
 # belongs to the kanban_notifier patch above; verify_kanban_result.py still owns
 # the seam, replaying a real refusal through the real gate and into the real
@@ -1058,19 +1058,23 @@ RUN /opt/hermes/.venv/bin/python3 /tmp/kanban-worker-tools/apply_kanban_worker_t
 # buying a block of its own. The guarantees are unchanged -- same appliers, same
 # grep guards, same behavioural verifies.
 #
-# Order within the RUN is a requirement, not a preference: both appliers rewrite
-# tools/kanban_tools.py, and verify_kanban_report_format.py drives the completion
-# path, so it can only run once BOTH patches are in. The COPY puts both modules
-# in /opt/hermes/tools first; report-format is applied first so a failure in the
-# smaller, newer patch is not reported as a failure of the older one.
-# See the module docstrings in deploy/docker/patches/kanban_result_required.py
-# and deploy/docker/patches/kanban_report_format.py.
+# Order within the RUN is a requirement, not a preference: all three appliers
+# rewrite tools/kanban_tools.py, and the verify scripts drive the completion
+# path, so they can only run once ALL the patches are in. The COPY puts the
+# modules in /opt/hermes/tools first; report-format is applied first so a
+# failure in the smaller, newer patch is not reported as a failure of the older
+# one, and verified-claims last, since it inserts after the result gate's lines.
+# See the module docstrings in deploy/docker/patches/kanban_result_required.py,
+# deploy/docker/patches/kanban_report_format.py and
+# deploy/docker/patches/kanban_verified_claims.py.
 COPY deploy/docker/patches/kanban_result_required.py \
      deploy/docker/patches/kanban_report_format.py \
      deploy/docker/patches/kanban_verified_claims.py \
      /opt/hermes/tools/
-# The appliers import their anchors from the modules, and only the script's own
-# directory is on sys.path -- hence the second copy of each module alongside them.
+# The first two appliers import their anchors from their modules, and only the
+# script's own directory is on sys.path -- hence the second copy of those two
+# modules alongside them. apply_kanban_verified_claims.py imports nothing from
+# its module, so it has no copy there.
 COPY deploy/docker/patches/apply_kanban_result_required.py \
      deploy/docker/patches/verify_kanban_result.py \
      deploy/docker/patches/apply_kanban_report_format.py \

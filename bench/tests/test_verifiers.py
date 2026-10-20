@@ -9647,11 +9647,19 @@ def test_every_forbidden_pattern_has_a_contradiction_row(case):
 
 # verified_claims_backed: the reply's evidence blocks against the workers' calls.
 _PODS_CMD = "kubectl get pod -n seeded-debug -l app=payments-api -o jsonpath='{.items[0].status.containerStatuses[0].lastState}'"
-_PODS_OUT = json.dumps({"output": '{"terminated":{"exitCode":137,\n"reason":"OOMKilled"}}', "exit_code": 0})
+# As the pod stores it: worker_trajectory.supplement re-serialises a JSON output with spaces.
+_PODS_OUT = json.dumps({"output": json.dumps({"terminated": {"exitCode": 137, "reason": "OOMKilled"}}), "exit_code": 0})
+# What the worker saw and copied: kubectl's compact JSON.
+_PODS_EXCERPT = '"exitCode":137,"reason":"OOMKilled"'
+
+
+def _block(command, excerpt):
+    return f"```\n$ {command}\n```\n```\n{excerpt}\n```"
+
+
 _EVIDENCE = (
     "**payments-api is OOMKilled.**\n\n**Evidence for verified claims**\n\n"
-    "The last termination was OOMKilled (exit 0, 2026-10-20T12:00:00Z)\n\n"
-    f"```\n$ {_PODS_CMD}\n\"exitCode\":137, \"reason\":\"OOMKilled\"\n```"
+    "The last termination was OOMKilled (exit 0, 2026-10-20T12:00:00Z, on card t_2)\n\n" + _block(_PODS_CMD, _PODS_EXCERPT)
 )
 
 
@@ -9661,8 +9669,9 @@ def _grade_claims(reply, calls, gaps=None, min_blocks=1):
 
 
 def test_verified_claims_backed_passes_evidence_a_worker_produced():
-    res = _grade_claims(_EVIDENCE, [_terminal(_PODS_CMD, result=_PODS_OUT)])
+    res = _grade_claims(_EVIDENCE, [_terminal(_PODS_CMD, result=_PODS_OUT, agent="cluster-seeded-a", task="t_2")])
     assert res.status == "pass", res
+    assert "not checked" not in res.reason
 
 
 def test_verified_claims_backed_fails_the_pilots_unbacked_label():
@@ -9677,8 +9686,14 @@ def test_verified_claims_backed_fails_a_command_no_worker_ran():
 
 
 def test_verified_claims_backed_ignores_the_routers_own_call():
-    res = _grade_claims(_EVIDENCE, [dict(_ROUTER_TERMINAL, args={"command": _PODS_CMD}, result=_PODS_OUT)])
+    router = dict(_ROUTER_TERMINAL, args={"command": _PODS_CMD}, result=_PODS_OUT)
+    res = _grade_claims(_EVIDENCE, [router, _terminal("kubectl get nodes")])
     assert res.status == "fail" and "not a command any worker ran" in res.reason
+
+
+def test_verified_claims_backed_no_worker_call_at_all_is_an_error():
+    res = _grade_claims(_EVIDENCE, [])
+    assert res.status == "error" and "no worker terminal call" in res.reason
 
 
 def test_verified_claims_backed_fails_an_invented_excerpt():
@@ -9686,10 +9701,38 @@ def test_verified_claims_backed_fails_an_invented_excerpt():
     assert res.status == "fail" and "is not in the output of" in res.reason
 
 
-def test_verified_claims_backed_a_clipped_output_is_an_error():
+def test_verified_claims_backed_reads_a_multi_line_command_from_its_own_fence():
+    command = "kubectl get pods -n seeded-debug \\\n  -o wide"
+    out = json.dumps({"output": "NAME  STATUS\npayments-api-1  OOMKilled", "exit_code": 0})
+    res = _grade_claims(_block(command, "payments-api-1  OOMKilled"), [_terminal(command, result=out)])
+    assert res.status == "pass", res
+
+
+def test_verified_claims_backed_a_lone_command_fence_is_not_evidence():
+    # A suggested fix after real evidence: a $ fence with no output fence after it.
+    fix = "\n\nTo fix it:\n\n```\n$ kubectl set resources deployment payments-api --limits=memory=256Mi\n```\n\nThen watch it."
+    res = _grade_claims(_EVIDENCE + fix, [_terminal(_PODS_CMD, result=_PODS_OUT)])
+    assert res.status == "pass", res
+
+
+def test_verified_claims_backed_a_clipped_output_checks_only_the_command():
     clipped = _PODS_OUT[:20] + " ...[clipped 40 chars]"
     res = _grade_claims(_EVIDENCE, [_terminal(_PODS_CMD, result=clipped)])
-    assert res.status == "error" and "clipped" in res.reason
+    assert res.status == "pass" and "excerpt not checked, output clipped" in res.reason
+
+
+def test_verified_claims_backed_finds_an_excerpt_in_a_clipped_head():
+    out = json.dumps({"output": "phase \u2026 node-b NotReady " + "x" * 3000, "exit_code": 0})
+    clipped = out[:200] + " ...[clipped 3000 chars]"
+    res = _grade_claims(_block("kubectl get nodes", "phase \u2026 node-b NotReady"), [_terminal("kubectl get nodes", result=clipped)])
+    assert res.status == "pass" and "not checked" not in res.reason, res
+
+
+def test_verified_claims_backed_masks_addresses_as_the_pod_does():
+    out = json.dumps({"output": "user:[REDACTED_EMAIL] roles/viewer", "exit_code": 0})
+    res = _grade_claims(_block("gcloud projects get-iam-policy p", "user:ana@example.com roles/viewer"),
+                        [_terminal("gcloud projects get-iam-policy p", result=out)])
+    assert res.status == "pass", res
 
 
 def test_verified_claims_backed_a_capture_gap_is_an_error():
@@ -9697,5 +9740,31 @@ def test_verified_claims_backed_a_capture_gap_is_an_error():
     assert res.status == "error" and "state.db missing" in res.reason
 
 
+def test_verified_claims_backed_withheld_arguments_are_an_error():
+    from kube_agents_bench import worker_trajectory
+
+    withheld = _terminal("", args={"raw": worker_trajectory.WITHHELD}, result=worker_trajectory.WITHHELD)
+    res = _grade_claims(_EVIDENCE, [withheld])
+    assert res.status == "error" and "withheld" in res.reason
+
+
 def test_verified_claims_backed_min_blocks_zero_passes_a_reply_with_no_evidence():
     assert _grade_claims("All good.", [], min_blocks=0).status == "pass"
+
+
+def test_verified_claims_backed_reads_what_the_gate_renders():
+    # The gate's render_evidence, loaded from the image patch, through this verifier's parser.
+    import importlib.util
+    import pathlib
+
+    path = pathlib.Path(__file__).resolve().parents[2] / "deploy/docker/patches/kanban_verified_claims.py"
+    spec = importlib.util.spec_from_file_location("kanban_verified_claims", path)
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+    command = "kubectl get pods -n seeded-debug \\\n  -o wide"
+    out = json.dumps({"output": "NAME  STATUS\npayments-api-1  OOMKilled", "exit_code": 0})
+    claim = {"claim": "payments-api-1 is OOMKilled.", "command": command, "excerpt": "payments-api-1  OOMKilled",
+             "exit_code": 0, "ran_at": "2026-10-20T12:00:00Z", "card": "t_2"}
+    reply = "**payments-api is OOMKilled.**\n\n" + gate.render_evidence([claim])
+    res = _grade_claims(reply, [_terminal(command, result=out, task="t_2")])
+    assert res.status == "pass", res

@@ -67,7 +67,8 @@ OLD_COMPLETE_METADATA = (
 NEW_COMPLETE_METADATA = (
     f"    {MARKER}\n"
     "    _rules_err, result, metadata = _apply_completion_rules(\n"
-    "        tid, args, result, metadata, redact=_redact)\n"
+    "        tid, args, result, metadata, redact=_redact,\n"
+    "        connect=_kanban_verified_claims_connect)\n"
     "    if _rules_err:\n"
     "        return tool_error(_rules_err)\n"
     "    _require_dict_metadata(metadata)\n"
@@ -76,6 +77,9 @@ NEW_COMPLETE_METADATA = (
 
 SCHEMA_PREAMBLE = (
     f"{MARKER}\n"
+    "from hermes_cli.kanban_db_connect import (\n"
+    "    connect as _kanban_verified_claims_connect,\n"
+    ")\n"
     "from tools.kanban_verified_claims import (\n"
     "    apply_schema as _apply_verified_claims_schema,\n"
     "    apply_completion_rules as _apply_completion_rules,\n"

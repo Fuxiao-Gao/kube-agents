@@ -111,6 +111,25 @@ second = json.loads(kt._handle_complete({
 check("the retry closes the card", second.get("ok"), str(second))
 check("the dropped claim is not shown as verified", kvc.EVIDENCE_HEADING not in (card(pilot).result or ""), card(pilot).result)
 
+print("a claim relayed from a card this card created:")
+parent = new_card("Why does payments-api restart? Verify each claim.")
+child = new_card("Read payments-api's last termination on seeded-a")
+conn.execute(
+    "CREATE TABLE IF NOT EXISTS kanban_worker_children ("
+    " child_id TEXT PRIMARY KEY, creator_id TEXT NOT NULL, created_at INTEGER NOT NULL)"
+)
+conn.execute("INSERT INTO kanban_worker_children VALUES (?, ?, 0)", (child, parent))
+conn.commit()
+run_terminal(COMMAND, OUTPUT)
+out = json.loads(kt._handle_complete({"summary": "node-b", "result": "node-b is NotReady.", kvc.PARAM: [BACKED]}))
+check("the child card completes with its claim", out.get("ok"), str(out))
+os.environ["HERMES_KANBAN_TASK"] = parent
+os.environ["HERMES_KANBAN_RUN_ID"] = str(K.latest_run(conn, parent).id)
+check("the parent card ran no command itself", not kvc.card_terminal_calls(parent))
+out = json.loads(kt._handle_complete({"summary": "node-b", "result": "**node-b is NotReady.**", kvc.PARAM: [BACKED]}))
+check("the parent's relayed claim is accepted", out.get("ok"), str(out))
+check("the evidence names the child card", f"on card {child}" in (card(parent).result or ""), card(parent).result)
+
 if FAILURES:
     print(f"\nverify_kanban_verified_claims: {len(FAILURES)} check(s) FAILED")
     for f in FAILURES:

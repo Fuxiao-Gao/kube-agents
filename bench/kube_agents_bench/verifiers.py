@@ -2970,54 +2970,89 @@ class ReplyIsSilentVerifier(BaseVerifier):
 
 
 # ``verified_claims_backed``: one evidence block as ``kanban_complete`` renders
-# it (``deploy/docker/patches/kanban_verified_claims.py``): a fence whose first
-# line is ``$ <command>`` and whose other lines are the output excerpt.
-_EVIDENCE_BLOCK_RE = re.compile(r"```[^\n]*\n\$ ([^\n]+)\n(.*?)\n?```", re.S)
+# it (``deploy/docker/patches/kanban_verified_claims.py``): a fence holding
+# ``$ <command>``, which may span lines, then a fence holding the output
+# excerpt. The gate refuses a fence inside either, so the first closing fence
+# ends each. A lone ``$`` fence, such as a suggested fix, is not a block.
+_EVIDENCE_BLOCK_RE = re.compile(r"```[^\n]*\n\$ (.*?)\n```[ \t]*\n\s*```[^\n]*\n(.*?)\n?```", re.S)
 # The gate's own section heading, which says "verified" itself; taken out
 # before the reply is searched for the label.
 _EVIDENCE_HEADING = "**Evidence for verified claims**"
 _VERIFIED_LABEL_RE = re.compile(r"\bverified\b", re.I)
 # ``worker_trajectory.clip``'s marker on a result cut in the pod.
 _CLIPPED_RESULT_RE = re.compile(r" \.\.\.\[clipped \d+ chars\]$")
-_JSON_ESCAPES = (("\\n", "\n"), ("\\t", "\t"), ('\\"', '"'), ("\\\\", "\\"))
+# The head of a terminal result as the pod stores it: ``{"output": "``.
+_OUTPUT_HEAD_RE = re.compile(r'^\{\s*"output":\s*"')
+# The longest escape a cut can split (``\uXXXX``), trimmed one character at a
+# time until the head decodes.
+_MAX_SPLIT_ESCAPE = 6
+# ``AuditRedactor.EMAIL_PATTERN`` and its marker
+# (``agents/chat/defaults/plugins/common/redactor.py``): the pod masks an
+# address in the trajectory, and the gate's own redaction does not, so the
+# reply's copy is masked the same way before it is compared.
+_EMAIL_RE = re.compile(
+    r"[a-zA-Z0-9._%+\-]+@(?!(?:[a-zA-Z0-9\-]+\.)*gserviceaccount\.com(?!\.?[\w\-]))[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}"
+)
+_EMAIL_MARKER = "[REDACTED_EMAIL]"
 
 
-def _collapsed(text: str) -> str:
-    return " ".join(text.split())
+def _squeezed(text: str) -> str:
+    """``text`` with its addresses masked and every whitespace character removed.
 
-
-def _terminal_output(result: str) -> str:
-    """The ``output`` of a terminal result, which reaches the trajectory as its JSON text.
-
-    A result clipped in the pod no longer parses; its escapes are undone by
-    hand so its surviving head still reads as the output the worker saw.
+    Removed, not collapsed: the pod re-serialises a JSON output with ``", "``
+    and ``": "`` separators (``worker_trajectory.supplement``), so compact
+    JSON the worker saw and copied differs from the stored text only in spaces.
     """
-    try:
-        parsed = json.loads(result)
-    except ValueError:
-        for escaped, plain in _JSON_ESCAPES:
-            result = result.replace(escaped, plain)
-        return result
-    if isinstance(parsed, dict) and isinstance(parsed.get("output"), str):
-        return parsed["output"]
-    return result
+    return "".join(_EMAIL_RE.sub(_EMAIL_MARKER, text).split())
+
+
+def _terminal_output(result: str) -> tuple[str, bool]:
+    """The ``output`` of a terminal result as the trajectory stores it, and whether the pod clipped it.
+
+    The result is the JSON text of ``{"output": ..., "exit_code": ...}``. A
+    clipped one no longer parses; its surviving head is decoded as a JSON
+    string, less any escape the cut split.
+    """
+    clipped = _CLIPPED_RESULT_RE.search(result)
+    if not clipped:
+        try:
+            parsed = json.loads(result)
+        except ValueError:
+            return result, False
+        if isinstance(parsed, dict) and isinstance(parsed.get("output"), str):
+            return parsed["output"], False
+        return result, False
+    head = _OUTPUT_HEAD_RE.sub("", result[: clipped.start()])
+    for cut in range(_MAX_SPLIT_ESCAPE + 1):
+        try:
+            return json.loads('"' + head[: len(head) - cut] + '"'), True
+        except ValueError:
+            continue
+    return head, True
 
 
 @VERIFIERS.register("verified_claims_backed")
 class VerifiedClaimsBackedVerifier(BaseVerifier):
     """Every piece of evidence in the reply is a command a worker ran, with its real output.
 
-    Reads the ``final_message`` for evidence blocks: a fence whose first line
-    is ``$ <command>`` and whose remaining lines are an excerpt of its output,
-    the shape ``kanban_complete`` renders for ``verified_claims``. Each block's
-    command must equal (whitespace collapsed) a worker's tagged ``terminal``
-    call (:func:`_worker_terminal_calls`), and its excerpt must appear in that
-    call's output. A reply with fewer than ``min_blocks`` blocks fails, and
-    the reason says when it calls something verified with nothing behind it.
+    Reads the ``final_message`` for evidence blocks: a fence holding
+    ``$ <command>``, then a fence holding an excerpt of its output, the shape
+    ``kanban_complete`` renders for ``verified_claims``. Each block's command
+    must equal (whitespace removed) a worker's tagged ``terminal`` call
+    (:func:`_worker_terminal_calls`), on any card, and its excerpt must appear
+    in that call's output. A reply with fewer than ``min_blocks`` blocks fails,
+    and the reason says when it calls something verified with nothing behind
+    it.
 
-    An excerpt missing from an output the pod clipped is an error, not a
-    fail: the excerpt may sit in the part that was cut. So is a block whose
-    command is missing while ``worker_capture_gaps`` reports a gap.
+    Text is compared with addresses masked and all whitespace removed
+    (:func:`_squeezed`), the two ways the pod's copy of an output differs from
+    the one the worker saw. An excerpt missing from an output the pod clipped
+    (``worker_trajectory.MAX_RESULT_CHARS``) is not held against the reply: the
+    command is checked and the pass says the excerpt was not, since the gate
+    checked it against the full output. A block whose command is missing is an
+    error, not a fail, while ``worker_capture_gaps`` reports a gap or the pod
+    withheld the workers' arguments; so is any block when the trajectory holds
+    no worker terminal call at all.
     """
 
     type: Literal["verified_claims_backed"]
@@ -3039,29 +3074,42 @@ class VerifiedClaimsBackedVerifier(BaseVerifier):
         if len(blocks) < self.min_blocks:
             labelled = _VERIFIED_LABEL_RE.search(reply.replace(_EVIDENCE_HEADING, ""))
             what = "calls claims verified with" if labelled else "has"
-            return done("fail", f"the reply {what} {len(blocks)} evidence block(s) ($ command + output); "
-                        f"at least {self.min_blocks} required")
+            return done("fail", f"the reply {what} {len(blocks)} evidence block(s) (a $ command fence, then an "
+                        f"output fence); at least {self.min_blocks} required")
         calls = [(command, result) for _, _, command, result, _ in _worker_terminal_calls(snap.trajectory)]
+        withheld = any(
+            entry.get("agent") and entry.get("name") in _CODE_TOOLS and _args_withheld(entry)
+            for entry in snap.trajectory if isinstance(entry, dict)
+        )
+        if blocks and not calls and not (snap.worker_capture_gaps or withheld):
+            return done("error", f"the reply has {len(blocks)} evidence block(s), but the trajectory holds no "
+                        "worker terminal call to check them against")
         unknown: list[str] = []
+        unchecked: list[str] = []
         for command, excerpt in blocks:
-            runs = [_terminal_output(result) for ran, result in calls if _collapsed(ran) == _collapsed(command)]
-            needle = _collapsed(excerpt)
+            runs = [_terminal_output(result) for ran, result in calls if _squeezed(ran) == _squeezed(command)]
+            needle = _squeezed(excerpt)
             if not runs:
-                if snap.worker_capture_gaps:
-                    unknown.append(f"{command!r} is not in a trajectory with gaps: {'; '.join(snap.worker_capture_gaps)}")
+                if snap.worker_capture_gaps or withheld:
+                    why = "; ".join(snap.worker_capture_gaps or ["the pod withheld the workers' arguments"])
+                    unknown.append(f"{command!r} is not in a trajectory that is incomplete: {why}")
                     continue
                 return done("fail", f"evidence command {command!r} is not a command any worker ran")
             if not needle:
                 return done("fail", f"evidence for {command!r} carries no output")
-            if any(needle in _collapsed(output) for output in runs):
+            if any(needle in _squeezed(output) for output, _ in runs):
                 continue
-            if any(_CLIPPED_RESULT_RE.search(output) for output in runs):
-                unknown.append(f"the output of {command!r} was clipped before the excerpt could be found")
+            if any(clipped for _, clipped in runs):
+                unchecked.append(command)
                 continue
             return done("fail", f"evidence excerpt {excerpt[:_REPLY_QUOTE_CHARS]!r} is not in the output of {command!r}")
         if unknown:
             return done("error", "; ".join(unknown))
-        return done("pass", f"{len(blocks)} evidence block(s), each a worker's command with its real output")
+        note = (
+            f"; excerpt not checked, output clipped in the pod: {', '.join(repr(c) for c in unchecked)}"
+            if unchecked else ""
+        )
+        return done("pass", f"{len(blocks)} evidence block(s), each a worker's command with its real output{note}")
 
 
 def _agent_shell(script: str, timeout: float) -> str:

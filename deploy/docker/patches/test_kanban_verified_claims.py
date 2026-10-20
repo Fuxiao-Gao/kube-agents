@@ -4,8 +4,10 @@ Run: python3 -m unittest discover -s deploy/docker/patches -p 'test_*.py' -t dep
 """
 
 import copy
+import json
 import os
 import pathlib
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -79,7 +81,20 @@ class AcceptTest(GateTestCase):
         self.assertEqual(stored["exit_code"], 0)
         self.assertEqual(stored["ran_at"], "1970-01-01T00:00:00Z")
         self.assertTrue(result.startswith("**node-b is down.**\n\n" + kvc.EVIDENCE_HEADING))
-        self.assertIn(f"$ {NODES_CMD}\nnode-b    NotReady <none>\n```", result)
+        self.assertIn(f"```\n$ {NODES_CMD}\n```\n```\nnode-b    NotReady <none>\n```", result)
+
+    def test_a_multi_line_command_stays_in_its_own_fence(self):
+        command = "kubectl get nodes \\\n  -o wide --context prod"
+        record(command=command)
+        _, result, _ = run_rules(CARD, [dict(GOOD, command=command)], "r", None)
+        self.assertIn(f"```\n$ {command}\n```\n```\nnode-b    NotReady <none>\n```", result)
+
+    def test_a_metadata_key_the_model_wrote_is_removed(self):
+        forged = {"keep": 1, kvc.METADATA_KEY: [{"claim": "x", "command": "never ran", "excerpt": "y"}]}
+        self.assertEqual(run_rules(CARD, None, "r", forged), (None, "r", {"keep": 1}))
+        record()
+        _, _, metadata = run_rules(CARD, [GOOD], "r", forged)
+        self.assertEqual([c["command"] for c in metadata[kvc.METADATA_KEY]], [NODES_CMD])
 
     def test_whitespace_differences_do_not_matter(self):
         record()
@@ -136,6 +151,15 @@ class RefuseTest(GateTestCase):
     def test_an_overlong_excerpt_is_refused(self):
         record(output="x" * 2000)
         self.assertRefused(dict(GOOD, excerpt="x" * (kvc.MAX_EXCERPT_CHARS + 1)), "longer than")
+
+    def test_an_overlong_command_is_refused(self):
+        command = "echo " + "x" * kvc.MAX_COMMAND_CHARS
+        record(command=command, output="x")
+        self.assertRefused(dict(GOOD, command=command, excerpt="x"), "command is longer than")
+
+    def test_a_fence_in_the_excerpt_is_refused(self):
+        record(command="cat README.md", output="Run:\n```bash\nmake test\n```")
+        self.assertRefused({"claim": "c", "command": "cat README.md", "excerpt": "```bash\nmake test"}, "fence")
 
     def test_too_many_claims_are_refused(self):
         record()
@@ -213,6 +237,87 @@ class RulesTest(GateTestCase):
         record()
         kvc.card_terminal_calls(CARD).clear()
         self.assertEqual(len(kvc.card_terminal_calls(CARD)), 1)
+
+
+def board(links, runs):
+    """An in-memory board with the two tables the child lookup reads."""
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE kanban_worker_children (child_id TEXT PRIMARY KEY, creator_id TEXT NOT NULL, created_at INTEGER NOT NULL)")
+    conn.execute("CREATE TABLE task_runs (id INTEGER PRIMARY KEY, task_id TEXT, outcome TEXT, metadata TEXT)")
+    conn.executemany("INSERT INTO kanban_worker_children VALUES (?, ?, 0)", links)
+    conn.executemany(
+        "INSERT INTO task_runs (task_id, outcome, metadata) VALUES (?, ?, ?)",
+        [(card, outcome, json.dumps({kvc.METADATA_KEY: claims})) for card, outcome, claims in runs],
+    )
+    return conn
+
+
+# A Cluster Agent card's accepted claim, as the gate stored it.
+CHILD_CLAIM = dict(GOOD, exit_code=0, ran_at="2026-10-20T12:00:00Z")
+
+
+class ChildClaimsTest(GateTestCase):
+    def connect_to(self, links, runs):
+        conn = board(links, runs)
+        return lambda: _Unclosable(conn)
+
+    def test_a_claim_accepted_on_a_descendant_is_accepted(self):
+        # CARD created t_mid, which created t_cluster.
+        connect = self.connect_to([("t_mid", CARD), ("t_cluster", "t_mid")], [("t_cluster", "completed", [CHILD_CLAIM])])
+        claim = dict(GOOD, excerpt="NotReady")
+        err, result, metadata = run_rules(CARD, [claim], "r", None, connect=connect)
+        self.assertIsNone(err)
+        [stored] = metadata[kvc.METADATA_KEY]
+        self.assertEqual((stored["exit_code"], stored["ran_at"], stored["card"]), (0, "2026-10-20T12:00:00Z", "t_cluster"))
+        self.assertIn("on card t_cluster", result)
+
+    def test_a_claim_that_does_not_match_the_childs_is_refused(self):
+        connect = self.connect_to([("t_cluster", CARD)], [("t_cluster", "completed", [CHILD_CLAIM])])
+        err, _, _ = run_rules(CARD, [dict(GOOD, excerpt="node-a    NotReady")], "r", None, connect=connect)
+        self.assertIn("no card it created verified it", err)
+
+    def test_a_claim_from_a_card_that_is_not_a_descendant_is_refused(self):
+        # t_other was created by another card, and CARD is its sibling, not its creator.
+        connect = self.connect_to([("t_other", "t_parent"), (CARD, "t_parent")], [("t_other", "completed", [CHILD_CLAIM])])
+        err, _, _ = run_rules(CARD, [GOOD], "r", None, connect=connect)
+        self.assertIn("no card it created verified it", err)
+
+    def test_a_child_run_that_did_not_complete_does_not_count(self):
+        connect = self.connect_to([("t_cluster", CARD)], [("t_cluster", "crashed", [CHILD_CLAIM])])
+        err, _, _ = run_rules(CARD, [GOOD], "r", None, connect=connect)
+        self.assertIsNotNone(err)
+
+    def test_the_board_is_not_opened_when_the_own_record_backs_the_claim(self):
+        record()
+        err, _, _ = run_rules(CARD, [GOOD], "r", None, connect=lambda: self.fail("opened the board"))
+        self.assertIsNone(err)
+
+    def test_a_board_with_no_children_table_has_no_descendants(self):
+        self.assertEqual(kvc.descendant_card_ids(sqlite3.connect(":memory:"), CARD), [])
+
+    def test_a_cycle_in_the_table_terminates(self):
+        conn = board([("t_a", CARD), (CARD, "t_a")], [])
+        self.assertEqual(kvc.descendant_card_ids(conn, CARD), ["t_a"])
+
+    def test_a_failing_board_read_only_means_no_child_claims(self):
+        def broken():
+            raise sqlite3.OperationalError("database is locked")
+        with self.assertLogs(kvc.logger, "WARNING"):
+            err, _, _ = run_rules(CARD, [GOOD], "r", None, connect=broken)
+        self.assertIn("no card it created verified it", err)
+
+
+class _Unclosable:
+    """Hands out one in-memory connection more than once: close() is a no-op."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, *a):
+        return self._conn.execute(*a)
+
+    def close(self):
+        pass
 
 
 class SchemaTest(unittest.TestCase):

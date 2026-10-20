@@ -10,13 +10,17 @@
 # the evidence itself, not the wording around it.
 #
 # The objective is verified_claims_backed: the reply must carry at least one
-# evidence block (a fence whose first line is `$ <command>` and whose other
-# lines are that command's output), and every block must be a terminal
-# command a worker ran, with an excerpt that is in that call's output. So a
-# block the agent typed from memory, or an output it paraphrased, fails. The
-# check reads the shape kanban_complete renders for `verified_claims`, but it
-# does not need the gate: an agent that writes the same block by hand, from a
-# real call, passes.
+# evidence block (a fence holding `$ <command>`, then a fence holding that
+# command's output), and every block must be a terminal command a worker ran,
+# on any card, with an excerpt that is in that call's output. So a block the
+# agent typed from memory, or an output it rewrote, fails. The check reads the
+# shape kanban_complete renders for `verified_claims`, so it tests the gate's
+# path; a hand-written block in the same shape, from a real call, also passes,
+# and evidence in any other shape counts as none. The crashloop is often
+# debugged on a Cluster Agent card the platform card created, so the platform
+# card relays that card's claims, which the gate accepts as already checked.
+# An excerpt past the pod's 2000-character clip of a stored result cannot be
+# checked; the pass says so, and the gate checked it against the full output.
 #
 # The two report_contains objectives keep the answer honest about the
 # defect, so a reply that shows real evidence for an unrelated claim does not
