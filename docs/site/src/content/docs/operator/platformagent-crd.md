@@ -326,9 +326,12 @@ The operator delivers the three values through the agent's managed `.env` (see
 pod, and the agent cannot override a value from its own `.env`.
 
 The chart sets this block from `platformAgent.harness.stallWatch`. On an install made with
-`install.sh`, put the block in a `TF_VAR_extra_helm_values` line in `install.env`, which every later
-`install.sh` and `upgrade.sh` run reads; a `helm upgrade --set` value is dropped by the next
-`upgrade.sh`, and the watch then goes back to its defaults:
+`install.sh`, put the block in the `TF_VAR_extra_helm_values` line in `install.env`, which a
+full-mode `install.sh` or `upgrade.sh` run applies; a `helm upgrade --set` value is dropped by the
+next full-mode run, and the watch then goes back to its defaults. `install.env` holds one such
+line, so if it already has a `platformAgent` key, put `harness={stallWatch={...}}` inside that key
+([Operator settings](/kube-agents/install/quickstart-gke/#operator-settings) says how the line
+works):
 
 ```bash
 TF_VAR_extra_helm_values='{platformAgent={harness={stallWatch={excludeNamespaces=["load-test"],minStallAgeMinutes=30}}}}'

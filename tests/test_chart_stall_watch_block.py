@@ -85,6 +85,10 @@ class StallWatchBlockRenderTest(unittest.TestCase):
     def test_a_zero_minimum_age_is_a_value(self):
         self.assertEqual(self._block_of(self._render("-f", self._values_file({"minStallAgeMinutes": 0}))), {"minStallAgeMinutes": 0})
 
+    def test_a_kind_that_only_starts_like_a_refused_one_renders(self):
+        kinds = {"kinds": ["eventsources.argoproj.io", "secretstores.external-secrets.io", "leasesets"]}
+        self.assertEqual(self._block_of(self._render("-f", self._values_file(kinds))), kinds)
+
     def test_all_renders_as_the_one_kind(self):
         self.assertEqual(self._block_of(self._render("-f", self._values_file({"kinds": ["all"]}))), {"kinds": ["all"]})
 

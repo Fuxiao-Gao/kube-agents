@@ -2264,6 +2264,22 @@ class Knobs(Base):
         self.assertEqual(self.board.cards[tid]["status"], "done")
         self.assertIn("cleared at", self.board.cards[tid]["result"])
 
+    def test_a_lifted_exclusion_is_judged_on_a_cluster_without_an_optional_crd(self):
+        # cert-manager's Certificates are on the default list; a cluster that
+        # does not serve them skips them on every tick, and that skip holds
+        # no Deployment.
+        served = [n for n in SERVED_DEFAULT if "cert-manager" not in n]
+        fleet = {"c": {"checkout": [DEPLOYMENT_ROW]}}
+        self.run_tick(fleet, served=served)
+        tid = self.card_of("checkout")
+        self.board.cards[tid]["status"] = "running"
+        with patch.dict(os.environ, {stall_watch.EXCLUDE_NAMESPACES_ENV: "checkout"}):
+            self.run_tick(fleet, served=served)
+        self.board.cards[tid]["status"] = "ready"
+        self.run_tick({"c": {"checkout": []}}, served=served)
+        self.assertEqual(self.board.cards[tid]["status"], "done")
+        self.assertIn("cleared at", self.board.cards[tid]["result"])
+
     def test_a_cut_namespace_listing_leaves_the_cluster_unread(self):
         marker = stall_watch.NAMESPACE_LIST_MARKER
         cut_listings = {

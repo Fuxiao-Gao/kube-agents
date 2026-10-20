@@ -90,7 +90,7 @@ annotation ``kubeagents.x-k8s.io/stall-watch: exempt`` on a namespace leaves
 it unread, and on an object leaves that object's rows out of the alerts. An
 open alert that an exclusion or the annotation empties has its card closed
 with a note that says so, not one that says the stall cleared. A stall's age is the longer of what ``stall_report.py``
-measured on the object and how long the ledger has held the row; a younger
+measured on the object and how long ago the watch first saw the object stall; a younger
 stall stays in the ledger and is asked again on each tick, and an object that
 joins a namespace with an open alert is not held.
 
@@ -268,6 +268,7 @@ SWEEPABLE_CLUSTER_STATUSES = frozenset({"RUNNING", "RECONCILING"})
 # credential proxy's output cap. The closing marker shows the listing arrived
 # whole; the marker is not a valid namespace name.
 NAMESPACE_LIST_MARKER = "---"
+NAMESPACE_LIST_MARKERS = 2
 NAMESPACES_ARGV = (
     "kubectl",
     "get",
@@ -530,6 +531,7 @@ EXEMPT_OBJECTS_KEY = "exempt_objects"
 #: One `kubectl get <Kind/name> -n <namespace>` of an object's exempt
 #: annotation, for that re-check. A deleted object prints nothing.
 EXEMPT_READ_ARGV = ("kubectl", "get")
+NAMESPACE_FLAG = "-n"
 EXEMPT_READ_FLAGS = ("--ignore-not-found", "-o", "jsonpath={.metadata.annotations.kubeagents\\.x-k8s\\.io/stall-watch}")
 EXEMPT_READ_TIMEOUT_SECONDS = 30
 #: Plurals kubectl forms with -es or -ies, so a skipped `ingresses` holds
@@ -809,7 +811,7 @@ def list_namespaces(kubeconfig: str, excluded: frozenset[str]) -> tuple[list[str
     lines = r.stdout.splitlines()
     # A cut listing would read the namespaces past the cut as deleted and
     # close their cards as cleared.
-    if PROXY_TRUNCATED_TEXT in (r.stderr or "") or lines.count(NAMESPACE_LIST_MARKER) != 2 or lines[-1] != NAMESPACE_LIST_MARKER:
+    if PROXY_TRUNCATED_TEXT in (r.stderr or "") or lines.count(NAMESPACE_LIST_MARKER) != NAMESPACE_LIST_MARKERS or lines[-1] != NAMESPACE_LIST_MARKER:
         raise ReadFailed(f"kubectl get namespaces returned an incomplete listing: {stderr_excerpt(r.stderr)}", r.stderr)
     cut = lines.index(NAMESPACE_LIST_MARKER)
     exempt = set(lines[cut + 1 : -1])
@@ -1698,7 +1700,8 @@ def scope_rows(state: dict, scope: str) -> list[dict]:
 def row_age_seconds(entry: dict, now: str) -> float:
     """How long a ledgered row's stall has lasted: the longer of the age
     stall_report.py measured on the object and the time since the watch first
-    saw the row. A field that does not parse counts as no age."""
+    saw the object stall (`diff_and_update` carries that over to the object's
+    new rows). A field that does not parse counts as no age."""
     try:
         reported = float(entry.get("stalled_seconds") or 0)
     except (TypeError, ValueError):
@@ -1963,9 +1966,10 @@ def episode_lines(state: dict, sweep: Sweep, new_by_scope: dict, cleared_by_scop
         reason = episode.get(CLEAR_REASON_KEY)
         if reason and clear_reason_lapsed(sweep, scope, episode):
             # What stored the reason no longer holds: judge the close afresh,
-            # but not on a partial read, whose unread kinds can still hold
-            # the stall. The next tick asks again.
-            if scope in sweep.partial_scopes:
+            # but not on a read that skipped a kind the alert's objects are,
+            # or the events, which can still hold the stall. The next tick
+            # asks again.
+            if skipped_could_hold(sweep, scope, episode.get("objects") or []):
                 continue
             reason = None
         if not reason:
@@ -2056,10 +2060,24 @@ def clear_reason_lapsed(sweep: Sweep, scope: str, episode: dict) -> bool:
     return False
 
 
+def skipped_could_hold(sweep: Sweep, scope: str, objects: list[str]) -> bool:
+    """Whether this tick's scan of the scope skipped the events, or a kind one
+    of `objects` (`Kind/name`) is. A kind the cluster does not serve is
+    skipped on every tick and holds none of them."""
+    skipped = sweep.partial_scopes.get(scope, set())
+    if EVENTS_MARKER in skipped:
+        return True
+    kinds = {str(obj).split("/", 1)[0] for obj in objects}
+    return any(resource_names_kind(r, kind) for r in skipped for kind in kinds)
+
+
 def object_exempt(kubeconfig: str, namespace: str, obj: str) -> bool:
     """Whether an object still carries the exempt annotation. A deleted object
-    does not. A read that fails says nothing, so it keeps the reason."""
-    argv = [*EXEMPT_READ_ARGV, obj, "-n", namespace, *EXEMPT_READ_FLAGS]
+    does not. A read that fails says nothing, so it keeps the reason. The
+    object is named `Kind/name`, as stall_report.py names it, so where two API
+    groups serve the same kind kubectl may read the other one and the close
+    says "cleared" rather than "exempt"."""
+    argv = [*EXEMPT_READ_ARGV, obj, NAMESPACE_FLAG, namespace, *EXEMPT_READ_FLAGS]
     try:
         r = run_sandbox(argv, timeout=EXEMPT_READ_TIMEOUT_SECONDS, kubeconfig=kubeconfig)
     except READ_FAILURES:
