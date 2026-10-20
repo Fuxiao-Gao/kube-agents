@@ -4,9 +4,10 @@
 A fleet health question ("are my clusters all healthy?") used to become one
 kanban card per cluster: each card cold-starts a Cluster Agent that improvises
 with `kubectl`, and the board runs five user cards at a time, so a 209-cluster
-fleet queued for more than half an hour (#3302). Every signal those cards read
-has a fleet-wide source that costs a fixed number of calls per project, not
-per cluster:
+fleet queued for more than half an hour (#3302). This sweep reads the signals
+below from fleet-wide sources, at a fixed number of calls per project, not per
+cluster. A cluster with none of them is reported as "no finding on these
+checks", never as healthy: a live `kubectl` read can see more.
 
 - `gcloud container clusters list`, once per project: each cluster's and each
   node pool's `status`, `statusMessage` and `conditions`.
@@ -16,7 +17,10 @@ per cluster:
   repeatedly in the last hour and still exist
   (`kubernetes_io:container_restart_count`), and pods Pending for the whole
   window (kube-state-metrics `kube_pod_status_phase`, which GKE exports when
-  the cluster's `POD` metrics package is on).
+  the cluster's `POD` metrics package is on), and Deployments short of
+  available replicas for the whole window (`kube_deployment_spec_replicas`
+  less `kube_deployment_status_replicas_available`, the `DEPLOYMENT` package),
+  which catches pods that run but never become Ready.
 
 Each metric is read twice per project: once for the findings and once for
 which clusters report the metric at all, so a cluster with no series is
@@ -117,6 +121,7 @@ UNKNOWN_CONDITION_CODE = "UNKNOWN"
 # The cluster's monitoringConfig packages each metric needs.
 SYSTEM_METRICS_PACKAGE = "SYSTEM_COMPONENTS"
 POD_METRICS_PACKAGE = "POD"
+DEPLOYMENT_METRICS_PACKAGE = "DEPLOYMENT"
 
 CHECK_CLUSTER_STATUS = "cluster-not-running"
 CHECK_CLUSTER_CONDITION = "cluster-condition"
@@ -125,8 +130,16 @@ CHECK_POOL_CONDITION = "node-pool-condition"
 CHECK_NODE_NOT_READY = "node-not-ready"
 CHECK_RESTARTING = "container-restarting"
 CHECK_PENDING = "pod-pending"
+CHECK_DEPLOYMENT = "deployment-unavailable"
 CONTROL_PLANE_CHECKS = (CHECK_CLUSTER_STATUS, CHECK_CLUSTER_CONDITION, CHECK_POOL_STATUS, CHECK_POOL_CONDITION)
-METRIC_CHECKS = (CHECK_NODE_NOT_READY, CHECK_RESTARTING, CHECK_PENDING)
+METRIC_CHECKS = (CHECK_NODE_NOT_READY, CHECK_RESTARTING, CHECK_PENDING, CHECK_DEPLOYMENT)
+# The monitoringConfig package each metric check needs.
+CHECK_PACKAGES = {
+    CHECK_NODE_NOT_READY: SYSTEM_METRICS_PACKAGE,
+    CHECK_RESTARTING: SYSTEM_METRICS_PACKAGE,
+    CHECK_PENDING: POD_METRICS_PACKAGE,
+    CHECK_DEPLOYMENT: DEPLOYMENT_METRICS_PACKAGE,
+}
 SEVERITY_CRITICAL = "critical"
 SEVERITY_MAJOR = "major"
 SEVERITY_MINOR = "minor"
@@ -145,6 +158,7 @@ LABEL_CONDITION_STATUS = "status"
 LABEL_KSM_CLUSTER = "cluster"
 LABEL_KSM_NAMESPACE = "namespace"
 LABEL_KSM_POD = "pod"
+LABEL_KSM_DEPLOYMENT = "deployment"
 NOT_READY_FALLBACK_STATUS = "not True"
 
 # The metric reads. Restarts: at least RESTART_THRESHOLD in RESTART_WINDOW is a
@@ -155,12 +169,19 @@ NOT_READY_FALLBACK_STATUS = "not True"
 RESTART_THRESHOLD = 3
 RESTART_WINDOW = "1h"
 PENDING_WINDOW = "10m"
+# A Deployment short of available replicas over the whole window, read every
+# step: a rollout that recovers inside the window is not listed.
+DEPLOYMENT_WINDOW = "10m"
+DEPLOYMENT_STEP = "1m"
 PROMQL_URL = "https://monitoring.googleapis.com/v1/projects/{project}/location/global/prometheus/api/v1/query"
 MONITORING_SCOPE = "https://www.googleapis.com/auth/monitoring.read"
 MONITORING_TIMEOUT_S = 60
 CREDENTIAL_PROXY_URL_ENV = "CREDENTIAL_PROXY_URL"
 HTTP_OK = 200
 NO_MONITORING_SESSION = "no Cloud Monitoring session: {error}"
+# The line that names --output's file; the chat route reads the path from it.
+WROTE_MANIFEST = "wrote the manifest to {path}"
+PARTIAL_SUFFIX = ".partial"
 QUERY_OK_RC = 0
 QUERY_FAILED_RC = 1
 
@@ -191,12 +212,25 @@ PENDING_QUERY = (
     + ") (kube_pod_status_phase" + PENDING_SELECTOR + " offset " + PENDING_WINDOW + " == 1))"
 )
 PENDING_PRESENCE_QUERY = "count by (" + KSM_BY + ') (kube_pod_status_phase{{project_id="{project}"{exclude}}})'
+DEPLOYMENT_BY = ", ".join((KSM_BY, LABEL_KSM_NAMESPACE, LABEL_KSM_DEPLOYMENT))
+DEPLOYMENT_SELECTOR = '{{project_id="{project}"{exclude}}}'
+DEPLOYMENT_QUERY = (
+    "min_over_time((sum by (" + DEPLOYMENT_BY + ") (kube_deployment_spec_replicas" + DEPLOYMENT_SELECTOR
+    + ") - on (" + DEPLOYMENT_BY + ") sum by (" + DEPLOYMENT_BY + ") (kube_deployment_status_replicas_available"
+    + DEPLOYMENT_SELECTOR + "))[" + DEPLOYMENT_WINDOW + ":" + DEPLOYMENT_STEP + "]) > 0"
+)
+DEPLOYMENT_PRESENCE_QUERY = "count by (" + KSM_BY + ") (kube_deployment_spec_replicas" + DEPLOYMENT_SELECTOR + ")"
 # The excluded clusters' names, so their series never leave the broker.
 EXCLUDE_MATCHER = ',{label}!~"{names}"'
 # A GKE cluster name: nothing in it is special in a regex or a PromQL string,
 # so it goes into the matcher as written. Any other name is left out of the
 # matcher, and its series are dropped after the read.
 GKE_CLUSTER_NAME = re.compile(r"^[a-z0-9-]+$")
+# The longest name list one matcher carries. A query holds the matcher in up to
+# two selectors and goes on the URL, which the broker's relay caps at 8 KiB
+# encoded (API_RELAY_MAX_QUERY_BYTES); past this, the project's excluded series
+# are dropped after the read instead.
+MAX_EXCLUDE_MATCHER_CHARS = 1000
 
 # A cluster with hundreds of restarting pods would otherwise put them all in
 # the manifest; the answer names the first ones and counts the rest.
@@ -210,6 +244,7 @@ IMPACT = {
     CHECK_NODE_NOT_READY: "Pods on this node are not being scheduled or may be evicted.",
     CHECK_RESTARTING: "The container is crash-looping; its workload is degraded or down.",
     CHECK_PENDING: "The pod has not been scheduled or cannot start.",
+    CHECK_DEPLOYMENT: "The Deployment serves with fewer Ready replicas than it wants, or none.",
 }
 
 
@@ -432,7 +467,12 @@ def _exclude_matcher(project: str, listed: list[dict], label: str) -> str:
                     if proj == project and name not in included and GKE_CLUSTER_NAME.match(name)})
     if not names:
         return ""
-    return EXCLUDE_MATCHER.format(label=label, names="|".join(names))
+    joined = "|".join(names)
+    if len(joined) > MAX_EXCLUDE_MATCHER_CHARS:
+        log(f"{project}: {len(names)} excluded cluster names are too long for one query; "
+            "their series are read and dropped after the read")
+        return ""
+    return EXCLUDE_MATCHER.format(label=label, names=joined)
 
 
 def _count(row: dict) -> int:
@@ -457,6 +497,7 @@ def read_metrics(project: str, listed: list[dict], *, query: QueryFn, stop_at: f
         (CHECK_NODE_NOT_READY, NODE_QUERY, NODE_PRESENCE_QUERY, LABEL_SYSTEM_CLUSTER, system_exclude),
         (CHECK_RESTARTING, RESTART_QUERY, RESTART_PRESENCE_QUERY, LABEL_SYSTEM_CLUSTER, system_exclude),
         (CHECK_PENDING, PENDING_QUERY, PENDING_PRESENCE_QUERY, LABEL_KSM_CLUSTER, ksm_exclude),
+        (CHECK_DEPLOYMENT, DEPLOYMENT_QUERY, DEPLOYMENT_PRESENCE_QUERY, LABEL_KSM_CLUSTER, ksm_exclude),
     )
     present: dict[str, set] = {}
     hits: dict[str, dict] = {}
@@ -490,9 +531,13 @@ def read_metrics(project: str, listed: list[dict], *, query: QueryFn, stop_at: f
                     cand = _candidate(check, SEVERITY_MAJOR, f"Pod/{labels.get(LABEL_SYSTEM_POD, '')}",
                                       f"container {labels.get(LABEL_SYSTEM_CONTAINER, '')} restarted {restarts} times "
                                       f"in the last {RESTART_WINDOW}", labels.get(LABEL_SYSTEM_NAMESPACE, ""))
-                else:
+                elif check == CHECK_PENDING:
                     cand = _candidate(check, SEVERITY_MAJOR, f"Pod/{labels.get(LABEL_KSM_POD, '')}",
                                       f"phase Pending for at least {PENDING_WINDOW}", labels.get(LABEL_KSM_NAMESPACE, ""))
+                else:
+                    cand = _candidate(check, SEVERITY_MAJOR, f"Deployment/{labels.get(LABEL_KSM_DEPLOYMENT, '')}",
+                                      f"{_count(row)} replica(s) short of available for at least {DEPLOYMENT_WINDOW}",
+                                      labels.get(LABEL_KSM_NAMESPACE, ""))
                 hits.setdefault(check, {}).setdefault(key, []).append(cand)
     return {"present": present, "hits": hits, "errors": errors, "records": records}
 
@@ -511,7 +556,7 @@ def cluster_entry(project: str, cluster: dict, record: dict | None, metrics: dic
     truncated = []
     packages = _packages(cluster)
     for check in METRIC_CHECKS:
-        needed = POD_METRICS_PACKAGE if check == CHECK_PENDING else SYSTEM_METRICS_PACKAGE
+        needed = CHECK_PACKAGES[check]
         if check in metrics["errors"]:
             error = metrics["errors"][check]
             reason = error if error == BUDGET_REASON else f"metric read failed: {error}"
@@ -668,11 +713,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--project", help="one project to read (on an install with a declared scope, one the "
                         "fleet_scope tool lists); omit to sweep --scope-projects, else every project gcloud lists")
+    parser.add_argument("--output", help="write the manifest to this file, whole, when the run ends, and print "
+                        "its path; without it the manifest goes to stdout")
     fleet_scope_args.add_scope_arguments(parser)
     args = parser.parse_args(argv)
     declared_scope.set(args.scope_projects, args.scope_unread, args.scope_exclude_clusters)
     manifest = collect_fleet(args.project)
-    print(json.dumps(manifest, indent=2))
+    if args.output:
+        partial = f"{args.output}{PARTIAL_SUFFIX}"
+        with open(partial, "w", encoding="utf-8") as fh:
+            json.dump(manifest, fh, indent=2)
+        os.replace(partial, args.output)
+        log(WROTE_MANIFEST.format(path=args.output))
+    else:
+        print(json.dumps(manifest, indent=2))
     if manifest.get("error"):
         log(f"WARNING: {manifest['error']}")
         return 1

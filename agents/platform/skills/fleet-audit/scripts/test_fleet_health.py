@@ -24,7 +24,7 @@ def run_of(rc, stdout="", stderr=""):
     return fh.Run(["x"], rc, stdout, stderr, 0.01)
 
 
-def cluster(name, location="us-central1", status="RUNNING", pools=None, packages=("SYSTEM_COMPONENTS", "POD"), **extra):
+def cluster(name, location="us-central1", status="RUNNING", pools=None, packages=("SYSTEM_COMPONENTS", "POD", "DEPLOYMENT"), **extra):
     doc = {
         "name": name,
         "location": location,
@@ -70,13 +70,13 @@ def querier(hits=None, present=None, errors=None):
 
     def query(project, promql):
         calls.append((project, promql))
-        for metric in ("node_status_condition", "container_restart_count", "kube_pod_status_phase"):
+        for metric in ("node_status_condition", "container_restart_count", "kube_pod_status_phase", "kube_deployment"):
             if metric in promql:
                 break
         if metric in errors:
             return [], errors[metric]
-        if not any(cmp in promql for cmp in ("== 1", ">=")):
-            ksm = metric == "kube_pod_status_phase"
+        if not any(cmp in promql for cmp in ("== 1", ">=", "> 0")):
+            ksm = metric in ("kube_pod_status_phase", "kube_deployment")
             return [series(c, loc, ksm=ksm) for c, loc in (present or {}).get(metric, [])], None
         return hits.get(metric, []), None
 
@@ -88,6 +88,7 @@ ALL_PRESENT = {
     "node_status_condition": [("a", "us-central1")],
     "container_restart_count": [("a", "us-central1")],
     "kube_pod_status_phase": [("a", "us-central1")],
+    "kube_deployment": [("a", "us-central1")],
 }
 
 
@@ -163,7 +164,7 @@ class MetricsTest(unittest.TestCase):
     def test_every_query_is_pinned_to_its_project(self):
         query = querier(present=ALL_PRESENT)
         self.entry(query)
-        self.assertEqual(len(query.calls), 6)
+        self.assertEqual(len(query.calls), 8)
         for project, promql in query.calls:
             self.assertEqual(project, "acme")
             self.assertIn('project_id="acme"', promql)
@@ -176,6 +177,16 @@ class MetricsTest(unittest.TestCase):
         self.assertIn(") and on (location, cluster_name, namespace_name, pod_name, container_name)", text)
         for _, promql in query.calls:
             self.assertEqual(promql.count("{"), promql.count("}"))
+
+    def test_a_deployment_short_of_ready_replicas_is_a_finding(self):
+        query = querier(present=ALL_PRESENT, hits={
+            "kube_deployment": [series("a", ksm=True, value="2", namespace="shop", deployment="checkout")]})
+        entry = self.entry(query)
+        self.assertEqual(checks(entry), [("deployment-unavailable", "major", "Deployment/checkout")])
+        self.assertEqual(entry["candidates"][0]["namespace"], "shop")
+        self.assertEqual(entry["candidates"][0]["excerpt"], "2 replica(s) short of available for at least 10m")
+        promql = fh.DEPLOYMENT_QUERY.format(project="acme", exclude="")
+        self.assertIn("[10m:1m]) > 0", promql)
 
     def test_the_pending_join_names_the_pod_labels(self):
         promql = fh.PENDING_QUERY.format(project="acme", exclude="")
@@ -191,19 +202,19 @@ class MetricsTest(unittest.TestCase):
 
     def test_the_metric_reads_are_recorded_once_per_project(self):
         manifest = fh.collect_fleet(run=lister({"acme": [cluster("a"), cluster("b")]}), query=querier(present=ALL_PRESENT))
-        self.assertEqual(len(manifest["project_reads"]["acme"]), 6)
+        self.assertEqual(len(manifest["project_reads"]["acme"]), 8)
         for entry in manifest["clusters"]:
             self.assertEqual([c["check"] for c in entry["commands"]], [",".join(fh.CONTROL_PLANE_CHECKS)])
 
     def test_a_cluster_with_no_series_is_unevaluated_not_healthy(self):
         entry = self.entry(querier(present={"node_status_condition": [("a", "us-central1")]}))
         reasons = {u["check"]: u["reason"] for u in entry["checks_unevaluated"]}
-        self.assertEqual(set(reasons), {"container-restarting", "pod-pending"})
+        self.assertEqual(set(reasons), {"container-restarting", "pod-pending", "deployment-unavailable"})
         self.assertIn("no series", reasons["container-restarting"])
 
     def test_a_metrics_package_that_is_off_is_named(self):
         entry = self.entry(querier(present=ALL_PRESENT | {"kube_pod_status_phase": []}),
-                           cluster("a", packages=("SYSTEM_COMPONENTS",)))
+                           cluster("a", packages=("SYSTEM_COMPONENTS", "DEPLOYMENT")))
         self.assertEqual(entry["checks_unevaluated"],
                          [{"check": "pod-pending", "reason": "the cluster's POD metrics package is off"}])
 
@@ -299,6 +310,16 @@ class FleetTest(unittest.TestCase):
         for _, promql in query.calls:
             self.assertRegex(promql, r'cluster(_name)?!~"secret-ops"')
 
+    def test_a_matcher_too_long_for_the_relay_falls_back_to_the_post_read_drop(self):
+        names = [f"excluded-cluster-with-a-long-name-{i:03d}" for i in range(40)]
+        fh.declared_scope.set("acme", None, ",".join(f"acme/us-central1/{n}" for n in names))
+        query = querier(present=ALL_PRESENT)
+        with contextlib.redirect_stderr(io.StringIO()):
+            fh.collect_fleet(run=lister({"acme": [cluster("a")] + [cluster(n) for n in names]}), query=query)
+        self.assertNotIn("!~", " ".join(q for _, q in query.calls))
+        for _, promql in query.calls:
+            self.assertLess(len(promql), fh.MAX_EXCLUDE_MATCHER_CHARS * 2)
+
     def test_an_excluded_name_an_included_cluster_shares_is_not_matched_out(self):
         fh.declared_scope.set("acme", None, "acme/europe-west1/a")
         query = querier(present=ALL_PRESENT)
@@ -364,15 +385,17 @@ class FleetTest(unittest.TestCase):
 
     def test_the_summary_names_every_unevaluated_check(self):
         query = querier(present={"node_status_condition": [("a", "us-central1")],
-                                 "container_restart_count": [("a", "us-central1")]})
+                                 "container_restart_count": [("a", "us-central1")],
+                                 "kube_deployment": [("a", "us-central1")]})
         manifest = fh.collect_fleet(run=lister({"acme": [cluster("a")]}), query=query)
         self.assertEqual(fh.summary_lines(manifest)[1],
                          "not evaluated, so not healthy either -- name each in the answer: pod-pending on 1 "
                          "cluster(s) (acme/us-central1/a): the cluster (status RUNNING) reported no series for this metric")
 
     def test_the_summary_groups_one_reason_across_many_clusters(self):
-        clusters = [cluster(f"c{i}", packages=("SYSTEM_COMPONENTS",)) for i in range(7)]
-        present = {m: [(f"c{i}", "us-central1") for i in range(7)] for m in ("node_status_condition", "container_restart_count")}
+        clusters = [cluster(f"c{i}", packages=("SYSTEM_COMPONENTS", "DEPLOYMENT")) for i in range(7)]
+        present = {m: [(f"c{i}", "us-central1") for i in range(7)]
+                   for m in ("node_status_condition", "container_restart_count", "kube_deployment")}
         manifest = fh.collect_fleet(run=lister({"acme": clusters}), query=querier(present=present))
         line = fh.summary_lines(manifest)[1]
         self.assertIn("pod-pending on 7 cluster(s)", line)
@@ -421,6 +444,20 @@ class MainTest(unittest.TestCase):
             fh.main(["--help"])
         for flag in ("--scope-projects", "--scope-unread", "--scope-exclude-clusters", "--project"):
             self.assertIn(flag, out.getvalue())
+
+    def test_output_writes_the_file_whole_and_prints_its_path(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "m.json")
+            err, out = io.StringIO(), io.StringIO()
+            with mock.patch.object(fh, "collect_fleet", return_value={"clusters": []}), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                self.assertEqual(fh.main(["--output", path]), 0)
+            self.assertEqual(json.load(open(path)), {"clusters": []})
+            self.assertEqual(out.getvalue(), "")
+            self.assertIn(f"wrote the manifest to {path}", err.getvalue())
+            self.assertFalse(os.path.exists(path + ".partial"))
+        fh.declared_scope.set(None, None)
 
     def test_main_passes_the_scope_flags_to_the_declared_scope(self):
         with mock.patch.object(fh, "collect_fleet", return_value={"clusters": []}) as collect, \

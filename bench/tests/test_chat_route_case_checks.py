@@ -153,6 +153,7 @@ NOT_LEDGER_RUNS = [
 
 LEDGER_CHECKS = ("no-ledger-run-was-opened", "nothing-was-published")
 UPGRADE = "upgrade-chat-request-runs-collector"
+HEALTH = "health-chat-request-runs-collector"
 SCRATCH_CHECK = "the-collector-used-the-chat-scratch-dir"
 PATCH = f"{SKILLS}/fleet-audit/scripts/patch_readiness.py"
 NETWORKING = "networking-chat-request-runs-collector"
@@ -187,6 +188,8 @@ def _run(case: str) -> str:
 def _soul_command(case: str) -> str:
     """SOUL.md's chat command for the case's row, with fleet_scope's args."""
     stream = CASES[case][3]
+    if case == HEALTH:
+        return f"python3 {SKILLS}/{_run(case)} {SCOPE} --output /opt/data/scratch/chat_manifest_{stream}_$(date +%s)_$$.json"
     prefix = f"{CHAT_DIR} " if case == UPGRADE else ""
     return f"{prefix}python3 {SKILLS}/{_run(case)} {SCOPE} > /opt/data/scratch/chat_manifest_{stream}.json"
 

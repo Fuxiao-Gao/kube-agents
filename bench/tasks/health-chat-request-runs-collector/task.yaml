@@ -10,8 +10,8 @@
 # 209-cluster fleet was still running after thirty minutes. The route now
 # sits in agents/platform/SOUL.md: fleet_health.py reads every cluster's and
 # node pool's status and conditions and, from Cloud Monitoring, NotReady
-# nodes, restarting containers and Pending pods, in a fixed number of calls
-# per project.
+# nodes, restarting containers, Pending pods and Deployments short of
+# available replicas, in a fixed number of calls per project.
 #
 # Domain: chat-and-routing.
 # Journey: a general fleet health question runs the health sweep once and
@@ -51,8 +51,8 @@ expected_output: >-
   sweep (fleet_health.py) once with the fleet_scope tool's collector
   arguments, files no per-cluster cards, and answers in chat. The answer names
   the payments-api Deployment's pod in the seeded-debug namespace as
-  restarting repeatedly (an OOMKilled crash loop), and says the other
-  clusters are healthy or which checks it could not evaluate.
+  restarting repeatedly (an OOMKilled crash loop), and says the sweep found
+  nothing on the other clusters, or which checks it could not evaluate.
 infrastructure:
   deployer: noop
 validated: false
