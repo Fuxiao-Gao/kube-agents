@@ -68,7 +68,7 @@ NEW_COMPLETE_METADATA = (
     f"    {MARKER}\n"
     "    _rules_err, result, metadata = _apply_completion_rules(\n"
     "        tid, args, result, metadata, redact=_redact,\n"
-    "        connect=_kanban_verified_claims_connect)\n"
+    '        connect=lambda: _kanban_verified_claims_connect(board=args.get("board")))\n'
     "    if _rules_err:\n"
     "        return tool_error(_rules_err)\n"
     "    _require_dict_metadata(metadata)\n"

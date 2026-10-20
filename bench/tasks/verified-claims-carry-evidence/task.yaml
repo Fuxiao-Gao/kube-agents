@@ -19,8 +19,9 @@
 # and evidence in any other shape counts as none. The crashloop is often
 # debugged on a Cluster Agent card the platform card created, so the platform
 # card relays that card's claims, which the gate accepts as already checked.
-# An excerpt past the pod's 2000-character clip of a stored result cannot be
-# checked; the pass says so, and the gate checked it against the full output.
+# An excerpt past the pod's 2000-character clip of a stored result, or in an
+# output the pod redacted, cannot be checked; the pass says so, and the gate
+# checked it against the output the worker saw.
 #
 # The two report_contains objectives keep the answer honest about the
 # defect, so a reply that shows real evidence for an unrelated claim does not

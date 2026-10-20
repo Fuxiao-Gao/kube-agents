@@ -271,6 +271,17 @@ class ChildClaimsTest(GateTestCase):
         self.assertEqual((stored["exit_code"], stored["ran_at"], stored["card"]), (0, "2026-10-20T12:00:00Z", "t_cluster"))
         self.assertIn("on card t_cluster", result)
 
+    def test_a_relayed_claim_keeps_the_card_that_ran_the_command(self):
+        # t_mid relayed t_cluster's claim; its run row comes first in the table.
+        relayed = dict(CHILD_CLAIM, card="t_cluster")
+        connect = self.connect_to(
+            [("t_mid", CARD), ("t_cluster", "t_mid")],
+            [("t_mid", "completed", [relayed]), ("t_cluster", "completed", [CHILD_CLAIM])],
+        )
+        _, result, metadata = run_rules(CARD, [GOOD], "r", None, connect=connect)
+        self.assertEqual(metadata[kvc.METADATA_KEY][0]["card"], "t_cluster")
+        self.assertNotIn("on card t_mid", result)
+
     def test_a_claim_that_does_not_match_the_childs_is_refused(self):
         connect = self.connect_to([("t_cluster", CARD)], [("t_cluster", "completed", [CHILD_CLAIM])])
         err, _, _ = run_rules(CARD, [dict(GOOD, excerpt="node-a    NotReady")], "r", None, connect=connect)

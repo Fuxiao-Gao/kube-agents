@@ -2972,9 +2972,12 @@ class ReplyIsSilentVerifier(BaseVerifier):
 # ``verified_claims_backed``: one evidence block as ``kanban_complete`` renders
 # it (``deploy/docker/patches/kanban_verified_claims.py``): a fence holding
 # ``$ <command>``, which may span lines, then a fence holding the output
-# excerpt. The gate refuses a fence inside either, so the first closing fence
-# ends each. A lone ``$`` fence, such as a suggested fix, is not a block.
-_EVIDENCE_BLOCK_RE = re.compile(r"```[^\n]*\n\$ (.*?)\n```[ \t]*\n\s*```[^\n]*\n(.*?)\n?```", re.S)
+# excerpt. The gate refuses a fence inside either, so neither group may cross
+# one: a lone ``$`` fence, such as a suggested fix before the section, is not
+# a block and cannot swallow the block after it.
+_EVIDENCE_BLOCK_RE = re.compile(
+    r"```[^\n]*\n\$ ((?:(?!```).)*?)\n```[ \t]*\n\s*```[^\n]*\n((?:(?!```).)*?)\n?```", re.S
+)
 # The gate's own section heading, which says "verified" itself; taken out
 # before the reply is searched for the label.
 _EVIDENCE_HEADING = "**Evidence for verified claims**"
@@ -2994,16 +2997,39 @@ _EMAIL_RE = re.compile(
     r"[a-zA-Z0-9._%+\-]+@(?!(?:[a-zA-Z0-9\-]+\.)*gserviceaccount\.com(?!\.?[\w\-]))[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}"
 )
 _EMAIL_MARKER = "[REDACTED_EMAIL]"
+# What every marker the pod writes starts with (``[REDACTED_SECRET]``,
+# ``[REDACTED_EMAIL]``, ...): a span of the worker's text the stored copy no
+# longer holds.
+_REDACTED_PREFIX = "[REDACTED"
+_REDACTED_SPAN_RE = re.compile(r"\\\[REDACTED_[A-Z_]*\\\]")
+# A ``\uXXXX`` escape. The pod re-serialises a JSON output with
+# ``json.dumps``, which escapes every non-ASCII character, and kubectl escapes
+# ``&``, ``<`` and ``>`` the same way, so both copies are compared unescaped.
+_UNICODE_ESCAPE_RE = re.compile(r"\\u([0-9a-fA-F]{4})")
 
 
 def _squeezed(text: str) -> str:
-    """``text`` with its addresses masked and every whitespace character removed.
+    """``text`` with ``\\uXXXX`` escapes undone, addresses masked and every whitespace character removed.
 
     Removed, not collapsed: the pod re-serialises a JSON output with ``", "``
     and ``": "`` separators (``worker_trajectory.supplement``), so compact
-    JSON the worker saw and copied differs from the stored text only in spaces.
+    JSON the worker saw and copied differs from the stored text in spaces and
+    escapes.
     """
+    text = _UNICODE_ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)), text)
+    text = text.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
     return "".join(_EMAIL_RE.sub(_EMAIL_MARKER, text).split())
+
+
+def _same_command(stored: str, cited: str) -> bool:
+    """Whether the reply's ``cited`` command is the stored one, a redacted span matching anything."""
+    stored, cited = _squeezed(stored), _squeezed(cited)
+    if stored == cited:
+        return True
+    if _REDACTED_PREFIX not in stored:
+        return False
+    pattern = _REDACTED_SPAN_RE.sub(".*?", re.escape(stored))
+    return re.fullmatch(pattern, cited, re.S) is not None
 
 
 def _terminal_output(result: str) -> tuple[str, bool]:
@@ -3044,12 +3070,13 @@ class VerifiedClaimsBackedVerifier(BaseVerifier):
     and the reason says when it calls something verified with nothing behind
     it.
 
-    Text is compared with addresses masked and all whitespace removed
-    (:func:`_squeezed`), the two ways the pod's copy of an output differs from
-    the one the worker saw. An excerpt missing from an output the pod clipped
-    (``worker_trajectory.MAX_RESULT_CHARS``) is not held against the reply: the
-    command is checked and the pass says the excerpt was not, since the gate
-    checked it against the full output. A block whose command is missing is an
+    Text is compared with ``\\uXXXX`` escapes undone, addresses masked and
+    all whitespace removed (:func:`_squeezed`), and a redacted span of a
+    stored command matches anything (:func:`_same_command`). An excerpt missing
+    from an output the pod clipped (``worker_trajectory.MAX_RESULT_CHARS``) or
+    redacted is not held against the reply: the command is checked and the
+    pass says the excerpt was not, since the gate checked it against the
+    output the worker saw. A block whose command is missing is an
     error, not a fail, while ``worker_capture_gaps`` reports a gap or the pod
     withheld the workers' arguments; so is any block when the trajectory holds
     no worker terminal call at all.
@@ -3087,7 +3114,7 @@ class VerifiedClaimsBackedVerifier(BaseVerifier):
         unknown: list[str] = []
         unchecked: list[str] = []
         for command, excerpt in blocks:
-            runs = [_terminal_output(result) for ran, result in calls if _squeezed(ran) == _squeezed(command)]
+            runs = [_terminal_output(result) for ran, result in calls if _same_command(ran, command)]
             needle = _squeezed(excerpt)
             if not runs:
                 if snap.worker_capture_gaps or withheld:
@@ -3099,14 +3126,14 @@ class VerifiedClaimsBackedVerifier(BaseVerifier):
                 return done("fail", f"evidence for {command!r} carries no output")
             if any(needle in _squeezed(output) for output, _ in runs):
                 continue
-            if any(clipped for _, clipped in runs):
+            if any(clipped or _REDACTED_PREFIX in output for output, clipped in runs):
                 unchecked.append(command)
                 continue
             return done("fail", f"evidence excerpt {excerpt[:_REPLY_QUOTE_CHARS]!r} is not in the output of {command!r}")
         if unknown:
             return done("error", "; ".join(unknown))
         note = (
-            f"; excerpt not checked, output clipped in the pod: {', '.join(repr(c) for c in unchecked)}"
+            f"; excerpt not checked, output clipped or redacted in the pod: {', '.join(repr(c) for c in unchecked)}"
             if unchecked else ""
         )
         return done("pass", f"{len(blocks)} evidence block(s), each a worker's command with its real output{note}")

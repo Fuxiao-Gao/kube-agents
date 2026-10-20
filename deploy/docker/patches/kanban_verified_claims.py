@@ -56,7 +56,10 @@ count.
 The gate copies ``exit_code`` and ``ran_at`` from the recorded call, or from
 the child card's accepted claim; the model does not supply them. Accepted
 claims are stored in ``metadata.verified_claims``, which the gate always
-rewrites, so the model cannot put unchecked claims there. They are also
+rewrites, so a ``kanban_complete`` call cannot put unchecked claims there.
+Other writers of a completed run's metadata (``hermes kanban edit`` or
+``complete --metadata``, the dashboard) bypass the gate, and a parent reads
+what they wrote as accepted. They are also
 rendered as an evidence section at the end of ``result``, the text the notifier
 posts to chat. The notifier keeps the head of ``result`` and clips it at
 ``kanban_notifier.RESULT_LIMIT``: a body near that limit pushes the section out
@@ -74,8 +77,9 @@ a dropped claim is never shown as verified.
 Limits
 ------
 - The record is per process. A caller with no ``HERMES_KANBAN_TASK`` (the
-  gateway completing a child card) has no record, so its claims are refused
-  once and then dropped.
+  gateway completing a card) has no record of its own: only claims that match
+  one the gate accepted on a descendant pass, and the rest are refused once
+  and then dropped.
 - The record holds the output the model saw: after the head-and-tail cut. An
   excerpt read later from a spill file is not in it.
 - Background processes are not recorded.
@@ -253,7 +257,8 @@ def descendant_verified_claims(conn, task_id: object) -> list[dict]:
             continue
         for claim in stored if isinstance(stored, list) else []:
             if isinstance(claim, dict) and all(isinstance(claim.get(f), str) for f in ("command", "excerpt")):
-                claims.append({**claim, "card": str(card)})
+                # A claim this descendant relayed keeps the card that ran the command.
+                claims.append({**claim, "card": claim.get("card") or str(card)})
     return claims
 
 

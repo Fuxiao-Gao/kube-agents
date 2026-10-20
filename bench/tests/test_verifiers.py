@@ -9768,3 +9768,37 @@ def test_verified_claims_backed_reads_what_the_gate_renders():
     reply = "**payments-api is OOMKilled.**\n\n" + gate.render_evidence([claim])
     res = _grade_claims(reply, [_terminal(command, result=out, task="t_2")])
     assert res.status == "pass", res
+
+
+def test_verified_claims_backed_a_lone_command_fence_before_the_section_is_not_evidence():
+    # The gate appends the section at the end, so a suggested fix in the body comes first.
+    fix = "To fix it:\n\n```\n$ kubectl set resources deployment payments-api --limits=memory=256Mi\n```\n\nThen watch it.\n\n"
+    res = _grade_claims(fix + _EVIDENCE, [_terminal(_PODS_CMD, result=_PODS_OUT)])
+    assert res.status == "pass", res
+
+
+def test_verified_claims_backed_a_redacted_output_checks_only_the_command():
+    out = json.dumps({"output": "data:\n  JAVA_OPTS: [REDACTED_SECRET]", "exit_code": 0})
+    res = _grade_claims(_block("kubectl get cm api-config -o yaml", "JAVA_OPTS: -Xmx512m"),
+                        [_terminal("kubectl get cm api-config -o yaml", result=out)])
+    assert res.status == "pass" and "clipped or redacted" in res.reason, res
+
+
+def test_verified_claims_backed_a_redacted_span_of_a_command_matches():
+    out = json.dumps({"output": "NAME  READY\nweb-1  1/1", "exit_code": 0})
+    stored = _terminal("kubectl get pods --token=[REDACTED_SECRET] -n web", result=out)
+    res = _grade_claims(_block("kubectl get pods --token=abc123 -n web", "web-1  1/1"), [stored])
+    assert res.status == "pass", res
+    res = _grade_claims(_block("kubectl get pods --token=abc123 -n other", "web-1  1/1"), [stored])
+    assert res.status == "fail" and "not a command any worker ran" in res.reason
+
+
+def test_verified_claims_backed_reads_escaped_characters_as_the_worker_saw_them():
+    # The pod re-serialises JSON output with ensure_ascii; kubectl escapes & as &.
+    raw = {"message": "out of memory — killed", "command": "a && b"}
+    out = json.dumps({"output": json.dumps(raw), "exit_code": 0})
+    cmd = "kubectl get pod p -o json"
+    res = _grade_claims(_block(cmd, '"message":"out of memory — killed"'), [_terminal(cmd, result=out)])
+    assert res.status == "pass", res
+    res = _grade_claims(_block(cmd, '"command":"a \\u0026\\u0026 b"'), [_terminal(cmd, result=out)])
+    assert res.status == "pass", res
