@@ -59,6 +59,16 @@ MAX_WORKERS = 4
 # chat route's 600 s terminal timeout. fleet_waste.py's PROJECT_READ_DEADLINE_S
 # has the reasoning.
 PROJECT_READ_DEADLINE_S = 420
+# `gcloud projects list`'s own timeout: under DEFAULT_TIMEOUT_S a credential that
+# sees hundreds of projects is killed mid-listing and the sweep falls back to the
+# active project alone. fleet_waste.py's PROJECTS_LIST_TIMEOUT_S has the reasoning.
+PROJECTS_LIST_TIMEOUT_S = 240
+# The whole run's budget, under the chat route's 600 s terminal timeout. A read
+# is never started past it: a metric read left for later is unevaluated, and a
+# `clusters list` gets only the time that remains, so the manifest prints
+# before the terminal kills the run. The margin is one Monitoring read.
+RUN_BUDGET_S = 500
+BUDGET_REASON = "not read: the sweep's time budget ran out before this read"
 PROJECT_DEADLINE_ERROR = (
     "not read: the sweep stops starting project reads {budget} s after it starts, so it can "
     "end inside its terminal timeout, and this project's turn came after that. Rerun with "
@@ -302,7 +312,7 @@ def discover_fleet(base_project: str | None, *, run: RunFn) -> Discovery:
     active = run(["gcloud", "config", "get-value", "project"])
     base = active.stdout.strip() if active.rc == 0 else ""
     projects = [base] if base else []
-    listed = run(["gcloud", "projects", "list", "--format", "value(projectId)"])
+    listed = run(["gcloud", "projects", "list", "--format", "value(projectId)"], timeout=PROJECTS_LIST_TIMEOUT_S)
     if listed.rc != 0:
         if not projects:
             return Discovery([], f"project discovery failed: `gcloud projects list` rc={listed.rc}: "
@@ -319,11 +329,17 @@ def discover_fleet(base_project: str | None, *, run: RunFn) -> Discovery:
     return Discovery(projects, None)
 
 
-def list_clusters(project: str, *, run: RunFn) -> tuple[list[dict], dict | None, str | None]:
-    """One `clusters list`. Returns `(clusters, command_record, error)`; a
-    disabled Kubernetes Engine API is zero clusters and no error."""
+def _remaining(stop_at: float | None) -> float | None:
+    return None if stop_at is None else stop_at - time.monotonic()
+
+
+def list_clusters(project: str, *, run: RunFn, stop_at: float | None = None) -> tuple[list[dict], dict | None, str | None]:
+    """One `clusters list`, given no more than the run's remaining budget.
+    Returns `(clusters, command_record, error)`; a disabled Kubernetes Engine
+    API is zero clusters and no error."""
     argv = ["gcloud", "container", "clusters", "list", "--project", project, "--format", "json"]
-    result = run(argv)
+    left = _remaining(stop_at)
+    result = run(argv) if left is None else run(argv, timeout=max(1, min(DEFAULT_TIMEOUT_S, int(left))))
     parsed = None
     if result.rc == 0 and result.stdout.strip():
         try:
@@ -419,7 +435,7 @@ def _value(row: dict) -> str:
     return str(value[1]) if len(value) > 1 else ""
 
 
-def read_metrics(project: str, listed: list[dict], *, query: QueryFn) -> dict:
+def read_metrics(project: str, listed: list[dict], *, query: QueryFn, stop_at: float | None = None) -> dict:
     """The three metric checks for one project, keyed by `(location, cluster)`.
 
     Returns `{"present": {check: set(keys)}, "hits": {check: {key: [candidate]}},
@@ -437,6 +453,10 @@ def read_metrics(project: str, listed: list[dict], *, query: QueryFn) -> dict:
     records = []
     for check, finding_q, presence_q, cluster_label, exclude in reads:
         for promql, is_presence in ((presence_q, True), (finding_q, False)):
+            left = _remaining(stop_at)
+            if left is not None and left <= 0:
+                errors[check] = BUDGET_REASON
+                break
             text = promql.format(project=project, exclude=exclude)
             t0 = time.monotonic()
             rows, error = query(project, text)
@@ -482,7 +502,9 @@ def cluster_entry(project: str, cluster: dict, record: dict | None, metrics: dic
     for check in METRIC_CHECKS:
         needed = POD_METRICS_PACKAGE if check == CHECK_PENDING else SYSTEM_METRICS_PACKAGE
         if check in metrics["errors"]:
-            unevaluated.append({"check": check, "reason": f"metric read failed: {metrics['errors'][check]}"})
+            error = metrics["errors"][check]
+            reason = error if error == BUDGET_REASON else f"metric read failed: {error}"
+            unevaluated.append({"check": check, "reason": reason})
         elif key not in metrics["present"].get(check, set()):
             if packages and needed not in packages:
                 reason = f"the cluster's {needed} metrics package is off"
@@ -512,12 +534,13 @@ def cluster_entry(project: str, cluster: dict, record: dict | None, metrics: dic
     return entry
 
 
-def collect_project(project: str, *, run: RunFn, query: QueryFn) -> tuple[list[dict], list[dict], str | None]:
+def collect_project(project: str, *, run: RunFn, query: QueryFn,
+                    stop_at: float | None = None) -> tuple[list[dict], list[dict], str | None]:
     """`(cluster entries, metric read records, error)` for one project."""
-    clusters, record, error = list_clusters(project, run=run)
+    clusters, record, error = list_clusters(project, run=run, stop_at=stop_at)
     if not clusters:
         return [], [], error
-    metrics = read_metrics(project, clusters, query=query)
+    metrics = read_metrics(project, clusters, query=query, stop_at=stop_at)
     return [cluster_entry(project, c, record, metrics) for c in clusters], metrics["records"], error
 
 
@@ -531,9 +554,11 @@ def _session_query() -> QueryFn:
 
 
 def collect_fleet(project: str | None = None, *, run: RunFn = default_run, query: QueryFn | None = None,
-                  max_workers: int = MAX_WORKERS, project_budget_s: float = PROJECT_READ_DEADLINE_S) -> dict:
+                  max_workers: int = MAX_WORKERS, project_budget_s: float = PROJECT_READ_DEADLINE_S,
+                  run_budget_s: float = RUN_BUDGET_S) -> dict:
     started_at = time.strftime(TIMESTAMP_FORMAT, time.gmtime())
     deadline = time.monotonic() + project_budget_s
+    stop_at = time.monotonic() + run_budget_s
     discovery = discover_fleet(project, run=run)
     if discovery.projects and query is None:
         query = _session_query()
@@ -541,7 +566,7 @@ def collect_fleet(project: str | None = None, *, run: RunFn = default_run, query
     def bounded(name: str):
         if time.monotonic() > deadline:
             return None
-        return collect_project(name, run=run, query=query)
+        return collect_project(name, run=run, query=query, stop_at=stop_at)
 
     entries: list[dict] = []
     project_reads: dict[str, list[dict]] = {}

@@ -1,9 +1,9 @@
 """The chat-route cases' worker-command checks, run through the verifier.
 
-Seven cases grade a plain fleet-wide chat question that runs an audit
-stream's collector and opens no ledger run (#2386): reliability, stockout,
-AI security, upgrade and drift, plus the GCE and networking regression
-guards. Each grades the collector run with ``required_runs`` and forbids an
+Eight cases grade a plain fleet-wide chat question that runs a collector and
+opens no ledger run: reliability, stockout, AI security, upgrade and drift,
+plus the GCE and networking regression guards (#2386), and the general fleet
+health question, which runs fleet_health.py (#3302). Each grades the collector run with ``required_runs`` and forbids an
 ``audit_report.py start``/``finish`` run twice with ``forbidden_runs`` (the
 no-ledger objective and the nothing-was-published safeguard). The upgrade
 case also requires the chat scratch dir with one regex.

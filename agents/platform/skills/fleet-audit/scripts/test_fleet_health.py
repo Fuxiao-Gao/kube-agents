@@ -309,6 +309,37 @@ class FleetTest(unittest.TestCase):
         self.assertIn("--project acme", manifest["clusters"][0]["error"])
         self.assertIn("no cluster could be read", manifest["error"])
 
+    def test_the_project_listing_gets_its_own_timeout(self):
+        seen = {}
+        inner = lister({"acme": [cluster("a")]})
+
+        def run(argv, **kwargs):
+            seen[" ".join(argv[:3])] = kwargs.get("timeout")
+            return inner(argv, **kwargs)
+
+        fh.collect_fleet(run=run, query=querier(present=ALL_PRESENT))
+        self.assertEqual(seen["gcloud projects list"], fh.PROJECTS_LIST_TIMEOUT_S)
+
+    def test_no_read_starts_past_the_run_budget(self):
+        query = querier(present=ALL_PRESENT)
+        manifest = fh.collect_fleet(run=lister({"acme": [cluster("a", status="ERROR")]}), query=query, run_budget_s=-1)
+        entry = manifest["clusters"][0]
+        self.assertEqual(query.calls, [])
+        self.assertEqual(checks(entry), [("cluster-not-running", "critical", "Cluster/a")])
+        self.assertEqual({u["reason"] for u in entry["checks_unevaluated"]}, {fh.BUDGET_REASON})
+
+    def test_the_clusters_list_gets_only_the_remaining_budget(self):
+        seen = {}
+        inner = lister({"acme": [cluster("a")]})
+
+        def run(argv, **kwargs):
+            if argv[:4] == ["gcloud", "container", "clusters", "list"]:
+                seen["timeout"] = kwargs.get("timeout")
+            return inner(argv, **kwargs)
+
+        fh.collect_fleet(run=run, query=querier(present=ALL_PRESENT), run_budget_s=10)
+        self.assertLessEqual(seen["timeout"], 10)
+
     def test_a_project_that_raises_does_not_lose_the_fleet(self):
         def query(project, promql):
             if project == "beta":
