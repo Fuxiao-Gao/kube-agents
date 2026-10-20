@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -180,10 +181,14 @@ RESTART_PRESENCE_QUERY = "count by (" + SYSTEM_BY + ") (kubernetes_io:container_
 KSM_BY = LABEL_LOCATION + ", " + LABEL_KSM_CLUSTER
 PENDING_BY = ", ".join((KSM_BY, LABEL_KSM_NAMESPACE, LABEL_KSM_POD))
 PENDING_SELECTOR = '{{project_id="{project}",phase="Pending"{exclude}}}'
+# Both sides are aggregated to the pod before the join, and the join names the
+# pod's labels: a raw `and` matches whole label sets, so a pod whose series
+# labels changed inside the window (a kube-state-metrics restart moves
+# `instance`) would drop out.
 PENDING_QUERY = (
-    "count by (" + PENDING_BY + ") ((min_over_time(kube_pod_status_phase" + PENDING_SELECTOR + "["
-    + PENDING_WINDOW + "]) == 1) and (kube_pod_status_phase" + PENDING_SELECTOR + " offset "
-    + PENDING_WINDOW + " == 1))"
+    "(count by (" + PENDING_BY + ") (min_over_time(kube_pod_status_phase" + PENDING_SELECTOR + "["
+    + PENDING_WINDOW + "]) == 1)) and on (" + PENDING_BY + ") (count by (" + PENDING_BY
+    + ") (kube_pod_status_phase" + PENDING_SELECTOR + " offset " + PENDING_WINDOW + " == 1))"
 )
 PENDING_PRESENCE_QUERY = "count by (" + KSM_BY + ') (kube_pod_status_phase{{project_id="{project}"{exclude}}})'
 # The excluded clusters' names, so their series never leave the broker.
@@ -430,9 +435,15 @@ def _exclude_matcher(project: str, listed: list[dict], label: str) -> str:
     return EXCLUDE_MATCHER.format(label=label, names="|".join(names))
 
 
-def _value(row: dict) -> str:
+def _count(row: dict) -> int:
+    """A PromQL sample as a whole count; NaN, an infinity or a non-number is 0,
+    so one odd sample cannot fail its project's read."""
     value = row.get("value") or []
-    return str(value[1]) if len(value) > 1 else ""
+    try:
+        number = float(value[1]) if len(value) > 1 else 0.0
+    except (TypeError, ValueError):
+        return 0
+    return round(number) if math.isfinite(number) else 0
 
 
 def read_metrics(project: str, listed: list[dict], *, query: QueryFn, stop_at: float | None = None) -> dict:
@@ -475,7 +486,7 @@ def read_metrics(project: str, listed: list[dict], *, query: QueryFn, stop_at: f
                     cand = _candidate(check, SEVERITY_MAJOR, f"Node/{labels.get(LABEL_NODE, '')}",
                                       f"Ready condition is {labels.get(LABEL_CONDITION_STATUS, NOT_READY_FALLBACK_STATUS)}")
                 elif check == CHECK_RESTARTING:
-                    restarts = round(float(_value(row) or 0))
+                    restarts = _count(row)
                     cand = _candidate(check, SEVERITY_MAJOR, f"Pod/{labels.get(LABEL_SYSTEM_POD, '')}",
                                       f"container {labels.get(LABEL_SYSTEM_CONTAINER, '')} restarted {restarts} times "
                                       f"in the last {RESTART_WINDOW}", labels.get(LABEL_SYSTEM_NAMESPACE, ""))

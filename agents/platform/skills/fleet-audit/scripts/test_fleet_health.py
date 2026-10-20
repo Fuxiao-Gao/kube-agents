@@ -177,6 +177,18 @@ class MetricsTest(unittest.TestCase):
         for _, promql in query.calls:
             self.assertEqual(promql.count("{"), promql.count("}"))
 
+    def test_the_pending_join_names_the_pod_labels(self):
+        promql = fh.PENDING_QUERY.format(project="acme", exclude="")
+        self.assertIn(") and on (location, cluster, namespace, pod) (count by (location, cluster, namespace, pod)", promql)
+        self.assertTrue(promql.startswith("(count by (location, cluster, namespace, pod) (min_over_time("))
+
+    def test_an_odd_restart_value_is_zero_not_a_crash(self):
+        rows = [series("a", value=v, namespace_name="n", pod_name=f"p{i}", container_name="c")
+                for i, v in enumerate(("NaN", "+Inf", "-Inf", "x", "4.6"))]
+        entry = self.entry(querier(present=ALL_PRESENT, hits={"container_restart_count": rows}))
+        self.assertEqual([c["excerpt"].split(" restarted ")[1].split(" ")[0] for c in entry["candidates"]],
+                         ["0", "0", "0", "0", "5"])
+
     def test_the_metric_reads_are_recorded_once_per_project(self):
         manifest = fh.collect_fleet(run=lister({"acme": [cluster("a"), cluster("b")]}), query=querier(present=ALL_PRESENT))
         self.assertEqual(len(manifest["project_reads"]["acme"]), 6)
