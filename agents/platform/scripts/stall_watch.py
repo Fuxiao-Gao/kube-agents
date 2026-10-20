@@ -260,20 +260,28 @@ KUBECONFIG_SLUG_REPLACEMENT = "-"
 #: every upgrade and repair window; treating it as unreadable would post a
 #: "could not read" and a "readable again" per cluster per window.
 SWEEPABLE_CLUSTER_STATUSES = frozenset({"RUNNING", "RECONCILING"})
-#: JSON rather than names, so a namespace's annotations are read in the same call.
-# One line per namespace, its name and the value of the exempt annotation,
-# tab-separated: about as small as `-o name`. The full JSON listing would carry
-# every label and annotation, and on a cluster with thousands of namespaces it
-# can pass the credential proxy's output cap, which cuts it mid-string and
-# leaves the whole cluster unread every tick.
-NAMESPACE_LINE_SEPARATOR = "\t"
+# One line per namespace name, a marker line, the names whose exempt
+# annotation is exactly EXEMPT_VALUE, and the marker again: about as small as
+# `-o name`. The annotation's value is never printed, so a value with a newline
+# in it adds no line. The full JSON listing would carry every label and
+# annotation, and on a cluster with thousands of namespaces it can pass the
+# credential proxy's output cap. The closing marker shows the listing arrived
+# whole; the marker is not a valid namespace name.
+NAMESPACE_LIST_MARKER = "---"
 NAMESPACES_ARGV = (
     "kubectl",
     "get",
     "namespaces",
     "-o",
-    "jsonpath={range .items[*]}{.metadata.name}{\"\\t\"}{.metadata.annotations.kubeagents\\.x-k8s\\.io/stall-watch}{\"\\n\"}{end}",
+    "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}"
+    "{\"" + NAMESPACE_LIST_MARKER + "\\n\"}"
+    "{range .items[?(@.metadata.annotations.kubeagents\\.x-k8s\\.io/stall-watch==\"" + EXEMPT_VALUE + "\")]}"
+    "{.metadata.name}{\"\\n\"}{end}"
+    "{\"" + NAMESPACE_LIST_MARKER + "\\n\"}",
 )
+#: What the credential proxy client writes to stderr when the broker cut a
+#: reply at its output cap. kubectl's exit code still comes back 0.
+PROXY_TRUNCATED_TEXT = "credential proxy output truncated"
 #: The kind list is filtered to what a cluster serves, from one
 #: `kubectl api-resources` per cluster, so a warning from the report script
 #: about a kind it could not scan is always a failure and never "this cluster
@@ -515,6 +523,15 @@ CLEAR_REASON_ROSTER = "roster"
 CLEAR_REASON_EXCLUDED = "excluded"
 CLEAR_REASON_EXEMPT = "exempt"
 CLEAR_REASON_CLEARED = "cleared"
+#: The evidence an exempt close reason carries: the objects whose annotation
+#: emptied the alert. A later tick that read the namespace re-checks them
+#: before it repeats the reason.
+EXEMPT_OBJECTS_KEY = "exempt_objects"
+#: One `kubectl get <Kind/name> -n <namespace>` of an object's exempt
+#: annotation, for that re-check. A deleted object prints nothing.
+EXEMPT_READ_ARGV = ("kubectl", "get")
+EXEMPT_READ_FLAGS = ("--ignore-not-found", "-o", "jsonpath={.metadata.annotations.kubeagents\\.x-k8s\\.io/stall-watch}")
+EXEMPT_READ_TIMEOUT_SECONDS = 30
 #: Plurals kubectl forms with -es or -ies, so a skipped `ingresses` holds
 #: Ingress rows and `networkpolicies` holds NetworkPolicy rows.
 PLURAL_ES_SUFFIXES = ("sses", "shes", "ches", "xes", "zes")
@@ -789,13 +806,19 @@ def list_namespaces(kubeconfig: str, excluded: frozenset[str]) -> tuple[list[str
     r = run_sandbox(list(NAMESPACES_ARGV), timeout=NAMESPACE_LIST_TIMEOUT_SECONDS, kubeconfig=kubeconfig)
     if r.returncode != 0:
         raise ReadFailed(f"kubectl get namespaces exited {r.returncode}: {stderr_excerpt(r.stderr)}", r.stderr)
+    lines = r.stdout.splitlines()
+    # A cut listing would read the namespaces past the cut as deleted and
+    # close their cards as cleared.
+    if PROXY_TRUNCATED_TEXT in (r.stderr or "") or lines.count(NAMESPACE_LIST_MARKER) != 2 or lines[-1] != NAMESPACE_LIST_MARKER:
+        raise ReadFailed(f"kubectl get namespaces returned an incomplete listing: {stderr_excerpt(r.stderr)}", r.stderr)
+    cut = lines.index(NAMESPACE_LIST_MARKER)
+    exempt = set(lines[cut + 1 : -1])
     watched, left_out = [], set()
-    for line in r.stdout.splitlines():
-        name, _, annotation = line.partition(NAMESPACE_LINE_SEPARATOR)
+    for name in lines[:cut]:
         name = name.strip()
         if not name or is_system_namespace(name):
             continue
-        if name in excluded or annotation.strip() == EXEMPT_VALUE:
+        if name in excluded or name in exempt:
             left_out.add(name)
         else:
             watched.append(name)
@@ -1354,10 +1377,19 @@ def diff_and_update(state: dict, sweep: Sweep, now: str) -> tuple[dict, dict]:
     `cluster/namespace` scope."""
     previous = state["stalls"]
     current = dict(previous)
+    # The earliest sighting per object. A row's key carries its detail, so a
+    # generation-lag row gets a new key on every spec write; its new row keeps
+    # the object's first sighting, or a spec written more often than the
+    # minimum stall age would hold the stall forever.
+    first_seen_by_object: dict[tuple[str, str, str], str] = {}
+    for entry in previous.values():
+        seen = str(entry.get("first_seen") or "")
+        if seen and (object_key(entry) not in first_seen_by_object or seen < first_seen_by_object[object_key(entry)]):
+            first_seen_by_object[object_key(entry)] = seen
     for key, row in sweep.rows.items():
         entry = previous.get(key)
         if entry is None:
-            entry = {**row, "first_seen": now}
+            entry = {**row, "first_seen": first_seen_by_object.get(object_key(row), now)}
         current[key] = {**entry, **row, "last_seen": now, "missed": 0}
     for key, entry in previous.items():
         if key in sweep.rows:
@@ -1923,20 +1955,30 @@ def episode_lines(state: dict, sweep: Sweep, new_by_scope: dict, cleared_by_scop
         # The scope has rows again: an exclusion or exemption that emptied it
         # was reverted, or the stall came back. Its next close is judged afresh.
         episodes[scope].pop(CLEAR_REASON_KEY, None)
+        episodes[scope].pop(EXEMPT_OBJECTS_KEY, None)
         episodes[scope].pop("cleared_at", None)
     for scope in sorted(set(episodes) - open_scopes):
         episode = episodes[scope]
         leaving = cleared_by_scope.get(scope, [])
-        reason = episode.get(CLEAR_REASON_KEY) or clear_reason(sweep, scope, leaving)
-        if reason == CLEAR_REASON_EXCLUDED and scope in sweep.read_scopes:
-            # The watch read the namespace this tick, so the exclusion that
-            # stored the reason has been lifted: judge the close afresh.
+        reason = episode.get(CLEAR_REASON_KEY)
+        if reason and clear_reason_lapsed(sweep, scope, episode):
+            # What stored the reason no longer holds: judge the close afresh,
+            # but not on a partial read, whose unread kinds can still hold
+            # the stall. The next tick asks again.
+            if scope in sweep.partial_scopes:
+                continue
+            reason = None
+        if not reason:
             reason = clear_reason(sweep, scope, leaving)
-        if not dry_run:
-            # Stored on the tick that saw the rows go: a later tick no longer
-            # holds them, so a close retried after a board error would read
-            # as a plain clearing.
-            episode[CLEAR_REASON_KEY] = reason
+            if not dry_run:
+                # Stored on the tick that saw the rows go: a later tick no
+                # longer holds them, so a close retried after a board error
+                # would read as a plain clearing.
+                episode[CLEAR_REASON_KEY] = reason
+                if reason == CLEAR_REASON_EXEMPT:
+                    episode[EXEMPT_OBJECTS_KEY] = object_names(leaving)
+                else:
+                    episode.pop(EXEMPT_OBJECTS_KEY, None)
         cleared = names_text(object_names(leaving) or episode.get("objects", []))
         if reason == CLEAR_REASON_ROSTER:
             cleared = "the cluster left the Cluster Agent roster"
@@ -1993,6 +2035,36 @@ def clear_reason(sweep: Sweep, scope: str, leaving: list[dict]) -> str:
     if leaving and all(object_key(e) in sweep.exempt_objects for e in leaving):
         return CLEAR_REASON_EXEMPT
     return CLEAR_REASON_CLEARED
+
+
+def clear_reason_lapsed(sweep: Sweep, scope: str, episode: dict) -> bool:
+    """Whether the close reason an earlier tick stored for an open alert no
+    longer holds. Each reason is checked against its own evidence, and only
+    when this tick saw that evidence; otherwise the stored reason stands."""
+    reason = episode.get(CLEAR_REASON_KEY)
+    cid, namespace = split_scope(scope)
+    if reason == CLEAR_REASON_ROSTER:
+        return not sweep.left_roster(cid) and (scope in sweep.read_scopes or sweep.excluded(scope))
+    if reason == CLEAR_REASON_EXCLUDED:
+        return scope in sweep.read_scopes
+    if reason == CLEAR_REASON_EXEMPT and scope in sweep.read_scopes:
+        kubeconfig = kubeconfig_path(*split_cluster_id(cid))
+        return not all(
+            (cid, namespace, obj) in sweep.exempt_objects or object_exempt(kubeconfig, namespace or "", obj)
+            for obj in episode.get(EXEMPT_OBJECTS_KEY) or []
+        )
+    return False
+
+
+def object_exempt(kubeconfig: str, namespace: str, obj: str) -> bool:
+    """Whether an object still carries the exempt annotation. A deleted object
+    does not. A read that fails says nothing, so it keeps the reason."""
+    argv = [*EXEMPT_READ_ARGV, obj, "-n", namespace, *EXEMPT_READ_FLAGS]
+    try:
+        r = run_sandbox(argv, timeout=EXEMPT_READ_TIMEOUT_SECONDS, kubeconfig=kubeconfig)
+    except READ_FAILURES:
+        return True
+    return r.returncode != 0 or r.stdout == EXEMPT_VALUE
 
 
 def namespace_of(scope: str) -> str:

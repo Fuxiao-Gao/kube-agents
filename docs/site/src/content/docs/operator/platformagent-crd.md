@@ -297,7 +297,7 @@ the same. Up to 100 names.
 `minStallAgeMinutes` holds a new alert until at least one stall in the namespace has lasted that
 long. A stall's age is the longer of two values: the age `stall_report.py` measures on the object
 (from its condition, its last spec write, or its warning events), and the time since the watch first
-saw it. A younger stall is not dropped: the watch keeps it in its ledger and checks it again on each
+saw the object stall. A spec write does not restart that second value. A younger stall is not dropped: the watch keeps it in its ledger and checks it again on each
 sweep, so the alert follows on the first sweep after the stall is old enough. An object that starts
 to stall in a namespace with an open alert is added to that alert's card at once. The range is 0 to
 1440; unset or `0` alerts on the first sweep that sees the stall.
@@ -324,6 +324,18 @@ reports an exempt object.
 The operator delivers the three values through the agent's managed `.env` (see
 [How config reaches each profile](#how-config-reaches-each-profile)), so a change rolls the agent
 pod, and the agent cannot override a value from its own `.env`.
+
+The chart sets this block from `platformAgent.harness.stallWatch`. On an install made with
+`install.sh`, put the block in a `TF_VAR_extra_helm_values` line in `install.env`, which every later
+`install.sh` and `upgrade.sh` run reads; a `helm upgrade --set` value is dropped by the next
+`upgrade.sh`, and the watch then goes back to its defaults:
+
+```bash
+TF_VAR_extra_helm_values='{platformAgent={harness={stallWatch={excludeNamespaces=["load-test"],minStallAgeMinutes=30}}}}'
+```
+
+On a hand-driven Terraform apply, set `extra_helm_values` in `terraform.tfvars` instead; on a bare
+Helm install, set the block in your values file.
 
 ### `spec.harness.tuning`
 

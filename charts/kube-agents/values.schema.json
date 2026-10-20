@@ -648,29 +648,8 @@
                       },
                       {
                         "contains": {
-                          "enum": [
-                            "secrets",
-                            "secret",
-                            "configmaps",
-                            "configmap",
-                            "cm",
-                            "events",
-                            "event",
-                            "ev",
-                            "endpoints",
-                            "endpoint",
-                            "ep",
-                            "endpointslices",
-                            "endpointslice",
-                            "controllerrevisions",
-                            "controllerrevision",
-                            "leases",
-                            "lease",
-                            "events.events.k8s.io",
-                            "controllerrevisions.apps",
-                            "endpointslices.discovery.k8s.io",
-                            "leases.coordination.k8s.io"
-                          ]
+                          "type": "string",
+                          "pattern": "^(secrets?|configmaps?|cm|events?|ev|endpoints?|ep|endpointslices?|controllerrevisions?|leases?)(\\.|$)"
                         }
                       }
                     ]
