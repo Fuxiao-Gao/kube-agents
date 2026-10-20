@@ -116,7 +116,7 @@ readonly EVAL_LOG_DIR
 # recorder (its decision, EVAL_IS_MAIN_RUN, and the log line at the record
 # step after the fan-out); the dashboard publisher's gate, which mirrors
 # the recorder's; and the rollback round trip after the suite verdict
-# (run_rollback_roundtrip, below). A flagged run passes neither the recorder
+# (run_rollback_roundtrip, below; skipped on a release-candidate run). A flagged run passes neither the recorder
 # nor the publisher: the next lane's periodic on
 # main runs under it with no PULL_NUMBER, the shape both otherwise write
 # from, and a next-mode sample in today's window would be indistinguishable
@@ -133,7 +133,8 @@ readonly EVAL_INJECT_TOKEN_SECRET_KEY="token"
 readonly EVAL_INJECT_LOCAL_PORT_BASE=29099
 
 # The rollback round trip under EVAL_MODE_NEXT=1 (run_rollback_roundtrip, after
-# the suite verdict is computed): hack/rollback-roundtrip.sh flips the install
+# the suite verdict is computed; a release-candidate run skips it, and the
+# function says why): hack/rollback-roundtrip.sh flips the install
 # next -> today -> next and checks the JetStream PVC and the bus creds Secret
 # come through it (cutover condition 6, #2461). Reported beside the verdict,
 # never in it: its own log section and artifacts, no case, no effect on the
@@ -4095,6 +4096,14 @@ job_started_epoch() {
 # not for a slow deploy.
 run_rollback_roundtrip() {
   if [ "${EVAL_MODE_NEXT:-}" != "1" ]; then
+    return 0
+  fi
+  # A release-candidate run's verdict is read only once the job has finished
+  # (scripts/release/poll_rc_eval_verdict.py waits for finished.json, and
+  # gives up at 330 minutes), so an hour of report-only round trip here would
+  # be an hour off the promotion's budget for a check that cannot change it.
+  if [ -n "${RC_COMMIT_SHA:-}" ]; then
+    echo "Rollback round trip skipped: a release-candidate run (RC_COMMIT_SHA=${RC_COMMIT_SHA}); its verdict waits on this job finishing, and the round trip is reported, never gated"
     return 0
   fi
   local log="${ARTIFACT_DIR}/${EVAL_ROLLBACK_LOG}" results="${ARTIFACT_DIR}/${EVAL_ROLLBACK_RESULTS}"
