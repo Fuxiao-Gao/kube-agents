@@ -78,7 +78,9 @@ Calculate per dimension and show both: `nodes_needed = max(ceil(total_cpu_reques
 
 ## Writing the answer
 
-For each workload or pool, in this order:
+Open your `result` with one line per workload or pool, before anything else: its name and the dependency that blocks or limits the cut. For example, `checkout-api: an HPA scales it on CPU, so a lower request adds replicas`, or `batch-worker: Guaranteed QoS, so a lower request is also a lower limit`. Write `no dependency found` when checks 1 to 3 found none. When the Platform Agent summarises several cards, these lines are what it carries to the person.
+
+Then, for each workload or pool, in this order:
 
 1. **The checks:** the five, one line each: what it found, and the command or reading behind it. "No HPA targets it" is a finding.
 2. **The proposal:** the new figures, or why no cut is safe. A dependency from checks 1 to 3 that makes the cut unsafe is the answer, stated first.
