@@ -2969,6 +2969,101 @@ class ReplyIsSilentVerifier(BaseVerifier):
         return VerificationResult(success=False, elapsed_time=time.monotonic() - start, reason=reason)
 
 
+# ``verified_claims_backed``: one evidence block as ``kanban_complete`` renders
+# it (``deploy/docker/patches/kanban_verified_claims.py``): a fence whose first
+# line is ``$ <command>`` and whose other lines are the output excerpt.
+_EVIDENCE_BLOCK_RE = re.compile(r"```[^\n]*\n\$ ([^\n]+)\n(.*?)\n?```", re.S)
+# The gate's own section heading, which says "verified" itself; taken out
+# before the reply is searched for the label.
+_EVIDENCE_HEADING = "**Evidence for verified claims**"
+_VERIFIED_LABEL_RE = re.compile(r"\bverified\b", re.I)
+# ``worker_trajectory.clip``'s marker on a result cut in the pod.
+_CLIPPED_RESULT_RE = re.compile(r" \.\.\.\[clipped \d+ chars\]$")
+_JSON_ESCAPES = (("\\n", "\n"), ("\\t", "\t"), ('\\"', '"'), ("\\\\", "\\"))
+
+
+def _collapsed(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _terminal_output(result: str) -> str:
+    """The ``output`` of a terminal result, which reaches the trajectory as its JSON text.
+
+    A result clipped in the pod no longer parses; its escapes are undone by
+    hand so its surviving head still reads as the output the worker saw.
+    """
+    try:
+        parsed = json.loads(result)
+    except ValueError:
+        for escaped, plain in _JSON_ESCAPES:
+            result = result.replace(escaped, plain)
+        return result
+    if isinstance(parsed, dict) and isinstance(parsed.get("output"), str):
+        return parsed["output"]
+    return result
+
+
+@VERIFIERS.register("verified_claims_backed")
+class VerifiedClaimsBackedVerifier(BaseVerifier):
+    """Every piece of evidence in the reply is a command a worker ran, with its real output.
+
+    Reads the ``final_message`` for evidence blocks: a fence whose first line
+    is ``$ <command>`` and whose remaining lines are an excerpt of its output,
+    the shape ``kanban_complete`` renders for ``verified_claims``. Each block's
+    command must equal (whitespace collapsed) a worker's tagged ``terminal``
+    call (:func:`_worker_terminal_calls`), and its excerpt must appear in that
+    call's output. A reply with fewer than ``min_blocks`` blocks fails, and
+    the reason says when it calls something verified with nothing behind it.
+
+    An excerpt missing from an output the pod clipped is an error, not a
+    fail: the excerpt may sit in the part that was cut. So is a block whose
+    command is missing while ``worker_capture_gaps`` reports a gap.
+    """
+
+    type: Literal["verified_claims_backed"]
+    min_blocks: int = Field(default=1, ge=0)
+
+    def verify(self, timeout_sec: float) -> VerificationResult:
+        start = time.monotonic()
+
+        def done(status: str, reason: str) -> VerificationResult:
+            return VerificationResult(
+                success=status == "pass", status=status, elapsed_time=time.monotonic() - start, reason=reason
+            )
+
+        snap = transcript.get()
+        if snap is None:
+            return done("error", _NO_TRANSCRIPT_REASON)
+        reply = snap.final_message
+        blocks = _EVIDENCE_BLOCK_RE.findall(reply)
+        if len(blocks) < self.min_blocks:
+            labelled = _VERIFIED_LABEL_RE.search(reply.replace(_EVIDENCE_HEADING, ""))
+            what = "calls claims verified with" if labelled else "has"
+            return done("fail", f"the reply {what} {len(blocks)} evidence block(s) ($ command + output); "
+                        f"at least {self.min_blocks} required")
+        calls = [(command, result) for _, _, command, result, _ in _worker_terminal_calls(snap.trajectory)]
+        unknown: list[str] = []
+        for command, excerpt in blocks:
+            runs = [_terminal_output(result) for ran, result in calls if _collapsed(ran) == _collapsed(command)]
+            needle = _collapsed(excerpt)
+            if not runs:
+                if snap.worker_capture_gaps:
+                    unknown.append(f"{command!r} is not in a trajectory with gaps: {'; '.join(snap.worker_capture_gaps)}")
+                    continue
+                return done("fail", f"evidence command {command!r} is not a command any worker ran")
+            if not needle:
+                return done("fail", f"evidence for {command!r} carries no output")
+            if any(needle in _collapsed(output) for output in runs):
+                continue
+            if any(_CLIPPED_RESULT_RE.search(output) for output in runs):
+                unknown.append(f"the output of {command!r} was clipped before the excerpt could be found")
+                continue
+            return done("fail", f"evidence excerpt {excerpt[:_REPLY_QUOTE_CHARS]!r} is not in the output of {command!r}")
+        if unknown:
+            return done("error", "; ".join(unknown))
+        return done("pass", f"{len(blocks)} evidence block(s), each a worker's command with its real output")
+
+
 def _agent_shell(script: str, timeout: float) -> str:
     # Lazy: the harness pulls in the agent transport, which a spec load does not need.
     from kube_agents_bench.harness import _agent_shell as shell

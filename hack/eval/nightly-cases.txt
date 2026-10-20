@@ -954,3 +954,9 @@
 # clean passes, 454-983s). Nightly from its first merge; a presubmit seat
 # is a later pull request that cites its record.
 ./tasks/upgrades-zonal-skew-replicas-warned/task.yaml
+
+# A reply that calls a claim verified shows, for each claim, the command a
+# worker ran and an excerpt of its real output (verified_claims_backed,
+# kanban_complete's verified_claims, #3200). deployer: noop, read-only against
+# the crashloop-workload fixture, three units at the 200s default.
+./tasks/verified-claims-carry-evidence/task.yaml

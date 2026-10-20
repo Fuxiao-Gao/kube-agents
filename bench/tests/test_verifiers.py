@@ -63,6 +63,7 @@ from kube_agents_bench.verifiers import (
     ReplyIsSilentVerifier,
     ReportContainsVerifier,
     ToolCalledVerifier,
+    VerifiedClaimsBackedVerifier,
     _fold_line_decoration,
 )
 
@@ -9642,3 +9643,59 @@ def test_every_forbidden_pattern_has_a_contradiction_row(case):
     rows = {objective: len(lines) for objective, lines in _CONTRADICTIONS.get(case, {}).items()}
     clauses = {objective: len(patterns) for objective, patterns in _forbidden_clauses(case).items()}
     assert rows == clauses, (rows, clauses)
+
+
+# verified_claims_backed: the reply's evidence blocks against the workers' calls.
+_PODS_CMD = "kubectl get pod -n seeded-debug -l app=payments-api -o jsonpath='{.items[0].status.containerStatuses[0].lastState}'"
+_PODS_OUT = json.dumps({"output": '{"terminated":{"exitCode":137,\n"reason":"OOMKilled"}}', "exit_code": 0})
+_EVIDENCE = (
+    "**payments-api is OOMKilled.**\n\n**Evidence for verified claims**\n\n"
+    "The last termination was OOMKilled (exit 0, 2026-10-20T12:00:00Z)\n\n"
+    f"```\n$ {_PODS_CMD}\n\"exitCode\":137, \"reason\":\"OOMKilled\"\n```"
+)
+
+
+def _grade_claims(reply, calls, gaps=None, min_blocks=1):
+    transcript.set("ok", _TRAJECTORY + calls, final_message=reply, worker_capture_gaps=gaps)
+    return VerifiedClaimsBackedVerifier(type="verified_claims_backed", min_blocks=min_blocks).verify(5.0)
+
+
+def test_verified_claims_backed_passes_evidence_a_worker_produced():
+    res = _grade_claims(_EVIDENCE, [_terminal(_PODS_CMD, result=_PODS_OUT)])
+    assert res.status == "pass", res
+
+
+def test_verified_claims_backed_fails_the_pilots_unbacked_label():
+    res = _grade_claims("Verification check: no mismatch exceeds 30%. **Verified.**", [_terminal(_PODS_CMD, result=_PODS_OUT)])
+    assert res.status == "fail"
+    assert "calls claims verified with 0 evidence block(s)" in res.reason
+
+
+def test_verified_claims_backed_fails_a_command_no_worker_ran():
+    res = _grade_claims(_EVIDENCE, [_terminal("kubectl get pods -A", result=_PODS_OUT)])
+    assert res.status == "fail" and "not a command any worker ran" in res.reason
+
+
+def test_verified_claims_backed_ignores_the_routers_own_call():
+    res = _grade_claims(_EVIDENCE, [dict(_ROUTER_TERMINAL, args={"command": _PODS_CMD}, result=_PODS_OUT)])
+    assert res.status == "fail" and "not a command any worker ran" in res.reason
+
+
+def test_verified_claims_backed_fails_an_invented_excerpt():
+    res = _grade_claims(_EVIDENCE.replace("137", "1"), [_terminal(_PODS_CMD, result=_PODS_OUT)])
+    assert res.status == "fail" and "is not in the output of" in res.reason
+
+
+def test_verified_claims_backed_a_clipped_output_is_an_error():
+    clipped = _PODS_OUT[:20] + " ...[clipped 40 chars]"
+    res = _grade_claims(_EVIDENCE, [_terminal(_PODS_CMD, result=clipped)])
+    assert res.status == "error" and "clipped" in res.reason
+
+
+def test_verified_claims_backed_a_capture_gap_is_an_error():
+    res = _grade_claims(_EVIDENCE, [], gaps=["profile platform: state.db missing"])
+    assert res.status == "error" and "state.db missing" in res.reason
+
+
+def test_verified_claims_backed_min_blocks_zero_passes_a_reply_with_no_evidence():
+    assert _grade_claims("All good.", [], min_blocks=0).status == "pass"
