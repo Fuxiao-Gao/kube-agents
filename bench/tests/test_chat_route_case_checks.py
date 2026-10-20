@@ -122,8 +122,7 @@ REAL_RUNS = {
     ],
     "health-chat-request-runs-collector": [
         f"python3 {SKILLS}/fleet-audit/scripts/fleet_health.py {SCOPE} > /opt/data/scratch/chat_manifest_fleet-health.json",
-        f"python3 {SKILLS}/fleet-audit/scripts/fleet_health.py {SCOPE} --scope-unread declared-scope=unresolved > /opt/data/scratch/chat_manifest_fleet-health.json && cat /opt/data/scratch/chat_manifest_fleet-health.json",
-        f"python3 {SKILLS}/fleet-audit/scripts/fleet_health.py {SCOPE}",
+        f"python3 {SKILLS}/fleet-audit/scripts/fleet_health.py {SCOPE} > /opt/data/scratch/chat_manifest_fleet-health.json && cat /opt/data/scratch/chat_manifest_fleet-health.json",
     ],
 }
 
