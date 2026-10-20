@@ -152,6 +152,10 @@ JOB_ID_KEY = "session_id"
 #: drained in a round with a blank line (``hermes_cli/quiet_single_query.py``).
 NOTICE_PREFIX = "[IMPORTANT: Background process"
 NOTICE_SEPARATOR = "\n\n" + NOTICE_PREFIX
+#: Any block Hermes can join after a notice starts like this: another notice,
+#: an async-delegation result, or a format added later. The guard keys on it,
+#: not on one block's prefix, so a new format cannot slip past it.
+JOINED_BLOCK_MARK = "\n\n["
 NOTICE_JOB_RE = re.compile(re.escape(NOTICE_PREFIX) + r" (\S+)")
 NOTICE_OUTPUT_MARK = "\nOutput:\n"
 NOTICE_END = "]"
@@ -298,15 +302,19 @@ def _result_lines(value):
 def _notices(content) -> list[tuple[str, str]]:
     """``(job id, output)`` of the one background-completion notice in a row.
 
-    A row that does not start with a notice holds none. A row that holds the
-    notice separator anywhere is not read at all: Hermes joins several
-    notices with it, and a job's own output can carry the same text, so a
-    real split point cannot be told from a forged one. Such a row credits no
+    A row that does not start with a notice holds none. A row that holds a
+    blank line followed by ``[`` anywhere is not read at all: Hermes joins
+    every block it drains in a round that way (other notices, async-delegation
+    results with a subagent's summary), and a job's own output can carry the
+    same text, so a real split point cannot be told from a forged one. An
+    honest ``finish`` whose output has a blank line before a bracketed log
+    line is refused too; the refusal asks for a foreground run, and a
+    read-back of the job is still read. Such a row credits no
     ``finish``; the proof then has to come from a foreground ``finish`` or a
     read-back of the job (fail closed).
     """
     text = content if isinstance(content, str) else ""
-    if not text.startswith(NOTICE_PREFIX) or NOTICE_SEPARATOR in text:
+    if not text.startswith(NOTICE_PREFIX) or JOINED_BLOCK_MARK in text:
         return []
     job = NOTICE_JOB_RE.match(text)
     if not job or NOTICE_OUTPUT_MARK not in text:
