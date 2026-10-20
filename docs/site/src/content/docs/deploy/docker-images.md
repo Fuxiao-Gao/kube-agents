@@ -73,7 +73,7 @@ Pinned here so `make mirror-images` and the install ask for the same version.
 
 | Image | Upstream reference | Pin | Override | Pulled by |
 | ----- | ------------------ | --- | -------- | --------- |
-| `litellm` | `ghcr.io/berriai/litellm` | `v1.104.0` | `LITELLM_IMAGE` | The LiteLLM gateway, from either the chart or the kustomize integration. |
+| `litellm` | `ghcr.io/berriai/litellm` | `v1.106.0` | `LITELLM_IMAGE` | The LiteLLM gateway, from either the chart or the kustomize integration. |
 | `fluent-bit` | `docker.io/fluent/fluent-bit` | `5.1.2` | `FLUENT_BIT_IMAGE` | The logging sidecar the operator injects into every agent pod. |
 | `nats` | `docker.io/library/nats` | `2.10-alpine` | `A2A_NATS_IMAGE` | The NATS StatefulSet the operator renders under spec.mode: next, and nothing on a default install. |
 | `nats-box` | `docker.io/natsio/nats-box` | `0.14.5` | `A2A_PROVISION_IMAGE` | The provision Job the operator runs against that NATS under spec.mode: next, and nothing on a default install. |
@@ -227,11 +227,11 @@ assumes that flat layout.
 Pick the row for how you install. Each has two prefixes: one for the images this project builds,
 one for the images it does not.
 
-| Install path                      | First-party            | Third party                      | If the second is unset              | Reaches cert-manager |
-| --------------------------------- | ---------------------- | -------------------------------- | ----------------------------------- | -------------------- |
-| `install.sh`                      | `--registry-prefix`    | `--third-party-registry-prefix`  | falls back to the first-party value | **yes**              |
-| Helm chart                        | `global.imageRegistry` | `global.thirdPartyImageRegistry` | falls back to the first-party value | n/a                  |
-| Terraform `examples/full-install` | `image_registry`       | `third_party_image_registry`     | falls back to the first-party value | **yes**              |
+| Install path                      | First-party            | Third party                      | If the second is unset     | Reaches cert-manager |
+| --------------------------------- | ---------------------- | -------------------------------- | -------------------------- | -------------------- |
+| `install.sh`                      | `--registry-prefix`    | `--third-party-registry-prefix`  | leaves upstream registries | **yes**              |
+| Helm chart                        | `global.imageRegistry` | `global.thirdPartyImageRegistry` | leaves upstream registries | n/a                  |
+| Terraform `examples/full-install` | `image_registry`       | `third_party_image_registry`     | leaves upstream registries | **yes**              |
 
 The rows are one path in three coats: `install.sh` generates the Terraform composition's
 `terraform.tfvars` from its flags, and the composition passes both values to the chart's
