@@ -430,7 +430,7 @@ for role in \
 done
 
 # A custom role, not roles/compute.networkAdmin: that role holds almost a
-# thousand permissions, and the sweep needs ten. `update` on a re-run keeps the
+# thousand permissions, and the sweep needs twelve. `update` on a re-run keeps the
 # role's permissions equal to the list above. On a project already registered,
 # run the commands in docs/ci-pool-projects.md section 5.7 by hand rather than
 # the script (section 8).
