@@ -526,10 +526,11 @@ nightlies run, not what can red a pull request.
 
 If an admitted case reds a pull request its diff cannot explain on a graded failure,
 demote it: delete its line from `hack/eval/blocking-roster.txt` and from
-`hack/eval/presubmit-cases.txt`, add it to `hack/eval/nightly-cases.txt` with the issue as
-the `#` line above it, and reference that issue. A held-out seat has no roster name: it is
-withdrawn by moving its line back to `hack/eval/nightly-cases.txt` and deleting its
-`HELD_OUT_IN_PRESUBMIT` entry. Demotion is a same-day edit to those
+`hack/eval/presubmit-cases.txt`, add it to the sorted section of `hack/eval/nightly-cases.txt`
+with the issue as the `#` line above it (and its `DEMOTED_AFTER_THE_SPLIT` entry with `None`
+as its predecessor in `scripts/test_eval_rosters.py`), and reference that issue. A held-out
+seat has no roster name: it is withdrawn by moving its line back to that section, deleting
+its `HELD_OUT_IN_PRESUBMIT` entry and listing it in `WITHDRAWN_TO_SORTED`. Demotion is a same-day edit to those
 files — the files, not the Prow config, are deliberately the fast lever. It is the lever for rung-4 reds ONLY: a rung-1–3 red (a mutation, an
 erroring verifier, an empty record on a task that provisions nothing — a record whose
 deployer died before any agent ran grades INFRA and reds nobody) does not stop when its
@@ -550,8 +551,8 @@ de-admission window, with nobody in the loop.)
 A demoted case keeps running and reporting in the nightly; give it a hold-out entry above
 with the issue that names its re-admission condition, and date it as `demoted YYYY-MM-DD` inside its
 `- **case-name** —` bullet, the shape the entries above use — the dashboard's Cases page
-reads that phrase from those bullets for the case's "demoted" pill. That issue goes to the case's `owner:` in its
-`task.yaml` — a GitHub login, or `maintainers` for the approvers in the root `OWNERS` file —
+reads that phrase from those bullets for the case's "demoted" pill. That issue goes to the case's effective owner — its `owner:`, or
+its domain's owner ([`bench/CONTRIBUTING.md`](../bench/CONTRIBUTING.md#ownership)) —
 who investigates and either fixes the case or proposes retiring it. A case whose owner does
 not answer stays demoted. The bar is the same for a contributed case and an in-house one;
 [`bench/CONTRIBUTING.md`](../bench/CONTRIBUTING.md) is what a contributor signs up to.
