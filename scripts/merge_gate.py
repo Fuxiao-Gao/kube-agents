@@ -16,15 +16,17 @@ these names:
 A smoke green from before the blocking job changed what it grades does not
 pass. While the repository variable SMOKE_PIN_NOT_BEFORE holds a UTC time, the
 same cutoff `pin_smoke_status.py` applies to its re-pins, `Smoke gate` stays
-pending on a green whose build first reported before that time, until a retest
-replaces it. The time is the earliest success status on the commit naming the
-same build, as that script reads it: a re-pin is a fresh copy with its own
-creation time. That is one more read per green while the variable is set. An
-`/override` is a status of its own, so it counts from when it was posted. An
+pending on a green whose build first reported before that time, until a run
+from after it replaces it. The time is the earliest success status on the
+commit naming the same build, as that script reads it: a re-pin is a fresh copy
+with its own creation time. A green with no build link counts from the earliest
+success with none. That is one more read per green while the variable is set.
+An `/override` links its own comment, so it counts from when it was posted. An
 unparsable value decides nothing and exits non-zero. Only greens are posted on
 a head, so a head `Smoke gate` posted green before the cutoff stays green: the
 pull request enters the queue, fails its group there, and like any pull request
-the queue removed, stays out until its head moves.
+the queue removed, stays out until its head moves. So the pending text asks for
+a push, not a `/test`.
 
 Tide also holds a merge on any other posted context that is not green, required
 or not, because no `context_options` entry for this repository says otherwise.
@@ -86,7 +88,7 @@ GATES = (SMOKE_GATE, LABELS_GATE)
 #: `pin_smoke_status.py` reads it.
 NOT_BEFORE_ENV = "SMOKE_PIN_NOT_BEFORE"
 #: What `Smoke gate` says while it waits on a green from before the cutoff.
-SMOKE_PREDATES = f"smoke predates {NOT_BEFORE_ENV}; run /test {SMOKE_CONTEXT}"
+SMOKE_PREDATES = f"smoke predates {NOT_BEFORE_ENV}; push a new commit to rerun {SMOKE_CONTEXT}"
 #: Tide's query for this repository (`prow/oss/config.yaml` in oss-test-infra) wants both.
 REQUIRED_LABELS = ("approved", "lgtm")
 #: The four labels Tide's query for this repository excludes. Any other `do-not-merge/` label
@@ -246,15 +248,17 @@ def latest_statuses(api, sha):
 def smoke_first_reported(api, sha):
     """When the build behind the latest smoke status on `sha` first reported green; None when unknown.
 
-    The earliest success status naming the same build (its target URL). None
+    The earliest success status naming the same build (its target URL); for a
+    status with no link, the earliest success with none, because each re-pin
+    copies it with a new creation time. None
     when the latest smoke status is not green or a creation time is unreadable
     or zoneless, which the cutoff counts as before it.
     """
     smoke = [s for s in api.get_all(f"/repos/{api.repo}/commits/{sha}/statuses") if s.get("context") == SMOKE_CONTEXT]
     if not smoke or smoke[0].get("state") != SUCCESS:
         return None
-    url = smoke[0].get("target_url")
-    copies = [s for s in smoke if s.get("state") == SUCCESS and s.get("target_url") == url] if url else smoke[:1]
+    url = smoke[0].get("target_url") or ""
+    copies = [s for s in smoke if s.get("state") == SUCCESS and (s.get("target_url") or "") == url]
     try:
         times = [parse_time(s.get("created_at") or "") for s in copies]
     except ValueError:

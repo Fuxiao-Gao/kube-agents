@@ -219,11 +219,16 @@ class CutoffTest(unittest.TestCase):
         )
         self.assertEqual(gate.smoke_first_reported(api, SHA), datetime(2026, 10, 23, 19, 0, tzinfo=timezone.utc))
 
-    def test_a_status_with_no_build_link_counts_from_its_own_time(self):
+    def test_a_status_with_no_build_link_counts_from_the_earliest_with_none(self):
+        """A re-pin copies a link-less green with a new time; the copy must not pass for a new verdict."""
         api = FakeAPI(
-            all_statuses=[smoke_status("2026-10-23T19:00:00Z", target_url=""), smoke_status("2026-10-23T12:00:00Z", target_url="")]
+            all_statuses=[
+                smoke_status("2026-10-23T19:00:00Z", target_url=""),
+                smoke_status("2026-10-23T12:00:00Z", target_url=None),
+                smoke_status("2026-10-23T11:00:00Z"),
+            ]
         )
-        self.assertEqual(gate.smoke_first_reported(api, SHA), datetime(2026, 10, 23, 19, 0, tzinfo=timezone.utc))
+        self.assertEqual(gate.smoke_first_reported(api, SHA), datetime(2026, 10, 23, 12, 0, tzinfo=timezone.utc))
 
     def test_an_unreadable_time_or_a_latest_that_is_not_green_is_unknown(self):
         for statuses in (
