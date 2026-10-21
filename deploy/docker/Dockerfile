@@ -1051,34 +1051,52 @@ RUN /opt/hermes/.venv/bin/python3 /tmp/kanban-worker-tools/apply_kanban_worker_t
 #     it could lose a complete report but could not guarantee a well-formed one
 #     -- the retry skipped the check and stored the same ugly copy. What is left
 #     is a two-level log on the delivery path. See that module's docstring.
+#   * kanban_verified_claims: kanban_complete takes `verified_claims`, each a
+#     claim with the command and output excerpt that prove it. The terminal
+#     result path records each call of the card, and the gate refuses a claim
+#     whose command did not run in the card or whose excerpt is not in its
+#     output, once, then drops it on the retry. Accepted claims are appended to
+#     `result` as an evidence section. A card's claim also passes when it
+#     matches one the gate accepted on a card it created.
 # Getting that answer into the chat message is the other half of the fix and
 # belongs to the kanban_notifier patch above; verify_kanban_result.py still owns
 # the seam, replaying a real refusal through the real gate and into the real
 # delivery path.
 #
-# Both patches ship in ONE COPY pair + ONE RUN, and the four COPY lines this
+# All three patches ship in ONE COPY pair + ONE RUN, and the four COPY lines this
 # block used to have are now two: this stage is the base for `platform`, whose
 # chain has hit Docker's layer-depth ceiling once already (build f9f1747c,
 # 2026-08-07), so the report-format patch is added at no layer cost rather than
 # buying a block of its own. The guarantees are unchanged -- same appliers, same
 # grep guards, same behavioural verifies.
 #
-# Order within the RUN is a requirement, not a preference: both appliers rewrite
-# tools/kanban_tools.py, and verify_kanban_report_format.py drives the completion
-# path, so it can only run once BOTH patches are in. The COPY puts both modules
-# in /opt/hermes/tools first; report-format is applied first so a failure in the
-# smaller, newer patch is not reported as a failure of the older one.
-# See the module docstrings in deploy/docker/patches/kanban_result_required.py
-# and deploy/docker/patches/kanban_report_format.py.
+# Order within the RUN is a requirement, not a preference: all three appliers
+# rewrite tools/kanban_tools.py, and the verify scripts drive the completion
+# path, so they can only run once ALL the patches are in. The COPY puts the
+# modules in /opt/hermes/tools first; report-format is applied first so a
+# failure in the smaller, newer patch is not reported as a failure of the older
+# one, and verified-claims last, since it inserts after the result gate's lines.
+# verify_kanban_verified_claims.py creates platform cards from inside a platform
+# card, so this RUN must also precede the kanban_self_copy applier (which
+# refuses such a card) and the kanban_children_settled applier (whose create
+# hook records the child itself).
+# See the module docstrings in deploy/docker/patches/kanban_result_required.py,
+# deploy/docker/patches/kanban_report_format.py and
+# deploy/docker/patches/kanban_verified_claims.py.
 COPY deploy/docker/patches/kanban_result_required.py \
      deploy/docker/patches/kanban_report_format.py \
+     deploy/docker/patches/kanban_verified_claims.py \
      /opt/hermes/tools/
-# The appliers import their anchors from the modules, and only the script's own
-# directory is on sys.path -- hence the second copy of each module alongside them.
+# The first two appliers import their anchors from their modules, and only the
+# script's own directory is on sys.path -- hence the second copy of those two
+# modules alongside them. apply_kanban_verified_claims.py imports nothing from
+# its module, so it has no copy there.
 COPY deploy/docker/patches/apply_kanban_result_required.py \
      deploy/docker/patches/verify_kanban_result.py \
      deploy/docker/patches/apply_kanban_report_format.py \
      deploy/docker/patches/verify_kanban_report_format.py \
+     deploy/docker/patches/apply_kanban_verified_claims.py \
+     deploy/docker/patches/verify_kanban_verified_claims.py \
      deploy/docker/patches/kanban_result_required.py \
      deploy/docker/patches/kanban_report_format.py \
      deploy/docker/patches/patchlib.py \
@@ -1090,9 +1108,13 @@ RUN /opt/hermes/.venv/bin/python3 /tmp/kanban-result/apply_kanban_report_format.
     grep -q "_result_err, result = _require_result(tid, summary, result)" /opt/hermes/tools/kanban_tools.py && \
     grep -q "_apply_result_schema(KANBAN_COMPLETE_SCHEMA)" /opt/hermes/tools/kanban_tools.py && \
     ! grep -q "provide at least one of: summary (preferred), result" /opt/hermes/tools/kanban_tools.py && \
+    /opt/hermes/.venv/bin/python3 /tmp/kanban-result/apply_kanban_verified_claims.py /opt/hermes && \
+    grep -q "_apply_verified_claims_schema(KANBAN_COMPLETE_SCHEMA)" /opt/hermes/tools/kanban_tools.py && \
+    grep -q "record_terminal_call(command, returncode, output)" /opt/hermes/tools/terminal_tool_result.py && \
     cd /opt/hermes && \
     /opt/hermes/.venv/bin/python3 /tmp/kanban-result/verify_kanban_result.py && \
     /opt/hermes/.venv/bin/python3 /tmp/kanban-result/verify_kanban_report_format.py && \
+    /opt/hermes/.venv/bin/python3 /tmp/kanban-result/verify_kanban_verified_claims.py && \
     rm -rf /tmp/kanban-result
 
 # Hotfix: three kanban scheduler faults, all measured on the cluster 2026-08-07,

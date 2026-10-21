@@ -471,6 +471,9 @@ CHECK_ASSERTIONS: dict[str, tuple[str, ...]] = {
     # No assertion field: "the gateway would post nothing" is the assertion; `reply` only picks
     # which reply is graded.
     "reply_is_silent": (),
+    # No field: "every evidence block in the reply is a worker's command with its real output"
+    # is the assertion; `min_blocks` only sets how many blocks a reply needs.
+    "verified_claims_backed": (),
     # This repository, agent-disk-reading: the discovery sweep a cron job filed.
     "bootstrap_fanout": ("require",),
     # This repository, sandbox-reading: the findings the onboarding
