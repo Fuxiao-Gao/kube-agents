@@ -2849,6 +2849,9 @@ unit_cost_hint() {
     # hack/eval/nightly-budget-history.txt carries the measurements and the
     # budget arithmetic.
     gitops-drift-noise-filtered-triage) echo 900 ;;
+    # The same shape again, plus a detector stop and relaunch before the live
+    # card wait. Unmeasured; priced with its siblings.
+    gitops-drift-backlog-digest) echo 900 ;;
     # Tofu too, and the same shape, plus a plant that waits out
     # stall_report.py's ten-minute Deployment threshold before it posts the
     # record and then waits for the card. 1040-1080s a repetition on a dev
