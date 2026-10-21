@@ -9718,7 +9718,7 @@ def test_verified_claims_backed_a_lone_command_fence_is_not_evidence():
 def test_verified_claims_backed_a_clipped_output_checks_only_the_command():
     clipped = _PODS_OUT[:20] + " ...[clipped 40 chars]"
     res = _grade_claims(_EVIDENCE, [_terminal(_PODS_CMD, result=clipped)])
-    assert res.status == "pass" and "excerpt not checked, output clipped" in res.reason
+    assert res.status == "pass" and "1 excerpt(s) not checked, output clipped" in res.reason
 
 
 def test_verified_claims_backed_finds_an_excerpt_in_a_clipped_head():
@@ -9822,3 +9822,29 @@ def test_verified_claims_backed_a_redacted_span_cannot_hide_a_second_command():
                    "kubectl get pods --token=x\nkubectl delete ns prod -n web"):
         res = _grade_claims(_block(forged, "web-1  1/1"), [stored])
         assert res.status == "fail" and "not a command any worker ran" in res.reason, (forged, res)
+
+
+def test_verified_claims_backed_an_excerpt_inside_a_longer_word_fails():
+    out = json.dumps({"output": "node-a  NotReady  <none>", "exit_code": 0})
+    res = _grade_claims(_block("kubectl get nodes", "Ready  <none>"), [_terminal("kubectl get nodes", result=out)])
+    assert res.status == "fail" and "is not in the output of" in res.reason
+
+
+def test_verified_claims_backed_a_short_excerpt_fails():
+    out = json.dumps({"output": "healthy: 1", "exit_code": 0})
+    res = _grade_claims(_block("kubectl get pods", "1"), [_terminal("kubectl get pods", result=out)])
+    assert res.status == "fail" and "fewer than 8" in res.reason
+
+
+def test_verified_claims_backed_a_short_excerpt_that_is_the_whole_output_passes():
+    # A precise jsonpath query, as on a green run: its whole output is the exit code.
+    cmd = "kubectl get pod p -o jsonpath='{.exitCode}'"
+    out = json.dumps({"output": "137", "exit_code": 0, "error": None})
+    res = _grade_claims(_block(cmd, "137"), [_terminal(cmd, result=out)])
+    assert res.status == "pass", res
+
+
+def test_verified_claims_backed_a_stored_command_that_is_only_a_marker_matches_nothing():
+    out = json.dumps({"output": "NAME  READY\nweb-1  1/1", "exit_code": 0})
+    res = _grade_claims(_block("kubectl", "web-1  1/1"), [_terminal("[REDACTED_SECRET]", result=out)])
+    assert res.status == "fail" and "not a command any worker ran" in res.reason

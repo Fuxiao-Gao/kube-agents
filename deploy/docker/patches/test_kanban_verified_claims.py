@@ -121,7 +121,7 @@ class AcceptTest(GateTestCase):
         claim = {"claim": "ghost does not exist.", "command": "kubectl get ns ghost", "excerpt": "(NotFound)"}
         _, result, metadata = run_rules(CARD, [claim], "r", None)
         self.assertEqual(metadata[kvc.METADATA_KEY][0]["exit_code"], 1)
-        self.assertIn("(exit 1,", result)
+        self.assertIn("(exit 1, the command failed,", result)
 
     def test_stored_text_is_redacted(self):
         record()
@@ -163,6 +163,29 @@ class RefuseTest(GateTestCase):
         record(command=command, output="x")
         self.assertRefused(dict(GOOD, command=command, excerpt="x"), "command is longer than")
 
+    def test_an_excerpt_inside_a_longer_word_is_refused(self):
+        # "Ready" inside "NotReady" claimed all nodes Ready; padded to the minimum length.
+        record(output="node-a  NotReady  <none>")
+        self.assertRefused(dict(GOOD, excerpt="Ready  <none>"), "is not in the output")
+
+    def test_a_short_excerpt_is_refused(self):
+        record(output="pods healthy: 1")
+        self.assertRefused(dict(GOOD, excerpt="1"), "fewer than")
+
+    def test_a_short_excerpt_that_is_the_whole_output_is_accepted(self):
+        # A precise jsonpath query, as on a green run: its whole output is the exit code.
+        record(command="kubectl get pod p -o jsonpath='{.exitCode}'", output="137")
+        claim = {"claim": "The container exited 137.", "command": "kubectl get pod p -o jsonpath='{.exitCode}'", "excerpt": "137"}
+        err, _, _ = run_rules(CARD, [claim], "r", None)
+        self.assertIsNone(err)
+
+    def test_an_excerpt_inside_a_json_line_is_accepted(self):
+        out = '{"containerID":"c1","exitCode":137,"reason":"OOMKilled"}'
+        record(command="kubectl get pod p -o jsonpath", output=out)
+        claim = {"claim": "OOMKilled.", "command": "kubectl get pod p -o jsonpath", "excerpt": '"exitCode":137,"reason":"OOMKilled"'}
+        err, _, _ = run_rules(CARD, [claim], "r", None)
+        self.assertIsNone(err)
+
     def test_an_overlong_claim_is_refused(self):
         record()
         self.assertRefused(dict(GOOD, claim="x" * (kvc.MAX_CLAIM_CHARS + 1)), "claim is longer than")
@@ -184,8 +207,8 @@ class RefuseTest(GateTestCase):
         self.assertRefused(dict(GOOD, command="kubectl get nodes -A"), "run it again")
 
     def test_a_fence_in_the_command_is_refused(self):
-        record(command="echo ```", output="```")
-        self.assertRefused({"claim": "c", "command": "echo ```", "excerpt": "x"}, "fence")
+        record(command="echo ``` done", output="``` done")
+        self.assertRefused({"claim": "c", "command": "echo ``` done", "excerpt": "``` done here"}, "fence")
 
     def test_a_fence_in_the_excerpt_is_refused(self):
         record(command="cat README.md", output="Run:\n```bash\nmake test\n```")
@@ -317,10 +340,32 @@ class ChildClaimsTest(GateTestCase):
         err, _, _ = run_rules(CARD, [dict(GOOD, excerpt="node-a    NotReady")], "r", None, connect=connect)
         self.assertIn("no card it created verified it", err)
 
+    def test_a_child_claim_with_another_command_is_refused(self):
+        # Same excerpt, different command: the relay checks the command too.
+        connect = self.connect_to([("t_cluster", CARD)], [("t_cluster", "completed", [CHILD_CLAIM])])
+        err, _, _ = run_rules(CARD, [dict(GOOD, command="kubectl get nodes -A")], "r", None, connect=connect)
+        self.assertIn("no card it created verified it", err)
+
     def test_a_claim_from_a_card_that_is_not_a_descendant_is_refused(self):
         # t_other was created by another card, and CARD is its sibling, not its creator.
         connect = self.connect_to([("t_other", "t_parent"), (CARD, "t_parent")], [("t_other", "completed", [CHILD_CLAIM])])
         err, _, _ = run_rules(CARD, [GOOD], "r", None, connect=connect)
+        self.assertIn("no card it created verified it", err)
+
+    def test_a_relayed_claim_of_an_adopted_card_is_refused(self):
+        # A repeated idempotency_key hands a worker an old cron card; the create hook does not adopt it.
+        import time
+
+        import kanban_children_settled as kcs
+
+        conn = board([], [("t_cron", "completed", [CHILD_CLAIM])])
+        conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, created_at INTEGER)")
+        conn.execute("INSERT INTO tasks VALUES ('t_cron', ?)", (int(time.time()) - 86400,))
+        conn.execute("DROP TABLE kanban_worker_children")
+        with mock.patch.dict(os.environ, {kcs.WORKER_TASK_ENV: CARD}):
+            kcs.maybe_record_worker_child(conn, "t_cron")
+        err, _, _ = run_rules(CARD, [GOOD], "r", None, connect=lambda: _Unclosable(conn))
+        self.assertIsNotNone(err, "the adopted card's claim was relayed")
         self.assertIn("no card it created verified it", err)
 
     def test_a_child_run_that_did_not_complete_does_not_count(self):
@@ -373,6 +418,7 @@ class SchemaTest(unittest.TestCase):
         for limit in (kvc.MAX_CLAIMS, kvc.MAX_CLAIM_CHARS, kvc.MAX_COMMAND_CHARS, kvc.MAX_EXCERPT_CHARS):
             with self.subTest(limit=limit):
                 self.assertIn(f"at most {limit} ", kvc.PARAM_DESCRIPTION)
+        self.assertIn(f"at least {kvc.MIN_EXCERPT_CHARS} ", kvc.PARAM_DESCRIPTION)
 
     def test_an_upstream_parameter_of_the_same_name_fails(self):
         schema = kvc.apply_schema(copy.deepcopy(self.SCHEMA))

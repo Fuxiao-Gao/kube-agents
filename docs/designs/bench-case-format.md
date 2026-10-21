@@ -265,8 +265,9 @@ replay's reply to the answer turn, at all, by its own silence rule), and
 `verified_claims_backed` (at least `min_blocks` evidence blocks in the answer, each a `$` command
 fence and then an output fence, as `kanban_complete` renders `verified_claims`; each command must
 be a worker's tagged `terminal` or `execute_code` call and each excerpt must be in that call's output, compared with
-escapes undone, addresses masked and whitespace removed; an excerpt past the pod's clip or in an
-output it redacted is not checked, and a missing command is
+escapes undone, addresses masked and whitespace collapsed, on word edges, and an excerpt under
+8 characters must be the whole output; an excerpt past the pod's clip or in an output it redacted
+is not checked, and a missing command is
 `status: "error"` when the capture has gaps, the pod withheld the workers' arguments, or the
 trajectory holds no worker terminal call).
 

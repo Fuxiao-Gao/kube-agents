@@ -3007,6 +3007,13 @@ _REDACTED_SPAN_RE = re.compile(r"\\\[REDACTED_[A-Z_]*\\\]")
 # What a redacted span of a command may stand for: one word, with no shell
 # separator that would start a second command.
 _REDACTED_WORD = r"[^\s;&|<>()$`]*"
+# Spaces around JSON and YAML punctuation, which the pod's re-serialisation
+# adds or drops.
+_JSON_SPACING_RE = re.compile(r"\s*([,:{}\[\]])\s*")
+_WORD_CHAR_RE = re.compile(r"\w")
+# ``kanban_verified_claims.MIN_EXCERPT_CHARS``: the fewest characters besides
+# whitespace an excerpt may hold, unless it is the command's whole output.
+_MIN_EXCERPT_CHARS = 8
 # A ``\uXXXX`` escape. The pod re-serialises a JSON output with
 # ``json.dumps``, which escapes every non-ASCII character, and kubectl escapes
 # ``&``, ``<`` and ``>`` the same way, so both copies are compared unescaped.
@@ -3014,14 +3021,30 @@ _UNICODE_ESCAPE_RE = re.compile(r"\\u([0-9a-fA-F]{4})")
 
 
 def _squeezed(text: str) -> str:
-    """``text`` with ``\\uXXXX`` escapes undone, addresses masked and every whitespace character removed.
+    """``text`` with ``\\uXXXX`` escapes undone, addresses masked, whitespace collapsed, and none around ``,:{}[]``.
 
-    Removed, not collapsed: the pod re-serialises a JSON output with ``", "``
-    and ``": "`` separators (``worker_trajectory.supplement``), so compact
-    JSON the worker saw and copied differs from the stored text in spaces and
-    escapes.
+    The pod re-serialises a JSON output with ``", "`` and ``": "`` separators
+    (``worker_trajectory.supplement``), so compact JSON the worker saw and
+    copied differs from the stored text in those spaces and in escapes. Other
+    whitespace is kept as one space, so a word edge still reads as one.
     """
-    return "".join(_normalized(text).split())
+    return _JSON_SPACING_RE.sub(r"\1", " ".join(_normalized(text).split()))
+
+
+def _excerpt_in(needle: str, haystack: str) -> bool:
+    """Whether ``needle`` is in ``haystack`` starting and ending on a word edge, as the gate requires.
+
+    A side whose own end character is not a word character is an edge already.
+    """
+    start = haystack.find(needle)
+    while start != -1:
+        end = start + len(needle)
+        left = start == 0 or not (_WORD_CHAR_RE.match(needle[0]) and _WORD_CHAR_RE.match(haystack[start - 1]))
+        right = end == len(haystack) or not (_WORD_CHAR_RE.match(needle[-1]) and _WORD_CHAR_RE.match(haystack[end]))
+        if left and right:
+            return True
+        start = haystack.find(needle, start + 1)
+    return False
 
 
 def _normalized(text: str) -> str:
@@ -3041,7 +3064,8 @@ def _same_command(stored: str, cited: str) -> bool:
     """
     if _squeezed(stored) == _squeezed(cited):
         return True
-    if _REDACTED_PREFIX not in stored:
+    if _REDACTED_PREFIX not in stored or not re.search(r"\w", _REDACTED_SPAN_RE.sub("", re.escape(stored))):
+        # A stored command that is only a marker would match any one word.
         return False
     stored, cited = " ".join(_normalized(stored).split()), " ".join(_normalized(cited).split())
     pattern = _REDACTED_SPAN_RE.sub(lambda _: _REDACTED_WORD, re.escape(stored))
@@ -3088,8 +3112,11 @@ class VerifiedClaimsBackedVerifier(BaseVerifier):
     it.
 
     Text is compared with ``\\uXXXX`` escapes undone, addresses masked and
-    all whitespace removed (:func:`_squeezed`), and a redacted span of a
-    stored command matches one word (:func:`_same_command`). An excerpt missing
+    whitespace collapsed, with none around JSON punctuation (:func:`_squeezed`).
+    An excerpt must start and end on a word edge and hold at least
+    :data:`_MIN_EXCERPT_CHARS` characters unless it is the command's whole
+    output, as the gate requires. A redacted
+    span of a stored command matches one word (:func:`_same_command`). An excerpt missing
     from an output the pod clipped (``worker_trajectory.MAX_RESULT_CHARS``) or
     redacted is not held against the reply: the command is checked and the
     pass says the excerpt was not, since the gate checked it against the
@@ -3139,9 +3166,13 @@ class VerifiedClaimsBackedVerifier(BaseVerifier):
                     unknown.append(f"{command!r} is not in a trajectory that is incomplete: {why}")
                     continue
                 return done("fail", f"evidence command {command!r} is not a command any worker ran")
-            if not needle:
-                return done("fail", f"evidence for {command!r} carries no output")
-            if any(needle in _squeezed(output) for output, _ in runs):
+            short = len("".join(excerpt.split())) < _MIN_EXCERPT_CHARS
+            if short and any(needle == _squeezed(output) for output, clipped in runs if not clipped):
+                continue
+            if short:
+                return done("fail", f"evidence for {command!r} holds fewer than {_MIN_EXCERPT_CHARS} characters "
+                            "and is not the command's whole output")
+            if any(_excerpt_in(needle, _squeezed(output)) for output, _ in runs):
                 continue
             if any(clipped or _REDACTED_PREFIX in output for output, clipped in runs):
                 unchecked.append(command)
@@ -3149,11 +3180,11 @@ class VerifiedClaimsBackedVerifier(BaseVerifier):
             return done("fail", f"evidence excerpt {excerpt[:_REPLY_QUOTE_CHARS]!r} is not in the output of {command!r}")
         if unknown:
             return done("error", "; ".join(unknown))
-        note = (
-            f"; excerpt not checked, output clipped or redacted in the pod: {', '.join(repr(c) for c in unchecked)}"
-            if unchecked else ""
-        )
-        return done("pass", f"{len(blocks)} evidence block(s), each a worker's command with its real output{note}")
+        if unchecked:
+            return done("pass", f"{len(blocks)} evidence block(s), each a command a worker ran; "
+                        f"{len(unchecked)} excerpt(s) not checked, output clipped or redacted in the pod: "
+                        f"{', '.join(repr(c) for c in unchecked)}")
+        return done("pass", f"{len(blocks)} evidence block(s), each a worker's command with its real output")
 
 
 def _agent_shell(script: str, timeout: float) -> str:

@@ -41,7 +41,11 @@ is not parsed. Each entry gives ``claim``, ``command`` and ``excerpt``:
 - ``command`` must equal, after whitespace is collapsed, a terminal command
   this card ran;
 - ``excerpt`` must appear, after whitespace is collapsed, in the output of a
-  run of that command.
+  run of that command, starting and ending on a word edge, and hold at least
+  :data:`MIN_EXCERPT_CHARS` characters besides whitespace unless it is the
+  command's whole output. So ``Ready`` does not match inside ``NotReady``,
+  ``1`` picked out of a longer output backs nothing, and a precise query whose
+  whole output is ``137`` still can.
 
 None of ``claim``, ``command`` and ``excerpt`` may hold a code fence (``` or
 ~~~), and ``claim`` is rendered on one line, so the rendered section cannot
@@ -90,6 +94,16 @@ Limits
   excerpt read later from a spill file is not in it.
 - Background processes are not recorded.
 - A child card's claims count only once that card completed with them.
+- The gate catches evidence a model made up or rewrote, not deliberate
+  deception. It proves that a command string ran and printed the excerpt, not
+  where its output came from: a worker can change ``PATH`` or ``KUBECONFIG``
+  in the sandbox between calls.
+- Prose in ``result`` is not checked. A card can skip ``verified_claims`` and
+  write the evidence heading by hand; the platform and cluster ``SOUL.md``
+  rules, not this gate, cover that. A card that quotes a child card's result
+  carries that child's real heading, so the heading alone proves nothing.
+- A claim backed by a command that failed is accepted, since "not found" is
+  evidence, and renders as ``exit N, the command failed``.
 """
 
 from __future__ import annotations
@@ -123,6 +137,11 @@ MAX_CLAIMS = 10
 MAX_CLAIM_CHARS = 300
 MAX_COMMAND_CHARS = 500
 MAX_EXCERPT_CHARS = 600
+
+#: The fewest characters besides whitespace an excerpt may hold, unless it is
+#: the command's whole output. Shorter, and it matches by chance: ``1``,
+#: ``Yes``, ``Ready``.
+MIN_EXCERPT_CHARS = 8
 
 #: ``kanban_children_settled.CHILDREN_TABLE``: which card's worker created
 #: which card. Created on the first fan-out, so it can be absent.
@@ -165,8 +184,10 @@ PARAM_DESCRIPTION = (
     f"{MAX_CLAIM_CHARS} characters); ``command`` is a terminal command you ran "
     f"in this card (at most {MAX_COMMAND_CHARS} characters), copied exactly; "
     f"``excerpt`` is the lines of its output that prove the claim, copied "
-    f"exactly (at most {MAX_EXCERPT_CHARS} characters). None of the three may "
-    f"hold a {FENCE} or {TILDE_FENCE} fence. "
+    f"exactly (whole words, at most {MAX_EXCERPT_CHARS} characters, and at least "
+    f"{MIN_EXCERPT_CHARS} unless it is the command's whole output). None of the three may hold a {FENCE} or "
+    f"{TILDE_FENCE} fence. A claim backed by a command that failed must say what "
+    f"failed. "
     "You may also repeat a verified claim from a card you created, with its "
     "command and excerpt as that card gave them. The tool checks each claim, "
     "adds the exit code and the time the command ran, and appends the evidence "
@@ -288,9 +309,37 @@ def _load_child_claims(connect, task_id: str) -> list[dict]:
         return []
 
 
+def _word_char(char: str) -> bool:
+    return char.isalnum() or char == "_"
+
+
+def _excerpt_in(needle: str, haystack: str) -> bool:
+    """Whether ``needle`` appears in ``haystack`` starting and ending on a word edge.
+
+    A side whose own end character is not a word character is an edge already,
+    so ``"exitCode":137`` matches inside a longer JSON line.
+    """
+    start = haystack.find(needle)
+    while start != -1:
+        end = start + len(needle)
+        left = start == 0 or not (_word_char(needle[0]) and _word_char(haystack[start - 1]))
+        right = end == len(haystack) or not (_word_char(needle[-1]) and _word_char(haystack[end]))
+        if left and right:
+            return True
+        start = haystack.find(needle, start + 1)
+    return False
+
+
+def _backs(needle: str, text: str) -> bool:
+    """Whether ``text`` backs the excerpt ``needle``: on word edges, or as all of it when the excerpt is short."""
+    if len(needle.replace(" ", "")) < MIN_EXCERPT_CHARS:
+        return needle == text
+    return _excerpt_in(needle, text)
+
+
 def _from_child(child_claims, wanted: str, needle: str) -> dict | None:
     for child in child_claims():
-        if _collapse(child["command"]) == wanted and needle in _collapse(child["excerpt"]):
+        if _collapse(child["command"]) == wanted and _backs(needle, _collapse(child["excerpt"])):
             return child
     return None
 
@@ -320,7 +369,7 @@ def _check_claim(calls: list, item: object, child_claims) -> tuple[dict | None, 
     accepted = {"claim": claim, "command": command, "excerpt": excerpt}
     runs = [call for call in calls if call["command"] == wanted]
     for call in reversed(runs):
-        if needle in call["output"]:
+        if _backs(needle, call["output"]):
             return {**accepted, "exit_code": call["exit_code"], "ran_at": call["ran_at"]}, None
     child = _from_child(child_claims, wanted, needle)
     if child is not None:
@@ -335,6 +384,11 @@ def _check_claim(calls: list, item: object, child_claims) -> tuple[dict | None, 
             f"command {_quote(command)!r} did not run in this card, and no card it created "
             "verified it; copy it exactly as it ran"
         )
+    if len(needle.replace(" ", "")) < MIN_EXCERPT_CHARS:
+        return None, (
+            f"excerpt {_quote(excerpt)!r} holds fewer than {MIN_EXCERPT_CHARS} characters and is not the whole "
+            f"output of {_quote(command)!r}; cite the whole line that proves the claim"
+        )
     return None, f"excerpt {_quote(excerpt)!r} is not in the output of {_quote(command)!r}; copy it exactly"
 
 
@@ -348,7 +402,8 @@ def render_evidence(claims: list) -> str:
     parts = [EVIDENCE_HEADING]
     for claim in claims:
         where = f", on card {claim['card']}" if claim.get("card") else ""
-        parts.append(f"{claim['claim']} (exit {claim['exit_code']}, {claim['ran_at']}{where})")
+        failed = ", the command failed" if claim["exit_code"] not in (0, None) else ""
+        parts.append(f"{claim['claim']} (exit {claim['exit_code']}{failed}, {claim['ran_at']}{where})")
         parts.append(f"{FENCE}\n$ {claim['command']}\n{FENCE}\n{FENCE}\n{claim['excerpt']}\n{FENCE}")
     return "\n\n".join(parts)
 
