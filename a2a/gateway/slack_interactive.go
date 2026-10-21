@@ -346,7 +346,8 @@ func (s *SlackAdapter) addPendingLocked(key string, p slackPending) {
 
 // interactive turns one interactive envelope's payload into a turn, or
 // reports it is not one: a click on a choice button, from a member of the
-// bot's own workspace, on a question not already answered.
+// bot's own workspace or a guest the allowlist names as "T…:U…" (admitGuest),
+// on a question not already answered.
 func (s *SlackAdapter) interactive(raw json.RawMessage) (InboundMessage, bool) {
 	var p slackClickPayload
 	if err := json.Unmarshal(raw, &p); err != nil {

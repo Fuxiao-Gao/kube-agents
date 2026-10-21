@@ -158,6 +158,27 @@ func TestSlackHomeShowsNoFleetToAMemberTheGatewayWouldNotAnswer(t *testing.T) {
 	}
 }
 
+// A Slack Connect guest the list names as T…:U… is drawn the dashboard, as their
+// mentions are turns; the same member id from a workspace the entry does not
+// name is not.
+func TestSlackHomeDrawsTheDashboardForAListedGuest(t *testing.T) {
+	api := &fakeSlackAPI{users: map[string]*slack.User{
+		"UG": {ID: "UG", TeamID: "T7"}, "UH": {ID: "UH", TeamID: "T8"}}}
+	a, _ := newUXSlackAdapter(api)
+	a.workspaceURL = "https://acme.slack.com/"
+	a.SetAllowedGuests([]string{"T7:UG", "T7:UH"})
+	a.SetHome(func(m string) (bool, bool) { return m == "U1" || m == "T7:UG" || m == "T7:UH", false },
+		func(context.Context) (*lib.Board, error) { return homeBoardFixture(), nil })
+	a.homeOpened(&slackevents.AppHomeOpenedEvent{User: "UG", Tab: "home"})
+	if len(api.views) != 1 || !strings.Contains(viewText(t, api.views[0].view), "header: Fleet") {
+		t.Fatalf("a listed guest was not drawn the dashboard: %+v", api.views)
+	}
+	a.homeOpened(&slackevents.AppHomeOpenedEvent{User: "UH", Tab: "home"})
+	if len(api.views) != 2 || viewText(t, api.views[1].view) != "section: "+slackHomeDenied {
+		t.Errorf("a member of a workspace the entry does not name was drawn the dashboard: %+v", api.views)
+	}
+}
+
 // A listed member needs no users.info, so an app without users:read still
 // draws their dashboard; allow-all is what needs the workspace check.
 func TestSlackHomeAListedMemberNeedsNoUserLookup(t *testing.T) {
