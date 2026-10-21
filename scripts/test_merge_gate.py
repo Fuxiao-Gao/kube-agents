@@ -23,6 +23,7 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 import merge_gate as gate
+import pin_smoke_status
 
 REPO = "gke-labs/kube-agents"
 SHA = "a" * 40
@@ -254,6 +255,27 @@ class CutoffTest(unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(gate, "cmd_group") as group:
             self.assertEqual(gate.main(["--repo", REPO, "group", "--ref", "x", "--gate", gate.SMOKE_GATE]), 2)
         group.assert_not_called()
+
+    def test_a_merge_labels_group_does_not_read_the_variable(self):
+        env = {"GITHUB_TOKEN": "t", gate.NOT_BEFORE_ENV: "tomorrow"}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(gate, "cmd_group") as group:
+            group.return_value = True, "#42 Merge labels: success"
+            self.assertEqual(gate.main(["--repo", REPO, "group", "--ref", "x", "--gate", gate.LABELS_GATE]), 0)
+        self.assertIsNone(group.call_args.kwargs["not_before"])
+
+    def test_a_green_pin_smoke_status_expired_waits_with_or_without_the_variable(self):
+        def unread():
+            raise AssertionError("the status history was read for an expired green")
+
+        expired = {gate.SMOKE_CONTEXT: ("success", f"Job succeeded. {gate.SMOKE_EXPIRED_NOTE}")}
+        for not_before in (None, CUTOFF):
+            with self.subTest(not_before=not_before):
+                results = gate.verdicts(pull(statuses=expired), no_files, not_before, unread)
+                self.assertEqual(results[gate.SMOKE_GATE], (gate.PENDING, gate.SMOKE_PREDATES))
+
+    def test_the_expired_note_is_the_one_pin_smoke_status_writes(self):
+        self.assertEqual(gate.SMOKE_EXPIRED_NOTE, pin_smoke_status.EXPIRED_NOTE)
+        self.assertIn(gate.SMOKE_EXPIRED_NOTE, pin_smoke_status.expired_description("x" * 200))
 
     def test_the_queue_refuses_a_green_from_before_the_cutoff(self):
         raw = {"number": 42, "head": {"sha": SHA}, "base": {"ref": "main"}, "labels": []}

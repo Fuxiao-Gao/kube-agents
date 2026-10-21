@@ -21,8 +21,14 @@ from after it replaces it. The time is the earliest success status on the
 commit naming the same build, as that script reads it: a re-pin is a fresh copy
 with its own creation time. A green with no build link counts from the earliest
 success with none. That is one more read per green while the variable is set.
-An `/override` links its own comment, so it counts from when it was posted. An
-unparsable value decides nothing and exits non-zero. Only greens are posted on
+An `/override` links its own comment, so it counts from when it was posted. A
+green that `pin_smoke_status.py` expired carries its note and stays pending
+even after the variable is cleared. A green from before the cutoff that the
+script did not expire, because Tide already saw it as stale, has no note. So
+leave the variable set: clearing it lets such a green pass again. An
+unparsable value decides nothing and exits non-zero on every path that reads
+it. `Merge labels` does not read it, but on the queue the `Smoke gate` leg
+fails each group, so check the value before you set it. Only greens are posted on
 a head, so a head `Smoke gate` posted green before the cutoff stays green: the
 pull request enters the queue, fails its group there, and like any pull request
 the queue removed, stays out until its head moves. So the pending text asks for
@@ -89,6 +95,9 @@ GATES = (SMOKE_GATE, LABELS_GATE)
 NOT_BEFORE_ENV = "SMOKE_PIN_NOT_BEFORE"
 #: What `Smoke gate` says while it waits on a green from before the cutoff.
 SMOKE_PREDATES = f"smoke predates {NOT_BEFORE_ENV}; push a new commit to rerun {SMOKE_CONTEXT}"
+#: The note `pin_smoke_status.py` (EXPIRED_NOTE) adds to a pre-cutoff green that Tide still
+#: credited. It holds that green with or without the variable, as it does for Tide.
+SMOKE_EXPIRED_NOTE = f"(predates {NOT_BEFORE_ENV}: retest)"
 #: Tide's query for this repository (`prow/oss/config.yaml` in oss-test-infra) wants both.
 REQUIRED_LABELS = ("approved", "lgtm")
 #: The four labels Tide's query for this repository excludes. Any other `do-not-merge/` label
@@ -218,7 +227,9 @@ def verdicts(pull, files, not_before=None, first_reported=None):
         smoke_gate = SUCCESS, "smoke not required: only paths it skips changed"
     else:
         smoke_gate = status_verdict(smoke, SMOKE_CONTEXT)
-        if smoke_gate[0] == SUCCESS and not_before is not None:
+        if smoke_gate[0] == SUCCESS and SMOKE_EXPIRED_NOTE in smoke[1]:
+            smoke_gate = PENDING, SMOKE_PREDATES
+        elif smoke_gate[0] == SUCCESS and not_before is not None:
             reported = first_reported()
             if reported is None or reported < not_before:
                 smoke_gate = PENDING, SMOKE_PREDATES
@@ -491,11 +502,14 @@ def main(argv=None):
     if not args.repo or not token:
         print("GITHUB_REPOSITORY (or --repo) and GITHUB_TOKEN are required", file=sys.stderr)
         return 2
-    try:
-        not_before = not_before_from_env()
-    except ValueError as error:
-        print(f"{NOT_BEFORE_ENV} is not a UTC time: {error}", file=sys.stderr)
-        return 2
+    not_before = None
+    # `Merge labels` never reads the cutoff, so a bad value must not fail it on the queue too.
+    if not (args.command == "group" and args.gate == LABELS_GATE):
+        try:
+            not_before = not_before_from_env()
+        except ValueError as error:
+            print(f"{NOT_BEFORE_ENV} is not a UTC time: {error}", file=sys.stderr)
+            return 2
     api = GitHubAPI(args.repo, token, user_agent=USER_AGENT)
     failures = 0
     if args.command == "pull":
