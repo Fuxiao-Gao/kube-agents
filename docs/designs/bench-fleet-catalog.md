@@ -167,7 +167,7 @@ neither is going to be obvious from a slug.
 **A role slug is not the `seeded-role` label.** `bench/tf/fleet/main.tf` carries
 `seeded-role=pinned-inference` on the pinned pool's node label and taint, and
 `seeded-role=idle-batch` on the idle pool's taint, and `bench/tf/fleet/defects-b.tf`
-`seeded-role=no-surge` on the no-surge pool's — so three of the thirty-one roles are called one
+`seeded-role=no-surge` on the no-surge pool's — so three of the thirty-two roles are called one
 thing by the catalogue and another by the Terraform that plants them. They are
 different mechanisms and both are load-bearing: the label and taint are scheduling
 constraints that keep other workloads off those pools, and the role slug is what the

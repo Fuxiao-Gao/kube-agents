@@ -78,7 +78,7 @@ Calculate per dimension and show both: `nodes_needed = max(ceil(total_cpu_reques
 
 ## Writing the answer
 
-Open your `result` with one line per workload or pool, before anything else: its name and the dependency that blocks or limits the cut. For example, `checkout-api: an HPA scales it on CPU, so a lower request adds replicas`, or `batch-worker: Guaranteed QoS, so a lower request is also a lower limit`. Write `no dependency found` when checks 1 to 3 found none. When the Platform Agent summarises several cards, these lines are what it carries to the person.
+Open your `result` with one line per workload or pool, before anything else: its name and the dependency that blocks or limits the cut. For example, `checkout-api: an HPA scales it on CPU, so a lower request adds replicas`, or `batch-worker: Guaranteed QoS, so a lower request is also a lower limit`. Write `no dependency found` when checks 1 to 3 found none. When the Platform Agent summarises several cards, these lines are what it carries to the person. `kanban_complete` refuses, once, a result that does not open with these lines or does not show the five checks.
 
 Then, for each workload or pool, in this order:
 
