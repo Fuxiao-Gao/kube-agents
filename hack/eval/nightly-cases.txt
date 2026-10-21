@@ -881,6 +881,18 @@
 # Add a case at its place in that order, so two pull requests that each add
 # a case don't edit the same lines. scripts/test_eval_rosters.py checks both.
 
+# autoops-warning-event-no-action-triage (#3267): a Warning event that cleared
+# by itself is triaged to one "No action needed" bullet, with no Option
+# letters and no "To authorize:" call to action. Its stack plants a healthy
+# Deployment, injects a recorded NetworkNotReady event for its pod through the
+# daemon, and waits for the card to finish; the agent turn is a board read.
+# Infra-lock exempt in hack/ci-eval-pr.sh: the stack writes only its own
+# labelled namespace through a kubeconfig of its own, plus its one daemon
+# session, so it runs beside the lock-infra chain rather than adding ~45
+# serial minutes to it. 900s hint, unmeasured (the shape of
+# autoops-warning-event-triage).
+./tasks/autoops-warning-event-no-action-triage/task.yaml
+
 # "/feedback <text>" is written up and shown for a yes before anything is
 # filed (docs/designs/chat-feedback-command.md): the Planning Agent's reply
 # carries the composed submission, the public-issue warning and a question,
