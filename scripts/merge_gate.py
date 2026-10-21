@@ -32,8 +32,9 @@ it. `Merge labels` does not read it, but on the queue the `Smoke gate` leg
 fails each group, so check the value before you set it. Only greens are posted on
 a head, so a head `Smoke gate` posted green before the cutoff stays green: the
 pull request enters the queue, fails its group there, and like any pull request
-the queue removed, stays out until its head moves. So the pending text asks for
-a push, not a `/test`.
+the queue removed, stays out until its head moves: the one retry after a
+`failed_checks` removal fails the same way. So the pending text asks for a push,
+not a `/test`.
 
 Tide also holds a merge on any other posted context that is not green, required
 or not, because no `context_options` entry for this repository says otherwise.
@@ -195,11 +196,11 @@ query($owner: String!, $name: String!, $base: String!, $after: String) {
         labels(first: 100) { nodes { name } }
         autoMergeRequest { enabledAt }
         mergeQueueEntry { id }
-        timelineItems(last: %d, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) {
+        timelineItems(last: %(removals)d, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) {
           nodes { ... on RemovedFromMergeQueueEvent { createdAt reason actor { login } } }
         }
         commits(last: 1) { nodes { commit {
-          checkSuites(first: %d) { nodes { createdAt } }
+          checkSuites(first: %(suites)d) { nodes { createdAt } }
           statusCheckRollup { contexts(first: 100) { nodes {
           __typename
           ... on StatusContext { context state description }
@@ -548,7 +549,7 @@ def graphql_pulls(api, base=BASE, actor=SWEEP_ACTOR):
     pulls = []
     after = None
     while True:
-        page = api.graphql(PULLS_QUERY % (REMOVALS_READ, CHECK_SUITES_READ), {"owner": owner, "name": name, "base": base, "after": after})
+        page = api.graphql(PULLS_QUERY % {"removals": REMOVALS_READ, "suites": CHECK_SUITES_READ}, {"owner": owner, "name": name, "base": base, "after": after})
         page = page["repository"]["pullRequests"]
         for node in page["nodes"]:
             commits = node["commits"]["nodes"]

@@ -70,6 +70,7 @@ class FakeAPI:
         self.refuse_comments = False
         self.refuse_comment_reads = False
         self.mutations = []
+        self.queries = []
         self.posts = []
 
     def get(self, path, tolerate=()):
@@ -95,6 +96,7 @@ class FakeAPI:
         self.posts.append((path, payload))
 
     def graphql(self, query, variables):
+        self.queries.append(query)
         if query.startswith("mutation"):
             self.mutations.append((query.split("(", 2)[1].split("{")[-1].strip(), variables["id"]))
             return {}
@@ -646,6 +648,13 @@ class SweepTest(unittest.TestCase):
         self.assertEqual(api.mutations, [])
         self.assertTrue(any(line.startswith("#7: left out, removed 2026-10-13T11:00:00Z") for line in lines))
         self.assertIn("#7: posted the left-out comment", lines)
+
+    def test_the_query_reads_each_size_into_its_own_connection(self):
+        api = FakeAPI()
+        with mock.patch.object(gate, "REMOVALS_READ", 3), mock.patch.object(gate, "CHECK_SUITES_READ", 7):
+            gate.graphql_pulls(api)
+        self.assertIn("timelineItems(last: 3,", api.queries[0])
+        self.assertIn("checkSuites(first: 7)", api.queries[0])
 
     def test_a_dry_run_changes_nothing(self):
         api = FakeAPI(nodes=[node(1, APPROVED)])
