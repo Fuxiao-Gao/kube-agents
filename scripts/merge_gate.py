@@ -144,6 +144,8 @@ query($owner: String!, $name: String!, $base: String!, $after: String) {
 }
 """
 ENABLE_MUTATION = "mutation($id: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $id}) { clientMutationId } }"
+#: The enable call with the pull request's node id written in, for a write user to paste.
+ENABLE_COMMAND_QUERY = 'mutation {{ enablePullRequestAutoMerge(input: {{pullRequestId: "{id}"}}) {{ clientMutationId }} }}'
 DISABLE_MUTATION = "mutation($id: ID!) { disablePullRequestAutoMerge(input: {pullRequestId: $id}) { clientMutationId } }"
 DEQUEUE_MUTATION = "mutation($id: ID!) { dequeuePullRequest(input: {id: $id}) { clientMutationId } }"
 #: The GraphQL type name of a commit status in a rollup.
@@ -343,21 +345,23 @@ def last_removal(node):
     return removals[-1] if removals else None
 
 
-def left_out_line(pull, repo):
+def left_out_line(pull):
     """The sweep's line for a pull request it leaves out: why, and the command that puts it back.
 
-    The queue picks the merge method, so the re-add needs no strategy flag;
-    `--auto` enters the queue now if the required checks have passed and turns
-    auto-merge on otherwise. Once auto-merge is on, the sweep leaves it alone.
+    The command is the sweep's own enable call, run on a write user's token: a
+    write user pastes it to turn auto-merge on, which with the queue means
+    "enqueue once the required checks pass". Once auto-merge is on, the next
+    sweep leaves the pull request alone.
     """
     removal = pull.get("removal") or {}
     when = removal.get("createdAt") or UNKNOWN_REMOVAL_FIELD
     who = ((removal.get("actor")) or {}).get("login") or UNKNOWN_REMOVAL_FIELD
     why = removal.get("reason") or UNKNOWN_REMOVAL_FIELD
-    number = pull["number"]
+    enable = ENABLE_COMMAND_QUERY.format(id=pull["id"])
     return (
-        f"#{number}: left out, removed {when} by {who} (reason: {why}). "
-        f"To re-add: gh pr merge {number} -R {repo} --auto (a write user), or push a fix (a push can drop lgtm)."
+        f"#{pull['number']}: left out, removed {when} by {who} (reason: {why}). "
+        f"To re-add (a write user): gh api graphql -f query='{enable}', "
+        "or push a fix (a push drops lgtm unless the author is in gke-labs/Googlers)."
     )
 
 
@@ -423,7 +427,7 @@ def sweep(api, base=BASE, enqueuer=None, actor=SWEEP_ACTOR, dry_run=False):
                     enqueuer.graphql(DISABLE_MUTATION, {"id": pull["id"]})
             if action:
                 if action == LEFT_OUT:
-                    lines.append(left_out_line(pull, api.repo))
+                    lines.append(left_out_line(pull))
                 else:
                     verb = {ENABLE: "auto-merge on", DISABLE: "auto-merge off and out of the queue"}[action]
                     lines.append(f"#{pull['number']}: {'would turn ' if dry_run else ''}{verb}")
