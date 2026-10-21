@@ -225,7 +225,10 @@ SETTLED_STATUSES = ("done", "archived")
 #: create made. A repeated ``idempotency_key`` returns an existing card, made by
 #: anyone (a person, cron, the gateway) and possibly long done; attributing it
 #: would make it a child of this card, and let this card relay its verified
-#: claims (``kanban_verified_claims.descendant_card_ids``).
+#: claims (``kanban_verified_claims.descendant_card_ids``). The window only
+#: approximates "a card this create made": a card that a person, cron or the
+#: gateway created in the last 60 seconds can still be adopted by a worker that
+#: knows its ``idempotency_key``.
 CREATED_JUST_NOW_SECONDS = 60
 
 #: How long a refusal stays on file — one attempt window. The value and the
