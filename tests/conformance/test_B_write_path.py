@@ -138,6 +138,46 @@ def _workflow_documents():
         yield path, document
 
 
+#: The script calls B2 looks for: they merge, enqueue or approve.
+_B2_MERGING = (
+    r"enablePullRequestAutoMerge",
+    r"enqueuePullRequest",
+    r"mergePullRequest",
+    r"addPullRequestReview",
+    r"gh\s+pr\s+merge",
+    r"gh\s+pr\s+review[^\n]*--approve",
+    r"/pulls/[^\n]*/merge\b",
+)
+#: Each allowed (script, match), and the start its source line must have, or None.
+#: The sweep also prints `gh pr merge N ... --auto` in the line for a pull
+#: request it leaves out, so a write user can re-add it by hand. That is text
+#: for a person to run, not a call, and only that line is exempt: any other
+#: `gh pr merge` in the file is still an offence.
+_B2_ALLOWED = {
+    ("scripts/merge_gate.py", "enablePullRequestAutoMerge"): None,
+    ("scripts/merge_gate.py", "gh pr merge"): 'f"To re-add: gh pr merge',
+}
+
+
+def _script_merge_calls(scripts):
+    """(offences, allowed keys found) for {relative path: text}: what B2 reads."""
+    found = set()
+    offences = []
+    for rel, text in scripts.items():
+        lines = text.splitlines()
+        for pattern in _B2_MERGING:
+            for match in re.finditer(pattern, text):
+                key = (rel, match.group(0))
+                line = text[: match.start()].count("\n") + 1
+                if key in _B2_ALLOWED:
+                    start = _B2_ALLOWED[key]
+                    if start is None or lines[line - 1].strip().startswith(start):
+                        found.add(key)
+                        continue
+                offences.append(f"{rel}:{line} {match.group(0)!r}")
+    return offences, found
+
+
 class B1NoAgentCredentialCausesAProductionChange(unittest.TestCase):
     """B1: not "cannot mutate a cluster" -- cannot cause a change, by any route."""
 
@@ -708,38 +748,26 @@ class B2AssentIsHumanOrPolicy(unittest.TestCase):
         one. The next test pins the predicate; any other script under
         `scripts/` making one of these calls is a red.
         """
-        merging = (
-            r"enablePullRequestAutoMerge",
-            r"enqueuePullRequest",
-            r"mergePullRequest",
-            r"addPullRequestReview",
-            r"gh\s+pr\s+merge",
-            r"gh\s+pr\s+review[^\n]*--approve",
-            r"/pulls/[^\n]*/merge\b",
-        )
-        # The sweep also prints `gh pr merge N ... --auto` in the line for a
-        # pull request it leaves out, so a write user can re-add it by hand. It
-        # is text for a person to run, not a call the script makes.
-        allowed = {
-            ("scripts/merge_gate.py", "enablePullRequestAutoMerge"),
-            ("scripts/merge_gate.py", "gh pr merge"),
-        }
-        found = set()
-        offences = []
+        scripts = {}
         for path in sorted((h.REPO_ROOT / "scripts").rglob("*")):
             if path.suffix not in (".py", ".sh") or path.name.startswith("test_"):
                 continue
-            text = path.read_text()
-            for pattern in merging:
-                for match in re.finditer(pattern, text):
-                    key = (str(path.relative_to(h.REPO_ROOT)), match.group(0))
-                    if key in allowed:
-                        found.add(key)
-                        continue
-                    line = text[: match.start()].count("\n") + 1
-                    offences.append(f"{path.relative_to(h.REPO_ROOT)}:{line} {match.group(0)!r}")
+            scripts[str(path.relative_to(h.REPO_ROOT))] = path.read_text()
+        offences, found = _script_merge_calls(scripts)
         self.assertEqual([], offences, "a script can assent to its own repository's changes")
-        self.assertEqual(allowed, found, "the allowed call is gone; drop it from the allowlist")
+        self.assertEqual(set(_B2_ALLOWED), found, "the allowed call is gone; drop it from the allowlist")
+
+    def test_B2_a_real_merge_call_beside_the_printed_command_is_caught(self) -> None:
+        """The printed re-add command is exempt by its line, not by its words.
+
+        A shell-string `gh pr merge` call anywhere else in `merge_gate.py` is
+        still an offence, though it matches the same three words.
+        """
+        sweep = (h.REPO_ROOT / "scripts" / "merge_gate.py").read_text()
+        call = '\nsubprocess.run(f"gh pr merge {number} --auto", shell=True)\n'
+        offences, _ = _script_merge_calls({"scripts/merge_gate.py": sweep + call})
+        self.assertEqual(1, len(offences), offences)
+        self.assertIn("'gh pr merge'", offences[0])
 
     def test_B2_the_enqueue_sweep_assents_only_on_both_human_labels(self) -> None:
         """The predicate behind the one allowed call, driven over the label space.
