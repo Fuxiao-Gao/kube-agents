@@ -47,6 +47,8 @@ DEFAULT_HERMES_HOME = "/opt/data"
 PROCESS_HOME = "home"
 NPM_HOME_CACHE = ".npm"
 NPM_SHARED_CACHE = Path(".cache", "npm")
+# Where the start-up sweep moves an old per-profile cache before it deletes it.
+NPM_RECLAIM_NAME = ".npm.reclaim"
 
 _jobs_lock_state = threading.local()
 
@@ -240,8 +242,12 @@ def share_npm_cache(process_home: Path, hermes_home: Path, reclaim: bool = False
     directory exists, so creating it would move where the profile keeps its gcloud
     and kube state. An existing ~/.npm symlink stays, and a cache line in .npmrc wins
     over ~/.npm. A real ~/.npm directory is the old per-profile cache. With `reclaim`,
-    it is removed and replaced. Only the start-up sweep sets `reclaim`, because a
-    process of the profile can be using the directory at any other time.
+    it is moved aside, the link takes its place, and then the moved copy is deleted,
+    so a delete that fails leaves an orphan directory, never a home with no link.
+    Only the start-up sweep sets `reclaim`, because a process of the profile can be
+    using the directory at any other time. On an install with more than one replica,
+    a pod that has not restarted yet can still be using it during the sweep; no
+    shipped agent runs an npx MCP server, and such a server starts again through npx.
     """
     if not process_home.is_dir():
         return
@@ -255,11 +261,16 @@ def share_npm_cache(process_home: Path, hermes_home: Path, reclaim: bool = False
         if link.exists():
             if not (reclaim and link.is_dir()):
                 return
+            aside = link.with_name(NPM_RECLAIM_NAME)
+            link.rename(aside)
+            link.symlink_to(os.path.relpath(shared.resolve(), process_home.resolve()), target_is_directory=True)
+            log(f"pointed npm in {process_home} at the shared cache {shared}")
             size = sum(
-                (Path(root) / name).lstat().st_size for root, _, names in os.walk(link) for name in names
+                (Path(root) / name).lstat().st_size for root, _, names in os.walk(aside) for name in names
             )
-            shutil.rmtree(link)
+            shutil.rmtree(aside)
             log(f"reclaimed the per-profile npm cache {link} ({size} bytes)")
+            return
         link.symlink_to(os.path.relpath(shared.resolve(), process_home.resolve()), target_is_directory=True)
         log(f"pointed npm in {process_home} at the shared cache {shared}")
     except OSError as exc:

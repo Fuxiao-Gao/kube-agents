@@ -671,6 +671,27 @@ class NpmCacheTest(unittest.TestCase):
         self.assertEqual(old.resolve(), self.tmp / ".cache" / "npm")
         self.assertIn(f"reclaimed the per-profile npm cache {old} (10 bytes)", err)
 
+    def test_a_failed_delete_still_leaves_the_link(self):
+        # The old cache is moved aside before the link goes in, so a delete that
+        # fails (another replica writing into it) leaves an orphan directory,
+        # never a home with no link until the next start.
+        process_home = self.tmp / "home"
+        process_home.mkdir()
+        old = self.old_cache(process_home)
+        real_rmtree = ps.shutil.rmtree
+        self.addCleanup(setattr, ps.shutil, "rmtree", real_rmtree)
+
+        def fail(path, *args, **kwargs):
+            raise OSError(39, "Directory not empty", str(path))
+
+        ps.shutil.rmtree = fail
+        err = self.share(process_home, self.tmp, reclaim=True)
+
+        self.assertTrue(old.is_symlink())
+        self.assertEqual(old.resolve(), self.tmp / ".cache" / "npm")
+        self.assertTrue((process_home / ps.NPM_RECLAIM_NAME).is_dir())
+        self.assertIn("WARN", err)
+
     def test_a_second_run_changes_nothing(self):
         process_home = self.scaffold(self.tmp)
         before = ps.os.readlink(process_home / ".npm")
