@@ -43,7 +43,8 @@ is not parsed. Each entry gives ``claim``, ``command`` and ``excerpt``:
 - ``excerpt`` must appear, after whitespace is collapsed, in the output of a
   run of that command.
 
-Neither may hold a code fence, so the rendered section cannot break.
+None of ``claim``, ``command`` and ``excerpt`` may hold a code fence, and
+``claim`` is rendered on one line, so the rendered section cannot break.
 
 A card that delegated the work did not run the commands itself. Its claim is
 also accepted when it matches a claim the gate already accepted on a card this
@@ -70,9 +71,13 @@ Never wedging the card
 Same policy as ``kanban_result_required.py``, for the same reasons: the first
 completion with a problem is refused with every rule's reasons in one message;
 the retry inside :data:`NUDGE_TTL_SECONDS` is accepted, the reasons are logged
-at WARNING, and the card closes. The refusal is shared by all rules, so two
-rules cannot refuse one card twice. On the retry the bad claims are dropped, so
-a dropped claim is never shown as verified.
+at WARNING, and the card closes. The refusal is shared by all rules in
+:data:`RULES`, so two rules cannot refuse one card twice. The other
+``kanban_complete`` gates (``kanban_result_required``,
+``kanban_children_settled``) keep their own refusal: a completion that fails
+one of them and a rule, fixed one problem per call, is refused once by each
+and closes on its third call at worst. On the retry the bad claims are
+dropped, so a dropped claim is never shown as verified.
 
 Limits
 ------
@@ -152,10 +157,13 @@ WHITESPACE = re.compile(r"\s+")
 
 PARAM_DESCRIPTION = (
     "Optional. Every claim you present as verified, checked or confirmed, with "
-    "the command that proves it. Each item is {claim, command, excerpt}: "
-    "``command`` is a terminal command you ran in this card (at most 500 "
-    "characters), copied exactly; ``excerpt`` is the lines of its output that "
-    "prove the claim, copied exactly (at most 600 characters, no ``` fence). "
+    f"the command that proves it: at most {MAX_CLAIMS} claims. Each item is "
+    f"{{claim, command, excerpt}}: ``claim`` is one sentence (at most "
+    f"{MAX_CLAIM_CHARS} characters); ``command`` is a terminal command you ran "
+    f"in this card (at most {MAX_COMMAND_CHARS} characters), copied exactly; "
+    f"``excerpt`` is the lines of its output that prove the claim, copied "
+    f"exactly (at most {MAX_EXCERPT_CHARS} characters). None of the three may "
+    f"hold a {FENCE} fence. "
     "You may also repeat a verified claim from a card you created, with its "
     "command and excerpt as that card gave them. The tool checks each claim, "
     "adds the exit code and the time the command ran, and appends the evidence "
@@ -295,14 +303,15 @@ def _check_claim(calls: list, item: object, child_claims) -> tuple[dict | None, 
     for field in ("claim", "command", "excerpt"):
         if not isinstance(item.get(field), str) or not item[field].strip():
             return None, f"has no {field}"
-    claim, command, excerpt = item["claim"].strip(), item["command"].strip(), item["excerpt"].strip("\n")
+    # The claim is rendered as one line of prose, so it is kept on one.
+    claim, command, excerpt = _collapse(item["claim"]), item["command"].strip(), item["excerpt"].strip("\n")
     if len(claim) > MAX_CLAIM_CHARS:
         return None, f"claim is longer than {MAX_CLAIM_CHARS} characters"
     if len(command) > MAX_COMMAND_CHARS:
         return None, f"command is longer than {MAX_COMMAND_CHARS} characters; cite a shorter command that shows the claim"
     if len(excerpt) > MAX_EXCERPT_CHARS:
         return None, f"excerpt is longer than {MAX_EXCERPT_CHARS} characters; keep the lines that prove the claim"
-    if FENCE in command or FENCE in excerpt:
+    if any(FENCE in part for part in (claim, command, excerpt)):
         return None, f"holds a {FENCE} fence; cite lines without one"
     wanted, needle = _collapse(command), _collapse(excerpt)
     accepted = {"claim": claim, "command": command, "excerpt": excerpt}
@@ -324,8 +333,9 @@ def _check_claim(calls: list, item: object, child_claims) -> tuple[dict | None, 
 def render_evidence(claims: list) -> str:
     """The section appended to ``result``: each claim, its command in one fence, its excerpt in the next.
 
-    Two fences keep a multi-line command apart from its output. Neither can
-    hold a fence of its own (:func:`_check_claim` refuses one).
+    Two fences keep a multi-line command apart from its output. No field can
+    hold a fence of its own (:func:`_check_claim` refuses one), and the claim
+    is one line.
     """
     parts = [EVIDENCE_HEADING]
     for claim in claims:

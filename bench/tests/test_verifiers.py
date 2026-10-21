@@ -9802,3 +9802,13 @@ def test_verified_claims_backed_reads_escaped_characters_as_the_worker_saw_them(
     assert res.status == "pass", res
     res = _grade_claims(_block(cmd, '"command":"a \\u0026\\u0026 b"'), [_terminal(cmd, result=out)])
     assert res.status == "pass", res
+
+
+def test_verified_claims_backed_a_fix_fence_then_a_manifest_fence_is_not_evidence():
+    # A remediation shown as a command fence and then a manifest fence, before the real section.
+    fix = "To fix it:\n\n```\n$ kubectl apply -f payments-api.yaml\n```\n\n```yaml\nresources:\n  limits:\n    memory: 256Mi\n```\n\n"
+    res = _grade_claims(fix + _EVIDENCE, [_terminal(_PODS_CMD, result=_PODS_OUT)])
+    assert res.status == "pass", res
+    adjacent = "```\n$ kubectl apply -f payments-api.yaml\n```\n```yaml\nmemory: 256Mi\n```\n\n"
+    res = _grade_claims(adjacent + _EVIDENCE, [_terminal(_PODS_CMD, result=_PODS_OUT)])
+    assert res.status == "pass", res

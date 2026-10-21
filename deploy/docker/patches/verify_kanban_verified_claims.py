@@ -6,7 +6,8 @@ Run by ``deploy/docker/Dockerfile`` from ``/opt/hermes`` after
 matched. This drives the patched code the way a worker reaches it: a real
 terminal result through ``finalize_foreground_result``, then a real
 ``kanban_complete`` on a real board, for the pilot's shape (a "verified" claim
-with no command behind it) and for a claim the card's own call backs.
+with no command behind it), for a claim the card's own call backs, and for a
+parent card that relays a claim the gate accepted on a card it created.
 
 Usage::
 

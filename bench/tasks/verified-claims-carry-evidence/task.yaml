@@ -10,8 +10,8 @@
 # the evidence itself, not the wording around it.
 #
 # The objective is verified_claims_backed: the reply must carry at least one
-# evidence block (a fence holding `$ <command>`, then a fence holding that
-# command's output), and every block must be a terminal command a worker ran,
+# evidence block (a fence holding `$ <command>`, then, on the next line, a
+# fence holding that command's output), and every block must be a terminal command a worker ran,
 # on any card, with an excerpt that is in that call's output. So a block the
 # agent typed from memory, or an output it rewrote, fails. The check reads the
 # shape kanban_complete renders for `verified_claims`, so it tests the gate's

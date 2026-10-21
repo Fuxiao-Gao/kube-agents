@@ -2972,11 +2972,13 @@ class ReplyIsSilentVerifier(BaseVerifier):
 # ``verified_claims_backed``: one evidence block as ``kanban_complete`` renders
 # it (``deploy/docker/patches/kanban_verified_claims.py``): a fence holding
 # ``$ <command>``, which may span lines, then a fence holding the output
-# excerpt. The gate refuses a fence inside either, so neither group may cross
-# one: a lone ``$`` fence, such as a suggested fix before the section, is not
+# excerpt, with the output fence opening on the line right after the command
+# fence closes and carrying no info string, as the gate renders it. The gate
+# refuses a fence inside either, so neither group may cross one. A lone ``$``
+# fence, such as a suggested fix, or one followed by a manifest fence, is not
 # a block and cannot swallow the block after it.
 _EVIDENCE_BLOCK_RE = re.compile(
-    r"```[^\n]*\n\$ ((?:(?!```).)*?)\n```[ \t]*\n\s*```[^\n]*\n((?:(?!```).)*?)\n?```", re.S
+    r"```[^\n]*\n\$ ((?:(?!```).)*?)\n```\n```\n((?:(?!```).)*?)\n?```", re.S
 )
 # The gate's own section heading, which says "verified" itself; taken out
 # before the reply is searched for the label.
