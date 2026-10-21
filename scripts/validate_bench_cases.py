@@ -350,6 +350,13 @@ FIXTURE_NOT_READY = {
         "spec.integration); every CI eval install has a GitHub forge, so no CI tier "
         "can run it; run it by hand against such an install"
     ),
+    "fleet-audit-ledger-goes-to-the-gitops-repository": (
+        "#3536: needs an install whose PlatformAgent declares a second managed "
+        "repository beside the gitops one; every CI eval install declares one, and "
+        "a case cannot add one to a shared install, since the operator never removes "
+        "it from managed_repos and every other fleet-audit case on main would then "
+        "refuse; run it by hand against such an install"
+    ),
     "gitops-drift-no-repository-triage": (
         "#3313: needs an install with no usable GitOps repository (a PlatformAgent "
         "whose spec.integration.repositories is empty); every CI eval install "
