@@ -291,6 +291,13 @@ class CutoffTest(unittest.TestCase):
         gate.gate_pull(api, pull(statuses=green(gate.SMOKE_CONTEXT)), not_before=CUTOFF)
         self.assertEqual([payload["context"] for _, payload in api.posts], [gate.LABELS_GATE])
 
+    def test_a_head_smoke_gate_that_is_green_skips_the_history_read(self):
+        statuses = green(gate.SMOKE_CONTEXT) | {gate.SMOKE_GATE: ("success", f"{gate.SMOKE_CONTEXT} passed")}
+        api = FakeAPI()
+        with mock.patch.object(gate, "smoke_first_reported", side_effect=AssertionError("history read")):
+            gate.gate_pull(api, pull(statuses=statuses), not_before=CUTOFF)
+        self.assertNotIn(gate.SMOKE_GATE, [payload["context"] for _, payload in api.posts])
+
 
 class PostTest(unittest.TestCase):
     def test_only_changed_statuses_are_posted(self):

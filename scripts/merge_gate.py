@@ -20,7 +20,8 @@ pending on a green whose build first reported before that time, until a run
 from after it replaces it. The time is the earliest success status on the
 commit naming the same build, as that script reads it: a re-pin is a fresh copy
 with its own creation time. A green with no build link counts from the earliest
-success with none. That is one more read per green while the variable is set.
+success with none. That is one more read per green while the variable is set,
+skipped when the head `Smoke gate` is already green.
 An `/override` links its own comment, so it counts from when it was posted. A
 green that `pin_smoke_status.py` expired carries its note and stays pending
 even after the variable is cleared. A green from before the cutoff that the
@@ -342,6 +343,10 @@ def gate_pull(api, pull, dry_run=False, not_before=None):
     """Decide and post the two statuses for one pull request on `main`."""
     if pull["base"] not in BASES:
         return [f"#{pull['number']}: targets {pull['base']}, not {BASE}; left to Tide"]
+    # Only greens are posted, so a head `Smoke gate` that is green stays green whatever the
+    # cutoff says. Do not read the build history for it on each sweep.
+    if (pull["statuses"].get(SMOKE_GATE) or (None,))[0] == SUCCESS:
+        not_before = None
     results = verdicts(
         pull, lambda: changed_files(api, pull["number"]), not_before, lambda: smoke_first_reported(api, pull["sha"])
     )
