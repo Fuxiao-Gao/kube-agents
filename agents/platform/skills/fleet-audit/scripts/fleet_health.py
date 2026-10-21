@@ -122,6 +122,7 @@ UNKNOWN_CONDITION_CODE = "UNKNOWN"
 SYSTEM_METRICS_PACKAGE = "SYSTEM_COMPONENTS"
 POD_METRICS_PACKAGE = "POD"
 DEPLOYMENT_METRICS_PACKAGE = "DEPLOYMENT"
+STATEFULSET_METRICS_PACKAGE = "STATEFULSET"
 
 CHECK_CLUSTER_STATUS = "cluster-not-running"
 CHECK_CLUSTER_CONDITION = "cluster-condition"
@@ -131,14 +132,20 @@ CHECK_NODE_NOT_READY = "node-not-ready"
 CHECK_RESTARTING = "container-restarting"
 CHECK_PENDING = "pod-pending"
 CHECK_DEPLOYMENT = "deployment-unavailable"
+CHECK_STATEFULSET = "statefulset-unready"
 CONTROL_PLANE_CHECKS = (CHECK_CLUSTER_STATUS, CHECK_CLUSTER_CONDITION, CHECK_POOL_STATUS, CHECK_POOL_CONDITION)
-METRIC_CHECKS = (CHECK_NODE_NOT_READY, CHECK_RESTARTING, CHECK_PENDING, CHECK_DEPLOYMENT)
+METRIC_CHECKS = (CHECK_NODE_NOT_READY, CHECK_RESTARTING, CHECK_PENDING, CHECK_DEPLOYMENT, CHECK_STATEFULSET)
+# Workload kinds: kube-state-metrics exports no series for a kind with no
+# objects, so on a cluster where it answers (the pod-phase read found the
+# cluster) no series means none of that kind, which is evaluated, not missing.
+WORKLOAD_CHECKS = (CHECK_DEPLOYMENT, CHECK_STATEFULSET)
 # The monitoringConfig package each metric check needs.
 CHECK_PACKAGES = {
     CHECK_NODE_NOT_READY: SYSTEM_METRICS_PACKAGE,
     CHECK_RESTARTING: SYSTEM_METRICS_PACKAGE,
     CHECK_PENDING: POD_METRICS_PACKAGE,
     CHECK_DEPLOYMENT: DEPLOYMENT_METRICS_PACKAGE,
+    CHECK_STATEFULSET: STATEFULSET_METRICS_PACKAGE,
 }
 SEVERITY_CRITICAL = "critical"
 SEVERITY_MAJOR = "major"
@@ -159,6 +166,7 @@ LABEL_KSM_CLUSTER = "cluster"
 LABEL_KSM_NAMESPACE = "namespace"
 LABEL_KSM_POD = "pod"
 LABEL_KSM_DEPLOYMENT = "deployment"
+LABEL_KSM_STATEFULSET = "statefulset"
 NOT_READY_FALLBACK_STATUS = "not True"
 
 # The metric reads. Restarts: at least RESTART_THRESHOLD in RESTART_WINDOW is a
@@ -169,10 +177,11 @@ NOT_READY_FALLBACK_STATUS = "not True"
 RESTART_THRESHOLD = 3
 RESTART_WINDOW = "1h"
 PENDING_WINDOW = "10m"
-# A Deployment short of available replicas over the whole window, read every
-# step: a rollout that recovers inside the window is not listed.
-DEPLOYMENT_WINDOW = "10m"
-DEPLOYMENT_STEP = "1m"
+# A workload short of ready replicas over the whole window, read every step: a
+# rollout that recovers inside the window is not listed, a workload younger
+# than the window is not listed, and a deleted one drops out at once.
+WORKLOAD_WINDOW = "10m"
+WORKLOAD_STEP = "1m"
 PROMQL_URL = "https://monitoring.googleapis.com/v1/projects/{project}/location/global/prometheus/api/v1/query"
 MONITORING_SCOPE = "https://www.googleapis.com/auth/monitoring.read"
 MONITORING_TIMEOUT_S = 60
@@ -211,15 +220,36 @@ PENDING_QUERY = (
     + PENDING_WINDOW + "]) == 1)) and on (" + PENDING_BY + ") (count by (" + PENDING_BY
     + ") (kube_pod_status_phase" + PENDING_SELECTOR + " offset " + PENDING_WINDOW + " == 1))"
 )
-PENDING_PRESENCE_QUERY = "count by (" + KSM_BY + ') (kube_pod_status_phase{{project_id="{project}"{exclude}}})'
-DEPLOYMENT_BY = ", ".join((KSM_BY, LABEL_KSM_NAMESPACE, LABEL_KSM_DEPLOYMENT))
-DEPLOYMENT_SELECTOR = '{{project_id="{project}"{exclude}}}'
-DEPLOYMENT_QUERY = (
-    "min_over_time((sum by (" + DEPLOYMENT_BY + ") (kube_deployment_spec_replicas" + DEPLOYMENT_SELECTOR
-    + ") - on (" + DEPLOYMENT_BY + ") sum by (" + DEPLOYMENT_BY + ") (kube_deployment_status_replicas_available"
-    + DEPLOYMENT_SELECTOR + "))[" + DEPLOYMENT_WINDOW + ":" + DEPLOYMENT_STEP + "]) > 0"
-)
-DEPLOYMENT_PRESENCE_QUERY = "count by (" + KSM_BY + ") (kube_deployment_spec_replicas" + DEPLOYMENT_SELECTOR + ")"
+# Presence reads the finding's own metric and selector, so a renamed metric
+# or label value leaves every cluster unevaluated rather than quietly clean.
+PENDING_PRESENCE_QUERY = "count by (" + KSM_BY + ") (kube_pod_status_phase" + PENDING_SELECTOR + ")"
+KSM_SELECTOR = '{{project_id="{project}"{exclude}}}'
+
+
+def _workload_short_queries(desired: str, ready: str, kind_label: str) -> tuple[str, str]:
+    """The finding and presence queries for a workload kind short of ready
+    replicas: desired less ready, above zero at every step of the window, for
+    a workload that existed at the window's start and still exists now."""
+    by = ", ".join((KSM_BY, LABEL_KSM_NAMESPACE, kind_label))
+    desired_now = desired + KSM_SELECTOR
+    ready_now = ready + KSM_SELECTOR
+    finding = (
+        "(min_over_time((sum by (" + by + ") (" + desired_now + ") - on (" + by + ") sum by (" + by + ") ("
+        + ready_now + "))[" + WORKLOAD_WINDOW + ":" + WORKLOAD_STEP + "]) > 0)"
+        + " and on (" + by + ") (count by (" + by + ") (" + desired_now + " offset " + WORKLOAD_WINDOW + "))"
+        + " and on (" + by + ") (count by (" + by + ") (" + ready_now + "))"
+    )
+    presence = (
+        "count by (" + KSM_BY + ") (" + desired_now + ") and on (" + KSM_BY + ") count by (" + KSM_BY + ") ("
+        + ready_now + ")"
+    )
+    return finding, presence
+
+
+DEPLOYMENT_QUERY, DEPLOYMENT_PRESENCE_QUERY = _workload_short_queries(
+    "kube_deployment_spec_replicas", "kube_deployment_status_replicas_available", LABEL_KSM_DEPLOYMENT)
+STATEFULSET_QUERY, STATEFULSET_PRESENCE_QUERY = _workload_short_queries(
+    "kube_statefulset_replicas", "kube_statefulset_status_replicas_ready", LABEL_KSM_STATEFULSET)
 # The excluded clusters' names, so their series never leave the broker.
 EXCLUDE_MATCHER = ',{label}!~"{names}"'
 # A GKE cluster name: nothing in it is special in a regex or a PromQL string,
@@ -245,6 +275,7 @@ IMPACT = {
     CHECK_RESTARTING: "The container is crash-looping; its workload is degraded or down.",
     CHECK_PENDING: "The pod has not been scheduled or cannot start.",
     CHECK_DEPLOYMENT: "The Deployment serves with fewer Ready replicas than it wants, or none.",
+    CHECK_STATEFULSET: "The StatefulSet serves with fewer Ready replicas than it wants, or none.",
 }
 
 
@@ -487,7 +518,7 @@ def _count(row: dict) -> int:
 
 
 def read_metrics(project: str, listed: list[dict], *, query: QueryFn, stop_at: float | None = None) -> dict:
-    """The three metric checks for one project, keyed by `(location, cluster)`.
+    """The metric checks for one project, keyed by `(location, cluster)`.
 
     Returns `{"present": {check: set(keys)}, "hits": {check: {key: [candidate]}},
     "errors": {check: error}, "records": [record]}`."""
@@ -498,6 +529,7 @@ def read_metrics(project: str, listed: list[dict], *, query: QueryFn, stop_at: f
         (CHECK_RESTARTING, RESTART_QUERY, RESTART_PRESENCE_QUERY, LABEL_SYSTEM_CLUSTER, system_exclude),
         (CHECK_PENDING, PENDING_QUERY, PENDING_PRESENCE_QUERY, LABEL_KSM_CLUSTER, ksm_exclude),
         (CHECK_DEPLOYMENT, DEPLOYMENT_QUERY, DEPLOYMENT_PRESENCE_QUERY, LABEL_KSM_CLUSTER, ksm_exclude),
+        (CHECK_STATEFULSET, STATEFULSET_QUERY, STATEFULSET_PRESENCE_QUERY, LABEL_KSM_CLUSTER, ksm_exclude),
     )
     present: dict[str, set] = {}
     hits: dict[str, dict] = {}
@@ -534,9 +566,13 @@ def read_metrics(project: str, listed: list[dict], *, query: QueryFn, stop_at: f
                 elif check == CHECK_PENDING:
                     cand = _candidate(check, SEVERITY_MAJOR, f"Pod/{labels.get(LABEL_KSM_POD, '')}",
                                       f"phase Pending for at least {PENDING_WINDOW}", labels.get(LABEL_KSM_NAMESPACE, ""))
-                else:
+                elif check == CHECK_DEPLOYMENT:
                     cand = _candidate(check, SEVERITY_MAJOR, f"Deployment/{labels.get(LABEL_KSM_DEPLOYMENT, '')}",
-                                      f"{_count(row)} replica(s) short of available for at least {DEPLOYMENT_WINDOW}",
+                                      f"{_count(row)} replica(s) short of available for at least {WORKLOAD_WINDOW}",
+                                      labels.get(LABEL_KSM_NAMESPACE, ""))
+                else:
+                    cand = _candidate(check, SEVERITY_MAJOR, f"StatefulSet/{labels.get(LABEL_KSM_STATEFULSET, '')}",
+                                      f"{_count(row)} replica(s) short of Ready for at least {WORKLOAD_WINDOW}",
                                       labels.get(LABEL_KSM_NAMESPACE, ""))
                 hits.setdefault(check, {}).setdefault(key, []).append(cand)
     return {"present": present, "hits": hits, "errors": errors, "records": records}
@@ -561,6 +597,9 @@ def cluster_entry(project: str, cluster: dict, record: dict | None, metrics: dic
             error = metrics["errors"][check]
             reason = error if error == BUDGET_REASON else f"metric read failed: {error}"
             unevaluated.append({"check": check, "reason": reason})
+        elif (check in WORKLOAD_CHECKS and key not in metrics["present"].get(check, set())
+              and key in metrics["present"].get(CHECK_PENDING, set()) and (not packages or needed in packages)):
+            continue
         elif key not in metrics["present"].get(check, set()):
             if packages and needed not in packages:
                 reason = f"the cluster's {needed} metrics package is off"

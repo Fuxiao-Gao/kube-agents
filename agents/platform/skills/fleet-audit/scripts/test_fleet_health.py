@@ -24,7 +24,7 @@ def run_of(rc, stdout="", stderr=""):
     return fh.Run(["x"], rc, stdout, stderr, 0.01)
 
 
-def cluster(name, location="us-central1", status="RUNNING", pools=None, packages=("SYSTEM_COMPONENTS", "POD", "DEPLOYMENT"), **extra):
+def cluster(name, location="us-central1", status="RUNNING", pools=None, packages=("SYSTEM_COMPONENTS", "POD", "DEPLOYMENT", "STATEFULSET"), **extra):
     doc = {
         "name": name,
         "location": location,
@@ -70,13 +70,13 @@ def querier(hits=None, present=None, errors=None):
 
     def query(project, promql):
         calls.append((project, promql))
-        for metric in ("node_status_condition", "container_restart_count", "kube_pod_status_phase", "kube_deployment"):
+        for metric in ("node_status_condition", "container_restart_count", "kube_pod_status_phase", "kube_deployment", "kube_statefulset"):
             if metric in promql:
                 break
         if metric in errors:
             return [], errors[metric]
         if not any(cmp in promql for cmp in ("== 1", ">=", "> 0")):
-            ksm = metric in ("kube_pod_status_phase", "kube_deployment")
+            ksm = metric in ("kube_pod_status_phase", "kube_deployment", "kube_statefulset")
             return [series(c, loc, ksm=ksm) for c, loc in (present or {}).get(metric, [])], None
         return hits.get(metric, []), None
 
@@ -89,6 +89,7 @@ ALL_PRESENT = {
     "container_restart_count": [("a", "us-central1")],
     "kube_pod_status_phase": [("a", "us-central1")],
     "kube_deployment": [("a", "us-central1")],
+    "kube_statefulset": [("a", "us-central1")],
 }
 
 
@@ -164,7 +165,7 @@ class MetricsTest(unittest.TestCase):
     def test_every_query_is_pinned_to_its_project(self):
         query = querier(present=ALL_PRESENT)
         self.entry(query)
-        self.assertEqual(len(query.calls), 8)
+        self.assertEqual(len(query.calls), 10)
         for project, promql in query.calls:
             self.assertEqual(project, "acme")
             self.assertIn('project_id="acme"', promql)
@@ -186,7 +187,26 @@ class MetricsTest(unittest.TestCase):
         self.assertEqual(entry["candidates"][0]["namespace"], "shop")
         self.assertEqual(entry["candidates"][0]["excerpt"], "2 replica(s) short of available for at least 10m")
         promql = fh.DEPLOYMENT_QUERY.format(project="acme", exclude="")
-        self.assertIn("[10m:1m]) > 0", promql)
+        self.assertIn("[10m:1m]) > 0)", promql)
+        self.assertIn("(kube_deployment_spec_replicas{project_id=\"acme\"} offset 10m))", promql)
+        self.assertTrue(promql.endswith("(count by (location, cluster, namespace, deployment) "
+                                        "(kube_deployment_status_replicas_available{project_id=\"acme\"}))"))
+
+    def test_a_statefulset_short_of_ready_replicas_is_a_finding(self):
+        query = querier(present=ALL_PRESENT, hits={
+            "kube_statefulset": [series("a", ksm=True, value="1", namespace="db", statefulset="pg")]})
+        entry = self.entry(query)
+        self.assertEqual(checks(entry), [("statefulset-unready", "major", "StatefulSet/pg")])
+        self.assertEqual(entry["candidates"][0]["excerpt"], "1 replica(s) short of Ready for at least 10m")
+
+    def test_no_workloads_of_a_kind_on_a_live_cluster_is_evaluated(self):
+        entry = self.entry(querier(present=ALL_PRESENT | {"kube_statefulset": [], "kube_deployment": []}))
+        self.assertNotIn("checks_unevaluated", entry)
+
+    def test_presence_reads_the_findings_own_metric(self):
+        self.assertIn('phase="Pending"', fh.PENDING_PRESENCE_QUERY)
+        self.assertIn("kube_deployment_status_replicas_available", fh.DEPLOYMENT_PRESENCE_QUERY)
+        self.assertIn("kube_statefulset_status_replicas_ready", fh.STATEFULSET_PRESENCE_QUERY)
 
     def test_the_pending_join_names_the_pod_labels(self):
         promql = fh.PENDING_QUERY.format(project="acme", exclude="")
@@ -202,14 +222,14 @@ class MetricsTest(unittest.TestCase):
 
     def test_the_metric_reads_are_recorded_once_per_project(self):
         manifest = fh.collect_fleet(run=lister({"acme": [cluster("a"), cluster("b")]}), query=querier(present=ALL_PRESENT))
-        self.assertEqual(len(manifest["project_reads"]["acme"]), 8)
+        self.assertEqual(len(manifest["project_reads"]["acme"]), 10)
         for entry in manifest["clusters"]:
             self.assertEqual([c["check"] for c in entry["commands"]], [",".join(fh.CONTROL_PLANE_CHECKS)])
 
     def test_a_cluster_with_no_series_is_unevaluated_not_healthy(self):
         entry = self.entry(querier(present={"node_status_condition": [("a", "us-central1")]}))
         reasons = {u["check"]: u["reason"] for u in entry["checks_unevaluated"]}
-        self.assertEqual(set(reasons), {"container-restarting", "pod-pending", "deployment-unavailable"})
+        self.assertEqual(set(reasons), {"container-restarting", "pod-pending", "deployment-unavailable", "statefulset-unready"})
         self.assertIn("no series", reasons["container-restarting"])
 
     def test_a_metrics_package_that_is_off_is_named(self):
@@ -386,7 +406,8 @@ class FleetTest(unittest.TestCase):
     def test_the_summary_names_every_unevaluated_check(self):
         query = querier(present={"node_status_condition": [("a", "us-central1")],
                                  "container_restart_count": [("a", "us-central1")],
-                                 "kube_deployment": [("a", "us-central1")]})
+                                 "kube_deployment": [("a", "us-central1")],
+                                 "kube_statefulset": [("a", "us-central1")]})
         manifest = fh.collect_fleet(run=lister({"acme": [cluster("a")]}), query=query)
         self.assertEqual(fh.summary_lines(manifest)[1],
                          "not evaluated, so not healthy either -- name each in the answer: pod-pending on 1 "

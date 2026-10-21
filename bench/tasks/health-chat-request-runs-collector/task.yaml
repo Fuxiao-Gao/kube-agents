@@ -10,8 +10,8 @@
 # 209-cluster fleet was still running after thirty minutes. The route now
 # sits in agents/platform/SOUL.md: fleet_health.py reads every cluster's and
 # node pool's status and conditions and, from Cloud Monitoring, NotReady
-# nodes, restarting containers, Pending pods and Deployments short of
-# available replicas, in a fixed number of calls per project.
+# nodes, restarting containers, Pending pods and Deployments or StatefulSets
+# short of Ready replicas, in a fixed number of calls per project.
 #
 # Domain: chat-and-routing.
 # Journey: a general fleet health question runs the health sweep once and
@@ -28,8 +28,9 @@
 # check reports. In CI the role is on slot a (seeded-a); on the dev fleet the
 # same Deployment sits on reliability-eval-cluster, so the objective names the
 # workload and namespace, never a cluster. The safeguard resolves the role by
-# slot, so on dev it reports status=error unless seeded-a carries the
-# Deployment too; read a dev run on its objectives.
+# slot, so a run counts only on a fleet where seeded-a carries the Deployment,
+# as the CI pool's does; elsewhere the safeguard errors and the run is not a
+# pass.
 #
 # Not this route, and left to their own cases: a single-symptom question on a
 # fleet within SOUL.md's ten-card fan-out bound (chat-fanout-fleet-restarts-rows
