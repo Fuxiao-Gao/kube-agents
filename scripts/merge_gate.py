@@ -111,6 +111,9 @@ HOLD_LABELS = (
     "do-not-merge/invalid-owners-file",
     "do-not-merge/work-in-progress",
 )
+#: `trusted_team_for_sticky_lgtm` for this repository (`prow/oss/plugins.yaml` in oss-test-infra):
+#: Prow keeps `lgtm` across a push only for its members.
+STICKY_LGTM_TEAM = "gke-labs/Googlers"
 #: `skip_if_only_changed` of `pull-kube-agents-smoke-test` in oss-test-infra
 #: `prow/prowjobs/gke-labs/kube-agents/kube-agents-presubmits.yaml`. Keep the two identical.
 SMOKE_SKIP_RE = re.compile(
@@ -460,7 +463,7 @@ def left_out_line(pull):
     return (
         f"#{pull['number']}: left out, removed {when} by {who} (reason: {why}). "
         f"To re-add (a write user): gh api graphql -f query='{enable}', "
-        "or push a fix (a push drops lgtm unless the author is in gke-labs/Googlers)."
+        f"or push a fix (a push drops lgtm unless the author is in {STICKY_LGTM_TEAM})."
     )
 
 

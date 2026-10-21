@@ -68,6 +68,7 @@ class FakeAPI:
         self.comments = list(comments)
         self.comment_reads = []
         self.refuse_comments = False
+        self.refuse_comment_reads = False
         self.mutations = []
         self.posts = []
 
@@ -82,6 +83,8 @@ class FakeAPI:
         if path.endswith("/statuses"):
             return self.all_statuses
         if "/comments" in path:
+            if self.refuse_comment_reads:
+                raise RuntimeError("HTTP 502")
             self.comment_reads.append(path)
             return self.comments
         return [self.raw_pull]
@@ -558,6 +561,16 @@ class SweepTest(unittest.TestCase):
         self.assertEqual(enqueuer.posts, [], "the comment goes through GITHUB_TOKEN, not the App")
         self.assertIn("#7: posted the left-out comment", lines)
         self.assertEqual(api.comment_reads, [f"/repos/{REPO}/issues/7/comments?since=2026-10-13T11:00:00Z"])
+        # Prow reads a slash command at the start of a line; no line of the comment may start one.
+        self.assertFalse(any(line.startswith("/") for line in body.splitlines()))
+
+    def test_a_failed_comment_read_is_logged_and_does_not_fail_the_sweep(self):
+        api = FakeAPI(nodes=[node(7, APPROVED, timeline=[removal()])])
+        api.refuse_comment_reads = True
+        lines, failures = gate.sweep(api)
+        self.assertEqual(failures, 0)
+        self.assertIn("#7: left-out comment not posted: HTTP 502", lines)
+        self.assertEqual([path for path, _ in api.posts if path.endswith("/comments")], [])
 
     def test_a_refused_comment_is_logged_and_does_not_fail_the_sweep(self):
         api = FakeAPI(nodes=[node(7, APPROVED, timeline=[removal()])])
