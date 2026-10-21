@@ -359,17 +359,25 @@ func (s *SlackAdapter) interactive(raw json.RawMessage) (InboundMessage, bool) {
 	if thread == "" {
 		thread = p.Message.TS
 	}
+	author := p.User.ID
 	if s.otherWorkspace(p.User.TeamID) || s.otherWorkspace(p.Team.ID) {
-		s.log.Info("slack: ignoring a click from another workspace's member",
-			"user", p.User.ID, "userTeam", p.User.TeamID, "team", s.teamID, "channel", p.Channel.ID)
-		// The same once-per-sender notice a refused message gets, in the
-		// question's thread: a button that does nothing looks broken.
-		team := p.User.TeamID
-		if team == "" {
-			team = p.Team.ID
+		// The message path's rule (foreignSender): a member of another
+		// workspace is admitted only when the allowlist names them by
+		// workspace, and their click then carries the same "T…:U…" author.
+		guest, ok := s.admitGuest(p.User.TeamID, p.Team.ID, p.User.ID)
+		author = guest
+		if !ok {
+			s.log.Info("slack: ignoring a click from another workspace's member",
+				"user", p.User.ID, "userTeam", p.User.TeamID, "team", s.teamID, "channel", p.Channel.ID)
+			// The same once-per-sender notice a refused message gets, in the
+			// question's thread: a button that does nothing looks broken.
+			team := p.User.TeamID
+			if team == "" {
+				team = p.Team.ID
+			}
+			s.noticeForeignSender(p.Channel.ID, thread, team, p.User.ID)
+			return InboundMessage{}, false
 		}
-		s.noticeForeignSender(p.Channel.ID, thread, team, p.User.ID)
-		return InboundMessage{}, false
 	}
 	if s.alreadySeen("click:" + p.Channel.ID + "/" + p.ActionTS) {
 		return InboundMessage{}, false
@@ -403,7 +411,7 @@ func (s *SlackAdapter) interactive(raw json.RawMessage) (InboundMessage, bool) {
 	return InboundMessage{
 		Conversation: conversation,
 		Kind:         kind,
-		AuthorID:     p.User.ID,
+		AuthorID:     author,
 		MessageID:    p.ActionTS,
 		Text:         text,
 		Click:        true,

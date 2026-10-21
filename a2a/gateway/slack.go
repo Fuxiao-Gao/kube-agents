@@ -51,10 +51,23 @@ var slackForeignNoticesCap = 2048
 // notice memory's key.
 const slackForeignNoticeKeySep = "/"
 
-// slackForeignNoticeText is what a refused member of another workspace is told,
-// with their member id, the one thing an admin needs to find the refusal in the log.
+// slackForeignNoticeText is what a refused member of another workspace is told:
+// their member id, the one thing an admin needs to find the refusal in the log,
+// and the allowlist entry that would admit them (slackGuestEntry), so they can
+// hand it to an admin. Both are ids they already hold.
 const slackForeignNoticeText = "⛔ I only take asks from members of this Slack workspace, and you are " +
-	"posting from another workspace, so I can't answer you here. Your member id is %s."
+	"posting from another workspace, so I can't answer you here. Your member id is %s. " +
+	"To be admitted, ask an admin of this install to add `%s` to its allowed Slack users."
+
+// slackGuestSep joins a Slack Connect guest's workspace id and member id in an
+// allowlist entry (integration.slack.allowedUsers: "T…:U…") and in the author
+// id the adapter gives an admitted guest's turns, so the gateway's exact-match
+// allowlist, the principal map and the target allowlist all read one string.
+const slackGuestSep = ":"
+
+// slackGuestEntryPattern is a well-formed guest entry: a workspace id (T…, or
+// E… for an Enterprise Grid org), the separator, and a member id (U… or W…).
+var slackGuestEntryPattern = regexp.MustCompile(`^[TE][A-Z0-9]+:[UW][A-Z0-9]+$`)
 
 // slackTurnSubtypes are the message subtypes that are genuine user turns.
 // Plain messages have no subtype; thread_broadcast is a thread reply with
@@ -235,6 +248,10 @@ type SlackAdapter struct {
 	// they are refused, so the notice is once per sender, not once per
 	// message. Created on first use; bounded by slackForeignNoticesCap.
 	foreignNoticed map[string]bool
+	// guests is the set of other workspaces' members the allowlist names,
+	// as "T…:U…" entries (SetAllowedGuests). foreignSender admits exactly
+	// these; set before Run, read-only after.
+	guests map[string]bool
 
 	// sessionsAPI drives Agent Sessions (slack_sessions.go); nil in a test
 	// that does not fake it, which then sends no status. sessionStates holds
@@ -1255,33 +1272,108 @@ func (s *SlackAdapter) connected(auth *slack.AuthTestResponse) {
 		// a bot that has gone quiet.
 		s.log.Warn("slack auth.test returned no team id; every message that names a workspace will be refused as another workspace's")
 	}
+	for entry := range s.guests {
+		if team, _, _ := strings.Cut(entry, slackGuestSep); auth.TeamID != "" && team == auth.TeamID {
+			// A member of our own workspace is matched by the plain id, so this
+			// entry admits nobody; said once, so the admin is not left guessing.
+			s.log.Warn("slack allowedUsers entry names this install's own workspace; list the plain member id instead",
+				"entry", entry)
+		}
+	}
+}
+
+// SetAllowedGuests takes the Slack allowlist (integration.slack.allowedUsers)
+// and keeps its team-qualified entries, "T…:U…": the members of other
+// workspaces this install serves in a Slack Connect channel. A plain "U…"
+// entry is a member of the install's own workspace, matched by the gateway,
+// and is not a guest. An entry that has the separator but is not well formed
+// (slackGuestEntryPattern) is logged and admits nobody. Call before Run.
+func (s *SlackAdapter) SetAllowedGuests(entries []string) {
+	s.guests = map[string]bool{}
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		if !strings.Contains(entry, slackGuestSep) {
+			continue
+		}
+		if !slackGuestEntryPattern.MatchString(entry) {
+			s.log.Warn("slack allowedUsers entry is not a member of another workspace in the form T…:U…; ignoring it",
+				"entry", entry)
+			continue
+		}
+		s.guests[entry] = true
+	}
+	if len(s.guests) > 0 {
+		s.log.Info("slack guests from other workspaces loaded", "entries", len(s.guests))
+	}
+}
+
+// senderWorkspace names the workspace a sender belongs to, from the two fields
+// Slack may carry: the sender's own team (user_team, or a click's user.team_id)
+// first, then the team the message or click names. ok is false when both are
+// set and disagree: then which workspace the sender is in cannot be told, and
+// no guest entry is matched. Both empty is "" and ok: the sender names no
+// workspace, which is our own member's shape.
+func senderWorkspace(userTeam, otherTeam string) (team string, ok bool) {
+	if userTeam != "" && otherTeam != "" && userTeam != otherTeam {
+		return "", false
+	}
+	if userTeam != "" {
+		return userTeam, true
+	}
+	return otherTeam, true
+}
+
+// slackGuestEntry is the allowlist entry that names member user of workspace team.
+func slackGuestEntry(team, user string) string {
+	return team + slackGuestSep + user
+}
+
+// admitGuest reports whether the allowlist names this member of another
+// workspace, and the author id their turns carry: "T…:U…", so the gateway's
+// allowlist, principal map and target allowlist match the same entry. A
+// workspace that cannot be told (senderWorkspace) or is unnamed admits nobody.
+func (s *SlackAdapter) admitGuest(userTeam, otherTeam, user string) (string, bool) {
+	team, ok := senderWorkspace(userTeam, otherTeam)
+	if !ok || team == "" || user == "" {
+		return "", false
+	}
+	entry := slackGuestEntry(team, user)
+	return entry, s.guests[entry]
 }
 
 // foreignSender reports a message whose sender belongs to a workspace other
-// than the bot's. Slack names the sender's workspace as user_team on a
-// message in a channel shared between workspaces, and a message's own team
-// field names the workspace it was posted from; both are read, so a shape
-// that carries only one is still checked. A message that names a workspace
-// other than ours in either is a Slack Connect guest's, and is refused
-// before the allowlist is consulted: the member id is the principal for an unmapped
-// sender, so admission must not reach past the install's own workspace, and
-// under allow-all nothing else would stop it. Fail-closed when auth.test
-// gave no team id. When the message addressed the bot (a DM, or a mention),
-// the refusal is logged at Info with the sender's member id, and the sender
-// is told once (noticeForeignSender), so a guest in a shared channel does not
-// meet a bot that seems broken. A message that addressed nobody is dropped
-// without a word, as a bot's or an edit's drop is. Under Enterprise Grid a
-// member of a sister workspace in a shared channel is refused too, since the
-// event does not carry the sender's enterprise.
-func (s *SlackAdapter) foreignSender(m *slackevents.MessageEvent) bool {
-	if !s.otherWorkspace(m.UserTeam) && (m.Message == nil || !s.otherWorkspace(m.Message.Team)) {
-		return false
+// than the bot's and is not admitted, and gives the author id a turn carries:
+// the member id for our own member, "T…:U…" for an admitted guest. Slack names
+// the sender's workspace as user_team on a message in a channel shared between
+// workspaces, and a message's own team field names the workspace it was posted
+// from; both are read, so a shape that carries only one is still checked. A
+// message that names a workspace other than ours in either is a Slack Connect
+// guest's, and is refused before the allowlist is consulted unless the
+// allowlist names that member of that workspace (admitGuest): the member id is
+// the principal for an unmapped sender, so admission must not reach past the
+// install's own workspace without an entry that says so, and under allow-all
+// nothing else would stop it. Allow-all admits no guest; a plain member id
+// does not either. Fail-closed when auth.test gave no team id, for every
+// sender the allowlist does not name by workspace. When the refused message
+// addressed the bot (a DM, or a mention), the refusal is logged at Info with
+// the sender's member id, and the sender is told once (noticeForeignSender),
+// so a guest in a shared channel does not meet a bot that seems broken. A
+// message that addressed nobody is dropped without a word, as a bot's or an
+// edit's drop is. Under Enterprise Grid a member of a sister workspace in a
+// shared channel is refused too unless named, since the event does not carry
+// the sender's enterprise.
+func (s *SlackAdapter) foreignSender(m *slackevents.MessageEvent) (refused bool, author string) {
+	messageTeam := ""
+	if m.Message != nil {
+		messageTeam = m.Message.Team
+	}
+	if !s.otherWorkspace(m.UserTeam) && !s.otherWorkspace(messageTeam) {
+		return false, m.User
+	}
+	if guest, ok := s.admitGuest(m.UserTeam, messageTeam, m.User); ok {
+		return false, guest
 	}
 	if m.ChannelType == slackChannelTypeIM || slackMentionsBot(m.Text, s.botUserID) {
-		messageTeam := ""
-		if m.Message != nil {
-			messageTeam = m.Message.Team
-		}
 		// Both fields: either can be the one that named the other workspace.
 		s.log.Info("slack: ignoring a message from another workspace's member",
 			"user", m.User, "userTeam", m.UserTeam, "messageTeam", messageTeam, "team", s.teamID, "channel", m.Channel)
@@ -1295,7 +1387,7 @@ func (s *SlackAdapter) foreignSender(m *slackevents.MessageEvent) bool {
 		}
 		s.noticeForeignSender(m.Channel, thread, team, m.User)
 	}
-	return true
+	return true, ""
 }
 
 // noticeForeignSender tells a refused member of another workspace why the bot
@@ -1327,7 +1419,7 @@ func (s *SlackAdapter) noticeForeignSender(channel, thread, team, user string) {
 	}
 	s.goSession(func() {
 		if _, _, err := s.api.PostMessage(channel,
-			slack.MsgOptionText(fmt.Sprintf(slackForeignNoticeText, user), false),
+			slack.MsgOptionText(fmt.Sprintf(slackForeignNoticeText, user, slackGuestEntry(team, user)), false),
 			slack.MsgOptionTS(thread)); err != nil {
 			s.log.Warn("slack: could not tell another workspace's member why they are refused",
 				"user", user, "channel", channel, "err", err)
@@ -1383,7 +1475,8 @@ func (s *SlackAdapter) inboundEvent(ctx context.Context, m *slackevents.MessageE
 		m.Channel == "" || m.TimeStamp == "" {
 		return InboundMessage{}, false
 	}
-	if s.foreignSender(m) {
+	refused, author := s.foreignSender(m)
+	if refused {
 		return InboundMessage{}, false
 	}
 	if s.alreadySeen(m.Channel + "/" + m.TimeStamp) {
@@ -1417,7 +1510,7 @@ func (s *SlackAdapter) inboundEvent(ctx context.Context, m *slackevents.MessageE
 		return InboundMessage{
 			Conversation: slackConversationID(m.ChannelType, m.Channel, threadTS),
 			Kind:         "dm",
-			AuthorID:     m.User,
+			AuthorID:     author,
 			MessageID:    m.TimeStamp,
 			TopLevel:     m.ThreadTimeStamp == "",
 			// Decoding also changes what the affordance matchers see. That is
@@ -1473,7 +1566,7 @@ func (s *SlackAdapter) inboundEvent(ctx context.Context, m *slackevents.MessageE
 		Conversation: slackConversationID(m.ChannelType, m.Channel, threadTS),
 		Kind:         "group",
 		Unaddressed:  botRooted && !mentioned,
-		AuthorID:     m.User,
+		AuthorID:     author,
 		MessageID:    m.TimeStamp,
 		// Decoded last, after the mention match and strip above: both key on
 		// Slack's raw "<@U…>" form, which decoding would have turned into

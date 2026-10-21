@@ -1625,9 +1625,10 @@ over the way Chat's does (2026-10-06): the operator renders it as `A2A_SLACK_ALL
 normalized the way the gateway reads it, with `A2A_SLACK_ALLOW_ALL_USERS` from the legacy
 consumer's rule on the raw list (absent, or a single empty string, is everyone), so one CR
 means one thing in both modes. The gateway then admits a Slack sender only if they belong
-to the bot's own workspace (a Slack Connect guest from another organisation is not a turn;
-see the mapping-table paragraph below) and the list admits them (exact `user_id` match, no
-case fold). The principal map below is an optional override for attribution, not a second
+to the bot's own workspace, or the list names them by workspace as `T…:U…` (a Slack Connect
+guest from another organisation is otherwise not a turn; see the mapping-table paragraph
+below), and the list admits them (exact match, no case fold: the `user_id` for our own
+member, the `T…:U…` entry for a guest). The principal map below is an optional override for attribution, not a second
 gate. One thing does not carry over on the flip:
 the broker reads `SLACK_BOT_TOKEN` as a comma-separated list, one token per workspace,
 where the gateway's adapter takes one token, so a multi-workspace install stays on
@@ -1749,17 +1750,24 @@ Because an unmapped sender's member id is enough to be admitted, admission must 
 past the install's own workspace. Slack names the sender's workspace as `user_team` on a
 message in a channel shared between workspaces, and a message's own `team` field names the
 workspace it was posted from. The gateway refuses a message that names a workspace other
-than the bot's own (from `auth.test`) in either: it is not a turn. When it addressed the
+than the bot's own (from `auth.test`) in either: it is not a turn, unless the allowlist names
+that member of that workspace as `T…:U…` (2026-10-21, #3294). The sender's workspace is
+`user_team` when set, else the message's `team`; when both are set and differ, no entry is
+matched, and when both are empty the sender is our own member, as below. An admitted
+guest's turn carries `T…:U…` as its author id, so the allowlist, the principal map and the
+target allowlist all match that one entry, and the guest's principal is `slack:T…:U…`. A
+plain `U…` entry keeps meaning our own member and never admits a guest, and allow-all, an
+empty list, admits none. When a refused message addressed the
 bot (a DM or a mention), the refusal is logged with the sender's member id, and the sender
 gets one reply in that message's thread, once per workspace and member, saying the bot
-answers only its own workspace. A click on one of the bot's buttons by such a member is
+answers only its own workspace and naming the `T…:U…` entry that would admit them. A click on one of the bot's buttons by such a member is
 refused the same way, and shares that once-per-sender notice, in the question's thread. Without a team id from `auth.test` it refuses any
-message that names a workspace, and warns once at start. A message that names no workspace
+message that names a workspace, except a guest the list names, and warns once at start. A message that names no workspace
 in either field is taken as our own member's, which rests on Slack setting them on a
 shared channel's messages; no captured Slack Connect payload has confirmed it yet. Under allow-all this is the only boundary on
 who may reach the bot, and it is stricter than the legacy consumer, which has no such
 check. Under Enterprise Grid a member of a sister workspace in a shared channel is refused
-too, since the event does not carry the sender's enterprise.
+too unless named, since the event does not carry the sender's enterprise.
 
 The table is a Kubernetes Secret, mounted read-only at the gateway's principal-map path, same file format the Discord ConfigMap uses.
 `a2a-slack-principal-map` is the name the operator mounts under `next`: alone at the
