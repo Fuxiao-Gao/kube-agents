@@ -2540,21 +2540,21 @@ func (r *PlatformAgentReconciler) noteDataClaimGrowth(key client.ObjectKey, grow
 
 // dataVolumeExpansionMessage is the DataVolumeNotExpanded message for the
 // agent's two data claims, agent claim first, or "" when neither is blocked.
-// known is false when this process has read neither claim yet; the status
-// writers then leave the condition as it stands.
+// known is false until this process has read both claims; the status writers
+// then leave the condition as it stands, because a claim not yet read can be
+// the one the condition names.
 func (r *PlatformAgentReconciler) dataVolumeExpansionMessage(agent *agentv1alpha1.PlatformAgent) (msg string, known bool) {
 	var parts []string
 	for _, key := range dataClaimKeys(agent) {
 		recorded, ok := r.dataVolumeExpansion.Load(key)
 		if !ok {
-			continue
+			return "", false
 		}
-		known = true
 		if part := recorded.(string); part != "" {
 			parts = append(parts, part)
 		}
 	}
-	return strings.Join(parts, dataVolumeExpansionMsgSeparator), known
+	return strings.Join(parts, dataVolumeExpansionMsgSeparator), true
 }
 
 // forgetDataVolumeExpansion drops the CR's claim records when the CR goes away.

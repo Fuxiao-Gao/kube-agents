@@ -70,9 +70,15 @@ const (
 // a key the target chart does not declare.
 const (
 	storageSizeNotPositiveMsg = "the data volume size must be greater than zero"
+	storageSizeTooLargeFmt    = "the data volume size must be at most %s, the largest persistent disk size"
 	storageSizeShrinkFmt      = "cannot lower the data volume size from %[1]s to %[2]s: a PersistentVolumeClaim cannot shrink. Keep %[1]s or raise it."
 	storageSizeRemovedWarnFmt = "spec.storage.size was removed, so the data volume size goes from %s to the operator default %s. Existing data claims keep their current size, because a PersistentVolumeClaim cannot shrink; only new claims get the default."
 )
+
+// maxStorageSize is the largest spec.storage.size: 64TiB is the largest
+// persistent disk. A larger value is a typo (Ei for Gi, say) that would patch
+// both claims to a size no disk can reach, and a claim cannot shrink back.
+var maxStorageSize = resource.MustParse("64Ti")
 
 // restrictedServiceAccounts is the set of high-privilege service account names forbidden in PlatformAgent spec.
 var restrictedServiceAccounts = map[string]struct{}{
@@ -315,8 +321,8 @@ func (v *PlatformAgentCustomValidator) validatePlatformAgent(ctx context.Context
 	allErrs = append(allErrs, gitErrs...)
 	warnings = append(warnings, gitWarnings...)
 
-	// 5. The data volume size: above zero, and on an update never lower than
-	// the size the stored object resolves to.
+	// 5. The data volume size: above zero, at most maxStorageSize, and on an
+	// update never lower than the size the stored object resolves to.
 	storageErrs, storageWarnings := validateStorageSize(oldObj, platformAgent)
 	allErrs = append(allErrs, storageErrs...)
 	warnings = append(warnings, storageWarnings...)
@@ -332,9 +338,9 @@ func (v *PlatformAgentCustomValidator) validatePlatformAgent(ctx context.Context
 	return warnings, nil
 }
 
-// validateStorageSize refuses a spec.storage.size of zero or less, and on an
-// update (oldObj not nil) an explicit size lower than the one the stored object
-// resolves to. Both sides go through controller.ResolveDataStorageSize, so an
+// validateStorageSize refuses a spec.storage.size of zero or less or above
+// maxStorageSize, and on an update (oldObj not nil) an explicit size lower
+// than the one the stored object resolves to. Both sides go through controller.ResolveDataStorageSize, so an
 // absent field compares as the operator default. A removed field is allowed
 // with a warning when the default is lower than the stored size: the operator
 // never shrinks a claim, so the claims keep their size.
@@ -343,6 +349,9 @@ func validateStorageSize(oldObj, platformAgent *agentv1alpha1.PlatformAgent) (fi
 	newSize := storageSize(platformAgent)
 	if newSize != nil && newSize.Sign() <= 0 {
 		return field.ErrorList{field.Invalid(sizePath, newSize.String(), storageSizeNotPositiveMsg)}, nil
+	}
+	if newSize != nil && newSize.Cmp(maxStorageSize) > 0 {
+		return field.ErrorList{field.Invalid(sizePath, newSize.String(), fmt.Sprintf(storageSizeTooLargeFmt, maxStorageSize.String()))}, nil
 	}
 	if oldObj == nil {
 		return nil, nil

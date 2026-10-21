@@ -700,8 +700,9 @@ Raising it expands both existing claims online where their StorageClass sets
 `DataVolumeNotExpanded` condition. A claim cannot shrink, so the admission webhook refuses a
 lower value when `operator.webhooks.enabled` is `true` (off by default). Without the webhook, a
 lower value is admitted and the operator keeps the claims at their size. Setting the value back
-to `null` also leaves the claims at their size. The render
-fails on a size of zero, and on a live install whose CRD predates `spec.storage`. The
+to `null` leaves claims above the default at their size, and grows claims below it to the
+default. The render fails on a size of zero or above `64Ti`, and on a live install whose CRD
+predates `spec.storage`. The
 [PlatformAgent CRD page](https://gke-labs.github.io/kube-agents/operator/platformagent-crd/#specstorage)
 is canonical for the behaviour.
 

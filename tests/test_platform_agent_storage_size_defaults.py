@@ -9,7 +9,8 @@ no spec.storage. If the copies drift, a default install either pins its CR to a
 stale size, which a later raise of the operator default then cannot reach, or
 asks for a size below the operator's, which the admission webhook refuses as a
 shrink on an existing install. The installer and the Terraform variable also
-take one grammar, so a value one accepts the other does not refuse.
+take one grammar and one upper limit, so a value one accepts the other does not
+refuse.
 
 Run: python3 -m unittest discover -s tests -p 'test_platform_agent_storage_size_defaults.py' -v
 """
@@ -83,7 +84,7 @@ class DataStorageSizeDefaultParityTest(unittest.TestCase):
 
     def test_the_installer_and_the_variable_take_one_grammar(self):
         installer = re.search(
-            r'^is_valid_platform_agent_storage_size\(\) \{\n  \[\[ "\$\{1:-\}" =~ (.+) \]\]\n\}$',
+            r'^is_valid_platform_agent_storage_size\(\) \{\n  \[\[ "\$\{1:-\}" =~ (.+) \]\] \|\| return 1$',
             _INSTALLER_COMMON.read_text(),
             re.MULTILINE,
         )
@@ -95,6 +96,16 @@ class DataStorageSizeDefaultParityTest(unittest.TestCase):
         self.assertIsNotNone(terraform, "platform_agent_storage_size has no regex validation")
         self.assertEqual(installer.group(1), terraform.group(1))
         self.assertRegex(_go_default(), installer.group(1))
+
+    def test_the_installer_and_the_variable_take_one_limit(self):
+        installer = re.search(
+            r"^readonly PLATFORM_AGENT_STORAGE_SIZE_MAX_MI=([0-9]+)$", _INSTALLER_COMMON.read_text(), re.MULTILINE
+        )
+        self.assertIsNotNone(installer, "installer_common.sh has no PLATFORM_AGENT_STORAGE_SIZE_MAX_MI")
+        terraform = re.search(r"\) <= ([0-9]+), true\)", _variable_block())
+        self.assertIsNotNone(terraform, "platform_agent_storage_size has no upper-limit validation")
+        self.assertEqual(installer.group(1), terraform.group(1))
+        self.assertEqual(int(installer.group(1)), 64 * 1024 * 1024, "the limit is 64Ti in Mi")
 
     def test_the_variable_names_the_crd_field(self):
         self.assertIn("spec.storage.size", _variable_block())

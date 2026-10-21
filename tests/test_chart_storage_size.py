@@ -4,7 +4,8 @@ The default, `null`, renders no `storage` block, so the operator sizes both data
 claims from its own default and a later raise of that default reaches the CR. A
 set size renders `storage.size` as a string. The schema refuses a value that is
 not a Kubernetes quantity, and the render refuses zero, which passes the
-quantity grammar but is a claim the API server refuses.
+quantity grammar but which the operator ignores for its default, and a size
+above 64Ti, the largest persistent disk.
 
 A size also has to reach a CRD that knows the field. `helm upgrade` never applies
 `crds/`, so on an install whose live CRD predates `spec.storage` the API server
@@ -39,6 +40,7 @@ _CRD_LOOKUP = 'lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "p
 _CRD_DIG = 'dig "schema" "openAPIV3Schema" "properties" "spec" "properties" (dict) .'
 _CRD_REMEDY = "kubectl apply --server-side -f charts/kube-agents/crds/"
 _ZERO_MESSAGE = "the data volume size must be greater than zero"
+_TOO_LARGE_MESSAGE = "the data volume size must be at most 64Ti"
 
 
 def _storage_block(template: str) -> str:
@@ -127,7 +129,7 @@ class StorageSizeRenderTest(unittest.TestCase):
                 self.assertNotIn("storage", self._spec_of(self._render(*args)))
 
     def test_a_set_size_renders_it_as_a_string(self):
-        for size in ("80Gi", "1Ti", "51200Mi"):
+        for size in ("80Gi", "1Ti", "51200Mi", "64Ti", "65536Gi"):
             with self.subTest(size=size):
                 spec = self._spec_of(self._render("--set", f"{_VALUE_PATH}={size}"))
                 self.assertEqual(spec["storage"], {"size": size})
@@ -149,6 +151,15 @@ class StorageSizeRenderTest(unittest.TestCase):
                 self.assertNotEqual(proc.returncode, 0)
                 self.assertIn(_VALUE_PATH, proc.stderr)
                 self.assertIn(_ZERO_MESSAGE, proc.stderr)
+
+
+    def test_a_size_above_64ti_fails_the_render_by_name(self):
+        for size in ("65537Gi", "65Ti", "9Ei"):
+            with self.subTest(size=size):
+                proc = self._render("--set-string", f"{_VALUE_PATH}={size}")
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn(_VALUE_PATH, proc.stderr)
+                self.assertIn(_TOO_LARGE_MESSAGE, proc.stderr)
 
 
 if __name__ == "__main__":

@@ -114,6 +114,23 @@ func TestStorageSizeValidation(t *testing.T) {
 		}
 	})
 
+	t.Run("refuses a size above 64Ti on create and update", func(t *testing.T) {
+		for _, size := range []string{"64Ti", "65536Gi"} {
+			if _, err := val.ValidateCreate(ctx, storageAgent(size)); err != nil {
+				t.Errorf("create with %s, the largest disk, was refused: %v", size, err)
+			}
+		}
+		for _, size := range []string{"65537Gi", "9Ei"} {
+			_, err := val.ValidateCreate(ctx, storageAgent(size))
+			assertFieldError(t, err, storageSizePath)
+			if err != nil && !strings.Contains(err.Error(), "at most 64Ti") {
+				t.Errorf("create with %s: error does not say the limit: %v", size, err)
+			}
+			_, err = val.ValidateUpdate(ctx, storageAgent("80Gi"), storageAgent(size))
+			assertFieldError(t, err, storageSizePath)
+		}
+	})
+
 	t.Run("allows a positive size on create, also below the default", func(t *testing.T) {
 		if _, err := val.ValidateCreate(ctx, storageAgent("20Gi")); err != nil {
 			t.Errorf("create with 20Gi was refused: %v", err)

@@ -1434,6 +1434,8 @@ class InstallerCommonTest(unittest.TestCase):
                 ({"PLATFORM_AGENT_STORAGE_SIZE": ""}, 'platform_agent_storage_size = "50Gi"\n'),
                 ({"PLATFORM_AGENT_STORAGE_SIZE": "80Gi"}, 'platform_agent_storage_size = "80Gi"\n'),
                 ({"PLATFORM_AGENT_STORAGE_SIZE": "1Ti"}, 'platform_agent_storage_size = "1Ti"\n'),
+                ({"PLATFORM_AGENT_STORAGE_SIZE": "64Ti"}, 'platform_agent_storage_size = "64Ti"\n'),
+                ({"PLATFORM_AGENT_STORAGE_SIZE": "67108864Mi"}, 'platform_agent_storage_size = "67108864Mi"\n'),
             ):
                 with self.subTest(env=env):
                     proc = self._run(
@@ -1445,12 +1447,12 @@ class InstallerCommonTest(unittest.TestCase):
                     self.assertIn(expected, dest.read_text())
 
     def test_tfvars_refuse_a_malformed_platform_agent_storage_size(self):
-        # upgrade.sh and the menu regenerate from install.env without
-        # install.sh's checks: the generator names the key and writes nothing,
-        # rather than leave the variable's validation to refuse it at plan.
+        # The generator is the installer's only check on the value: it names
+        # the key and writes nothing, rather than leave the variable's
+        # validation to refuse it at plan.
         with tempfile.TemporaryDirectory() as out_dir:
             dest = pathlib.Path(out_dir) / "terraform.tfvars"
-            for value in ("0Gi", "80", "80G", "1.5Ti", "-10Gi", "080Gi", "80Gi "):
+            for value in ("0Gi", "80", "80G", "1.5Ti", "-10Gi", "080Gi", "80Gi ", "65Ti", "65537Gi", "99999999999Ti"):
                 with self.subTest(value=value):
                     proc = self._run(
                         f'rc=0; write_tfvars_from_state "{dest}" || rc=$?; echo "rc=$rc"',
@@ -1467,7 +1469,8 @@ class InstallerCommonTest(unittest.TestCase):
 
     def test_load_install_env_reads_the_storage_size_from_the_file_alone(self):
         # An inherited size would grow the claims for one run, and the next run
-        # from a clean shell would ask for less; the file's own key still loads.
+        # from a clean shell would drop the field again; the file's own key
+        # still loads.
         with tempfile.TemporaryDirectory() as tmp:
             silent = pathlib.Path(tmp) / "silent.env"
             silent.write_text("PROJECT_ID=p\n")

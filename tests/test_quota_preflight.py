@@ -272,6 +272,23 @@ class PreflightDecisionTest(unittest.TestCase):
         self.assertNotEqual(refused.returncode, 0)
         self.assertIn("requests.storage", refused.stderr)
 
+    def test_an_oversized_data_volume_size_saturates_rather_than_wraps(self) -> None:
+        """`9Ei` parses to MaxInt64, and two claims of it wrapped the total negative.
+
+        The CR template refuses a size above 64Ti first, so this renders a copy
+        without it, to reach the preflight's own arithmetic.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            chart = pathlib.Path(tmp) / "kube-agents"
+            shutil.copytree(self.chart, chart)
+            (chart / "templates" / "platform-agent-cr.yaml").unlink()
+            original, self.chart = self.chart, chart
+            try:
+                req = self._requirements(["platformAgent.storage.size=9Ei"])
+            finally:
+                self.chart = original
+        self.assertEqual(req["requestsStorage"], 2**63 - 1)
+
     def test_credential_proxy_memory_limit_override_moves_only_that_total(self) -> None:
         """The one key an install raises moves limits.memory by its difference and nothing else.
 

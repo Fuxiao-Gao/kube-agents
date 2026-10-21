@@ -411,3 +411,48 @@ func TestAStorageClassReadErrorLetsThePatchDecide(t *testing.T) {
 		t.Errorf("dataVolumeExpansionMessage = %q, known=%v; want \"\" and known: an unread class is not a class that cannot expand", msg, known)
 	}
 }
+
+// TestOneUnreadClaimLeavesTheConditionAlone pins the "known" rule: a first
+// pass that reads the agent's claim but not the sandbox's must not clear a
+// DataVolumeNotExpanded condition that names the sandbox's claim.
+func TestOneUnreadClaimLeavesTheConditionAlone(t *testing.T) {
+	agent := sizedAgent("80Gi")
+	agentClaim := buildPVC(agent).Name
+	sandboxClaim := shellSandboxDataClaimName(agent)
+	meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
+		Type: dataVolumeExpansionConditionType, Status: metav1.ConditionTrue,
+		Reason: dataVolumeExpansionBlockedReason, Message: "Claim " + sandboxClaim + " requests 50Gi",
+	})
+	failSandboxRead := interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, isClaim := obj.(*corev1.PersistentVolumeClaim); isClaim && key.Name == sandboxClaim {
+				return fmt.Errorf("the API server timed out")
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		},
+	}
+	scheme := setupScheme()
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(agent, storageClass(testStorageClassName, true),
+			boundClaim(agent, agentClaim, "80Gi", testStorageClassName, true),
+			boundClaim(agent, sandboxClaim, agentDataStorageSize, testStorageClassName, false)).
+		WithStatusSubresource(&agentv1alpha1.PlatformAgent{}).
+		WithInterceptorFuncs(failSandboxRead).
+		Build()
+	r := &PlatformAgentReconciler{Client: cl, APIReader: cl, Scheme: scheme}
+	ctx := context.Background()
+
+	if err := r.reconcilePVC(ctx, agent); err != nil {
+		t.Fatalf("reconcilePVC: %v", err)
+	}
+	if msg, known := r.dataVolumeExpansionMessage(agent); known {
+		t.Fatalf("dataVolumeExpansionMessage = %q, known; want unknown while the sandbox claim is unread", msg)
+	}
+	if err := r.updateStatusDegraded(ctx, agent, reasonShellSandboxKeysMissing, "the sandbox keypair Secret is missing", workloadRendered); err != nil {
+		t.Fatalf("updateStatusDegraded: %v", err)
+	}
+	if meta.FindStatusCondition(agent.Status.Conditions, dataVolumeExpansionConditionType) == nil {
+		t.Errorf("a pass that could not read %s removed %s", sandboxClaim, dataVolumeExpansionConditionType)
+	}
+}

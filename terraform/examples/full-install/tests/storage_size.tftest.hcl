@@ -1,8 +1,9 @@
 # The data volume size: the default passes the chart no platformAgent.storage
 # key, a raised size reaches the release values as platformAgent.storage.size
 # beside the mode, and the variable refuses a value that is not a whole number
-# of Mi, Gi or Ti above zero. Providers mocked and the cluster module's outputs
-# fixed, as in alert_daily_limits.tftest.hcl; nothing here reaches a cloud.
+# of Mi, Gi or Ti above zero and at most 64Ti. Providers mocked and the cluster
+# module's outputs fixed, as in alert_daily_limits.tftest.hcl; nothing here
+# reaches a cloud.
 
 mock_provider "google" {
   mock_resource "google_service_account" {
@@ -103,6 +104,21 @@ run "a_fractional_size_is_refused" {
   command = plan
   variables {
     platform_agent_storage_size = "1.5Ti"
+  }
+  expect_failures = [var.platform_agent_storage_size]
+}
+
+run "the_largest_disk_is_allowed" {
+  command = plan
+  variables {
+    platform_agent_storage_size = "64Ti"
+  }
+}
+
+run "a_size_above_64Ti_is_refused" {
+  command = plan
+  variables {
+    platform_agent_storage_size = "65537Gi"
   }
   expect_failures = [var.platform_agent_storage_size]
 }

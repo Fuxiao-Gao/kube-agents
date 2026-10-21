@@ -340,7 +340,7 @@ bootstrap_install_env() {
   unset PLATFORM_AGENT_MODE
   # The data volume size too: an inherited PLATFORM_AGENT_STORAGE_SIZE would
   # grow both data claims for one run, and the next run from a clean shell
-  # would ask for a lower size, which the admission webhook refuses.
+  # would drop the field again, leaving claims larger than the CR says.
   unset PLATFORM_AGENT_STORAGE_SIZE
   # The GitOps forge keys likewise: an inherited GITOPS_FORGE=gitlab would
   # switch a recorded GitHub install's forge for this run. --gitops-forge is

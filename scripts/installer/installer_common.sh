@@ -94,6 +94,11 @@ readonly SCOPE_MAX_PROJECTS_MIN=1
 readonly SCOPE_MAX_PROJECTS_MAX=5000
 readonly SCOPE_MAX_PROJECTS_DEFAULT=100
 
+# ─── Data volume size ─────────────────────────────
+# The largest PLATFORM_AGENT_STORAGE_SIZE, in Mi: 64Ti, the largest persistent
+# disk, which the admission webhook and the chart also take as the limit.
+readonly PLATFORM_AGENT_STORAGE_SIZE_MAX_MI=67108864
+
 # ─── OpenAI-compatible model server ───────────────────────────────────────────
 # The ports a base URL without one is dialled on, and the TCP port range.
 readonly HTTP_DEFAULT_PORT=80
@@ -837,12 +842,22 @@ is_valid_platform_agent_mode() {
   [[ "${1:-}" =~ ^(today|next)$ ]]
 }
 
-# PLATFORM_AGENT_STORAGE_SIZE: a whole number of Mi, Gi or Ti above zero, the
-# grammar the composition's platform_agent_storage_size validation takes. The
-# CRD's spec.storage.size takes any quantity; this is the narrower subset a
-# disk is sized in.
+# PLATFORM_AGENT_STORAGE_SIZE: a whole number of Mi, Gi or Ti above zero and at
+# most 64Ti, what the composition's platform_agent_storage_size validation
+# takes. The CRD's spec.storage.size takes any quantity; this is the narrower
+# subset a disk is sized in. A number with more digits than the limit in Mi is
+# over it in every unit, which keeps the multiply inside Bash's int64.
 is_valid_platform_agent_storage_size() {
-  [[ "${1:-}" =~ ^[1-9][0-9]*(Mi|Gi|Ti)$ ]]
+  [[ "${1:-}" =~ ^[1-9][0-9]*(Mi|Gi|Ti)$ ]] || return 1
+  local unit="${BASH_REMATCH[1]}" number mi_per_unit
+  number="${1%"$unit"}"
+  [ "${#number}" -le "${#PLATFORM_AGENT_STORAGE_SIZE_MAX_MI}" ] || return 1
+  case "$unit" in
+    Mi) mi_per_unit=1 ;;
+    Gi) mi_per_unit=1024 ;;
+    Ti) mi_per_unit=1048576 ;;
+  esac
+  [ $((number * mi_per_unit)) -le "$PLATFORM_AGENT_STORAGE_SIZE_MAX_MI" ]
 }
 
 # The PlatformAgent and its release, read once for the scope check and the
@@ -1697,7 +1712,7 @@ load_install_env() {
   unset PLATFORM_AGENT_MODE
   # The data volume size too: an inherited PLATFORM_AGENT_STORAGE_SIZE would
   # grow both data claims for one run, and the next run from a clean shell
-  # would ask for a lower size, which the admission webhook refuses.
+  # would drop the field again, leaving claims larger than the CR says.
   unset PLATFORM_AGENT_STORAGE_SIZE
   # The GitOps forge keys too: an inherited GITOPS_FORGE=gitlab would render a
   # GitLab forge, and drop the GitHub alias and minter, for one run of an
@@ -4867,7 +4882,7 @@ write_tfvars_from_state() {
   # The data volume size, for the same reason.
   local platform_agent_storage_size="${PLATFORM_AGENT_STORAGE_SIZE:-$DEFAULT_PLATFORM_AGENT_STORAGE_SIZE}"
   if ! is_valid_platform_agent_storage_size "$platform_agent_storage_size"; then
-    print_error "PLATFORM_AGENT_STORAGE_SIZE='${platform_agent_storage_size}' is not a whole number of Mi, Gi or Ti above zero, for example 80Gi. Fix it in install.env."
+    print_error "PLATFORM_AGENT_STORAGE_SIZE='${platform_agent_storage_size}' is not a whole number of Mi, Gi or Ti above zero and at most 64Ti, for example 80Gi. Fix it in install.env."
     return 1
   fi
 
