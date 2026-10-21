@@ -354,7 +354,7 @@ func buildCredentialProxyService(agent *agentv1alpha1.PlatformAgent) *corev1.Ser
 // unavailability is the cheaper failure: the gateway retries its long poll.
 //
 // One replica, by design. The Chat relay's ack ids, the Slack relay's
-// Socket Mode connection and the content workspace live in this process or its
+// event queue and receipts, and the content workspace live in this process or its
 // emptyDir, so a second pod behind the Service breaks them; only the exec route
 // scales as it is. docs/designs/credential-proxy-single-pod.md records the
 // decision, the load it was sized against, and the split exec tier to build if

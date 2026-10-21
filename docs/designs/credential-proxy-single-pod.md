@@ -17,8 +17,8 @@ container's requests and limits, which an install raises through
 
 ## 1. Decision
 
-One pod. Concurrency is bought vertically: a larger memory limit (on Autopilot, which clamps
-the limit to the request, a larger request) raises the number of requests the child memory budget
+One pod. Concurrency is bought vertically: a larger memory limit (on Autopilot without bursting,
+which clamps the limit to the request, a larger request) raises the number of requests the child memory budget
 admits, up to the slot cap. More replicas behind the Service would break
 the routes that keep state in the pod (§2), and the load that motivated the question now fits
 one pod (§4). The single point of failure is the same one the agent pod already is.
@@ -35,8 +35,10 @@ other routes keep state in the process or in the pod's emptyDir:
   claim is `ReadWriteOnce` and a separate pod cannot mount it. An `open` on one pod followed by
   a `commit` on another fails with `NoSuchHandle`.
 - The Google Chat relay. A pull keeps its `receipt → ack_id` map in the process that pulled.
-- The Slack relay. It holds one Socket Mode connection; two pods open two, and each event is
-  delivered twice.
+- The Slack relay. Each pod opens its own Socket Mode connection, and Slack spreads events
+  across the connections. The relay acknowledges an event to Slack when it arrives and holds it
+  in an in-process queue, and a pull keeps its `receipt → event` map in the process that pulled.
+  A settle that reaches the other pod fails, so a requeue after a failed turn loses the event.
 
 The drift detector is not in this list: it runs in the gateway pod, and the broker's watcher route
 only forwards its calls and caches the endpoints. The event watcher's dedup snapshots would use the
