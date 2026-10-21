@@ -203,6 +203,21 @@ class MetricsTest(unittest.TestCase):
         entry = self.entry(querier(present=ALL_PRESENT | {"kube_statefulset": [], "kube_deployment": []}))
         self.assertNotIn("checks_unevaluated", entry)
 
+    def test_a_workload_metric_with_one_of_its_two_series_is_unevaluated(self):
+        def query(project, promql):
+            if "kube_deployment" in promql and not any(c in promql for c in ("> 0",)):
+                return [series("a", ksm=True, value=fh.PRESENCE_ONE)], None
+            return querier(present=ALL_PRESENT)(project, promql)
+
+        entry = self.entry(query)
+        self.assertEqual(entry["checks_unevaluated"],
+                         [{"check": "deployment-unavailable", "reason": fh.METRIC_MISSING_REASON}])
+
+    def test_the_workload_presence_read_tells_both_from_one(self):
+        promql = fh.DEPLOYMENT_PRESENCE_QUERY.format(project="acme", exclude="")
+        self.assertIn(") * 0 + " + fh.PRESENCE_BOTH + " or ", promql)
+        self.assertEqual(promql.count("* 0 + " + fh.PRESENCE_ONE), 2)
+
     def test_presence_reads_the_findings_own_metric(self):
         self.assertIn('phase="Pending"', fh.PENDING_PRESENCE_QUERY)
         self.assertIn("kube_deployment_status_replicas_available", fh.DEPLOYMENT_PRESENCE_QUERY)

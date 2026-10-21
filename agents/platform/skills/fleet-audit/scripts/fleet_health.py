@@ -224,6 +224,11 @@ PENDING_QUERY = (
 # or label value leaves every cluster unevaluated rather than quietly clean.
 PENDING_PRESENCE_QUERY = "count by (" + KSM_BY + ") (kube_pod_status_phase" + PENDING_SELECTOR + ")"
 KSM_SELECTOR = '{{project_id="{project}"{exclude}}}'
+# The values a workload presence read returns per cluster.
+PRESENCE_BOTH = "1"
+PRESENCE_ONE = "2"
+METRIC_MISSING_REASON = ("the cluster reports one of this check's two kube-state-metrics series but not the "
+                         "other (renamed or missing), so the check cannot be read")
 
 
 def _workload_short_queries(desired: str, ready: str, kind_label: str) -> tuple[str, str]:
@@ -239,9 +244,15 @@ def _workload_short_queries(desired: str, ready: str, kind_label: str) -> tuple[
         + " and on (" + by + ") (count by (" + by + ") (" + desired_now + " offset " + WORKLOAD_WINDOW + "))"
         + " and on (" + by + ") (count by (" + by + ") (" + ready_now + "))"
     )
+    # One read, two answers per cluster: PRESENCE_BOTH where both series exist,
+    # PRESENCE_ONE where only one does (a renamed or dropped metric), which is
+    # unevaluated rather than read as a cluster with none of the kind.
+    desired_count = "count by (" + KSM_BY + ") (" + desired_now + ")"
+    ready_count = "count by (" + KSM_BY + ") (" + ready_now + ")"
     presence = (
-        "count by (" + KSM_BY + ") (" + desired_now + ") and on (" + KSM_BY + ") count by (" + KSM_BY + ") ("
-        + ready_now + ")"
+        "(" + desired_count + " and on (" + KSM_BY + ") " + ready_count + ") * 0 + " + PRESENCE_BOTH
+        + " or " + desired_count + " * 0 + " + PRESENCE_ONE
+        + " or " + ready_count + " * 0 + " + PRESENCE_ONE
     )
     return finding, presence
 
@@ -506,6 +517,11 @@ def _exclude_matcher(project: str, listed: list[dict], label: str) -> str:
     return EXCLUDE_MATCHER.format(label=label, names=joined)
 
 
+def _raw_value(row: dict) -> str:
+    value = row.get("value") or []
+    return str(value[1]) if len(value) > 1 else ""
+
+
 def _count(row: dict) -> int:
     """A PromQL sample as a whole count; NaN, an infinity or a non-number is 0,
     so one odd sample cannot fail its project's read."""
@@ -532,6 +548,7 @@ def read_metrics(project: str, listed: list[dict], *, query: QueryFn, stop_at: f
         (CHECK_STATEFULSET, STATEFULSET_QUERY, STATEFULSET_PRESENCE_QUERY, LABEL_KSM_CLUSTER, ksm_exclude),
     )
     present: dict[str, set] = {}
+    partial: dict[str, set] = {}
     hits: dict[str, dict] = {}
     errors: dict[str, str] = {}
     records = []
@@ -553,7 +570,10 @@ def read_metrics(project: str, listed: list[dict], *, query: QueryFn, stop_at: f
                 labels = row.get("metric") or {}
                 key = (labels.get(LABEL_LOCATION, ""), labels.get(cluster_label, ""))
                 if is_presence:
-                    present.setdefault(check, set()).add(key)
+                    if check in WORKLOAD_CHECKS and _raw_value(row) == PRESENCE_ONE:
+                        partial.setdefault(check, set()).add(key)
+                    else:
+                        present.setdefault(check, set()).add(key)
                     continue
                 if check == CHECK_NODE_NOT_READY:
                     cand = _candidate(check, SEVERITY_MAJOR, f"Node/{labels.get(LABEL_NODE, '')}",
@@ -575,7 +595,7 @@ def read_metrics(project: str, listed: list[dict], *, query: QueryFn, stop_at: f
                                       f"{_count(row)} replica(s) short of Ready for at least {WORKLOAD_WINDOW}",
                                       labels.get(LABEL_KSM_NAMESPACE, ""))
                 hits.setdefault(check, {}).setdefault(key, []).append(cand)
-    return {"present": present, "hits": hits, "errors": errors, "records": records}
+    return {"present": present, "partial": partial, "hits": hits, "errors": errors, "records": records}
 
 
 def _packages(cluster: dict) -> set[str]:
@@ -597,6 +617,8 @@ def cluster_entry(project: str, cluster: dict, record: dict | None, metrics: dic
             error = metrics["errors"][check]
             reason = error if error == BUDGET_REASON else f"metric read failed: {error}"
             unevaluated.append({"check": check, "reason": reason})
+        elif key in metrics.get("partial", {}).get(check, set()):
+            unevaluated.append({"check": check, "reason": METRIC_MISSING_REASON})
         elif (check in WORKLOAD_CHECKS and key not in metrics["present"].get(check, set())
               and key in metrics["present"].get(CHECK_PENDING, set()) and (not packages or needed in packages)):
             continue
