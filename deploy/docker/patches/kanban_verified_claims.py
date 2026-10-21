@@ -330,9 +330,13 @@ def _excerpt_in(needle: str, haystack: str) -> bool:
     return False
 
 
+def _is_short(needle: str) -> bool:
+    return len(needle.replace(" ", "")) < MIN_EXCERPT_CHARS
+
+
 def _backs(needle: str, text: str) -> bool:
     """Whether ``text`` backs the excerpt ``needle``: on word edges, or as all of it when the excerpt is short."""
-    if len(needle.replace(" ", "")) < MIN_EXCERPT_CHARS:
+    if _is_short(needle):
         return needle == text
     return _excerpt_in(needle, text)
 
@@ -374,6 +378,11 @@ def _check_claim(calls: list, item: object, child_claims) -> tuple[dict | None, 
     child = _from_child(child_claims, wanted, needle)
     if child is not None:
         return {**accepted, "exit_code": child.get("exit_code"), "ran_at": child.get("ran_at"), "card": child["card"]}, None
+    if _is_short(needle) and (runs or any(_collapse(other["command"]) == wanted for other in child_claims())):
+        return None, (
+            f"excerpt {_quote(excerpt)!r} holds fewer than {MIN_EXCERPT_CHARS} characters and is not the whole "
+            f"output of {_quote(command)!r}; cite the whole line that proves the claim"
+        )
     if not runs and len(calls) >= MAX_RECORDED_CALLS:
         return None, (
             f"command {_quote(command)!r} is not in this card's record, which keeps only its last "
@@ -383,11 +392,6 @@ def _check_claim(calls: list, item: object, child_claims) -> tuple[dict | None, 
         return None, (
             f"command {_quote(command)!r} did not run in this card, and no card it created "
             "verified it; copy it exactly as it ran"
-        )
-    if len(needle.replace(" ", "")) < MIN_EXCERPT_CHARS:
-        return None, (
-            f"excerpt {_quote(excerpt)!r} holds fewer than {MIN_EXCERPT_CHARS} characters and is not the whole "
-            f"output of {_quote(command)!r}; cite the whole line that proves the claim"
         )
     return None, f"excerpt {_quote(excerpt)!r} is not in the output of {_quote(command)!r}; copy it exactly"
 

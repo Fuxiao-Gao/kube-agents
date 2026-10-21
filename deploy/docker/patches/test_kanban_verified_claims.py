@@ -340,6 +340,20 @@ class ChildClaimsTest(GateTestCase):
         err, _, _ = run_rules(CARD, [dict(GOOD, excerpt="node-a    NotReady")], "r", None, connect=connect)
         self.assertIn("no card it created verified it", err)
 
+    def test_a_short_excerpt_of_a_child_claim_is_refused_as_short(self):
+        # "node-b" sits on word edges in the child's excerpt, but is under the minimum.
+        connect = self.connect_to([("t_cluster", CARD)], [("t_cluster", "completed", [CHILD_CLAIM])])
+        err, _, _ = run_rules(CARD, [dict(GOOD, excerpt="node-b")], "r", None, connect=connect)
+        self.assertIn("fewer than", err)
+        self.assertNotIn("did not run", err)
+
+    def test_a_short_child_excerpt_relayed_whole_is_accepted(self):
+        exit_claim = {"claim": "The container exited 137.", "command": "kubectl get pod p -o jsonpath", "excerpt": "137"}
+        connect = self.connect_to([("t_cluster", CARD)], [("t_cluster", "completed", [dict(exit_claim, exit_code=0)])])
+        err, _, metadata = run_rules(CARD, [exit_claim], "r", None, connect=connect)
+        self.assertIsNone(err)
+        self.assertEqual(metadata[kvc.METADATA_KEY][0]["card"], "t_cluster")
+
     def test_a_child_claim_with_another_command_is_refused(self):
         # Same excerpt, different command: the relay checks the command too.
         connect = self.connect_to([("t_cluster", CARD)], [("t_cluster", "completed", [CHILD_CLAIM])])
