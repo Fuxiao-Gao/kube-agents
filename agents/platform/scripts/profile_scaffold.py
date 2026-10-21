@@ -244,37 +244,55 @@ def share_npm_cache(process_home: Path, hermes_home: Path, reclaim: bool = False
     over ~/.npm. A real ~/.npm directory is the old per-profile cache. With `reclaim`,
     it is moved aside, the link takes its place, and then the moved copy is deleted,
     so a delete that fails leaves an orphan directory, never a home with no link.
-    Only the start-up sweep sets `reclaim`, because a process of the profile can be
-    using the directory at any other time. On an install with more than one replica,
-    a pod that has not restarted yet can still be using it during the sweep; no
-    shipped agent runs an npx MCP server, and such a server starts again through npx.
+    The next run with `reclaim` deletes an orphan that an earlier run left, before
+    anything else. Only the start-up sweep sets `reclaim`, because a process of the
+    profile can be using the directory at any other time. On an install with more
+    than one replica, a pod that has not restarted yet can still be using it during
+    the sweep; no shipped agent runs an npx MCP server, and such a server starts
+    again through npx. npx runs an installed package without a new integrity check,
+    so a package changed in the shared cache stays for every profile: after a
+    suspected compromise, clear `<agentHome>/.cache/npm`, not only the profile.
     """
     if not process_home.is_dir():
         return
     link = process_home / NPM_HOME_CACHE
+    aside = process_home / NPM_RECLAIM_NAME
     shared = hermes_home / NPM_SHARED_CACHE
     try:
         # Also when the link exists: npm fails on every command when its cache is a dangling link.
         shared.mkdir(parents=True, exist_ok=True)
+        if reclaim and aside.is_dir() and not aside.is_symlink():
+            # Left by an earlier start-up whose delete failed or that stopped
+            # before the link; it would also block the rename below.
+            _delete_reclaimed_npm_cache(aside)
         if link.is_symlink():
             return
         if link.exists():
             if not (reclaim and link.is_dir()):
                 return
-            aside = link.with_name(NPM_RECLAIM_NAME)
             link.rename(aside)
             link.symlink_to(os.path.relpath(shared.resolve(), process_home.resolve()), target_is_directory=True)
             log(f"pointed npm in {process_home} at the shared cache {shared}")
-            size = sum(
-                (Path(root) / name).lstat().st_size for root, _, names in os.walk(aside) for name in names
-            )
-            shutil.rmtree(aside)
-            log(f"reclaimed the per-profile npm cache {link} ({size} bytes)")
+            _delete_reclaimed_npm_cache(aside)
             return
         link.symlink_to(os.path.relpath(shared.resolve(), process_home.resolve()), target_is_directory=True)
         log(f"pointed npm in {process_home} at the shared cache {shared}")
     except OSError as exc:
         log(f"WARN: could not point npm in {process_home} at the shared cache {shared} ({exc})")
+
+
+def _delete_reclaimed_npm_cache(aside: Path) -> None:
+    """Delete an old per-profile npm cache that share_npm_cache moved to `aside`.
+
+    A failure is logged with the directory and left for the next start-up sweep.
+    """
+    try:
+        size = sum((Path(root) / name).lstat().st_size for root, _, names in os.walk(aside) for name in names)
+        shutil.rmtree(aside)
+    except OSError as exc:
+        log(f"WARN: could not delete the old per-profile npm cache {aside} ({exc}); the next start-up tries again")
+        return
+    log(f"reclaimed the per-profile npm cache {aside} ({size} bytes)")
 
 
 def read_json(path: Path) -> object | None:

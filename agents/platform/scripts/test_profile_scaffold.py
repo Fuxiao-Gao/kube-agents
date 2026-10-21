@@ -669,7 +669,7 @@ class NpmCacheTest(unittest.TestCase):
         err = self.share(process_home, self.tmp, reclaim=True)
 
         self.assertEqual(old.resolve(), self.tmp / ".cache" / "npm")
-        self.assertIn(f"reclaimed the per-profile npm cache {old} (10 bytes)", err)
+        self.assertIn(f"reclaimed the per-profile npm cache {process_home / ps.NPM_RECLAIM_NAME} (10 bytes)", err)
 
     def test_a_failed_delete_still_leaves_the_link(self):
         # The old cache is moved aside before the link goes in, so a delete that
@@ -690,7 +690,43 @@ class NpmCacheTest(unittest.TestCase):
         self.assertTrue(old.is_symlink())
         self.assertEqual(old.resolve(), self.tmp / ".cache" / "npm")
         self.assertTrue((process_home / ps.NPM_RECLAIM_NAME).is_dir())
-        self.assertIn("WARN", err)
+        self.assertIn(f"could not delete the old per-profile npm cache {process_home / ps.NPM_RECLAIM_NAME}", err)
+        self.assertNotIn("could not point npm", err)
+
+        # The next start-up sweep deletes the orphan.
+        ps.shutil.rmtree = real_rmtree
+        err = self.share(process_home, self.tmp, reclaim=True)
+
+        self.assertFalse((process_home / ps.NPM_RECLAIM_NAME).exists())
+        self.assertIn("reclaimed the per-profile npm cache", err)
+        self.assertTrue(old.is_symlink())
+
+    def test_an_orphan_does_not_block_the_next_reclaim(self):
+        # A start-up stopped between the move and the link: an orphan and no
+        # link. A process then made a new real cache. The sweep removes both.
+        process_home = self.tmp / "home"
+        process_home.mkdir()
+        old = self.old_cache(process_home)
+        orphan = process_home / ps.NPM_RECLAIM_NAME
+        (orphan / "_cacache").mkdir(parents=True)
+        (orphan / "_cacache" / "index").write_text("x" * 7, encoding="utf-8")
+
+        err = self.share(process_home, self.tmp, reclaim=True)
+
+        self.assertEqual(old.resolve(), self.tmp / ".cache" / "npm")
+        self.assertFalse(orphan.exists())
+        self.assertNotIn("WARN", err)
+
+    def test_the_scaffolder_leaves_an_orphan_alone(self):
+        """Only the start-up sweep deletes, because a process can be using the directory."""
+        process_home = self.tmp / "home"
+        process_home.mkdir()
+        orphan = process_home / ps.NPM_RECLAIM_NAME
+        orphan.mkdir()
+
+        self.share(process_home, self.tmp)
+
+        self.assertTrue(orphan.is_dir())
 
     def test_a_second_run_changes_nothing(self):
         process_home = self.scaffold(self.tmp)
