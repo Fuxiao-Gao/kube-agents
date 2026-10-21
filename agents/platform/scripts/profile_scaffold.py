@@ -35,6 +35,18 @@ except ImportError:
 MERGE_PATHS: tuple[str, ...] = ("cron/jobs.json",)
 DEFAULT_LEGACY_CRON_RISK: str = "low"
 DEFAULT_JOBS_LOCK_TIMEOUT_SECONDS: float = 15.0
+DEFAULT_HERMES_HOME = "/opt/data"
+
+# npm keeps its cache in ~/.npm, and a profile's processes run with HOME at
+# <profile>/home (Hermes' _PROFILE_DIRS), so each profile kept its own ~100 MiB
+# copy (gke-labs#3376). A ~/.npm symlink to one directory on the data volume gives
+# them one cache. It is a symlink and not a cache line in .npmrc or the environment:
+# Hermes starts MCP stdio servers with a filtered environment, and it looks for an
+# installed npx package only at $npm_config_cache or ~/.npm (_npx_cached_bin in
+# tools/mcp_tool_config.py). The link is relative, so it resolves after agentHome moves.
+PROCESS_HOME = "home"
+NPM_HOME_CACHE = ".npm"
+NPM_SHARED_CACHE = Path(".cache", "npm")
 
 _jobs_lock_state = threading.local()
 
@@ -217,7 +229,41 @@ def ensure_profile(name: str, description: str, hermes_home: Path) -> Path:
             raise SystemExit(f"ERROR: could not execute 'hermes' to create profile {name}: {e}")
     if not home.is_dir():
         raise SystemExit(f"ERROR: expected profile home not found after create: {home}")
+    share_npm_cache(home / PROCESS_HOME, hermes_home)
     return home
+
+
+def share_npm_cache(process_home: Path, hermes_home: Path, reclaim: bool = False) -> None:
+    """Make `process_home`/.npm a symlink to the one npm cache under `hermes_home`.
+
+    Never creates `process_home`: Hermes gives a subprocess that HOME only when the
+    directory exists, so creating it would move where the profile keeps its gcloud
+    and kube state. An existing ~/.npm symlink stays, and a cache line in .npmrc wins
+    over ~/.npm. A real ~/.npm directory is the old per-profile cache. With `reclaim`,
+    it is removed and replaced. Only the start-up sweep sets `reclaim`, because a
+    process of the profile can be using the directory at any other time.
+    """
+    if not process_home.is_dir():
+        return
+    link = process_home / NPM_HOME_CACHE
+    shared = hermes_home / NPM_SHARED_CACHE
+    try:
+        # Also when the link exists: npm fails on every command when its cache is a dangling link.
+        shared.mkdir(parents=True, exist_ok=True)
+        if link.is_symlink():
+            return
+        if link.exists():
+            if not (reclaim and link.is_dir()):
+                return
+            size = sum(
+                (Path(root) / name).lstat().st_size for root, _, names in os.walk(link) for name in names
+            )
+            shutil.rmtree(link)
+            log(f"reclaimed the per-profile npm cache {link} ({size} bytes)")
+        link.symlink_to(os.path.relpath(shared.resolve(), process_home.resolve()), target_is_directory=True)
+        log(f"pointed npm in {process_home} at the shared cache {shared}")
+    except OSError as exc:
+        log(f"WARN: could not point npm in {process_home} at the shared cache {shared} ({exc})")
 
 
 def read_json(path: Path) -> object | None:
@@ -533,6 +579,14 @@ def main() -> None:
         "--backfill-cron",
         help="Backfill default risk tier onto a cron/jobs.json file directly without overlaying.",
     )
+    group.add_argument(
+        "--share-npm-cache",
+        action="store_true",
+        help=(
+            "Point npm in $HERMES_HOME/home and every profile's home at one shared cache, "
+            "and remove each old per-profile cache (see share_npm_cache)."
+        ),
+    )
     ap.add_argument("--template", default="", help="Baked template dir to overlay onto the profile home.")
     ap.add_argument("--description", default="", help="Profile description (surfaced in discovery).")
     ap.add_argument("--plugins", default="", help="Optional shared plugins dir to overlay for observability.")
@@ -558,6 +612,12 @@ def main() -> None:
         ),
     )
     args = ap.parse_args()
+    hermes_home = Path(os.environ.get("HERMES_HOME", DEFAULT_HERMES_HOME))
+
+    if args.share_npm_cache:
+        for process_home in (hermes_home / PROCESS_HOME, *profiles_base(hermes_home).glob(f"*/{PROCESS_HOME}")):
+            share_npm_cache(process_home, hermes_home, reclaim=True)
+        return
 
     if args.backfill_cron:
         target = Path(args.backfill_cron)
@@ -574,7 +634,6 @@ def main() -> None:
         if not home.is_dir():
             raise SystemExit(f"ERROR: --home is not a directory: {home}")
     else:
-        hermes_home = Path(os.environ.get("HERMES_HOME", "/opt/data"))
         home = ensure_profile(args.name, args.description, hermes_home)
     overlay_template(
         home,
