@@ -39,7 +39,7 @@ _VALUE_PATH = "platformAgent.storage.size"
 _CRD_LOOKUP = 'lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "platformagents.kubeagents.x-k8s.io"'
 _CRD_DIG = 'dig "schema" "openAPIV3Schema" "properties" "spec" "properties" (dict) .'
 _CRD_REMEDY = "kubectl apply --server-side -f charts/kube-agents/crds/"
-_ZERO_MESSAGE = "the data volume size must be greater than zero"
+_ZERO_MESSAGE = "reads as zero whole bytes; the data volume size must be at least one byte"
 _TOO_LARGE_MESSAGE = "the data volume size must be at most 64Ti"
 
 
@@ -145,7 +145,7 @@ class StorageSizeRenderTest(unittest.TestCase):
                 self.assertIn("/platformAgent/storage", proc.stderr)
 
     def test_a_zero_size_fails_the_render_by_name(self):
-        for size in ("0", "0Gi", "0.0Ti"):
+        for size in ("0", "0Gi", "0.0Ti", "0.5"):
             with self.subTest(size=size):
                 proc = self._render("--set-string", f"{_VALUE_PATH}={size}")
                 self.assertNotEqual(proc.returncode, 0)

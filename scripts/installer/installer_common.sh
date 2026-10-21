@@ -4882,7 +4882,7 @@ write_tfvars_from_state() {
   # The data volume size, for the same reason.
   local platform_agent_storage_size="${PLATFORM_AGENT_STORAGE_SIZE:-$DEFAULT_PLATFORM_AGENT_STORAGE_SIZE}"
   if ! is_valid_platform_agent_storage_size "$platform_agent_storage_size"; then
-    print_error "PLATFORM_AGENT_STORAGE_SIZE='${platform_agent_storage_size}' is not a whole number of Mi, Gi or Ti above zero and at most 64Ti, for example 80Gi. Fix it in install.env."
+    print_error "PLATFORM_AGENT_STORAGE_SIZE='${platform_agent_storage_size}' is not a whole number of Mi, Gi or Ti above zero and at most 64Ti, for example 80Gi. Fix it in install.env, or on a first install, in the value this shell exports."
     return 1
   fi
 

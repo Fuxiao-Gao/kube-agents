@@ -245,19 +245,18 @@ class PreflightDecisionTest(unittest.TestCase):
         """
         base = self._requirements()
         self.assertEqual(base["requestsStorage"], _OPERATOR_STORAGE_BYTES)
+        totals = {}
         for size, size_bytes in (("80Gi", 80 * 1024**3), ("20Gi", 20 * 1024**3),
                                  ("50Gi", _DATA_CLAIM_DEFAULT_BYTES), ("1Ti", 1024**4)):
             with self.subTest(size=size):
                 req = self._requirements([f"platformAgent.storage.size={size}"])
+                totals[size] = req["requestsStorage"]
                 self.assertEqual(
                     req["requestsStorage"],
                     _OPERATOR_STORAGE_BYTES + _DATA_CLAIMS * (size_bytes - _DATA_CLAIM_DEFAULT_BYTES),
                 )
                 self.assertEqual(req["persistentVolumeClaims"], base["persistentVolumeClaims"])
-        self.assertEqual(
-            self._requirements(["platformAgent.storage.size=80Gi"])["requestsStorage"],
-            162 * 1024**3,
-        )
+        self.assertEqual(totals["80Gi"], 162 * 1024**3)
 
     def test_a_data_volume_size_that_does_not_fit_the_quota_fails_the_render(self) -> None:
         # The default fits a 102Gi requests.storage quota exactly; 80Gi does not.

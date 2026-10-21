@@ -456,3 +456,61 @@ func TestOneUnreadClaimLeavesTheConditionAlone(t *testing.T) {
 		t.Errorf("a pass that could not read %s removed %s", sandboxClaim, dataVolumeExpansionConditionType)
 	}
 }
+
+// TestAnUnreadClassAndARefusedPatchKeepTheRecord pins the class-read side of
+// the "known" rule: a pass whose StorageClass read fails and whose patch is
+// refused learned nothing, so the record from the pass before stands and the
+// DataVolumeNotExpanded condition stays.
+func TestAnUnreadClassAndARefusedPatchKeepTheRecord(t *testing.T) {
+	agent := sizedAgent("80Gi")
+	agentClaim := buildPVC(agent).Name
+	sandboxClaim := shellSandboxDataClaimName(agent)
+	failClassRead := false
+	flaky := interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, isClass := obj.(*storagev1.StorageClass); isClass && failClassRead {
+				return fmt.Errorf("the API server timed out")
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		},
+		Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if _, isClaim := obj.(*corev1.PersistentVolumeClaim); isClaim {
+				return apierrors.NewForbidden(schema.GroupResource{Resource: "persistentvolumeclaims"}, obj.GetName(),
+					fmt.Errorf("only dynamically provisioned pvc can be resized and the storageclass that provisions the pvc must support resize"))
+			}
+			return cl.Patch(ctx, obj, patch, opts...)
+		},
+	}
+	scheme := setupScheme()
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(agent, storageClass(testStorageClassName, false),
+			boundClaim(agent, agentClaim, agentDataStorageSize, testStorageClassName, true),
+			boundClaim(agent, sandboxClaim, agentDataStorageSize, testStorageClassName, false)).
+		WithStatusSubresource(&agentv1alpha1.PlatformAgent{}).
+		WithInterceptorFuncs(flaky).
+		Build()
+	r := &PlatformAgentReconciler{Client: cl, APIReader: cl, Scheme: scheme}
+	ctx := context.Background()
+
+	if err := r.reconcilePVC(ctx, agent); err != nil {
+		t.Fatalf("reconcilePVC: %v", err)
+	}
+	if msg, known := r.dataVolumeExpansionMessage(agent); !known || msg == "" {
+		t.Fatalf("dataVolumeExpansionMessage = %q, known=%v after a pass that read the class; this proves nothing", msg, known)
+	}
+	if err := r.updateStatusDegraded(ctx, agent, reasonShellSandboxKeysMissing, "the sandbox keypair Secret is missing", workloadRendered); err != nil {
+		t.Fatalf("updateStatusDegraded: %v", err)
+	}
+
+	failClassRead = true
+	if err := r.reconcilePVC(ctx, agent); err != nil {
+		t.Fatalf("reconcilePVC (class unread): %v", err)
+	}
+	if err := r.updateStatusDegraded(ctx, agent, reasonShellSandboxKeysMissing, "the sandbox keypair Secret is missing", workloadRendered); err != nil {
+		t.Fatalf("updateStatusDegraded (class unread): %v", err)
+	}
+	if meta.FindStatusCondition(agent.Status.Conditions, dataVolumeExpansionConditionType) == nil {
+		t.Errorf("a pass that could not read the class and had its patch refused removed %s", dataVolumeExpansionConditionType)
+	}
+}

@@ -616,9 +616,9 @@ which equals the operator's own default. The generator writes `platform_agent_st
 every run, and the composition passes the chart nothing for the default, so the CR carries no
 `storage` field. A first install records a value it inherits from the shell; after that, the file
 is the only way in, because `bootstrap_install_env` and `load_install_env` drop an inherited
-value: one run at a raised size followed by a run from a clean shell would ask for a lower size,
-which the admission webhook refuses. A value that is not a whole number of `Mi`, `Gi` or `Ti`
-above zero stops every front door but `uninstall.sh`, which exports it empty before it
+value: one run at a raised size followed by a run from a clean shell would drop the field again,
+leaving the claims larger than the CR says. A value that is not a whole number of `Mi`, `Gi` or
+`Ti` above zero and at most `64Ti` stops every front door but `uninstall.sh`, which exports it empty before it
 regenerates.
 
 When `next` hands Slack to the A2A gateway (Slack on, Google Chat off: the operator's

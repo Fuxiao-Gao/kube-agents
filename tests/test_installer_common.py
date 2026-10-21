@@ -1464,7 +1464,7 @@ class InstallerCommonTest(unittest.TestCase):
                         f"PLATFORM_AGENT_STORAGE_SIZE='{value}' is not a whole number of Mi, Gi or Ti above zero",
                         proc.stderr,
                     )
-                    self.assertIn("Fix it in install.env.", proc.stderr)
+                    self.assertIn("Fix it in install.env, or on a first install, in the value this shell exports.", proc.stderr)
                     self.assertFalse(dest.exists(), "no tfvars is written for a value Terraform would refuse")
 
     def test_load_install_env_reads_the_storage_size_from_the_file_alone(self):

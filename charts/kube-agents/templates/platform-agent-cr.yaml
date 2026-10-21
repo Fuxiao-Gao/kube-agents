@@ -76,18 +76,20 @@ spec:
     sizes both data claims from its own default. The schema checks the
     quantity's grammar only, so the range fails here, as the webhook (off by
     default) would refuse it. Zero passes the grammar, and the operator would
-    ignore it for its default while the CR said 0. A size above 64Ti, the
-    largest persistent disk (70368744177664 bytes), is a unit typo that would
-    patch both claims to a size no disk reaches, and a claim cannot shrink
-    back. The CRD guard is the scoped pool's: `helm upgrade` never applies
-    crds/, an API server serving a CRD from before spec.storage prunes the
-    block, and the claims stay at the default while the release record
-    carries the size. `lookup` is empty under `helm template`, so the guard
-    fires only against a live install.
+    ignore it for its default while the CR said 0. parseBytes truncates to
+    whole bytes, so a size below one byte, such as 0.5, fails here too, where
+    the webhook would admit it. A size above 64Ti, the largest persistent
+    disk (70368744177664 bytes), is a unit typo that would patch both claims
+    to a size no disk reaches, and a claim cannot shrink back. The CRD guard
+    is the scoped pool's: `helm upgrade` never applies crds/, an API server
+    serving a CRD from before spec.storage prunes the block, and the claims
+    stay at the default while the release record carries the size. `lookup`
+    is empty under `helm template`, so the guard fires only against a live
+    install.
   */}}
   {{- with (.Values.platformAgent.storage | default dict).size }}
   {{- if le (include "kube-agents.parseBytes" . | int64) 0 }}
-  {{- fail (printf "platformAgent.storage.size is %s; the data volume size must be greater than zero. Leave it null to keep the operator default" .) }}
+  {{- fail (printf "platformAgent.storage.size is %s, which reads as zero whole bytes; the data volume size must be at least one byte. Leave it null to keep the operator default" .) }}
   {{- end }}
   {{- if gt (include "kube-agents.parseBytes" . | int64) 70368744177664 }}
   {{- fail (printf "platformAgent.storage.size is %s; the data volume size must be at most 64Ti, the largest persistent disk size" .) }}

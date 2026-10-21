@@ -5656,8 +5656,9 @@ class PlatformAgentStorageSizePersistsThroughInstallEnvTest(unittest.TestCase):
 
     Every later run drops an inherited PLATFORM_AGENT_STORAGE_SIZE and reads
     the file alone, so a size the first run applied but did not record would
-    read as the lower default on the next run, which the admission webhook
-    refuses. Unset, nothing is recorded, so later runs follow the default.
+    read as the default on the next run, which drops the field and leaves
+    the claims larger than the CR says. Unset, nothing is recorded, so later
+    runs follow the default.
     """
 
     def _bootstrap_with_export(self, tmp, export_line):

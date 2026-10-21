@@ -2616,11 +2616,12 @@ func setDataVolumeExpansionCondition(agent *agentv1alpha1.PlatformAgent, msg str
 // cache, because the role grants get on storageclasses and nothing more, and
 // a cached read would start an informer that cannot list. When the read fails
 // for another reason (an image ahead of its ClusterRole, say), this returns ""
-// and the patch is the test, as it was before the class was read.
-func (r *PlatformAgentReconciler) dataClaimCannotExpand(ctx context.Context, pvc *corev1.PersistentVolumeClaim) string {
+// with read false, and the patch is the test, as it was before the class was
+// read.
+func (r *PlatformAgentReconciler) dataClaimCannotExpand(ctx context.Context, pvc *corev1.PersistentVolumeClaim) (reason string, read bool) {
 	className := ptr.Deref(pvc.Spec.StorageClassName, "")
 	if className == "" {
-		return dataVolumeNoStorageClassReason
+		return dataVolumeNoStorageClassReason, true
 	}
 	reader := client.Reader(r.Client)
 	if r.APIReader != nil {
@@ -2629,16 +2630,16 @@ func (r *PlatformAgentReconciler) dataClaimCannotExpand(ctx context.Context, pvc
 	class := &storagev1.StorageClass{}
 	if err := reader.Get(ctx, client.ObjectKey{Name: className}, class); err != nil {
 		if errors.IsNotFound(err) {
-			return fmt.Sprintf(dataVolumeStorageClassGoneFmt, className)
+			return fmt.Sprintf(dataVolumeStorageClassGoneFmt, className), true
 		}
 		logf.FromContext(ctx).Info("could not read the data claim's StorageClass; the patch decides whether it can grow",
 			"claim", pvc.Name, "storageClass", className, "reason", err.Error())
-		return ""
+		return "", false
 	}
 	if !ptr.Deref(class.AllowVolumeExpansion, false) {
-		return fmt.Sprintf(dataVolumeStorageClassFixedFmt, className)
+		return fmt.Sprintf(dataVolumeStorageClassFixedFmt, className), true
 	}
-	return ""
+	return "", true
 }
 
 // growDataClaim widens an existing claim to `want`. A claim that is absent is
@@ -2656,8 +2657,9 @@ func (r *PlatformAgentReconciler) dataClaimCannotExpand(ctx context.Context, pvc
 // that is merely smaller than we would like. Before the patch it reads the
 // claim's StorageClass, and when the class cannot expand the claim it skips the
 // patch and returns the reason, which the DataVolumeNotExpanded condition
-// carries. Every other refusal is logged. The result is nil only when the
-// claim could not be read.
+// carries. Every other refusal is logged. The result is nil when the claim
+// could not be read, or when neither the class read nor the patch said whether
+// the claim can grow; the previous record then stands.
 func (r *PlatformAgentReconciler) growDataClaim(ctx context.Context, key client.ObjectKey, want resource.Quantity, owner metav1.Object) *dataClaimGrowth {
 	log := logf.FromContext(ctx)
 	growth := &dataClaimGrowth{claim: key.Name, want: want}
@@ -2690,7 +2692,8 @@ func (r *PlatformAgentReconciler) growDataClaim(ctx context.Context, key client.
 		return growth
 	}
 
-	if growth.cannotExpand = r.dataClaimCannotExpand(ctx, pvc); growth.cannotExpand != "" {
+	cannotExpand, classRead := r.dataClaimCannotExpand(ctx, pvc)
+	if growth.cannotExpand = cannotExpand; growth.cannotExpand != "" {
 		log.Info("the data claim's StorageClass cannot expand it; the DataVolumeNotExpanded condition says so",
 			"claim", key.Name, "have", have.String(), "want", want.String(), "reason", growth.cannotExpand)
 		return growth
@@ -2708,10 +2711,15 @@ func (r *PlatformAgentReconciler) growDataClaim(ctx context.Context, key client.
 		if errors.IsForbidden(err) || errors.IsInvalid(err) {
 			log.Info("the API server refused the data claim's growth; the StorageClass, a namespace storage quota, or a claim not yet bound decides this",
 				"claim", key.Name, "have", have.String(), "want", want.String(), "reason", err.Error())
-			return growth
+		} else {
+			log.Error(err, "could not grow the data claim",
+				"claim", key.Name, "have", have.String(), "want", want.String())
 		}
-		log.Error(err, "could not grow the data claim",
-			"claim", key.Name, "have", have.String(), "want", want.String())
+		// With the class unread, a refusal does not say whether the class can
+		// expand the claim, so the previous record stands.
+		if !classRead {
+			return nil
+		}
 		return growth
 	}
 	// Acceptance, not growth: the resize itself is the CSI driver's, and it lands
