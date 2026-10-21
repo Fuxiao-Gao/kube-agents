@@ -756,7 +756,8 @@ the growth, or a claim not yet bound, is logged by the operator and does not set
 
 The admission webhook refuses a `spec.storage.size` lower than the size the stored object resolves
 to (the `50Gi` default when it sets none), because a claim cannot shrink. It also refuses a size of
-zero or less, and a size above `64Ti`, the largest persistent disk. Removing the field is allowed,
+zero or less, and a size above `64Ti`, the largest persistent disk, unless the stored object already
+carries that value; a stored size above `64Ti` compares as `64Ti`. Removing the field is allowed,
 and the size then resolves to the default. Where the stored size is above the default, the existing
 claims keep their size, only a new claim gets the default, and the webhook warns about the removal.
 Where the stored size is below the default, the operator grows both claims to the default, with no

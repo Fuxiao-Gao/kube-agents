@@ -347,16 +347,24 @@ func (v *PlatformAgentCustomValidator) validatePlatformAgent(ctx context.Context
 func validateStorageSize(oldObj, platformAgent *agentv1alpha1.PlatformAgent) (field.ErrorList, admission.Warnings) {
 	sizePath := field.NewPath("spec", "storage", "size")
 	newSize := storageSize(platformAgent)
-	if newSize != nil && newSize.Sign() <= 0 {
+	// A value the stored object already carries passes the range checks, so a
+	// CR written while the webhook was off stays open to every other update.
+	unchanged := oldObj != nil && sameStorageSize(storageSize(oldObj), newSize)
+	if newSize != nil && !unchanged && newSize.Sign() <= 0 {
 		return field.ErrorList{field.Invalid(sizePath, newSize.String(), storageSizeNotPositiveMsg)}, nil
 	}
-	if newSize != nil && newSize.Cmp(maxStorageSize) > 0 {
+	if newSize != nil && !unchanged && newSize.Cmp(maxStorageSize) > 0 {
 		return field.ErrorList{field.Invalid(sizePath, newSize.String(), fmt.Sprintf(storageSizeTooLargeFmt, maxStorageSize.String()))}, nil
 	}
 	if oldObj == nil {
 		return nil, nil
 	}
 	oldResolved := controller.ResolveDataStorageSize(oldObj)
+	// A stored size above the limit compares as the limit, so lowering it to a
+	// size the webhook admits is not refused as a shrink.
+	if oldResolved.Cmp(maxStorageSize) > 0 {
+		oldResolved = maxStorageSize.DeepCopy()
+	}
 	newResolved := controller.ResolveDataStorageSize(platformAgent)
 	if newResolved.Cmp(oldResolved) >= 0 {
 		return nil, nil
@@ -365,6 +373,14 @@ func validateStorageSize(oldObj, platformAgent *agentv1alpha1.PlatformAgent) (fi
 		return nil, admission.Warnings{fmt.Sprintf(storageSizeRemovedWarnFmt, oldResolved.String(), newResolved.String())}
 	}
 	return field.ErrorList{field.Forbidden(sizePath, fmt.Sprintf(storageSizeShrinkFmt, oldResolved.String(), newResolved.String()))}, nil
+}
+
+// sameStorageSize reports whether a and b are both absent or the same quantity.
+func sameStorageSize(a, b *resource.Quantity) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Cmp(*b) == 0
 }
 
 // storageSize is spec.storage.size as written, or nil when it is absent.

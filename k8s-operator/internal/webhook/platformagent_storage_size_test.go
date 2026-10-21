@@ -131,6 +131,22 @@ func TestStorageSizeValidation(t *testing.T) {
 		}
 	})
 
+	t.Run("an out-of-range size already stored does not block other updates", func(t *testing.T) {
+		for _, size := range []string{"0", "65Ti"} {
+			if _, err := val.ValidateUpdate(ctx, storageAgent(size), storageAgent(size)); err != nil {
+				t.Errorf("an update that keeps the stored %s was refused: %v", size, err)
+			}
+		}
+	})
+
+	t.Run("lowering a stored size above 64Ti to 64Ti is allowed", func(t *testing.T) {
+		if _, err := val.ValidateUpdate(ctx, storageAgent("65Ti"), storageAgent("64Ti")); err != nil {
+			t.Errorf("65Ti to 64Ti was refused: %v", err)
+		}
+		_, err := val.ValidateUpdate(ctx, storageAgent("65Ti"), storageAgent("1Ti"))
+		assertFieldError(t, err, storageSizePath)
+	})
+
 	t.Run("allows a positive size on create, also below the default", func(t *testing.T) {
 		if _, err := val.ValidateCreate(ctx, storageAgent("20Gi")); err != nil {
 			t.Errorf("create with 20Gi was refused: %v", err)
