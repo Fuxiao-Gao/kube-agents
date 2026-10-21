@@ -1885,10 +1885,11 @@ def _triage_task_body(payload: Dict[str, Any]) -> str:
     three-section rule above, and it sits outside the ``## What to do`` → 🔗
     span that the bench delivery contract slices.
 
-    The report ends by inviting the reader to reply ``apply``, and something
-    honours it. The agent that acts on such a reply reads the report back from
-    the ``incidents`` table through the ``incident_context`` plugin, and the row
-    that lookup needs is written by the same delivery that posted the report:
+    A report that proposes a fix ends by inviting the reader to reply
+    ``apply``, and something honours it. The agent that acts on such a reply
+    reads the report back from the ``incidents`` table through the
+    ``incident_context`` plugin, and the row that lookup needs is written by
+    the same delivery that posted the report:
     ``kanban_notifier.store_incident_report`` keys it to the chat thread once
     the notifier has sent it. That was not true between #738 — which replaced
     the egress call in ``platform_mcp_server.send_notification``, the table's
@@ -1916,12 +1917,20 @@ def _triage_task_body(payload: Dict[str, Any]) -> str:
     against the gate; bench/tests/test_triage_delivery_contract.py holds it
     against both the gate and that eval case.
 
+    A report that proposes no fix carries neither an ``Option`` letter nor
+    that bullet: its one bullet is **No action needed**. So it earns no
+    ``incidents`` row, which is intended: a reply of ``apply`` has nothing to
+    apply. bench/tasks/autoops-warning-event-no-action-triage/task.yaml
+    requires the ``No action needed:`` label and forbids the ``Option``
+    letter and the authorize bullet, so a reword here also reaches that case;
+    bench/tests/test_triage_delivery_contract.py holds the two together.
+
     §7 rule 3 — "no offer to help further" — does not reach the bullet. Rule 3
     is about closing chatter, the "let me know if you need anything else" that
     ends a message with nothing in it; rule 1 requires the report to say what
-    the agent wants done. The report asks the reader for exactly one decision,
-    and the ``To authorize:`` bullet is how that decision is expressed. It is
-    the ask, not an offer alongside it.
+    the agent wants done. A report that proposes a fix asks the reader for
+    exactly one decision, and the ``To authorize:`` bullet is how that decision
+    is expressed. It is the ask, not an offer alongside it.
 
     The report template below is STANDARD markdown, and must stay that way.
     Every chat platform's adapter translates the agent's markdown on the way
@@ -1974,8 +1983,13 @@ def _triage_task_body(payload: Dict[str, Any]) -> str:
         f"- **Proposed fix (<Action Title>):** <1-sentence description of the GitOps fix>.\n"
         f"- **To authorize:** reply **'apply'** to open a GitOps Pull Request with this fix.\n"
         f"No Recommended line, and nothing after **'apply'** in the call to action — a bare 'apply' is unambiguous when there is one fix.\n\n"
+        f"**When no manifest change is warranted and nothing is left for anyone to do:** this is the report the **Done when** line allows. "
+        f"The 'What to do' section is then this one bullet and nothing else:\n"
+        f"- **No action needed:** <1-sentence reason, for example the warning resolved itself and the workload is healthy now>.\n"
+        f"No Option letters, no Proposed fix, no Recommended line and no 'To authorize:' bullet, because there is nothing to apply. "
+        f"Do not invent a fix to fill the section.\n\n"
         f"Every <...> above and in the template below is a placeholder: fill each one in. The posted report must never contain a literal '<letter>'.\n\n"
-        f"The last bullet of the 'What to do' section is the call to action, not another option: keep its 'To authorize:' label, "
+        f"When the report proposes a fix, the last bullet of the 'What to do' section is the call to action, not another option: keep its 'To authorize:' label, "
         f"never give it an Option letter, and never count it when you number the options. "
         f"A reply in this thread reaches an agent that can see your report, so the offer is honoured.\n\n"
         f"Format the report you pass to `kanban_complete`'s `result` exactly like this — "
@@ -2415,9 +2429,9 @@ def _drift_task_body(payload: Dict[str, Any]) -> str:
         f"- **Proposed fix (<Action Title>):** <1-sentence description of the GitOps fix>.\n"
         f"- **To authorize:** reply **'apply'** to open a GitOps Pull Request with this fix.\n"
         f"No Recommended line, and nothing after **'apply'** in the call to action.\n\n"
-        f"**If the change was already reconciled away and nothing is left to do,** say that in 'What to do' as "
-        f"the single 'Proposed fix' bullet — 'no change needed, the object already matches the declared state' — "
-        f"and keep the 'To authorize:' bullet off entirely. Do not invent a fix to fill the section.\n\n"
+        f"**If the change was already reconciled away and nothing is left to do,** make 'What to do' this one "
+        f"bullet: '- **No action needed:** the object already matches the declared state.' No Proposed fix, and "
+        f"keep the 'To authorize:' bullet off entirely. Do not invent a fix to fill the section.\n\n"
         f"Every <...> above and in the template below is a placeholder: fill each one in. The posted report must "
         f"never contain a literal '<letter>'.\n\n"
         f"Format the report you pass to `kanban_complete`'s `result` exactly like this — "
@@ -2625,8 +2639,8 @@ def _stall_task_body(payload: Dict[str, Any]) -> str:
         f"- **To authorize:** reply **'apply'** to open a GitOps Pull Request with this fix.\n"
         f"No Recommended line, and nothing after **'apply'** in the call to action.\n\n"
         f"**If the scan finds nothing stalled any more,** say so in 'What's wrong', quote the scan's "
-        f"`stalled resources: 0` line in 'Why', make 'What to do' the single bullet 'No change needed: the namespace "
-        f"has recovered', and leave the 'To authorize:' bullet off entirely. Do not invent a fix to fill the section.\n\n"
+        f"`stalled resources: 0` line in 'Why', make 'What to do' the single bullet '- **No action needed:** the "
+        f"namespace has recovered.', and leave the 'To authorize:' bullet off entirely. Do not invent a fix to fill the section.\n\n"
         f"Every <...> above and in the template below is a placeholder: fill each one in. The posted report must "
         f"never contain a literal '<letter>'.\n\n"
         f"The last bullet of the 'What to do' section is the call to action, not another option: keep its "

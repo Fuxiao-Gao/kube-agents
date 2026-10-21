@@ -2258,7 +2258,7 @@ class TestSessionKvServerQueryBuilding(unittest.TestCase):
         # under the heading -- the only thing kanban_notifier.actionable_report
         # can recognise the report by, so a report without it earns no
         # `incidents` row and the reply it invites arrives bare.
-        single_option = instructions.split("**With exactly one option:**", 1)[1]
+        single_option = instructions.split("**With exactly one option:**", 1)[1].split("\n\n", 1)[0]
         bullets = [
             line for line in single_option.splitlines() if line.startswith("- **")
         ]
@@ -2266,6 +2266,52 @@ class TestSessionKvServerQueryBuilding(unittest.TestCase):
         self.assertTrue(bullets[0].startswith("- **Proposed fix (<Action Title>):**"))
         self.assertTrue(bullets[1].startswith("- **To authorize:** reply **'apply'**"))
         self.assertNotIn("Option", "\n".join(bullets))
+
+    def test_a_report_with_nothing_to_apply_has_no_call_to_action(self):
+        # A warning that resolved itself used to end on "To authorize: reply
+        # 'apply'" too, so the reader could not tell a decision from nothing to
+        # do (#3267). The no-action shape is one bullet and no call to action,
+        # so kanban_notifier.actionable_report stores no `incidents` row for it:
+        # a reply of "apply" has nothing to act on.
+        payload = {
+            "reason": "FailedScheduling",
+            "namespace": "test-ns",
+            "kind_of_object": "Pod",
+            "name": "test-pod",
+            "message": "0/3 nodes are available: insufficient memory."
+        }
+        query = session_kv_server._build_agent_query(payload)
+        instructions = query.split("## What to do", 1)[0]
+        no_action = instructions.split(
+            "**When no manifest change is warranted and nothing is left for anyone to do:**", 1
+        )[1].split("\n\n", 1)[0]
+        bullets = [line for line in no_action.splitlines() if line.startswith("- **")]
+        self.assertEqual(len(bullets), 1, bullets)
+        self.assertTrue(bullets[0].startswith("- **No action needed:**"))
+        self.assertIn("no 'To authorize:' bullet", no_action)
+        self.assertIn("Do not invent a fix to fill the section", no_action)
+        # The shapes that propose a fix still end on the call to action.
+        self.assertIn("When the report proposes a fix, the last bullet", instructions)
+        self.assertIn("- **To authorize:** reply **'apply'**", query.split("## What to do", 1)[1])
+
+    def test_every_triage_template_says_nothing_to_do_with_one_label(self):
+        # The warning, drift and stall cards each have a shape for "nothing to
+        # do", and one chat thread can show all three. They share one label,
+        # so a reader never mistakes the drift card's bullet for a fix to
+        # approve (3438-F1).
+        label = "- **No action needed:**"
+        bodies = {
+            "warning": session_kv_server._triage_task_body(
+                {"reason": "NetworkNotReady", "namespace": "ns", "kind_of_object": "Pod", "name": "p", "message": "m"}
+            ),
+            "drift": session_kv_server._drift_task_body(TestDriftInject.DRIFT_PAYLOAD),
+            "stall": session_kv_server._stall_task_body(TestStallInject.STALL_PAYLOAD),
+        }
+        for kind, body in bodies.items():
+            with self.subTest(kind=kind):
+                self.assertIn(label, body)
+                self.assertNotIn("No change needed", body)
+                self.assertNotIn("no change needed", body)
 
     def test_the_options_and_the_recommendation_are_still_there(self):
         # What the call-to-action points at. A reply of "apply Option B" is

@@ -2396,7 +2396,11 @@ print(m.group(1).strip('\'\"') if m else '')
 # stack's cluster_name output cannot move another unit's current-context.
 infra_lock_exempt() { # <task-name>
   case "$1" in
-    oobe-first-run-audits) return 0 ;;
+    # autoops-warning-event-no-action-triage writes its own labelled namespace
+    # on the host cluster, through a kubeconfig of its own. In the install it
+    # writes one daemon session, with the ledger row and card that its event
+    # produces, which no other stack rewrites, so it needs no state lock.
+    oobe-first-run-audits | autoops-warning-event-no-action-triage) return 0 ;;
   esac
   return 1
 }
@@ -2946,6 +2950,10 @@ unit_cost_hint() {
     # nightly of 2026-10-09; the top of the list, so it launches first in each
     # repetition round.
     oobe-first-run-audits) echo 3000 ;;
+    # Off the infra lock too (infra_lock_exempt), unmeasured: priced as
+    # autoops-warning-event-triage, the same plant-then-card shape, so it
+    # launches early in its round rather than last at the default.
+    autoops-warning-event-no-action-triage) echo 900 ;;
     # The nightly-only full audits: 600-1300s a repetition on 2026-08-26,
     # planted-pdb's 962s the one clean measurement. Priced with the 900 band
     # so a nightly run launches them first. fleet-cost-idle-pool joined the
