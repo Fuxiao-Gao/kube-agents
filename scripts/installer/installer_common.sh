@@ -837,6 +837,14 @@ is_valid_platform_agent_mode() {
   [[ "${1:-}" =~ ^(today|next)$ ]]
 }
 
+# PLATFORM_AGENT_STORAGE_SIZE: a whole number of Mi, Gi or Ti above zero, the
+# grammar the composition's platform_agent_storage_size validation takes. The
+# CRD's spec.storage.size takes any quantity; this is the narrower subset a
+# disk is sized in.
+is_valid_platform_agent_storage_size() {
+  [[ "${1:-}" =~ ^[1-9][0-9]*(Mi|Gi|Ti)$ ]]
+}
+
 # The PlatformAgent and its release, read once for the scope check and the
 # mode notice beside it. Each front door calls refuse_apply_over_undeclared_scope
 # and then announce_platform_agent_mode_for_apply against the same namespace,
@@ -1687,6 +1695,10 @@ load_install_env() {
   # switch the install's component stack for one run, and the next run from a
   # clean shell would switch it back and retire the A2A stack.
   unset PLATFORM_AGENT_MODE
+  # The data volume size too: an inherited PLATFORM_AGENT_STORAGE_SIZE would
+  # grow both data claims for one run, and the next run from a clean shell
+  # would ask for a lower size, which the admission webhook refuses.
+  unset PLATFORM_AGENT_STORAGE_SIZE
   # The GitOps forge keys too: an inherited GITOPS_FORGE=gitlab would render a
   # GitLab forge, and drop the GitHub alias and minter, for one run of an
   # install the file records as GitHub, and an inherited GITOPS_HOST would
@@ -4852,6 +4864,12 @@ write_tfvars_from_state() {
     print_error "PLATFORM_AGENT_MODE='${platform_agent_mode}' is not one of today, next. Fix it in install.env."
     return 1
   fi
+  # The data volume size, for the same reason.
+  local platform_agent_storage_size="${PLATFORM_AGENT_STORAGE_SIZE:-$DEFAULT_PLATFORM_AGENT_STORAGE_SIZE}"
+  if ! is_valid_platform_agent_storage_size "$platform_agent_storage_size"; then
+    print_error "PLATFORM_AGENT_STORAGE_SIZE='${platform_agent_storage_size}' is not a whole number of Mi, Gi or Ti above zero, for example 80Gi. Fix it in install.env."
+    return 1
+  fi
 
   local old_umask
   old_umask="$(umask)"
@@ -4930,6 +4948,10 @@ write_tfvars_from_state() {
     echo "# The PlatformAgent's spec.mode (PLATFORM_AGENT_MODE in install.env). The"
     echo "# composition passes the chart nothing for \"today\", so its CR carries no mode."
     echo "platform_agent_mode = $(hcl_str "$platform_agent_mode")"
+    echo ""
+    echo "# The PlatformAgent's spec.storage.size (PLATFORM_AGENT_STORAGE_SIZE in"
+    echo "# install.env). The composition passes the chart nothing for the default."
+    echo "platform_agent_storage_size = $(hcl_str "$platform_agent_storage_size")"
     echo ""
     echo "# Gateway redaction (LITELLM_REDACTION_* in install.env). The composition"
     echo "# renders nothing into the chart while enabled is false."
