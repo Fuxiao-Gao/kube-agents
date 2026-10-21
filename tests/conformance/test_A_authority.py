@@ -532,8 +532,10 @@ class A3TheGatewaysSlackPrincipalComesFromSlackOrTheMap(unittest.TestCase):
     map joins to the member id, or the member id Slack asserted, qualified
     `slack:`.  The map is an override and not a gate, so three things carry
     the invariant: a member of another workspace (a Slack Connect guest) is
-    not a turn at all, so admission never reaches past the install's own
-    workspace; an unlisted sender resolves to nothing whatever the map says;
+    not a turn unless the allowlist names that member of that workspace as
+    `T…:U…`, so admission never reaches past the install's own workspace
+    without an entry that says so (allow-all names nobody); an unlisted
+    sender resolves to nothing whatever the map says;
     and the map cannot assert the reserved prefix, so a principal that claims
     to be a bare member id always is one.
     """
@@ -554,14 +556,23 @@ class A3TheGatewaysSlackPrincipalComesFromSlackOrTheMap(unittest.TestCase):
         inbound = h.go_function_body(source, "inboundEvent")
         self.assertRegex(
             inbound,
-            r"if s\.foreignSender\(m\) \{\s*return InboundMessage\{\}, false",
+            r"refused, author := s\.foreignSender\(m\)\s*if refused \{\s*return InboundMessage\{\}, false",
             "the Slack ingress no longer refuses a member of another workspace before admission",
         )
         foreign = h.go_function_body(source, "foreignSender")
-        self.assertIn(
-            "if !s.otherWorkspace(m.UserTeam) && (m.Message == nil || !s.otherWorkspace(m.Message.Team)) {",
+        self.assertIn("if !s.otherWorkspace(m.UserTeam) && !s.otherWorkspace(messageTeam) {", foreign)
+        self.assertRegex(
             foreign,
+            r"if guest, ok := s\.admitGuest\(m\.UserTeam, messageTeam, m\.User\); ok \{\s*return false, guest",
+            "a member of another workspace is admitted by something other than an allowlist entry naming them",
         )
+        # Only an entry that names the member of that workspace admits them;
+        # two workspace fields that disagree match nothing.
+        admit = h.go_function_body(source, "admitGuest")
+        self.assertIn("return entry, s.guests[entry]", admit)
+        self.assertIn('if !ok || team == "" || user == "" {', admit)
+        workspace = h.go_function_body(source, "senderWorkspace")
+        self.assertIn('if userTeam != "" && otherTeam != "" && userTeam != otherTeam {', workspace)
         other = h.go_function_body(source, "otherWorkspace")
         self.assertIn('return team != "" && (s.teamID == "" || team != s.teamID)', other)
 
