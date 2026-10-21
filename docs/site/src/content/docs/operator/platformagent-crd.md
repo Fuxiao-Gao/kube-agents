@@ -297,7 +297,8 @@ the same. Up to 100 names.
 `minStallAgeMinutes` holds a new alert until at least one stall in the namespace has lasted that
 long. A stall's age is the longer of two values: the age `stall_report.py` measures on the object
 (from its condition, its last spec write, or its warning events), and the time since the watch first
-saw the object stall. A spec write does not restart that second value. A younger stall is not dropped: the watch keeps it in its ledger and checks it again on each
+saw the object stall. A spec write does not restart that second value, as long as the watch saw
+the object stall on one of its last two sweeps. A younger stall is not dropped: the watch keeps it in its ledger and checks it again on each
 sweep, so the alert follows on the first sweep after the stall is old enough. An object that starts
 to stall in a namespace with an open alert is added to that alert's card at once. The range is 0 to
 1440; unset or `0` alerts on the first sweep that sees the stall.

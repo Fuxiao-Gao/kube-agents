@@ -541,8 +541,12 @@ PLURAL_ES_SUFFIXES = ("sses", "shes", "ches", "xes", "zes")
 #: heuristic; one for everything not named here. A repeating-warnings row
 #: exists only while its event recurred inside the report's window, and a
 #: dangling-reference row vanishes for a scan whose one referent listing
-#: failed while the object listing succeeded; both flap on one miss.
-CLEAR_AFTER_MISSED_SCANS = {"repeating-warnings": 2, "dangling-reference": 2}
+#: failed while the object listing succeeded; both flap on one miss. A
+#: generation-lag row is reported only once the last spec write is older than
+#: the threshold, so a spec written every few ticks hides it from one scan; a
+#: row held over that scan keeps the object's first sighting for the
+#: minimum-age gate.
+CLEAR_AFTER_MISSED_SCANS = {"repeating-warnings": 2, "dangling-reference": 2, "generation-lag": 2}
 DEFAULT_CLEAR_AFTER_MISSED_SCANS = 1
 LEDGER_KEY_SEPARATOR = "|"
 #: A cluster is `project:name@location`, the triple the scope's

@@ -2198,6 +2198,18 @@ class Knobs(Base):
         self.assertEqual(len(self.kv.alerts), 1, "sixty minutes since the object's first sighting")
         self.assertEqual(self.kv.alerts[0]["first_seen"], "2026-10-02T12:00:00+00:00")
 
+    def test_a_spec_write_that_hides_the_stall_from_every_other_tick_still_raises(self):
+        # Writes every 20 minutes, ticks every 30: generation lag is reported
+        # only 10 minutes after a write, so the ticks alternate in and out of
+        # that window.
+        seen = [(2, "12:00"), (None, "12:30"), (5, "13:00"), (None, "13:30"), (8, "14:00")]
+        with patch.dict(os.environ, {stall_watch.MIN_AGE_ENV: "60"}):
+            for generation, now in seen:
+                rows = [] if generation is None else [finding("checkout", "Deployment/checkout-api", "generation-lag", f"generation {generation} observed 1", stalled_seconds=600)]
+                self.run_tick({"c": {"checkout": rows}}, now=f"2026-10-02T{now}:00+00:00")
+        self.assertEqual(len(self.kv.alerts), 1, "sixty minutes since the object's first sighting")
+        self.assertEqual(self.kv.alerts[0]["first_seen"], "2026-10-02T12:00:00+00:00")
+
     def exempt_reads(self, fake):
         return [argv for argv, _, _ in fake.calls if argv[-len(stall_watch.EXEMPT_READ_FLAGS):] == list(stall_watch.EXEMPT_READ_FLAGS)]
 
