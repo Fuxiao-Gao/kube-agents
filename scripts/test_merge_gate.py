@@ -429,6 +429,30 @@ class RemovalTest(unittest.TestCase):
     def test_the_sweeps_own_dequeue_does_not_count(self):
         self.assertFalse(gate.removed_since_push(node(1, APPROVED, timeline=[removal(gate.SWEEP_ACTOR)])))
 
+    def test_only_a_lone_failed_checks_removal_since_the_push_is_retried(self):
+        failed = lambda at: removal("github-merge-queue", at=at, reason="failed_checks")
+        cases = (
+            ("one failed_checks", [failed("2026-10-13T11:00:00Z")], True),
+            ("two failed_checks", [failed("2026-10-13T10:30:00Z"), failed("2026-10-13T11:00:00Z")], False),
+            ("an earlier one before the push", [failed("2026-10-13T09:00:00Z"), failed("2026-10-13T11:00:00Z")], True),
+            ("an earlier one caused by the push", [failed("2026-10-13T10:00:30Z"), failed("2026-10-13T11:00:00Z")], True),
+            ("manual", [removal("octocat", reason="manual")], False),
+            ("merge_conflict", [removal("github-merge-queue", reason="merge_conflict")], False),
+            ("no reason", [removal("github-merge-queue")], False),
+            ("a manual one, then failed_checks", [removal("octocat", at="2026-10-13T10:30:00Z", reason="manual"), failed("2026-10-13T11:00:00Z")], True),
+            ("failed_checks, then manual", [failed("2026-10-13T10:30:00Z"), removal("octocat", reason="manual")], False),
+            ("the sweep's own dequeue last", [failed("2026-10-13T10:30:00Z"), removal(gate.SWEEP_ACTOR, reason="manual")], False),
+        )
+        for name, timeline, expected in cases:
+            with self.subTest(name):
+                self.assertEqual(gate.retry_due(node(1, APPROVED, timeline=timeline)), expected)
+
+    def test_a_retry_is_enabled_and_a_spent_one_is_left_out(self):
+        base = {"draft": False, "labels": APPROVED, "auto_merge": False, "queue_entry": None, "removed_since_push": True}
+        self.assertEqual(gate.enqueue_action({**base, "retry": True}), gate.ENABLE)
+        self.assertEqual(gate.enqueue_action({**base, "retry": False}), gate.LEFT_OUT)
+        self.assertIsNone(gate.enqueue_action({**base, "retry": True, "labels": {"lgtm"}}))
+
     def test_no_timeline_item_is_no_removal(self):
         self.assertFalse(gate.removed_since_push(node(1, APPROVED)))
 
@@ -450,6 +474,13 @@ def removal(actor="octocat", at="2026-10-13T11:00:00Z", reason=None):
     if reason is not None:
         event["reason"] = reason
     return event
+
+
+#: Two `failed_checks` removals since the push: the retry is spent, so the sweep leaves it out.
+FAILED_TWICE = [
+    removal("github-merge-queue", at="2026-10-13T10:30:00Z", reason="failed_checks"),
+    removal("github-merge-queue", reason="failed_checks"),
+]
 
 
 def node(number, labels, auto_merge=False, queue_entry=None, contexts=(), timeline=(), pushed=PUSHED):
@@ -518,7 +549,7 @@ class SweepTest(unittest.TestCase):
         self.assertTrue(any("left out" in line for line in lines))
 
     def test_a_left_out_line_carries_the_reason_and_the_re_add_command(self):
-        api = FakeAPI(nodes=[node(7, APPROVED, timeline=[removal("github-merge-queue", reason="failed_checks")])])
+        api = FakeAPI(nodes=[node(7, APPROVED, timeline=FAILED_TWICE)])
         lines, _ = gate.sweep(api)
         self.assertIn(
             "#7: left out, removed 2026-10-13T11:00:00Z by github-merge-queue (reason: failed_checks). "
@@ -549,7 +580,7 @@ class SweepTest(unittest.TestCase):
         self.assertNotIn("'", query)
 
     def test_a_left_out_pull_request_gets_one_comment_with_the_line(self):
-        api, enqueuer = FakeAPI(nodes=[node(7, APPROVED, timeline=[removal("github-merge-queue", reason="failed_checks")])]), FakeAPI()
+        api, enqueuer = FakeAPI(nodes=[node(7, APPROVED, timeline=FAILED_TWICE)]), FakeAPI()
         lines, failures = gate.sweep(api, enqueuer=enqueuer)
         self.assertEqual(failures, 0)
         comments = [(path, payload["body"]) for path, payload in api.posts if path.endswith("/comments")]
@@ -601,6 +632,20 @@ class SweepTest(unittest.TestCase):
         lines, _ = gate.sweep(api, dry_run=True)
         self.assertEqual(api.posts, [])
         self.assertIn("#7: would post the left-out comment", lines)
+
+    def test_the_first_failed_checks_removal_is_retried_once(self):
+        api = FakeAPI(nodes=[node(7, APPROVED, timeline=[removal("github-merge-queue", reason="failed_checks")])])
+        lines, failures = gate.sweep(api)
+        self.assertEqual((failures, api.mutations), (0, [("enablePullRequestAutoMerge", "PR_7")]))
+        self.assertIn("#7: auto-merge on again, the one retry after a failed_checks removal", lines)
+        self.assertEqual([path for path, _ in api.posts if "/comments" in path], [], "no comment before the retry fails")
+
+    def test_a_second_failed_checks_removal_is_left_out_and_commented(self):
+        api = FakeAPI(nodes=[node(7, APPROVED, timeline=FAILED_TWICE)])
+        lines, _ = gate.sweep(api)
+        self.assertEqual(api.mutations, [])
+        self.assertTrue(any(line.startswith("#7: left out, removed 2026-10-13T11:00:00Z") for line in lines))
+        self.assertIn("#7: posted the left-out comment", lines)
 
     def test_a_dry_run_changes_nothing(self):
         api = FakeAPI(nodes=[node(1, APPROVED)])

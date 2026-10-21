@@ -9,7 +9,8 @@ name: Auto Enqueue
 # a `do-not-merge` label. It also re-posts the gate statuses of the approved
 # pull requests, in case `merge-gate.yml` missed an event. A pull request the
 # queue removed, or that someone took out by hand, stays out until its head
-# moves; to keep one out past that, add a hold label.
+# moves; to keep one out past that, add a hold label. The one exception: after
+# the first `failed_checks` removal since the push, the sweep puts it back once.
 #
 # Inert until the repository variable `MERGE_QUEUE` is `on`, which is the last
 # step of the cut-over: the queue is enabled on `main` and the repository is

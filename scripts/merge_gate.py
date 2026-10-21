@@ -67,6 +67,9 @@ get no `merge_group` runs, and turning on auto-merge needs `contents: write`
 A pull request the queue removed, or that someone took out by hand, stays out
 until its head moves (its first check suite is newer than the removal): its head checks are still green, so turning auto-merge on
 again would put the same failing tree back in the queue every five minutes.
+One exception: after the first `failed_checks` removal since the push, the
+sweep puts it back once, because a flaky or cancelled check gets the same
+reason as a real failure. A second one keeps it out.
 The sweep posts one comment on such a pull request, with the reason and the
 command a write user runs to put it back.
 """
@@ -145,8 +148,8 @@ UNKNOWN_REMOVAL_FIELD = "unknown"
 #: removal's time, so each removal gets one comment and a later removal gets a new one.
 LEFT_OUT_MARKER = "<!-- merge-queue-left-out {removed} -->"
 LEFT_OUT_COMMENT = """{marker}
-This pull request was removed from the merge queue. The enqueue sweep does not put it back until \
-a new push. The sweep logged:
+This pull request was removed from the merge queue. The enqueue sweep puts a pull request back \
+once after a failed check, and it does not put this one back until a new push. The sweep logged:
 
 ```text
 {line}
@@ -172,6 +175,14 @@ BOT_SUFFIX = "[bot]"
 PUSH_REMOVAL_WINDOW = timedelta(minutes=2)
 #: Enough of the head's check suites to find the first; Actions and the CLA app each add one.
 CHECK_SUITES_READ = 10
+#: Queue removals read per pull request: enough to count the `failed_checks` ones since the push.
+REMOVALS_READ = 10
+#: The removal reason GitHub writes for a failed or cancelled `merge_group` check. A flake and a
+#: real failure both get it, so the sweep puts the pull request back once per head commit.
+FAILED_CHECKS_REASON = "failed_checks"
+#: How many times per head commit the sweep puts a pull request back after `failed_checks`
+#: removals. `LEFT_OUT_COMMENT` and the sweep's log line say "once"; change them with it.
+FAILED_CHECKS_RETRIES = 1
 
 #: The smoke and the gates are commit statuses; the rollup also carries check runs, which this skips.
 PULLS_QUERY = """
@@ -184,7 +195,7 @@ query($owner: String!, $name: String!, $base: String!, $after: String) {
         labels(first: 100) { nodes { name } }
         autoMergeRequest { enabledAt }
         mergeQueueEntry { id }
-        timelineItems(last: 1, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) {
+        timelineItems(last: %d, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) {
           nodes { ... on RemovedFromMergeQueueEvent { createdAt reason actor { login } } }
         }
         commits(last: 1) { nodes { commit {
@@ -274,7 +285,7 @@ def enqueue_action(pull):
     wanted = not pull["draft"] and labels_verdict(pull["labels"])[0] == SUCCESS
     queued = pull["auto_merge"] or pull["queue_entry"] is not None
     if wanted and not queued:
-        return LEFT_OUT if pull.get("removed_since_push") else ENABLE
+        return LEFT_OUT if pull.get("removed_since_push") and not pull.get("retry") else ENABLE
     if queued and not wanted:
         return DISABLE
     return None
@@ -420,25 +431,58 @@ def rollup_statuses(nodes):
     }
 
 
-def removed_since_push(node, actor=SWEEP_ACTOR):
-    """Whether someone other than the sweep removed the pull request from the queue after its last push.
-
-    The push time is the head's first check suite: the timeline places a commit
-    by its commit date, not by when it was pushed. A head with no check suite
-    counts as pushed after any removal.
-    """
-    removals = ((node.get("timelineItems") or {}).get("nodes")) or []
-    if not removals or not removals[-1].get("createdAt"):
-        return False
-    login = ((removals[-1].get("actor")) or {}).get("login") or ""
-    if login.removesuffix(BOT_SUFFIX) == actor.removesuffix(BOT_SUFFIX):
-        return False
+def _pushed_at(node):
+    """When the head was pushed: its first check suite, or None. The timeline places a commit by
+    its commit date, not by when it was pushed."""
     commits = node["commits"]["nodes"]
     suites = ((commits[0]["commit"].get("checkSuites") or {}).get("nodes") or []) if commits else []
     pushed = [parse_time(suite["createdAt"]) for suite in suites if suite.get("createdAt")]
-    if not pushed:
+    return min(pushed) if pushed else None
+
+
+def _after_push(removal, pushed, actor):
+    """Whether a removal came from someone other than the sweep, after the push and not caused by it."""
+    if not removal.get("createdAt"):
         return False
-    return parse_time(removals[-1]["createdAt"]) - min(pushed) > PUSH_REMOVAL_WINDOW
+    login = ((removal.get("actor")) or {}).get("login") or ""
+    if login.removesuffix(BOT_SUFFIX) == actor.removesuffix(BOT_SUFFIX):
+        return False
+    return parse_time(removal["createdAt"]) - pushed > PUSH_REMOVAL_WINDOW
+
+
+def removed_since_push(node, actor=SWEEP_ACTOR):
+    """Whether someone other than the sweep removed the pull request from the queue after its last push.
+
+    Only the last removal counts. A head with no check suite counts as pushed
+    after any removal.
+    """
+    removals = ((node.get("timelineItems") or {}).get("nodes")) or []
+    pushed = _pushed_at(node)
+    return bool(removals and pushed and _after_push(removals[-1], pushed, actor))
+
+
+def retry_due(node, actor=SWEEP_ACTOR):
+    """Whether the sweep puts a removed pull request back once: the last removal is `failed_checks`
+    and it is the only `failed_checks` removal since the push.
+
+    A flake and a real failure get the same reason, so one retry per head
+    commit gives a flake its way back, and a second failure keeps the pull
+    request out. A `manual` or `merge_conflict` removal is never retried.
+
+    The hold race shares the one retry: a held pull request at the front of the
+    queue fails its own `Merge labels` job and gets `failed_checks` too. So
+    after `/hold cancel` it comes back only if that was the first
+    `failed_checks` removal since the push; a flake later on the same head then
+    keeps it out.
+    """
+    if not removed_since_push(node, actor):
+        return False
+    removals = node["timelineItems"]["nodes"]
+    if removals[-1].get("reason") != FAILED_CHECKS_REASON:
+        return False
+    pushed = _pushed_at(node)
+    failed = [r for r in removals if r.get("reason") == FAILED_CHECKS_REASON and _after_push(r, pushed, actor)]
+    return len(failed) <= FAILED_CHECKS_RETRIES
 
 
 def last_removal(node):
@@ -504,7 +548,7 @@ def graphql_pulls(api, base=BASE, actor=SWEEP_ACTOR):
     pulls = []
     after = None
     while True:
-        page = api.graphql(PULLS_QUERY % CHECK_SUITES_READ, {"owner": owner, "name": name, "base": base, "after": after})
+        page = api.graphql(PULLS_QUERY % (REMOVALS_READ, CHECK_SUITES_READ), {"owner": owner, "name": name, "base": base, "after": after})
         page = page["repository"]["pullRequests"]
         for node in page["nodes"]:
             commits = node["commits"]["nodes"]
@@ -519,6 +563,7 @@ def graphql_pulls(api, base=BASE, actor=SWEEP_ACTOR):
                 "auto_merge": node["autoMergeRequest"] is not None,
                 "queue_entry": (node["mergeQueueEntry"] or {}).get("id"),
                 "removed_since_push": removed_since_push(node, actor),
+                "retry": retry_due(node, actor),
                 "removal": last_removal(node),
                 "statuses": rollup_statuses(((rollup or {}).get("contexts") or {}).get("nodes") or []),
             })
@@ -560,6 +605,8 @@ def sweep(api, base=BASE, enqueuer=None, actor=SWEEP_ACTOR, dry_run=False, not_b
                     lines.append(comment_left_out(api, pull, line, dry_run=dry_run))
                 else:
                     verb = {ENABLE: "auto-merge on", DISABLE: "auto-merge off and out of the queue"}[action]
+                    if action == ENABLE and pull.get("retry"):
+                        verb += f" again, the one retry after a {FAILED_CHECKS_REASON} removal"
                     lines.append(f"#{pull['number']}: {'would turn ' if dry_run else ''}{verb}")
         except Exception as error:  # one pull request must not stop the sweep
             failures += 1
