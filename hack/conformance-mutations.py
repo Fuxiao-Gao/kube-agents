@@ -23,6 +23,7 @@ counts as KILLED: the recorded gap moved, which is exactly the signal wanted.
 Usage:
     python3 hack/conformance-mutations.py            # every mutation
     python3 hack/conformance-mutations.py --list
+    python3 hack/conformance-mutations.py --summary  # counts, nothing run
     python3 hack/conformance-mutations.py -k C1      # substring filter on the id
 
 The tree must be clean. It edits tracked files in place and restores them, so a
@@ -57,8 +58,7 @@ class Mutation:
     #: True for a mutation that must NOT be caught. A suite that goes red on a
     #: harmless change is a suite people learn to override, so a no-op edit is
     #: run as a control on the harness itself: SURVIVED is the pass for these
-    #: and KILLED is the failure. Three today: B1-denylist-rule, A3-fastpath-redundant
-    #: and B1-gke-mcp-overlay-copy-redundant.
+    #: and KILLED is the failure. `--summary` names the current ones.
     must_survive: bool = False
 
 
@@ -428,16 +428,21 @@ Mutation(
         # never sees it: GitHub resolves `uses:` case-insensitively, so this
         # runs the identical action. The test walked straight past it and
         # reported OK until the filter was lowercased. Pins the action SHA
-        # because the flip and the ref are not contiguous otherwise -- a pin
-        # bump reports STALE here, and the fix is to paste the new SHA in.
+        # because the flip and the ref are not contiguous otherwise -- so the
+        # anchor stops just before the pin and the replacement inserts a
+        # case-flipped checkout step ahead of the original. The anchor holds no
+        # SHA, so a Dependabot bump of actions/checkout leaves it intact; the
+        # SHA in the replacement is never matched against the file.
         "B4-pull-request-target-checkout-case",
         ".github/workflows/risk_classify.yml",
-        ("        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n"
+        ("      - name: Checkout the default branch\n"
+         "        uses: actions/checkout@",
+         "      - name: Checkout the default branch\n"
+         "        uses: Actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n"
          "        with:\n"
-         "          ref: ${{ github.event.repository.default_branch }}",
-         "        uses: Actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n"
-         "        with:\n"
-         "          ref: ${{ github.event.Pull_Request.HEAD.sha }}"),
+         "          ref: ${{ github.event.Pull_Request.HEAD.sha }}\n"
+         "      - name: Checkout the default branch, displaced\n"
+         "        uses: actions/checkout@"),
         "test_B4_no_pull_request_target_workflow_checks_out_the_pull_request",
         "capitalise both the action name and the expression context while "
         "repointing the ref, which is the shape a case-flip evasion takes",
@@ -623,6 +628,15 @@ Mutation(
         "project, and two clean runs later its profiles are retired",
     ),
     Mutation(
+        "C3-stall-watch-exclusion-unpinned",
+        "k8s-operator/internal/testing/testdata/platform/expected/platformagent.yaml",
+        ("    STALL_WATCH_EXCLUDE_NAMESPACES=\n", ""),
+        "test_C3_the_stall_watch_knobs_cannot_come_from_the_agents_env_file",
+        "drop the empty STALL_WATCH_EXCLUDE_NAMESPACES pin because the CR does not "
+        "set it -- one line in the agent-writable PVC .env then silences the stall "
+        "watch for a namespace nobody excluded",
+    ),
+    Mutation(
         "C1-watcher-route-allows-a-list",
         "agents/platform/scripts/watcher_policy.py",
         ('_EVENTS_LIST = re.compile(r"api/v1/events")\n',
@@ -640,6 +654,36 @@ Mutation(
         "drop `watch` from the refused segments as a leftover of an older API -- "
         "the server still serves watch/secrets, and the named-GET rule reads it "
         "as an object called `secrets`",
+    ),
+    Mutation(
+        "C1-watcher-kind-list-widened",
+        "agents/platform/scripts/watcher_policy.py",
+        ('        ("", "configmaps"),\n',
+         '        ("", "configmaps"),\n        ("", "nodes"),\n'),
+        "test_C1_the_watcher_kubernetes_route_refuses_writes_and_everything_but_events_and_named_reads",
+        "add nodes to the watcher's kind table so drift on a node label is "
+        "enriched -- every fleet node, its addresses and taints, becomes "
+        "readable on the broker's credential for a kind no person edits",
+    ),
+    Mutation(
+        "C1-watcher-kind-group-ignored",
+        "agents/platform/scripts/watcher_policy.py",
+        ('    if (group, match.group("resource")) not in WATCHER_NAMED_READS:\n',
+         '    if match.group("resource") not in {r for _, r in WATCHER_NAMED_READS}:\n'),
+        "test_C1_the_watcher_kubernetes_route_refuses_writes_and_everything_but_events_and_named_reads",
+        "match the table on the plural alone to save a parse -- any CRD that "
+        "names its plural `deployments` or `roles` is then read as if it were "
+        "the built-in kind",
+    ),
+    Mutation(
+        "C1-watcher-secrets-moved-into-the-table",
+        "agents/platform/scripts/watcher_policy.py",
+        ('REFUSED_RESOURCES = frozenset({"secrets"})\n',
+         'REFUSED_RESOURCES = frozenset()\n'),
+        "test_C1_the_watcher_kubernetes_route_refuses_writes_and_everything_but_events_and_named_reads",
+        "drop the separate Secrets refusal as redundant now that the kind table "
+        "exists -- it is the only rule that refuses a Secret under a group the "
+        "table may one day list, and the import check leans on it",
     ),
     Mutation(
         "C1-watcher-subscription-unpinned",
@@ -1012,8 +1056,11 @@ Mutation(
     Mutation(
         "C4-unpinned-action",
         ".github/workflows/prettier.yml",
-        ("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1",
-         "actions/checkout@v7"),
+        # Anchored on the prefix, not the pin, so a Dependabot bump leaves it
+        # intact: the replacement floats the ref to a tag and turns the old SHA
+        # into a trailing comment.
+        ("uses: actions/checkout@",
+         "uses: actions/checkout@v7 # was "),
         "test_C4_every_third_party_action_is_pinned_to_a_commit",
         "float one action back to a tag, which a Dependabot conflict "
         "resolution can produce by hand",
@@ -1021,7 +1068,9 @@ Mutation(
     Mutation(
         "C4-base-image-digest",
         "tags.env",
-        ("@sha256:99641e57ec762c59e54cb44aa6746b7fc68c18b3c5ddb088af54234c613d9294", ""),
+        # Anchored on the separator, not the digest, so a base-image bump
+        # leaves it intact: the digest moves to a comment line below the tag.
+        ("@sha256:", "\n# was @sha256:"),
         "test_C4_the_agent_base_image_is_pinned_by_digest",
         "drop the digest and keep the tag, which reads as equivalent",
     ),
@@ -1247,12 +1296,13 @@ Mutation(
     ),
     Mutation(
         "C5-leader-reaches-configmaps",
-        # platformagent-ha.yaml, not platformagent.yaml: the leader Role's pods
-        # rule renders only above one replica, and the HA fixture is the only
-        # golden that sets it.
+        # platformagent-ha.yaml: the fixture that asks for more than one
+        # replica. Since the operator caps the gateway at one replica (#3027),
+        # its leader Role renders the leases rule only, so the mutation widens
+        # that rule.
         "k8s-operator/internal/testing/testdata/platform/expected/platformagent-ha.yaml",
-        ("    resources:\n      - pods\n    verbs:\n      - get\n      - patch\n",
-         "    resources:\n      - configmaps\n      - pods\n    verbs:\n      - get\n      - patch\n"),
+        ("    resources:\n      - leases\n    verbs:\n",
+         "    resources:\n      - configmaps\n      - leases\n    verbs:\n"),
         "test_C5_the_leader_role_stays_confined_to_coordination",
         "add the ConfigMap lock client-go's configmapsleases mode still "
         "supports, which turns a coordination role into a namespace read-write "
@@ -1275,6 +1325,14 @@ Mutation(
          'safe_hint = log_hint if log_hint else "unknown"'),
         "test_D1_a_log_hint_cannot_forge_a_record",
         "log the hint raw, which is the state the sanitiser was added to fix",
+    ),
+    Mutation(
+        "D1-cluster-profile-unaudited",
+        "agents/cluster/config.yaml",
+        ("    - hermes_otel\n    - tool_call_audit\n", "    - hermes_otel\n"),
+        "test_D1_every_profile_records_its_tool_calls",
+        "trim the Cluster Agent template's plugin list back to otel alone, the "
+        "state the template shipped in",
     ),
     Mutation(
         "D1-platform-role-reaches-secrets",
@@ -2379,7 +2437,12 @@ def _run_suite() -> tuple[set[str], set[str]]:
         capture_output=True,
         text=True,
         timeout=300,
-        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        # CONFORMANCE_MUTATION_RUN: the suite's anchor self-check
+        # (test_every_mutation_still_finds_the_text_it_edits) skips itself
+        # here. A mutation removes its own anchor by design, so that check
+        # would fire on every mutated tree and read every verdict as NOISY or
+        # OVERSHOT; this script checks the anchor itself before mutating.
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "CONFORMANCE_MUTATION_RUN": "1"},
     )
     output = process.stdout + process.stderr
     failed = set(re.findall(r"^(?:FAIL|ERROR): (\S+)", output, re.MULTILINE))
@@ -2397,13 +2460,37 @@ def _git_clean() -> bool:
     ).stdout.strip()
 
 
-def main() -> int:
+def summary(mutations: list[Mutation]) -> str:
+    """The counts a reader wants from the mutation table, computed (#3553).
+
+    The README used to restate them by hand, so every pull request that added
+    a mutation rewrote the same line and conflicted with every other one. What
+    a run measures (killed, noisy) is true only of the commit it ran on, and
+    belongs to the pull request that ran it.
+    """
+    controls = [m.id for m in mutations if m.must_survive]
+    return (
+        f"{len(mutations)} mutations, {len(controls)} must_survive control(s): "
+        f"{', '.join(controls) or 'none'}.\n"
+        f"A full run's last line counts the other {len(mutations) - len(controls)}: "
+        f"killed + noisy + survived + stale. A control that passes, SURVIVED (expected), "
+        f"is none of those; one that goes red (OVERSHOT) counts as survived, and one "
+        f"whose anchor moved counts as stale."
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--list", action="store_true")
+    parser.add_argument("--summary", action="store_true",
+                        help="print the mutation and must_survive counts; runs nothing")
     parser.add_argument("-k", "--filter", default="")
-    arguments = parser.parse_args()
+    arguments = parser.parse_args(argv)
 
     selected = [m for m in MUTATIONS if arguments.filter in m.id]
+    if arguments.summary:
+        print(summary(selected))
+        return 0
     if arguments.list:
         for mutation in selected:
             print(f"{mutation.id:38} {mutation.path}")
