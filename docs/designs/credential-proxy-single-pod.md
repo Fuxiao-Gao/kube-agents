@@ -1,6 +1,6 @@
 # The Credential Proxy Runs as One Pod
 
-> **STATUS — decided; single pod is the shipped design.** The credential proxy (the broker) runs
+> **STATUS — design of record; implemented.** The credential proxy (the broker) runs
 > as one pod, `Replicas: 1` with the `Recreate` strategy. This document records why it is not
 > scaled horizontally today, what the load measurement behind that decision is, and what would
 > make it change.
@@ -17,37 +17,44 @@ container's requests and limits, which an install raises through
 
 ## 1. Decision
 
-One pod. Concurrency is bought vertically: a larger memory limit raises the number of requests
-the child memory budget admits, up to the slot cap. More replicas behind the Service would break
+One pod. Concurrency is bought vertically: a larger memory limit (on Autopilot, which clamps
+the limit to the request, a larger request) raises the number of requests the child memory budget
+admits, up to the slot cap. More replicas behind the Service would break
 the routes that keep state in the pod (§2), and the load that motivated the question now fits
 one pod (§4). The single point of failure is the same one the agent pod already is.
 
 ## 2. State that lives in the pod
 
 The exec route (brokered `kubectl`, `gcloud` and the Cloud API relay) needs nothing beyond
-caches. The other routes keep state in the process or in the pod's emptyDir:
+caches: the managed kubeconfigs and the forge refresh coalesce cache are per process, so more pods
+would fill them more than once, and every cold path would run its `gcloud` more than once. The
+other routes keep state in the process or in the pod's emptyDir:
 
 - The content workspace. Handles live under `<state-dir>/workspace` in the pod's own
   emptyDir; `CREDENTIAL_PROXY_WORKSPACE_ROOT` is deliberately unset, because the sandbox's data
   claim is `ReadWriteOnce` and a separate pod cannot mount it. An `open` on one pod followed by
   a `commit` on another fails with `NoSuchHandle`.
 - The Google Chat relay. A pull keeps its `receipt → ack_id` map in the process that pulled.
-- The Slack relay and the drift detector. Both are per-process singletons.
-- The managed kubeconfigs and the forge refresh coalesce cache. Per-process caches: more
-  pods would fill them more than once, and every cold path would run its `gcloud` more than
-  once.
+- The Slack relay. It holds one Socket Mode connection; two pods open two, and each event is
+  delivered twice.
+
+The drift detector is not in this list: it runs in the gateway pod, and the broker's watcher route
+only forwards its calls and caches the endpoints. The event watcher's dedup snapshots would use the
+same workspace root, but the watcher does not run in the broker role.
+[`agent-shell-sandboxing.md`](agent-shell-sandboxing.md) ("One replica") gave the Slack relay as
+the first reason for one replica; this document owns the decision now.
 
 The `Recreate` strategy follows from the same state: two pods behind the Service during a
 rollout split traffic that assumes one pod.
 
 ## 3. Measured: two replicas behind today's Service
 
-A spike on 2026-10-08 on a Standard GKE dev install (image `main-d817b3b2`) scaled the broker to
+A spike on 2026-10-08 on a Standard GKE install (image `main-d817b3b2`) scaled the broker to
 two replicas, with the operator scaled to zero so it would not restore `Replicas: 1`:
 
 - Exec route: works. 24 brokered `kubectl` and `gcloud` calls from the sandbox all
-  succeeded. Requests split about 69/51 between the pods, with no non-zero exits and no
-  refusals. The shim opens one connection per call, and kube-proxy balances per connection.
+  succeeded. Over the window, the shell principal's exec requests (other agents' traffic
+  included) split 69 and 51 between the pods, with no non-zero exits and no refusals. The shim opens one connection per call, and kube-proxy balances per connection.
 - Google Chat relay: the ack crosses pods. The gateway's ack opens a new connection, so it
   reached the pod that did not pull about half the time and got `404 {"settled": false}`. Each
   turn still completed once in the run, but two missed acks in a row would pass the
@@ -62,12 +69,14 @@ with chat enabled and the workspace break to every install with a forge.
 The question came from a 143-cluster install where the single pod sat at its CPU limit during
 fleet sweeps and was OOM-killed. Since then:
 
-- The child memory budget stops the OOM, and the default limit is 2Gi: the budget admits nine
-  requests, and the slot cap holds it to eight.
-- The Controller Stall Watch reuses credentials across ticks, which removed the burst of
-  `get-credentials` calls it produced on its schedule.
-- The reconciler's and the stall watch's listing pools are four wide, matched to what the
-  broker admits.
+- The child memory budget stops the OOM. On Standard the default limit is 2Gi: the budget
+  admits nine requests, and the slot cap holds it to eight. On Autopilot without bursting the limit
+  is clamped to the 1Gi request, and the budget admits four.
+- The Controller Stall Watch reuses kubeconfigs across ticks, which removed about 290
+  `get-credentials` calls per tick; each cluster's credentials are now fetched about once a day.
+- The reconciler's and the stall watch's listing pools are four wide, sized to the four requests
+  the broker admitted at the old 1Gi limit. At 2Gi the two pools listing together can hold all
+  eight slots for the length of a listing.
 
 On the eval install's presubmit runs since 2026-10-09, the budget never binds; the waits are for
 the slot cap at 6 s median and 20 s at most, with no refusals; and the first run after the
@@ -76,8 +85,9 @@ proxy's memory request was raised to 1Gi had no waits in 783 commands.
 ## 5. Shapes considered
 
 1. Split the exec route into its own tier. The exec route behind its own Deployment and
-   Service, with a replica count on the CR, while the relays, the content workspace and the
-   detector stay on one pod. The load is all on the exec route, and that route already works
+   Service, with a replica count on the CR, while the relays and the content workspace stay on
+   one pod. (A variant keeps one Deployment and has Envoy route the stateful verbs to one stable
+   pod.) The load is all on the exec route, and that route already works
    across pods (§3). The cost is a second footprint entry, a second NetworkPolicy target, and
    the shim learning a second address. This is the shape to build if the question reopens (§6).
 2. Sticky routing by workspace or receipt. One Deployment with N replicas and the calls

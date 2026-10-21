@@ -111,7 +111,7 @@ const (
 	// hold the limit to at least two. An install raises the limit through
 	// spec.deployment.credentialProxy.resources (resolveCredentialProxyResources
 	// merges it over these defaults per key), which raises the admitted count;
-	// the caps stay here. Concurrency is bought vertically, never with
+	// the caps stay here. Concurrency is bought vertically, not with
 	// replicas: the broker is one pod by design
 	// (docs/designs/credential-proxy-single-pod.md).
 	//
@@ -347,18 +347,18 @@ func buildCredentialProxyService(agent *agentv1alpha1.PlatformAgent) *corev1.Ser
 // buildCredentialProxyDeployment renders the standalone proxy pod.
 //
 // Recreate, not RollingUpdate. The Google Chat relay pulls from a Pub/Sub
-// subscription and buffers what it pulled until the gateway fetches it over this
-// Service; two pods pulling the same subscription during a rollout means
-// messages land in the buffer of the pod that is going away, and the Service
-// then load-balances the gateway's fetch to the other one. A few seconds of
-// unavailability is the cheaper failure — the gateway retries its long poll,
-// while a dropped chat message is silent.
+// subscription when the gateway fetches over this Service and keeps each
+// message's ack id in this process; with two pods during a rollout, an ack the
+// Service sends to the other pod fails, and a message that misses its ack
+// deadline is delivered again and its turn runs twice. A few seconds of
+// unavailability is the cheaper failure: the gateway retries its long poll.
 //
-// One replica, by design. The Chat relay's ack map, the Slack relay, the drift
-// detector and the content workspace live in this process or its emptyDir, so a
-// second pod behind the Service breaks them; only the exec route scales as it
-// is. docs/designs/credential-proxy-single-pod.md records the decision, the
-// load it was sized against, and the split exec tier to build if it reopens.
+// One replica, by design. The Chat relay's ack ids, the Slack relay's
+// Socket Mode connection and the content workspace live in this process or its
+// emptyDir, so a second pod behind the Service breaks them; only the exec route
+// scales as it is. docs/designs/credential-proxy-single-pod.md records the
+// decision, the load it was sized against, and the split exec tier to build if
+// it reopens.
 func buildCredentialProxyDeployment(agent *agentv1alpha1.PlatformAgent, policyHash string) *appsv1.Deployment {
 	saName := agent.Name
 	if agent.Spec.Security != nil && agent.Spec.Security.ServiceAccountName != "" {
@@ -386,7 +386,7 @@ func buildCredentialProxyDeployment(agent *agentv1alpha1.PlatformAgent, policyHa
 		TypeMeta:   metav1.TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
 		ObjectMeta: metav1.ObjectMeta{Name: credentialProxyName(agent), Namespace: agent.Namespace},
 		Spec: appsv1.DeploymentSpec{
-			Replicas: ptr.To(int32(1)), // one pod by design; see the function comment
+			Replicas: ptr.To(int32(1)),
 			Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType},
 			Selector: &metav1.LabelSelector{MatchLabels: credentialProxySelector(agent)},
 			Template: corev1.PodTemplateSpec{

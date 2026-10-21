@@ -2834,6 +2834,8 @@ The Slack relay holds a socket-mode WebSocket. Two replicas means two connection
 duplicate event delivery, so the broker Deployment pins `replicas: 1`. The credential
 broker cannot be made highly available while it is fused with an inbound event pump, and
 splitting the two is the obvious follow-up.
+[`credential-proxy-single-pod.md`](credential-proxy-single-pod.md) owns the replica decision
+and the other state that keeps the broker at one pod.
 
 ### The proxy image is not the agent image
 
