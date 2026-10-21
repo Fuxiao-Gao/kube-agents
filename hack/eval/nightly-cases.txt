@@ -890,6 +890,11 @@
 # merge; a presubmit seat waits on a clean nightly record.
 ./tasks/chat-feedback-composes-and-asks-first/task.yaml
 
+# The front door's "what can you do?" calls a per-cluster agent "the <cluster>
+# cluster agent", not its profile id (#3082). deployer: noop, transcript-only,
+# one front-door turn with no card: +3 units.
+./tasks/chat-voice-capabilities-names-cluster-agents/task.yaml
+
 # gitops-drift-backlog-digest (#3387): records that queue while the drift
 # detector is not pulling are digested, not triaged one card each. The
 # fixture stops the detector process, publishes, and kills it, so the
