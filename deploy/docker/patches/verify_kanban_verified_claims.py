@@ -119,7 +119,7 @@ conn.execute(
     "CREATE TABLE IF NOT EXISTS kanban_worker_children ("
     " child_id TEXT PRIMARY KEY, creator_id TEXT NOT NULL, created_at INTEGER NOT NULL)"
 )
-conn.execute("INSERT INTO kanban_worker_children VALUES (?, ?, 0)", (child, parent))
+conn.execute("INSERT OR IGNORE INTO kanban_worker_children VALUES (?, ?, 0)", (child, parent))
 conn.commit()
 run_terminal(COMMAND, OUTPUT)
 out = json.loads(kt._handle_complete({"summary": "node-b", "result": "node-b is NotReady.", kvc.PARAM: [BACKED]}))

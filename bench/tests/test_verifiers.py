@@ -9812,3 +9812,13 @@ def test_verified_claims_backed_a_fix_fence_then_a_manifest_fence_is_not_evidenc
     adjacent = "```\n$ kubectl apply -f payments-api.yaml\n```\n```yaml\nmemory: 256Mi\n```\n\n"
     res = _grade_claims(adjacent + _EVIDENCE, [_terminal(_PODS_CMD, result=_PODS_OUT)])
     assert res.status == "pass", res
+
+
+def test_verified_claims_backed_a_redacted_span_cannot_hide_a_second_command():
+    # The pod masks one word; a span may not stand for a separator or a second command.
+    out = json.dumps({"output": "NAME  READY\nweb-1  1/1", "exit_code": 0})
+    stored = _terminal("kubectl get pods --token=[REDACTED_SECRET] -n web", result=out)
+    for forged in ("kubectl get pods --token=x; kubectl delete namespace prod -n web",
+                   "kubectl get pods --token=x\nkubectl delete ns prod -n web"):
+        res = _grade_claims(_block(forged, "web-1  1/1"), [stored])
+        assert res.status == "fail" and "not a command any worker ran" in res.reason, (forged, res)

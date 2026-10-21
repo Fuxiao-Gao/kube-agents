@@ -3004,6 +3004,9 @@ _EMAIL_MARKER = "[REDACTED_EMAIL]"
 # longer holds.
 _REDACTED_PREFIX = "[REDACTED"
 _REDACTED_SPAN_RE = re.compile(r"\\\[REDACTED_[A-Z_]*\\\]")
+# What a redacted span of a command may stand for: one word, with no shell
+# separator that would start a second command.
+_REDACTED_WORD = r"[^\s;&|<>()$`]*"
 # A ``\uXXXX`` escape. The pod re-serialises a JSON output with
 # ``json.dumps``, which escapes every non-ASCII character, and kubectl escapes
 # ``&``, ``<`` and ``>`` the same way, so both copies are compared unescaped.
@@ -3018,20 +3021,31 @@ def _squeezed(text: str) -> str:
     JSON the worker saw and copied differs from the stored text in spaces and
     escapes.
     """
+    return "".join(_normalized(text).split())
+
+
+def _normalized(text: str) -> str:
+    """``text`` with ``\\uXXXX`` escapes undone and addresses masked, whitespace kept."""
     text = _UNICODE_ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)), text)
     text = text.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
-    return "".join(_EMAIL_RE.sub(_EMAIL_MARKER, text).split())
+    return _EMAIL_RE.sub(_EMAIL_MARKER, text)
 
 
 def _same_command(stored: str, cited: str) -> bool:
-    """Whether the reply's ``cited`` command is the stored one, a redacted span matching anything."""
-    stored, cited = _squeezed(stored), _squeezed(cited)
-    if stored == cited:
+    """Whether the reply's ``cited`` command is the stored one, a redacted span standing for one word.
+
+    The pod's redactor masks a token, password or ``key=value`` value, each of
+    which stops at whitespace, so a span matches only text with no whitespace
+    and no shell separator. It is matched on the whitespace-collapsed text,
+    since squeezing first would let a span swallow a second command.
+    """
+    if _squeezed(stored) == _squeezed(cited):
         return True
     if _REDACTED_PREFIX not in stored:
         return False
-    pattern = _REDACTED_SPAN_RE.sub(".*?", re.escape(stored))
-    return re.fullmatch(pattern, cited, re.S) is not None
+    stored, cited = " ".join(_normalized(stored).split()), " ".join(_normalized(cited).split())
+    pattern = _REDACTED_SPAN_RE.sub(lambda _: _REDACTED_WORD, re.escape(stored))
+    return re.fullmatch(pattern, cited) is not None
 
 
 def _terminal_output(result: str) -> tuple[str, bool]:
@@ -3066,7 +3080,8 @@ class VerifiedClaimsBackedVerifier(BaseVerifier):
     Reads the ``final_message`` for evidence blocks: a fence holding
     ``$ <command>``, then a fence holding an excerpt of its output, the shape
     ``kanban_complete`` renders for ``verified_claims``. Each block's command
-    must equal (whitespace removed) a worker's tagged ``terminal`` call
+    must equal (whitespace removed) a worker's tagged ``terminal`` or
+    ``execute_code`` call
     (:func:`_worker_terminal_calls`), on any card, and its excerpt must appear
     in that call's output. A reply with fewer than ``min_blocks`` blocks fails,
     and the reason says when it calls something verified with nothing behind
@@ -3074,7 +3089,7 @@ class VerifiedClaimsBackedVerifier(BaseVerifier):
 
     Text is compared with ``\\uXXXX`` escapes undone, addresses masked and
     all whitespace removed (:func:`_squeezed`), and a redacted span of a
-    stored command matches anything (:func:`_same_command`). An excerpt missing
+    stored command matches one word (:func:`_same_command`). An excerpt missing
     from an output the pod clipped (``worker_trajectory.MAX_RESULT_CHARS``) or
     redacted is not held against the reply: the command is checked and the
     pass says the excerpt was not, since the gate checked it against the

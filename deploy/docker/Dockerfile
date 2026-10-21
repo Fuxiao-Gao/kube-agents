@@ -1064,6 +1064,10 @@ RUN /opt/hermes/.venv/bin/python3 /tmp/kanban-worker-tools/apply_kanban_worker_t
 # modules in /opt/hermes/tools first; report-format is applied first so a
 # failure in the smaller, newer patch is not reported as a failure of the older
 # one, and verified-claims last, since it inserts after the result gate's lines.
+# verify_kanban_verified_claims.py creates platform cards from inside a platform
+# card, so this RUN must also precede the kanban_self_copy applier (which
+# refuses such a card) and the kanban_children_settled applier (whose create
+# hook records the child itself).
 # See the module docstrings in deploy/docker/patches/kanban_result_required.py,
 # deploy/docker/patches/kanban_report_format.py and
 # deploy/docker/patches/kanban_verified_claims.py.

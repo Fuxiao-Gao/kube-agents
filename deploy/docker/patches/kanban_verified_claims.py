@@ -43,8 +43,9 @@ is not parsed. Each entry gives ``claim``, ``command`` and ``excerpt``:
 - ``excerpt`` must appear, after whitespace is collapsed, in the output of a
   run of that command.
 
-None of ``claim``, ``command`` and ``excerpt`` may hold a code fence, and
-``claim`` is rendered on one line, so the rendered section cannot break.
+None of ``claim``, ``command`` and ``excerpt`` may hold a code fence (``` or
+~~~), and ``claim`` is rendered on one line, so the rendered section cannot
+break.
 
 A card that delegated the work did not run the commands itself. Its claim is
 also accepted when it matches a claim the gate already accepted on a card this
@@ -153,6 +154,8 @@ TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 EVIDENCE_HEADING = "**Evidence for verified claims**"
 FENCE = "```"
+#: The other fence opener Markdown and the Slack renderers read.
+TILDE_FENCE = "~~~"
 WHITESPACE = re.compile(r"\s+")
 
 PARAM_DESCRIPTION = (
@@ -163,7 +166,7 @@ PARAM_DESCRIPTION = (
     f"in this card (at most {MAX_COMMAND_CHARS} characters), copied exactly; "
     f"``excerpt`` is the lines of its output that prove the claim, copied "
     f"exactly (at most {MAX_EXCERPT_CHARS} characters). None of the three may "
-    f"hold a {FENCE} fence. "
+    f"hold a {FENCE} or {TILDE_FENCE} fence. "
     "You may also repeat a verified claim from a card you created, with its "
     "command and excerpt as that card gave them. The tool checks each claim, "
     "adds the exit code and the time the command ran, and appends the evidence "
@@ -311,8 +314,8 @@ def _check_claim(calls: list, item: object, child_claims) -> tuple[dict | None, 
         return None, f"command is longer than {MAX_COMMAND_CHARS} characters; cite a shorter command that shows the claim"
     if len(excerpt) > MAX_EXCERPT_CHARS:
         return None, f"excerpt is longer than {MAX_EXCERPT_CHARS} characters; keep the lines that prove the claim"
-    if any(FENCE in part for part in (claim, command, excerpt)):
-        return None, f"holds a {FENCE} fence; cite lines without one"
+    if any(fence in part for part in (claim, command, excerpt) for fence in (FENCE, TILDE_FENCE)):
+        return None, f"holds a {FENCE} or {TILDE_FENCE} fence; cite lines without one"
     wanted, needle = _collapse(command), _collapse(excerpt)
     accepted = {"claim": claim, "command": command, "excerpt": excerpt}
     runs = [call for call in calls if call["command"] == wanted]
@@ -322,6 +325,11 @@ def _check_claim(calls: list, item: object, child_claims) -> tuple[dict | None, 
     child = _from_child(child_claims, wanted, needle)
     if child is not None:
         return {**accepted, "exit_code": child.get("exit_code"), "ran_at": child.get("ran_at"), "card": child["card"]}, None
+    if not runs and len(calls) >= MAX_RECORDED_CALLS:
+        return None, (
+            f"command {_quote(command)!r} is not in this card's record, which keeps only its last "
+            f"{MAX_RECORDED_CALLS} commands; run it again, then cite that run"
+        )
     if not runs:
         return None, (
             f"command {_quote(command)!r} did not run in this card, and no card it created "
