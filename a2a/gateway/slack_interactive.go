@@ -316,7 +316,19 @@ func (s *SlackAdapter) notePending(msg InboundMessage) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.addPendingLocked(slackPendingKey(msg.Conversation, msg.MessageID),
-		slackPending{conversation: msg.Conversation, author: msg.AuthorID, text: msg.Text})
+		slackPending{conversation: msg.Conversation, author: slackMemberOf(msg.AuthorID), text: msg.Text})
+}
+
+// slackMemberOf is the Slack member id behind an author id: the id itself for
+// our own member, the part after the workspace for an admitted guest's
+// "T…:U…" (slackGuestEntry). A pending turn keeps this raw id, because what it
+// feeds, the answered line's display name and the Home tab's asker, are Slack
+// API calls that take a member id.
+func slackMemberOf(author string) string {
+	if _, member, found := strings.Cut(author, slackGuestSep); found {
+		return member
+	}
+	return author
 }
 
 func (s *SlackAdapter) addPendingLocked(key string, p slackPending) {
@@ -371,11 +383,7 @@ func (s *SlackAdapter) interactive(raw json.RawMessage) (InboundMessage, bool) {
 				"user", p.User.ID, "userTeam", p.User.TeamID, "team", s.teamID, "channel", p.Channel.ID)
 			// The same once-per-sender notice a refused message gets, in the
 			// question's thread: a button that does nothing looks broken.
-			team := p.User.TeamID
-			if team == "" {
-				team = p.Team.ID
-			}
-			s.noticeForeignSender(p.Channel.ID, thread, team, p.User.ID)
+			s.noticeForeignSender(p.Channel.ID, thread, p.User.TeamID, p.Team.ID, p.User.ID)
 			return InboundMessage{}, false
 		}
 	}

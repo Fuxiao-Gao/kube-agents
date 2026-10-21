@@ -119,7 +119,7 @@ The allowlist decides who may talk to the agent. It takes **Slack member IDs**, 
 - **Set it:** pass `--slack-allowed-users=U0123ABCD,U0456EFGH` on the first installer run. To change it later, edit `SLACK_ALLOWED_USERS` in `install.env` and re-run the installer: a re-run refuses a `--slack-allowed-users` that disagrees with `install.env`, and an upgrade renders the `PlatformAgent` resource from `install.env`, so a hand edit of the resource does not last.
 - **An email never matches.** An entry like `alice@example.com` admits nobody; if every entry is an email, everyone is refused.
 - **An empty list admits every member of the workspace.** In a shared or company workspace that means anyone there can drive an agent with access to your clusters, so set a list unless the workspace is yours alone.
-- **A member of another workspace (`next` only):** a Slack Connect guest is admitted only by an entry with their workspace ID, a colon and their member ID, for example `T0123WXYZ:U0123ABCD`. The bot's refusal notice gives the guest this exact entry, and the gateway's refusal log line names both IDs. A plain member ID always means a member of your own workspace, so it never admits a guest, and an empty list admits no guest either. A list with guest entries is not empty, so list your own members too. Under `today` a guest entry admits nobody.
+- **A member of another workspace (`next` only):** a Slack Connect guest is admitted only by an entry with their workspace ID, a colon and their member ID, for example `T0123WXYZ:U0123ABCD`. The bot's refusal notice gives the guest this exact entry, and the gateway's refusal log line names both IDs. Under `next`, a plain member ID always means a member of your own workspace, so it never admits a guest, and an empty list admits no guest either. A list with guest entries is not empty, so list your own members too. Under `today` a guest entry admits nobody.
 
 What a member who is not on the list sees:
 
@@ -139,7 +139,7 @@ kubectl create secret generic a2a-slack-principal-map -n kubeagents-system \
 kubectl rollout restart deployment/platform-agent-a2a-gateway -n kubeagents-system
 ```
 
-The gateway reads the map when it starts, so restart it after every change. The map changes attribution only: it admits no one, and a member the allowlist refuses is refused whatever the map says. A value that starts with `slack:` locks that member out, even when the allowlist admits them, until the entry is corrected. The [`spec.integration`](/kube-agents/operator/platformagent-crd/#specintegration) reference has the rest of the map's behaviour.
+A Slack Connect guest cannot be mapped: a Secret key cannot hold the `:` of a `T…:U…` entry, so a guest is always attributed by that entry (`slack:T…:U…`). The gateway reads the map when it starts, so restart it after every change. The map changes attribution only: it admits no one, and a member the allowlist refuses is refused whatever the map says. A value that starts with `slack:` locks that member out, even when the allowlist admits them, until the entry is corrected. The [`spec.integration`](/kube-agents/operator/platformagent-crd/#specintegration) reference has the rest of the map's behaviour.
 
 ## Verify
 

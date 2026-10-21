@@ -1661,7 +1661,8 @@ the A2A objects on skew rather than touching them, and a Slack gateway holds the
 in its own pod env, so the frozen gateway keeps its own Socket Mode connection beside the
 legacy one, until the operator recognises the mode again. Slack delivers each event to one
 of the two connections. Both admit by `allowedUsers`, but only the gateway refuses another
-workspace's member, so a Slack Connect guest is answered or dropped depending on which
+workspace's member unless a `T…:U…` entry names them, an entry the legacy consumer never
+matches, so a Slack Connect guest is answered or dropped depending on which
 consumer receives the event (as is a sender whose map entry carries the reserved `slack:`
 prefix, which only the gateway refuses). Chat's
 frozen gateway goes quiet instead, because it reaches Chat only through the broker's A2A
@@ -1754,8 +1755,9 @@ than the bot's own (from `auth.test`) in either: it is not a turn, unless the al
 that member of that workspace as `T…:U…` (2026-10-21, #3294). The sender's workspace is
 `user_team` when set, else the message's `team`; when both are set and differ, no entry is
 matched, and when both are empty the sender is our own member, as below. An admitted
-guest's turn carries `T…:U…` as its author id, so the allowlist, the principal map and the
-target allowlist all match that one entry, and the guest's principal is `slack:T…:U…`. A
+guest's turn carries `T…:U…` as its author id, so the allowlist and the target allowlist
+match that one entry, and the guest's principal is `slack:T…:U…`. The principal map cannot
+name a guest: it is a Secret, and a Secret key cannot hold `:`. A
 plain `U…` entry keeps meaning our own member and never admits a guest, and allow-all, an
 empty list, admits none. When a refused message addressed the
 bot (a DM or a mention), the refusal is logged with the sender's member id, and the sender

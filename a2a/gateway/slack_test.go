@@ -3271,3 +3271,56 @@ func TestSlackAdmitsNoGuestWithoutAnEntry(t *testing.T) {
 		t.Errorf("posts = %+v, want the notice to name the entry an admin would add", api.posted)
 	}
 }
+
+func TestSlackGuestRuleEdges(t *testing.T) {
+	api := &fakeSlackAPI{}
+	a := newTestSlackAdapter(api)
+	a.teamID = "T0URS"
+	a.syncSessions = true
+	a.SetAllowedGuests([]string{"T0THER:UGUEST"})
+	ctx := context.Background()
+
+	// Two workspace fields that disagree admit nobody, so the notice does not
+	// offer an entry that would not work.
+	disagree := slackMsg("im", "D1", "UGUEST", "hello", "2.0", "")
+	disagree.UserTeam = "T0THER"
+	disagree.Message = &slack.Msg{Team: "T0THIRD"}
+	if _, ok := a.inbound(ctx, disagree); ok {
+		t.Fatal("a sender whose two workspace fields disagree was admitted")
+	}
+	if len(api.posted) != 1 || strings.Contains(api.posted[0].text, "To be admitted") ||
+		!strings.Contains(api.posted[0].text, "UGUEST") {
+		t.Errorf("posts = %+v, want a notice naming the member id and no entry", api.posted)
+	}
+
+	// Without a team id of our own every named workspace is foreign, and a
+	// listed guest is still admitted by their entry.
+	a.teamID = ""
+	listed := slackMsg("im", "D2", "UGUEST", "hello", "3.0", "")
+	listed.UserTeam = "T0THER"
+	if msg, ok := a.inbound(ctx, listed); !ok || msg.AuthorID != "T0THER:UGUEST" {
+		t.Errorf("a listed guest with no team id of our own = (%+v, %v), want T0THER:UGUEST", msg, ok)
+	}
+}
+
+func TestSlackMemberOfKeepsTheRawMemberId(t *testing.T) {
+	for author, want := range map[string]string{"U1": "U1", "T2:U9": "U9", "": ""} {
+		if got := slackMemberOf(author); got != want {
+			t.Errorf("slackMemberOf(%q) = %q, want %q", author, got, want)
+		}
+	}
+}
+
+func TestSlackTargetAllowlistMatchesAGuestEntry(t *testing.T) {
+	ps := NewPseudonymizer([]byte("test-salt"))
+	cfg := &Config{TargetAllowedUsers: map[string]map[string][]string{
+		targetPlatform: {slackBackend: {"U1", "T2:U9"}},
+	}}
+	g := &Gateway{targetAllowed: buildTargetAllowed(cfg, ps)}
+	if !g.targetAllows(targetPlatform, slackBackend, requesterSubject(ps, slackBackend, "T2:U9")) {
+		t.Error("a listed guest's qualified author is not on the target allowlist")
+	}
+	if g.targetAllows(targetPlatform, slackBackend, requesterSubject(ps, slackBackend, "U9")) {
+		t.Error("a listed guest's bare member id reached the target allowlist")
+	}
+}
