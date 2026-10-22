@@ -8,6 +8,8 @@ The code is `kube_agents_bench/scale/`; this directory holds what it reads and w
 - `phase1.yaml`: the Phase 1 plan: target, factors and levels, operations and run counts. A later
   phase is another file of the same shape.
 - `harness-limits.json`: every measured run. A run merges its records in; nothing is removed.
+- `harness-limits.sample.json`: a small fake data set the admin console page and its tests use when
+  `harness-limits.json` does not exist.
 
 Run `make scale-plan` to print the matrix and `make scale-run` to execute it; `SCALE_CONFIG` picks
 another plan file. The target comes from the plan's `target` block, and any key there can be
@@ -62,5 +64,7 @@ for example `["response_seconds"]` when the run saw a provider 429.
 Metric names: `memory_peak_bytes`, `cpu_peak_cores`, `restarts`, `oomkills` (per container);
 `pvc_used_bytes`, `pvc_capacity_bytes`, `profile_bytes_max`; `proxy_wait_p50_seconds`,
 `proxy_wait_max_seconds`, `proxy_refusals`; `watcher_events_seen`, `watcher_session_creates`,
-`watcher_events_injected`; `triage_lost`, `run_slot_refusals`; `tokens_input`, `tokens_output`,
-`tokens_cached`; `first_card_seconds`, `response_seconds`; `sweep_seconds`.
+`watcher_events_injected`, `watcher_quota_suppressed`; `triage_lost`, `run_slot_refusals`;
+`tokens_input`, `tokens_output`, `tokens_cached` (LiteLLM's counters over the run's window, every caller
+included) and `run_tokens_input`, `run_tokens_output`, `run_tokens_cached` (what the run's own prompts
+used, as the harness reports it); `response_seconds` (the slowest prompt of the run).

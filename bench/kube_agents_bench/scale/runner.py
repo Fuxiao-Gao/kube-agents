@@ -200,8 +200,10 @@ class Runner:
         metrics.append(records.Metric("run_slot_refusals", float(logs["run_slot_refusals"] + outcome.run_slot_refusals)))
         if outcome.response_seconds:
             metrics.append(records.Metric("response_seconds", max(outcome.response_seconds)))
+        # tokens_* (from LiteLLM) count every model call in the window, background jobs included;
+        # run_tokens_* (from the harness) count the sessions this run's prompts opened.
         for name, value in outcome.tokens.items():
-            metrics = [m for m in metrics if m.name != name] + [records.Metric(name, value)]
+            metrics.append(records.Metric(f"run_{name}", value))
         errors = list(outcome.errors) + before.errors + after.errors
         provider_429s = logs["provider_429s"] + outcome.provider_429s
         excluded = RESPONSE_FITS if provider_429s and op.kind == "prompt" else []
@@ -224,6 +226,10 @@ class Runner:
             for (factor, level), group in itertools.groupby(pending, key=lambda s: (s.factor, s.level)):
                 values = self.apply_level(factor, level)
                 for spec in group:
+                    if spec.operation.kind != "reset_soak":
+                        # A reset (or a restart the agent did itself) leaves the watcher on the host
+                        # cluster only; every other operation is measured with the fleet watched.
+                        self.wait_registered(int(values["clusters"]))
                     record = self.execute(spec, values)
                     awaiting.append((time.time(), record))
                     awaiting = self.flush_peaks(awaiting, wait=False)

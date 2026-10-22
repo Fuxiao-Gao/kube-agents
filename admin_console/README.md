@@ -178,6 +178,23 @@ Helm. See the
 [inference gateway guide](../docs/site/src/content/docs/concepts/inference-gateway.md)
 for provider behavior.
 
+## Harness limits
+
+Setup's **Harness limits** page reads the load measurements of the agent
+harness from the repository, `bench/scale/harness-limits.json`, so it needs no
+connection. Until that file exists, the page shows
+`bench/scale/harness-limits.sample.json` under a banner that marks it as a
+sample. The plan, metrics and thresholds are those of the
+[harness bottlenecks design](../docs/designs/agent-harness-bottlenecks.md).
+
+For the selected commit and mode, the page plots each metric against each
+factor's measured value (per cluster for nodes and objects), one operation at a
+time, with a straight-line fit and its dashed prediction. A line through two
+distinct values is a two-point estimate; past the largest measured value it is
+predicted, not measured. For the fleet entered on the page, it answers the
+design's two questions: are the container limits enough, and which limits and
+machine type does the fleet need. The raw records are in a collapsed section.
+
 ## Chat
 
 Chat is always available in navigation. Without a verified target it provides a

@@ -34,6 +34,8 @@ METRICS_PATH = "/metrics"
 PYTHON_FETCH = "import sys, urllib.request; sys.stdout.write(urllib.request.urlopen(sys.argv[1]).read().decode())"
 SIDECAR_RESTART_POLICY = "Always"
 GATEWAY_FRAGMENT = "gateway"
+# The agent's data volume: profiles, sessions, the kanban board. The other claims (bus, shell) are not it.
+AGENT_DATA_CLAIM = "platform-agent-data"
 AGENT_CONTAINER = "platform-agent"
 PROFILES_DIR = "/opt/data/profiles"
 # The scaffolder names a profile cluster-<project>-<cluster>-<location>; the project is
@@ -244,7 +246,10 @@ class Install:
     def pvc_metrics(self) -> list[Metric]:
         """Used and total bytes of the agent's data volume, and the largest profile."""
         for pod in self.pods():
-            claims = {v["name"] for v in pod["spec"].get("volumes", []) if "persistentVolumeClaim" in v}
+            claims = {
+                v["name"] for v in pod["spec"].get("volumes", [])
+                if v.get("persistentVolumeClaim", {}).get("claimName") == AGENT_DATA_CLAIM
+            }
             for container in pod["spec"]["containers"]:
                 for mount in container.get("volumeMounts", []):
                     if mount["name"] not in claims:
