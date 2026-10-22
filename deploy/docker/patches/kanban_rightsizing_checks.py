@@ -78,30 +78,45 @@ DEPENDENCY_LINE = re.compile(
 )
 
 #: Labels an answer puts before a colon that are not workloads: the checks'
-#: names and the words each check uses, and the answer's section words.
-#: ``- HPA: none`` and ``- PDB: none selects it`` are check lines, and a
-#: dependency block ends at the first of them.
+#: names and the words each check uses, figures and metadata, and the answer's
+#: section words. ``- HPA: none`` and ``cpu: 400m`` are not dependency lines.
 LABEL_WORDS = frozenset(
     {"hpa", "keda", "qos", "pdb", "pvc", "helm", "argo", "argocd", "flux", "kustomize", "gitops",
      "limits", "requests", "selector", "selectors", "allocatable", "node", "nodes", "packing",
      "shared", "sharing", "source", "sources", "files", "objects", "other", "check", "checks",
      "proposal", "arithmetic", "result", "results", "finding", "findings", "cluster", "clusters",
      "note", "notes", "summary", "evidence", "cause", "fix", "status", "answer", "recommendation",
-     "workload", "workloads"}
+     "workload", "workloads", "cpu", "memory", "replicas", "namespace", "image", "verdict",
+     "conclusion", "context", "impact", "deployment", "statefulset", "daemonset"}
 )
 
-#: A dependency line, or an opening, that says the workload is not on this
-#: card's cluster: a fan-out's not-found leg has no checks to show and nothing
-#: for the card above it to carry.
+#: What makes a line a dependency line: its text after the colon names a
+#: dependency the skill's checks look for, or says there is none. A positive
+#: test, so a ``word: value`` line that names no dependency never counts.
+DEPENDENCY_TERM = re.compile(
+    r"\b(?:hpas?|horizontalpodautoscalers?|horizontal pod autoscalers?|keda|scaledobjects?|autoscal\w*"
+    r"|guaranteed|qos|burstable|requests? (?:equal|equals|match|matches|=|==)|limits?"
+    r"|pdbs?|poddisruptionbudgets?|disruption budgets?|pvcs?|persistentvolumeclaims?|selectors?"
+    r"|values files?|helm|argo ?cd|flux|config ?sync|kustomize|shared|no dependency found)\b"
+)
+
+#: A line made only of bold text: the report format's one-sentence opener. It
+#: is neither a dependency line nor the end of the block.
+BOLD_ONLY = re.compile(r"^\s*\*\*[^*].*\*\*\s*$")
+
+#: A card that reports the workload is not on its cluster, with no dependency
+#: line and no check: a fan-out's not-found leg. Both a negation and a cluster
+#: or namespace noun on one line, so "HPA: not found" does not qualify.
 NOT_HERE = re.compile(r"\b(not (?:on|in|found|present|running|exist)|(?:does|do|did)n't exist|no such|absent)\b")
+CLUSTER_NOUN = re.compile(r"\b(?:clusters?|namespaces?)\b")
 
 #: The five checks the skill requires, each as the words that name it.
 CHECKS = {
-    "HPA or KEDA": re.compile(r"\b(hpa|horizontalpodautoscaler|horizontal pod autoscaler|keda|scaledobject)\b"),
+    "HPA or KEDA": re.compile(r"\b(hpas?|horizontalpodautoscalers?|horizontal pod autoscalers?|keda|scaledobjects?)\b"),
     "QoS and requests against limits": re.compile(r"\b(qos|guaranteed|burstable|besteffort)\b"),
     "objects sharing its pods or volumes": re.compile(r"\b(pdb|poddisruptionbudget|disruption budget|pvc|persistentvolumeclaim|selector)s?\b"),
-    "files shared across clusters": re.compile(r"\b(helm|argo ?cd|argocd|flux|config ?sync|configsync|kustomize|values file|tracking-id)\b"),
-    "per-node packing": re.compile(r"\b(allocatable|per node|per-node|packing|nodes? needed|machine type)\b"),
+    "files shared across clusters": re.compile(r"\b(helm|argo ?cd|argocd|flux|config ?sync|configsync|kustomize|values files?|tracking-id)\b"),
+    "per-node packing": re.compile(r"\b(allocatable|per node|per-node|packing|nodes? needed|machine types?)\b"),
 }
 
 #: The statuses of a card whose ``result`` is final.
@@ -132,7 +147,7 @@ def _canonical(raw: str) -> str | None:
     """
     line = _fold(LIST_MARKER.sub("", MARKDOWN_LINK.sub(r"\1", raw)))
     match = DEPENDENCY_LINE.match(line)
-    if not match or match.group(1) in LABEL_WORDS:
+    if not match or match.group(1) in LABEL_WORDS or not DEPENDENCY_TERM.search(match.group(2)):
         return None
     return f"{match.group(1)}: {match.group(2)}"
 
@@ -140,20 +155,21 @@ def _canonical(raw: str) -> str | None:
 def dependency_lines(result: object) -> list[str]:
     """The block of dependency lines a ``result`` opens with, canonical.
 
-    The block starts at the first such line within the first
-    :data:`OPENING_LINES` non-blank lines and ends at the next blank line,
-    line that is not one, or check line (``- HPA: ...``).
+    The block starts at the first dependency line within the first
+    :data:`OPENING_LINES` non-blank lines. Blank lines and bold-only lines
+    inside it are skipped, so one workload per paragraph is still one block;
+    it ends at the first other line (a check line, a paragraph of prose).
     """
     block: list[str] = []
     seen = 0
     for raw in str(result or "").splitlines():
+        if not raw.strip() or BOLD_ONLY.match(raw):
+            continue
         line = _canonical(raw)
         if block:
             if line is None:
                 break
             block.append(line)
-            continue
-        if not raw.strip():
             continue
         seen += 1
         if seen > OPENING_LINES:
@@ -177,12 +193,12 @@ def missing_checks(result: object) -> list[str]:
 
 
 def _not_here(result: object) -> bool:
-    """The card reports that the workload is not on its cluster, and nothing else."""
-    lines = dependency_lines(result)
-    if lines:
-        return all(NOT_HERE.search(line.split(": ", 1)[1]) for line in lines)
+    """The card reports only that the workload is not on its cluster: no
+    dependency line, no check named, and a line that says it is not there."""
+    if dependency_lines(result) or len(missing_checks(result)) < len(CHECKS):
+        return False
     opening = [_fold(raw) for raw in str(result or "").splitlines() if raw.strip()][:OPENING_LINES]
-    return any(NOT_HERE.search(line) for line in opening)
+    return any(NOT_HERE.search(line) and CLUSTER_NOUN.search(line) for line in opening)
 
 
 def _own_reasons(result: object) -> list[str]:
@@ -200,18 +216,27 @@ def _own_reasons(result: object) -> list[str]:
     return reasons
 
 
+def _parent_text(result: object) -> str:
+    """The parent's text as a carried line is looked for in it: each line with
+    its list marker dropped, plus, for a table row, each pair of neighbouring
+    cells joined as ``cell: cell``, so a two-column row carries a line too."""
+    parts = []
+    for line in str(result or "").splitlines():
+        parts.append(_fold(LIST_MARKER.sub("", line)))
+        if line.count("|") >= 2:
+            cells = [_fold(MARKDOWN_LINK.sub(r"\1", c)) for c in line.strip().strip("|").split("|")]
+            parts.extend(f"{a}: {b}" for a, b in zip(cells, cells[1:]) if a and b)
+    return " \n ".join(parts)
+
+
 def _child_reasons(conn, task_id: str, result: object) -> list[str]:
-    # Each line of the parent, list marker dropped, so a carried line matches
-    # whether the parent bullets it or not.
-    folded = " \n ".join(_fold(LIST_MARKER.sub("", line)) for line in str(result or "").splitlines())
+    folded = _parent_text(result)
     reasons = []
     for child in gate.descendant_card_ids(conn, task_id):
         row = conn.execute(CHILD_RESULT_SQL, (child,)).fetchone()
         if not row or SKILL_NAME not in str(row[0]) or row[2] not in SETTLED_STATUSES:
             continue
         for line in dependency_lines(row[1]):
-            if NOT_HERE.search(line.split(": ", 1)[1]):
-                continue
             if line not in folded:
                 reasons.append(f"card {child} reported `{line}`; carry that line into `result` word for word")
     return reasons

@@ -218,6 +218,58 @@ class ReviewShapesTest(RuleTestCase):
         self.assertTrue(any("does not show these checks" in r for r in reasons), reasons)
 
 
+class BotRoundOneShapesTest(RuleTestCase):
+    """The shapes the first bot review of #3507 named."""
+
+    CHECKS_TAIL = "\n\n- HPA or KEDA: see above\n- QoS: shown\n- PDB: none\n- Helm: none\n- Packing: 2 nodes needed"
+
+    def setUp(self):
+        super().setUp()
+        self.card(PARENT, body="Lower the requests of api-server and queue-worker.")
+
+    def child(self, result, task_id=CHILD):
+        self.card(task_id, body=SKILL_BODY, status="done", result=result, creator=PARENT)
+
+    def test_one_workload_per_paragraph_is_one_block(self):
+        self.child("api-server: an HPA scales it on CPU\n\nqueue-worker: Guaranteed QoS, so a lower request is a lower limit" + self.CHECKS_TAIL)
+        [reason] = self.rule(PARENT, "api-server: an HPA scales it on CPU")[0]
+        self.assertIn("queue-worker: guaranteed qos", reason)
+
+    def test_a_bold_opener_shaped_like_a_line_is_skipped(self):
+        self.child("**ledger-writer: no safe cut.**\n\nledger-writer: Guaranteed QoS, so a lower request is a lower limit" + self.CHECKS_TAIL)
+        self.assertEqual(self.rule(PARENT, "ledger-writer: Guaranteed QoS, so a lower request is a lower limit")[0], [])
+        [reason] = self.rule(PARENT, "**ledger-writer: no safe cut.**")[0]
+        self.assertIn("ledger-writer: guaranteed qos", reason)
+
+    def test_figures_and_metadata_lines_are_not_dependency_lines(self):
+        self.card("t_own", body=SKILL_BODY)
+        reasons = self.rule("t_own", "cpu: 400m\nmemory: 64Mi\nseeded-a: both workloads found" + self.CHECKS_TAIL)[0]
+        self.assertTrue(any("open `result`" in r for r in reasons), reasons)
+        self.child("Namespace: seeded-capacity\nDeployment: inference-server\n\ninference-server: an HPA scales it on CPU" + self.CHECKS_TAIL)
+        self.assertEqual(self.rule(PARENT, "inference-server: an HPA scales it on CPU")[0], [])
+
+    def test_a_check_saying_not_found_does_not_exempt_the_card(self):
+        self.card("t_own", body=SKILL_BODY)
+        reasons = self.rule("t_own", "- HPA: not found\n- KEDA: no such resource type on this cluster")[0]
+        self.assertTrue(any("open `result`" in r for r in reasons), reasons)
+
+    def test_a_real_line_with_a_negation_is_carried(self):
+        self.child("inference-server: an HPA scales it on CPU; the replicas it wants are not running" + self.CHECKS_TAIL)
+        [reason] = self.rule(PARENT, "**No cut.**")[0]
+        self.assertIn("inference-server: an hpa", reason)
+
+    def test_a_two_column_table_row_carries_the_line(self):
+        self.child("ledger-writer: Guaranteed QoS, so a lower request is a lower limit" + self.CHECKS_TAIL)
+        summary = "| Workload | Dependency |\n| --- | --- |\n| ledger-writer | Guaranteed QoS, so a lower request is a lower limit |"
+        self.assertEqual(self.rule(PARENT, summary)[0], [])
+
+    def test_plural_check_words_count(self):
+        self.card("t_own", body=SKILL_BODY)
+        result = ("api-server: no dependency found\n\nNo HPAs or ScaledObjects target either workload. "
+                  "QoS Burstable. No PDB. Helm none. Both machine types fit.")
+        self.assertEqual(self.rule("t_own", result)[0], [])
+
+
 class SharedRefusalTest(RuleTestCase):
     def test_the_gate_refuses_once_then_accepts(self):
         self.card(CHILD, body=SKILL_BODY)

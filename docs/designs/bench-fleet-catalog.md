@@ -94,9 +94,9 @@ whose own rule is that the project is registered last.
 
 ## The roles
 
-Thirty-four fixtures: thirty-one across the four cluster slots and three project-scoped. Most in-cluster
-fixtures are on slot `a`, across the eleven seeded namespaces `seeded-debug`,
-`seeded-reliability`, `seeded-security`, `seeded-capacity`, `seeded-deprecation`, `seeded-intent`, `seeded-token`, `seeded-headroom`, `seeded-stall`, `seeded-shapes` and `seeded-defaults`, plus both
+Thirty-five fixtures: thirty-two across the four cluster slots and three project-scoped. Most in-cluster
+fixtures are on slot `a`, across the twelve seeded namespaces `seeded-debug`,
+`seeded-reliability`, `seeded-security`, `seeded-capacity`, `seeded-deprecation`, `seeded-intent`, `seeded-token`, `seeded-headroom`, `seeded-qos`, `seeded-stall`, `seeded-shapes` and `seeded-defaults`, plus both
 defect node pools. Slot `c` carries a GKE-level defect only and no workloads at all: it is the
 configuration outlier. Slot `b` is the held-back control plane, and also carries the
 upgrade-readiness drain defects, which belong with the cluster whose subject is upgrading. Slot
