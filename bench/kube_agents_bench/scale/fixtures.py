@@ -167,15 +167,18 @@ def warning_manifests(failing_pods: int) -> list[dict[str, Any]]:
     ]
 
 
-def fixture_pods(values: dict[str, float], churn_lifetime_seconds: int) -> int:
-    """Pods the fixtures place on each test cluster at one point, for node planning.
+def fixture_pods(values: dict[str, float], churn_lifetime_seconds: int, first: bool = True) -> int:
+    """Pods the fixtures place on one test cluster at one point, for node planning.
 
-    The listing fixture lives on the first cluster only; the runner plans every
-    cluster for the largest so the clusters stay alike.
+    Every cluster holds the object mix and its share of the churn; the listing
+    and the failing workload live on the first cluster only.
     """
-    churn_live = math.ceil(values["churn_per_minute"] * churn_lifetime_seconds / SECONDS_PER_MINUTE)
-    mix = object_mix(int(values["objects"]))
-    return mix.pods + int(values["warning_events"]) + int(values["listing_pods"]) + churn_live
+    clusters = max(1, int(values.get("clusters", 1)))
+    churn_live = math.ceil(values["churn_per_minute"] * churn_lifetime_seconds / SECONDS_PER_MINUTE / clusters)
+    pods = object_mix(int(values["objects"])).pods + churn_live
+    if first:
+        pods += int(values["warning_events"]) + int(values["listing_pods"])
+    return pods
 
 
 def delete_fixture(context: str, fixture: str) -> None:

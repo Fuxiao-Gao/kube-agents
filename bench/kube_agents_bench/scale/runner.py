@@ -17,6 +17,7 @@ import logging
 import math
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -70,18 +71,21 @@ class Runner:
         """Create the missing test clusters and delete the extra ones, then wait for registration."""
         wanted = self.cluster_names(count)
         existing = kube.clusters_with_prefix(self.project, self.zone, self.prefix)
-        for name in wanted:
-            if name not in existing:
-                LOG.info("creating test cluster %s", name)
-                kube.create_cluster(self.project, self.zone, name, TEST_CLUSTER_MACHINE_TYPE,
-                                    DEFAULT_POOL_NODES, TEST_CLUSTER_LABELS)
-                kube.run([kube.GCLOUD, "container", "clusters", "get-credentials", name,
-                          f"--zone={self.zone}", f"--project={self.project}"])
-        for name in existing:
-            if name not in wanted:
-                LOG.info("deleting test cluster %s", name)
-                kube.delete_cluster(self.project, self.zone, name)
+        missing = [name for name in wanted if name not in existing]
+        extra = [name for name in existing if name not in wanted]
+        with ThreadPoolExecutor(max_workers=max(1, len(missing) + len(extra))) as pool:
+            jobs = [pool.submit(self._create_cluster, name) for name in missing]
+            jobs += [pool.submit(kube.delete_cluster, self.project, self.zone, name) for name in extra]
+            for job in jobs:
+                job.result()
         self.wait_registered(count)
+
+    def _create_cluster(self, name: str) -> None:
+        LOG.info("creating test cluster %s", name)
+        kube.create_cluster(self.project, self.zone, name, TEST_CLUSTER_MACHINE_TYPE,
+                            DEFAULT_POOL_NODES, TEST_CLUSTER_LABELS)
+        kube.run([kube.GCLOUD, "container", "clusters", "get-credentials", name,
+                  f"--zone={self.zone}", f"--project={self.project}"])
 
     def wait_registered(self, count: int) -> None:
         """Wait for a Cluster Agent profile per test cluster, then make the event watcher watch them.
@@ -111,12 +115,22 @@ class Runner:
             LOG.info("event watcher now watches %s", sorted(self.install.watched_clusters() & names))
 
     def ensure_nodes(self, values: dict[str, float]) -> None:
-        pods = fixtures.fixture_pods(values, int(self.settings["churn_pod_lifetime_seconds"]))
-        for_pods = DEFAULT_POOL_NODES + math.ceil(pods / int(self.settings["pods_per_node"]))
-        nodes = max(int(values["nodes"]), for_pods)
-        for name in self.cluster_names(int(values["clusters"])):
-            kube.ensure_node_pool(self.project, self.zone, name, self.settings["fixture_pool"],
-                                  self.settings["fixture_machine_type"], nodes - DEFAULT_POOL_NODES)
+        """Size each test cluster's fixture pool for the level's node count and the Pods it must hold."""
+        names = self.cluster_names(int(values["clusters"]))
+        lifetime = int(self.settings["churn_pod_lifetime_seconds"])
+        per_node = int(self.settings["pods_per_node"])
+        sizes = {}
+        for index, name in enumerate(names):
+            pods = fixtures.fixture_pods(values, lifetime, first=index == 0)
+            sizes[name] = max(int(values["nodes"]), DEFAULT_POOL_NODES + math.ceil(pods / per_node)) - DEFAULT_POOL_NODES
+        with ThreadPoolExecutor(max_workers=len(names)) as pool:
+            jobs = [
+                pool.submit(kube.ensure_node_pool, self.project, self.zone, name, self.settings["fixture_pool"],
+                            self.settings["fixture_machine_type"], size)
+                for name, size in sizes.items()
+            ]
+            for job in jobs:
+                job.result()
 
     # --- fixtures -----------------------------------------------------------------------------
 

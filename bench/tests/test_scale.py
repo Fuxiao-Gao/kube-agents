@@ -85,8 +85,10 @@ def test_objects_manifests_hold_the_level_and_carry_the_label():
 
 
 def test_fixture_pods_counts_every_fixture():
-    values = {"objects": 4000, "warning_events": 100, "listing_pods": 100, "churn_per_minute": 1000}
-    assert fixtures.fixture_pods(values, 30) == 1200 + 100 + 100 + 500
+    values = {"clusters": 2, "objects": 4000, "warning_events": 100, "listing_pods": 100, "churn_per_minute": 1000}
+    # Each of 2 clusters takes half the churn; only the first holds the listing and the failing workload.
+    assert fixtures.fixture_pods(values, 30) == 1200 + 250 + 100 + 100
+    assert fixtures.fixture_pods(values, 30, first=False) == 1200 + 250
 
 
 PROMETHEUS_TEXT = """# HELP k8s_event_watcher_events_seen_total Events seen.
