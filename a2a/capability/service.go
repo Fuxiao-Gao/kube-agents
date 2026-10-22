@@ -121,7 +121,7 @@ func callerFromSubject(subject string) (string, error) {
 	return rest, nil
 }
 
-// Request is what a broker asks. It carries no identity: the subject carries
+// Request is what a broker asks, or the dispatcher asking profile.run. It carries no identity: the subject carries
 // that, and a payload field would be one the caller writes.
 type Request struct {
 	Ref      Ref   `json:"ref"`

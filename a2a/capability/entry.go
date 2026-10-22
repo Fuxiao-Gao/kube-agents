@@ -21,11 +21,12 @@ import (
 	"strings"
 )
 
-// Tier is the authority tier an entry carries. The vocabulary is
-// 02-agent-personas §9's controller label `kube-agents/tier`. What a tier
-// permits is its verb set in tierVerbs (verb.go); the three below nest,
-// platform ⊃ cluster-admin ⊃ developer-team, but the sets, not an order, are
-// the rule.
+// Tier is the authority tier an entry carries. platform, cluster-admin and
+// developer-team are 02-agent-personas §6.1's controller label
+// `kube-agents/tier`, and they nest, platform ⊃ cluster-admin ⊃
+// developer-team. read and unattended are the profile tiers (below), which nest
+// with nothing. What a tier permits is its verb set in tierVerbs (verb.go): the
+// sets, not an order, are the rule.
 type Tier string
 
 const (
