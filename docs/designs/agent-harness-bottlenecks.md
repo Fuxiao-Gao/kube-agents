@@ -2,11 +2,13 @@
 
 ## High level summary
 
-When kube-agents is installed to large projects, depending on the shape of the fleet and usage pattern, the agent harness is stressed in various ways. This results in slow response time, or even OOMKills.
+kube-agents runs the Platform Agent and its supporting components in one GKE cluster. This document calls them the harness. The harness watches and queries a fleet of clusters. A large fleet puts load on the harness. Too much load makes responses slow and causes OOMKills. An OOMKill stops a container that uses more memory than its limit.
 
 This research measures the harness on small fleets. Each experiment increases one stress point. A stress point is one property of the fleet or of its use, for example the number of clusters. The research fits a model to the data and predicts the limits for larger fleets. The result is a chart that answers two questions. First: are the current container limits enough for a given fleet? Second: which node size and container limits does a given fleet need?
 
 # Context
+
+When kube-agents is installed to large projects, depending on the shape of the fleet and usage pattern, the agent harness is stressed in various ways. This results in slow response time, or even OOMKills.
 
 ## Estimating Limits
 
@@ -16,39 +18,39 @@ Many are infeasible to replicate in a testing environment. So we estimate system
 
 1. Set up a base project, starting from a reasonable size
 2. Progressively experiment on different sizes of key stress points, one at a time
-3. Collect data points, 3 runs per point
+3. Collect data points, 3 runs per point (Phase 1 runs the 2-hour onboarding window and the event watcher soak once, so those points have no spread)
 4. Fit a model per metric: a line where the data is linear (memory against objects, disk against activity), and the measured knee where a queue saturates (run slots, credential proxy admission)
 5. Visualize known points via plot
 6. Predict larger values on a dynamic plot, with an error band that widens past the largest measured point
 7. Suggest kube-agents deployment size according to fleet size
 
-Model responses vary from run to run, and a provider 429 can look like a harness limit. Each run records the provider 429s it saw; a run that hit one is excluded from the fit. Do not run experiments while the dev install's own work is heavy, so the two do not share the quota at once.
+Model responses vary from run to run, and a provider 429 can look like a harness limit. Each run records the provider 429s it saw. A run that hit one is excluded from the response-time fit, but its memory, CPU and disk values stay: a model 429 slows the agent down and does not lower its memory. The onboarding window is the exception: a fresh install can use up its own TPM quota ([#3388](https://github.com/gke-labs/kube-agents/issues/3388)), so there the 429 count is a result, not a reason to exclude the run.
 
 ## Metrics
 
 Each metric has a threshold. The breaking point of a metric is the stress level where it reaches its threshold.
 
-| Metric                                                                                                   | Source                                                                                                                                                   | Threshold                                                                                     |
-| -------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| Memory per container: working set and cgroup `memory.peak`                                               | cAdvisor, cgroup                                                                                                                                         | The container's memory limit                                                                  |
-| OOMKills and restarts per container (`agent-api-auth`, `envoy-credential-proxy`, the controller-manager) | `lastState`                                                                                                                                              | Any                                                                                           |
-| CPU usage and throttling per container                                                                   | cAdvisor                                                                                                                                                 | The container's CPU limit                                                                     |
-| Disk usage of the agent data PVC, in total and per Cluster Agent profile                                 | `du` on the data volume                                                                                                                                  | PVC capacity                                                                                  |
-| Network throughput                                                                                       | cAdvisor                                                                                                                                                 | None; recorded only                                                                           |
-| Credential proxy queue                                                                                   | `kubeagents_credential_proxy_slots_in_use`, `kubeagents_credential_proxy_admission_wait_seconds`, `kubeagents_credential_proxy_admission_refusals_total` | Wait above 15s (the Cluster Agent preflight); refusal at 60s                                  |
-| Event pipeline                                                                                           | `k8s_event_watcher_events_seen_total`, `k8s_event_watcher_session_creates_total`, `k8s_event_watcher_events_injected_total`                              | Session creates per injected event; recorded for the fit                                      |
-| Triage starts lost                                                                                       | No metric today: count `Aborting troubleshooting trigger` log lines, or add a counter first                                                              | Any                                                                                           |
-| Run slots occupied and `429 Too many concurrent runs` refusals                                           | No metric today: the counter is in Hermes memory; count 429s at the client, or add a gauge first                                                         | 10 slots                                                                                      |
-| Kanban `ready` queue depth and wait                                                                      | `kanban_board_health.py`                                                                                                                                 | Wait longer than the response time gate                                                       |
-| Model tokens per minute, provider 429s, time to first token                                              | LiteLLM, Vertex AI quota metrics                                                                                                                         | The project's TPM quota                                                                       |
-| Scheduled sweep duration (hourly Cluster Agent reconcile, Controller Stall Watch)                        | Job logs                                                                                                                                                 | The job's schedule interval                                                                   |
-| Response time of typical queries: acknowledgement, first card, final answer                              | Traces                                                                                                                                                   | [#3140](https://github.com/gke-labs/kube-agents/issues/3140) gates: <30s OK, >60s investigate |
+| Metric                                                                                                              | Source                                                                                                                                                   | Threshold                                                                                     |
+| ------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| Memory per container: working set over the run's time window                                                        | Cloud Monitoring `kubernetes.io/container/memory/used_bytes`; cgroup `memory.peak` as a check only, because it counts from container start               | The container's memory limit                                                                  |
+| OOMKills and restarts per container (`agent-api-auth`, `envoy-credential-proxy`, the controller-manager)            | `lastState`                                                                                                                                              | Any                                                                                           |
+| CPU usage and throttling per container                                                                              | cAdvisor                                                                                                                                                 | The container's CPU limit                                                                     |
+| Disk usage of the agent data PVC, in total and per Cluster Agent profile                                            | `du` on the data volume                                                                                                                                  | PVC capacity                                                                                  |
+| Network throughput                                                                                                  | cAdvisor                                                                                                                                                 | None; recorded only                                                                           |
+| Credential proxy queue                                                                                              | `kubeagents_credential_proxy_slots_in_use`, `kubeagents_credential_proxy_admission_wait_seconds`, `kubeagents_credential_proxy_admission_refusals_total` | Wait above 15s (the Cluster Agent preflight); refusal at 60s                                  |
+| Event pipeline                                                                                                      | `k8s_event_watcher_events_seen_total`, `k8s_event_watcher_session_creates_total`, `k8s_event_watcher_events_injected_total`                              | Session creates per injected event; recorded for the fit                                      |
+| Triage starts lost                                                                                                  | No metric today: count `Aborting troubleshooting trigger` log lines, or add a counter first                                                              | Any                                                                                           |
+| Run slots occupied and `429 Too many concurrent runs` refusals                                                      | No metric today: the counter is in Hermes memory; count 429s at the client, or add a gauge first                                                         | 10 slots                                                                                      |
+| Kanban `ready` queue depth and wait                                                                                 | `kanban_board_health.py`                                                                                                                                 | Wait longer than the response time gate                                                       |
+| Model tokens per minute, provider 429s, time to first token                                                         | LiteLLM, Vertex AI quota metrics                                                                                                                         | The project's TPM quota                                                                       |
+| Scheduled sweep duration (hourly Cluster Agent reconcile, Controller Stall Watch)                                   | Job logs                                                                                                                                                 | The job's schedule interval                                                                   |
+| Response time of typical queries: first card, final answer; acknowledgement only where a chat platform is connected | The runner's own timings and the kanban card timestamps; traces where the install exports them                                                           | [#3140](https://github.com/gke-labs/kube-agents/issues/3140) gates: <30s OK, >60s investigate |
 
 ## Testing Stress Points
 
 ### Base numbers
 
-2 clusters, 2 nodes each, about 100 objects per cluster, 10 pods created per minute, 1 concurrent request. Each experiment starts from the base and changes one factor, so the first level of each factor is the base.
+2 clusters, 2 nodes each, about 100 fixture objects per cluster, 10 pods created per minute, 1 Warning event per minute, 1 concurrent request, and a 100-pod listing. Each experiment starts from the base and changes one factor, so the first level of each factor is the base.
 
 ### Progressive experiments
 
@@ -59,8 +61,8 @@ Each metric has a threshold. The breaking point of a metric is the stress level 
 | Objects per cluster (see below)                                            | 100, 4,000, 10,000                                   | Simulated objects; the informers read the API server, so they see them the same way                                                                                                                                                 |
 | Pods created/deleted per minute                                            | 10, 1,000, 100,000                                   | Across the fleet; 100,000 per minute on one cluster exceeds what its control plane accepts. The watcher sees churn through the Events it produces                                                                                   |
 | Warning events per minute across the fleet                                 | 1, 10, 100, 1,000, and one fault on 100 pods at once | Drives session creation and triage fan-out ([#660](https://github.com/gke-labs/kube-agents/issues/660), [#3567](https://github.com/gke-labs/kube-agents/issues/3567), [#3583](https://github.com/gke-labs/kube-agents/issues/3583)) |
-| Concurrent requests: user questions while scheduled audits and triages run | 1, 10, 50, 100                                       | Above 10, this measures refusal and queueing at the run slots                                                                                                                                                                       |
-| Size of one listing the agent reads (pods in one `kubectl get -A`)         | 100, 1,000, 4,000                                    | Credential proxy child memory ([#2045](https://github.com/gke-labs/kube-agents/issues/2045))                                                                                                                                        |
+| Concurrent requests: user questions while scheduled audits and triages run | 1, 15, 50, 100                                       | Above 10, this measures refusal and queueing at the run slots                                                                                                                                                                       |
+| Size of one listing the agent reads (pods in one `kubectl get -A`)         | 100, 1,000, 4,000                                    | Credential proxy child memory ([#2045](https://github.com/gke-labs/kube-agents/issues/2045)); a separate fixture of that many Pods in one namespace, because the object levels hold fewer Pods                                      |
 
 ### What "objects per cluster" means
 
@@ -94,23 +96,23 @@ The experiment builds each level from a fixed mix modelled on the high-cardinali
 | 4,000  | 100        | 600                                    | 1,200                   | 900        |
 | 10,000 | 250        | 1,500                                  | 3,000                   | 2,250      |
 
-The level is the sum of these objects (namespaces + Deployments + Services + HPAs + Pods + ConfigMaps, ignoring ReplicaSets and Endpoints). Events are measured, not set: the pod-churn and Warning-event factors drive them.
+The level is the sum of these fixture objects (namespaces + Deployments + Services + HPAs + Pods + ConfigMaps, ignoring ReplicaSets and Endpoints). A GKE cluster holds objects of its own before any fixture: an empty test cluster had 78 of these kinds (17 Pods, 43 ConfigMaps, 8 Services, 10 namespaces). Each run therefore records the cluster's real totals by kind, and the fit uses the totals, not the level. Events are measured, not set: the pod-churn and Warning-event factors drive them.
 
 ## Agent Operations
 
 Each operation runs against the factors that load it, not against every factor.
 
-| Operation                                                                                       | Factors                                            |
-| ----------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| First 2 hours after installation, with the onboarding jobs running in the background            | Clusters, objects per cluster                      |
-| The event watcher, always on                                                                    | Nodes per cluster, pods per minute, Warning events |
-| Run a fleet audit (`fleet-audit`, cost analysis) across every cluster                           | Clusters, objects per cluster, listing size        |
-| Run the Upgrade Readiness Report                                                                | Clusters                                           |
-| Restart the agent pod while the fleet holds standing Warning events (boot burst)                | Warning events                                     |
-| Ask "which clusters, if any, are stressed?" (a fan-out)                                         | Clusters, concurrent requests                      |
-| Ask "which clusters do you monitor?" while a fan-out runs                                       | Concurrent requests                                |
-| Run the scheduled jobs: hourly Cluster Agent reconcile, Controller Stall Watch, drift detection | Clusters                                           |
-| Read every Config Connector resource on one cluster                                             | Objects per cluster                                |
+| Operation                                                                                                         | Factors                                            |
+| ----------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| First 2 hours after installation, with the onboarding jobs running in the background                              | Clusters, objects per cluster                      |
+| The event watcher, always on                                                                                      | Nodes per cluster, pods per minute, Warning events |
+| Run a fleet audit (`fleet-audit`, cost analysis) across every cluster                                             | Clusters, objects per cluster, listing size        |
+| Run the Upgrade Readiness Report                                                                                  | Clusters                                           |
+| Restart the agent pod while the fleet holds standing Warning events (boot burst)                                  | Warning events                                     |
+| Ask "which clusters, if any, are stressed?" (a fan-out)                                                           | Clusters, concurrent requests                      |
+| Ask "which clusters do you monitor?" while a fan-out runs                                                         | Concurrent requests                                |
+| Run the scheduled jobs: hourly Cluster Agent reconcile, Controller Stall Watch, drift detection                   | Clusters                                           |
+| Read every Config Connector resource on one cluster (needs Config Connector installed on a test cluster; Phase 2) | Objects per cluster                                |
 
 # Delivery / Success Criteria
 
@@ -123,8 +125,8 @@ Each operation runs against the factors that load it, not against every factor.
 
 ## Decisions
 
-1. **Where the data lives.** The latest measured data is committed to the repository as `bench/scale/harness-limits.json`: one record per run, with the kube-agents commit, the date, the factor and its level, the operation, and each metric's value. A page in the admin console (`scripts/admin_portal.sh`) loads that file, so the chart works without a connected install. Each new measurement run replaces the file.
-2. **Safety margin.** Question 2 sets each container limit 30% above its predicted peak. The margin covers three things the fit does not: the spread between the 3 runs at a point, bursts shorter than the sampling interval (the boot burst, a fan-out), and garbage-collector headroom: the event watcher sets `GOMEMLIMIT` to half its container limit, so its heap is collected harder as it approaches that point. Inside the measured range, the 30% is the whole margin. Past the largest measured point, the chart adds the fit's error band on top, and labels the result as predicted, not measured.
+1. **Where the data lives.** The measured data is committed to the repository as `bench/scale/harness-limits.json`: one record per run, with the kube-agents commit, the mode, the date, the factor and its level, the cluster's real object totals, the operation, and each metric's value. A page in the admin console (`scripts/admin_portal.sh`) loads that file, so the chart works without a connected install. A new run merges its records into the file, keyed by commit, mode, factor, level, operation and run number; it replaces only a record with the same key. Records from earlier commits stay, so the page shows the latest commit by default and can compare it with an earlier one.
+2. **Safety margin.** Question 2 sets each container limit 30% above its predicted peak. The margin covers three things the fit does not: the spread between the 3 runs at a point, bursts shorter than the sampling interval (the boot burst, a fan-out), and garbage-collector headroom: the event watcher sets `GOMEMLIMIT` to half its container limit, so its heap is collected harder as it approaches that point. Inside the measured range, the 30% is the whole margin. Past the largest measured point, the chart adds the fit's error band on top, and labels the result as predicted, not measured. A point measured once has no spread, so its band is marked unknown.
 3. **Node placement.** All kube-agents pods run on one node pool. The smallest node is the one that fits the largest pod's requests; the pool's size follows from the sum of all pods' requests plus the node's system reservation. The node-size answer picks from five machine types. Allocatable memory is what remains after GKE's system reservation and the 100Mi eviction threshold; the values are approximate, from GKE's reservation formula:
 
    | Machine type     | vCPU | Memory | Allocatable memory (about) | Why it is on the list                      |
@@ -135,14 +137,26 @@ Each operation runs against the factors that load it, not against every factor.
    | `n2-standard-16` | 16   | 64 GB  | 58.4 GB                    | Large fleet, CPU-bound fan-outs            |
    | `n2-highmem-16`  | 16   | 128 GB | 118.4 GB                   | Large fleet, memory-bound caches           |
 
-   The default install uses Autopilot, which has no node choice; there, question 2 answers with pod requests only.
+   The experiment's host cluster is Standard, so the node-size answer can be checked. The installer's default is Autopilot, which has no node choice; there, question 2 answers with pod requests only.
 
 4. **Container limits and node size.** A larger node does not raise the container limits by itself. The operator renders defaults (`agent-api-auth` 2Gi, the controller-manager 128Mi), and the `PlatformAgent` CR moves them: `spec.deployment.resources`, `spec.deployment.credentialProxy.resources` and `spec.deployment.agentAPIAuth.resources`; the controller-manager's limit is a chart value. Question 2 therefore derives the node from the limits, not the limits from the node.
-5. **Where the experiments run.** In the author's existing dev project. The experiments share that project's quotas with its install, including the model TPM quota, so each run records provider 429s and a run that hit one is excluded from the fit.
+5. **Where the experiments run.** In a scratch project with its own kube-agents install, not on the author's dev install: the onboarding runs reinstall from scratch, which deletes the install's PVC, memory and profiles. The scratch project also has its own model quota, so the experiment does not share TPM with other work. The install's host cluster is Standard (`e2-standard-4`), and it runs one pinned kube-agents commit for the whole phase.
+6. **The test fleet.** New Standard zonal clusters, created for the experiment in the scratch project and deleted after it. The seeded fleet is not used: its planted failures already produce Warning events, so it cannot hold a controlled base, and eval cases depend on it. The install's scope covers only the test fleet.
+7. **Safety.** The install has no chat platform and no GitOps repository or GitHub token during the runs, so a planted fault cannot post to a channel or open a pull request ([#660](https://github.com/gke-labs/kube-agents/issues/660)). The alert ceilings stay at their defaults, and the runner reads triage results from the agent API and the kanban board.
+8. **Simulated nodes and Pods.** The node, pod-churn and listing levels use kwok on the test clusters. GKE's node lifecycle controller may delete Node objects that no VM backs; Phase 1 starts with a spike that confirms kwok nodes and Pods survive on a GKE Standard cluster. Without kwok, 1,200 real Pods need about 11 nodes at 110 Pods per node.
+
+9. **Reusable tooling.** The measurement repeats as the codebase changes, so the tooling is a tool, not a one-off script:
+   - The plan is data: factors, levels, operations and run counts live in a config file under `bench/scale/`, so a later run changes the config, not the code. Phase 1 and Phase 2 are two configs.
+   - The target is a parameter: project, host cluster, test clusters and mode come from flags or the environment; nothing names the author's project.
+   - Fixtures are idempotent: each level applies and removes its objects by label, so a level can be re-applied or torn down after a failed run.
+   - Each stage runs on its own (create the fleet, apply a level, run an operation, collect, tear down), and a run resumes from the records already in the file.
+   - Each record carries the kube-agents commit and image, so results from two commits compare directly.
+   - Tests sit beside the code and run on every pull request (a `PYTHON_TEST_DIRS` glob in the `Makefile`); one `make` target with a `## description` starts a run.
 
 ## Open questions
 
 1. **Fleet size has more than one dimension.** Memory depends on total watched objects (clusters × objects per cluster), but single-factor experiments vary each factor alone. Plot memory against total watched objects so the two experiments fall on one axis, and confirm with one combined point (for example 8 clusters × 4,000 objects).
+2. **Which mode.** `spec.mode: today` and `spec.mode: next` load the harness differently (session pods, the A2A bus, kanban dispatch). The results hold only for the mode measured; each record carries it.
 
 # Phases
 
@@ -150,21 +164,21 @@ The work runs in two phases. Phase 1 takes about 3 days of elapsed time and show
 
 ## Phase 1: two data points per factor
 
-Each factor is measured at the base and at one higher level. The higher level is the one the known issues point at, and one the dev project reaches without new quota:
+Each factor is measured at the base and at one higher level, the one the known issues point at:
 
 | Factor                          | Base         | Second point                  | Why this point                                                                                  |
 | ------------------------------- | ------------ | ----------------------------- | ----------------------------------------------------------------------------------------------- |
-| Number of clusters              | 2            | 8                             | Reachable with clusters the dev project already has; 64 needs new quota                         |
+| Number of clusters              | 2            | 8                             | 8 new zonal clusters; 64 needs a quota check                                                    |
 | Nodes per cluster               | 2            | 100 (simulated)               | Event and Node volume of a mid-size cluster                                                     |
 | Objects per cluster             | 100          | 4,000                         | The high-cardinality fleet in [#1986](https://github.com/gke-labs/kube-agents/issues/1986)      |
-| Pods created/deleted per minute | 10           | 1,000                         | Within what one control plane accepts                                                           |
+| Pods created/deleted per minute | 10           | 1,000 (simulated)             | Within what one control plane accepts                                                           |
 | Warning events                  | 1 per minute | One fault on 100 Pods at once | The fan-out shape in [#660](https://github.com/gke-labs/kube-agents/issues/660)                 |
-| Concurrent requests             | 1            | 10                            | The Hermes run-slot cap ([#3724](https://github.com/gke-labs/kube-agents/issues/3724))          |
-| Size of one listing             | 100 pods     | 4,000 pods                    | The credential proxy child size in [#2045](https://github.com/gke-labs/kube-agents/issues/2045) |
+| Concurrent requests             | 1            | 15                            | Past the 10 Hermes run slots ([#3724](https://github.com/gke-labs/kube-agents/issues/3724))     |
+| Size of one listing             | 100 pods     | 4,000 pods (simulated)        | The credential proxy child size in [#2045](https://github.com/gke-labs/kube-agents/issues/2045) |
 
 That is 8 points: the base and 7 second points. Two points fit a line but cannot show a knee or a curve, so every Phase 1 prediction is labelled as a two-point estimate.
 
-To fit 3 days, Phase 1 runs the 2-hour onboarding window and the event watcher soak once per point, and the other operations 3 times. It adds no product code: triage starts lost and run-slot refusals are counted from log lines and client-side 429s.
+Phase 1 runs the 2-hour onboarding window and the event watcher soak once per point, and the other operations 3 times. It changes neither the agent nor the operator: triage starts lost and run-slot refusals are counted from log lines and client-side 429s.
 
 | Operation                                              | Points × runs | Time per run | Total                   |
 | ------------------------------------------------------ | ------------- | ------------ | ----------------------- |
@@ -174,17 +188,20 @@ To fit 3 days, Phase 1 runs the 2-hour onboarding window and the event watcher s
 | Fan-out question, with the metadata question during it | 3 × 3         | ~20 min      | 3 h                     |
 | Upgrade Readiness Report                               | 2 × 3         | ~20 min      | 2 h                     |
 | Boot burst                                             | 2 × 3         | ~15 min      | 1.5 h                   |
-| Config Connector read                                  | 2 × 3         | ~15 min      | 1.5 h                   |
 | Scheduled jobs                                         | 2             | 3 h          | Overlaps the runs above |
 | Level changes                                          | 8             | ~20 min      | 3 h                     |
-| **Total**                                              |               |              | **~29 h**               |
+| **Total**                                              |               |              | **~28 h**               |
+
+Building comes first and takes about 2–3 days, so Phase 1 is about 5 days of elapsed time: 2–3 days to build, then about 28 h of runs, unattended and overnight where possible. The model token cost is not estimated yet; the base run measures it, and the rest of Phase 1 waits for that number.
 
 Steps, in order:
 
-1. A read-only base measurement of the dev install at idle. It needs no new code.
-2. Minimal fixtures and runner as scripts under `bench/scale/`: the object mix for the 4,000 level, simulated nodes, the churn and burst generators, and a loop that runs the operations and writes `bench/scale/harness-limits.json`.
-3. The runs, unattended, overnight where possible.
-4. An admin console page that loads `bench/scale/harness-limits.json` and shows, per metric, the two points against the metric's threshold, with the raw data in a toggled section. It answers the two sizing questions from the two-point estimates.
+1. The scratch project, its Standard host cluster and install (Decisions 5 and 7), and the test clusters.
+2. A half-day kwok spike on one test cluster (Decision 8). If kwok nodes do not survive, the simulated levels use real nodes at a lower level, and the schedule and cost are revised before going on.
+3. The fixtures and runner under `bench/scale/`, built to Decision 9 with the Phase 1 config, and their tests: the object mix for the 4,000 level, the kwok nodes, the churn and burst generators, the 4,000-pod listing, and a loop that runs the operations and merges records into `bench/scale/harness-limits.json`.
+4. The base run, which also measures the token cost per operation.
+5. The other runs.
+6. An admin console page that loads `bench/scale/harness-limits.json` and shows, per metric, the two points against the metric's threshold, with the raw data in a toggled section. It answers the two sizing questions from the two-point estimates.
 
 ## Phase 2: decided from the Phase 1 result
 
@@ -195,9 +212,11 @@ Phase 1's chart decides what follows. The candidates:
 - The 64-cluster level, after a quota check (cluster management costs about $0.10 per cluster-hour).
 - The combined point (8 clusters × 4,000 objects).
 - 3 runs for the onboarding window and the watcher soak.
+- The Config Connector read, on a test cluster with Config Connector installed.
 - New stress points the Phase 1 data suggests.
 - The instrumentation: a counter for triage starts lost ([#3583](https://github.com/gke-labs/kube-agents/issues/3583)) and a gauge for occupied Hermes run slots ([#3724](https://github.com/gke-labs/kube-agents/issues/3724)).
 - An issue for each limit the data shows below a realistic fleet size, linked from the Known Issues table.
+- A recurring run: the Phase 1 config on each release candidate, with the page flagging a metric that moved past a set fraction of the previous release.
 
 All planned points at 3 runs each would take about 95–115 h of machine time, 1.5–2 weeks of calendar time with re-runs.
 
@@ -213,7 +232,7 @@ We do aim to find hard breaking points such as OOMKills, by comparing the predic
 
 ## Correlated factors
 
-Some stress points may amplify each other, for example cluster count and concurrent audit requests. Each experiment changes one factor, so these interactions are not measured.
+Some stress points may amplify each other, for example cluster count and concurrent audit requests. Each experiment changes one factor, so these interactions are not measured, apart from the one combined point that checks the total-objects axis.
 
 # Appendix
 
