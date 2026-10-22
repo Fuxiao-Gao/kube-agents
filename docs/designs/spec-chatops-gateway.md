@@ -383,7 +383,7 @@ deterministically with the two places a kube-agents report goes, the issue track
 public feedback form, and starts no task; with text after it, the gateway passes the message
 through as typed, and the Planning Agent composes the report and asks for a yes before the
 platform worker files it through the credential broker. The command, the persona flow and the
-broker verb are designed in [`chat-feedback-command.md`](chat-feedback-command.md).
+broker verb are designed in [`chat-feedback-command.md`](chat-feedback-command.md). `/feedback summary` (added 2026-10-21) is the one text form the gateway answers itself: the install's identifier-free usage and feedback summary, from the `PlatformAgent` resource and the gateway's task records, with no task started (part 7 of the same document).
 
 Delegation on a human's behalf keeps the human's bound, and the gateway is where it is kept.
 A session does not mint a child task itself: it asks the gateway to, over the same local
