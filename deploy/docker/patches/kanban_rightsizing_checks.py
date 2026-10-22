@@ -31,7 +31,8 @@ Only a card the skill was asked for is checked, or a card above one:
   word after Markdown emphasis and whitespace are folded.
 
 A card the skill was not asked for, and a card that created none, pass
-untouched. Nothing is parsed out of free text to decide whether a card is a
+untouched. So does a card whose cluster does not run the workload (``NOT_HERE``):
+a fan-out's not-found leg has no checks to show, and its line is not carried. Nothing is parsed out of free text to decide whether a card is a
 rightsizing answer: the body naming the skill is the trigger.
 
 Refusal
@@ -61,15 +62,38 @@ SKILL_NAME = "gke-rightsizing-checks"
 #: first; a bold one-sentence answer above them is allowed.
 OPENING_LINES = 8
 
-#: ``<workload>: <dependency>``: a Kubernetes name, then a colon and text.
-DEPENDENCY_LINE = re.compile(r"^\s*(?:[-*]\s+)?([a-z0-9][a-z0-9.-]*[a-z0-9])\s*:\s+\S.*$")
+#: A list marker in front of a line: ``-``, ``*``, ``+`` or ``1.``/``1)``.
+LIST_MARKER = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+
+#: A Markdown link, ``[text](url)``, kept as its text: the report format links
+#: every workload a card names.
+MARKDOWN_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+
+#: ``<workload>: <dependency>``, on a line already folded and stripped of its
+#: list marker: an optional kind word, an optional ``<namespace>/``, a
+#: Kubernetes name, then a colon and text.
+DEPENDENCY_LINE = re.compile(
+    r"^(?:(?:deployment|statefulset|daemonset|cronjob|job|replicaset)\s+)?"
+    r"(?:[a-z0-9][a-z0-9.-]*/)?([a-z0-9][a-z0-9.-]*[a-z0-9])\s*:\s+(\S.*)$"
+)
 
 #: Labels an answer puts before a colon that are not workloads: the checks'
-#: own names and the answer's section words. ``- HPA: none`` is a check line.
+#: names and the words each check uses, and the answer's section words.
+#: ``- HPA: none`` and ``- PDB: none selects it`` are check lines, and a
+#: dependency block ends at the first of them.
 LABEL_WORDS = frozenset(
-    {"hpa", "keda", "qos", "shared", "source", "packing", "check", "checks", "proposal",
-     "arithmetic", "result", "finding", "cluster", "note", "summary", "evidence", "cause", "fix"}
+    {"hpa", "keda", "qos", "pdb", "pvc", "helm", "argo", "argocd", "flux", "kustomize", "gitops",
+     "limits", "requests", "selector", "selectors", "allocatable", "node", "nodes", "packing",
+     "shared", "sharing", "source", "sources", "files", "objects", "other", "check", "checks",
+     "proposal", "arithmetic", "result", "results", "finding", "findings", "cluster", "clusters",
+     "note", "notes", "summary", "evidence", "cause", "fix", "status", "answer", "recommendation",
+     "workload", "workloads"}
 )
+
+#: A dependency line, or an opening, that says the workload is not on this
+#: card's cluster: a fan-out's not-found leg has no checks to show and nothing
+#: for the card above it to carry.
+NOT_HERE = re.compile(r"\b(not (?:on|in|found|present|running|exist)|(?:does|do|did)n't exist|no such|absent)\b")
 
 #: The five checks the skill requires, each as the words that name it.
 CHECKS = {
@@ -87,57 +111,88 @@ CARD_BODY_SQL = "SELECT COALESCE(body, '') FROM tasks WHERE id = ?"
 CHILD_RESULT_SQL = "SELECT COALESCE(body, ''), COALESCE(result, ''), status FROM tasks WHERE id = ?"
 
 MARKDOWN_NOISE = str.maketrans({"*": None, "_": None, "`": None})
+#: A pipe table's cell border, read as a space, so a line carried into a table
+#: row still matches.
+TABLE_PIPE = str.maketrans({"|": " "})
 WHITESPACE = re.compile(r"\s+")
 
 
 def _fold(text: str) -> str:
-    """Lower case, no Markdown emphasis or code marks, whitespace collapsed."""
-    return WHITESPACE.sub(" ", str(text).translate(MARKDOWN_NOISE)).strip().lower()
+    """Lower case, links kept as their text, no emphasis, code marks or table
+    pipes, whitespace collapsed."""
+    text = MARKDOWN_LINK.sub(r"\1", str(text))
+    return WHITESPACE.sub(" ", text.translate(MARKDOWN_NOISE).translate(TABLE_PIPE)).strip().lower()
 
 
-def _is_dependency_line(line: str) -> bool:
+def _canonical(raw: str) -> str | None:
+    """``name: dependency`` for a dependency line, else None.
+
+    Folded, its list marker, kind word and namespace dropped, so the same line
+    written as a bullet, a numbered item or a linked name reads the same.
+    """
+    line = _fold(LIST_MARKER.sub("", MARKDOWN_LINK.sub(r"\1", raw)))
     match = DEPENDENCY_LINE.match(line)
-    return bool(match) and match.group(1) not in LABEL_WORDS
+    if not match or match.group(1) in LABEL_WORDS:
+        return None
+    return f"{match.group(1)}: {match.group(2)}"
 
 
 def dependency_lines(result: object) -> list[str]:
-    """The block of ``<workload>: <dependency>`` lines a ``result`` opens with, folded.
+    """The block of dependency lines a ``result`` opens with, canonical.
 
     The block starts at the first such line within the first
-    :data:`OPENING_LINES` non-blank lines and ends at the next blank or other
-    line, so the check lines further down (``- HPA: ...``) are not taken for it.
+    :data:`OPENING_LINES` non-blank lines and ends at the next blank line,
+    line that is not one, or check line (``- HPA: ...``).
     """
     block: list[str] = []
     seen = 0
     for raw in str(result or "").splitlines():
-        line = _fold(raw)
+        line = _canonical(raw)
         if block:
-            if not line or not _is_dependency_line(line):
+            if line is None:
                 break
             block.append(line)
             continue
-        if not line:
+        if not raw.strip():
             continue
         seen += 1
         if seen > OPENING_LINES:
             break
-        if _is_dependency_line(line):
+        if line is not None:
             block.append(line)
     return block
 
 
+def _body(result: object) -> str:
+    """``result`` without the evidence section the verified-claims rule appends,
+    whose commands would otherwise name every check for it."""
+    text = str(result or "")
+    return text.split(gate.EVIDENCE_HEADING, 1)[0]
+
+
 def missing_checks(result: object) -> list[str]:
-    """The checks from :data:`CHECKS` that ``result`` never names."""
-    text = _fold(result or "")
+    """The checks from :data:`CHECKS` that ``result``'s body never names."""
+    text = _fold(_body(result))
     return [name for name, pattern in CHECKS.items() if not pattern.search(text)]
 
 
+def _not_here(result: object) -> bool:
+    """The card reports that the workload is not on its cluster, and nothing else."""
+    lines = dependency_lines(result)
+    if lines:
+        return all(NOT_HERE.search(line.split(": ", 1)[1]) for line in lines)
+    opening = [_fold(raw) for raw in str(result or "").splitlines() if raw.strip()][:OPENING_LINES]
+    return any(NOT_HERE.search(line) for line in opening)
+
+
 def _own_reasons(result: object) -> list[str]:
+    if _not_here(result):
+        return []
     reasons = []
     if not dependency_lines(result):
         reasons.append(
             f"{SKILL_NAME}: open `result` with one line per workload, `<workload>: <dependency>` "
-            "(or `<workload>: no dependency found`), before anything else"
+            "(or `<workload>: no dependency found`), after at most one bold sentence"
         )
     missing = missing_checks(result)
     if missing:
@@ -146,13 +201,17 @@ def _own_reasons(result: object) -> list[str]:
 
 
 def _child_reasons(conn, task_id: str, result: object) -> list[str]:
-    folded = _fold(result or "")
+    # Each line of the parent, list marker dropped, so a carried line matches
+    # whether the parent bullets it or not.
+    folded = " \n ".join(_fold(LIST_MARKER.sub("", line)) for line in str(result or "").splitlines())
     reasons = []
     for child in gate.descendant_card_ids(conn, task_id):
         row = conn.execute(CHILD_RESULT_SQL, (child,)).fetchone()
         if not row or SKILL_NAME not in str(row[0]) or row[2] not in SETTLED_STATUSES:
             continue
         for line in dependency_lines(row[1]):
+            if NOT_HERE.search(line.split(": ", 1)[1]):
+                continue
             if line not in folded:
                 reasons.append(f"card {child} reported `{line}`; carry that line into `result` word for word")
     return reasons

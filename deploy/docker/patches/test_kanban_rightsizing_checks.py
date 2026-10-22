@@ -164,6 +164,60 @@ class ChildLinesTest(RuleTestCase):
         self.assertEqual(self.rule(PARENT, summary)[0], [])
 
 
+class ReviewShapesTest(RuleTestCase):
+    """The shapes a correct answer takes that the first matcher refused."""
+
+    def setUp(self):
+        super().setUp()
+        self.card(PARENT, body="Lower the requests of api-server and queue-worker.")
+
+    def child(self, result, task_id=CHILD):
+        self.card(task_id, body=SKILL_BODY, status="done", result=result, creator=PARENT)
+
+    def test_a_bulleted_child_line_carried_without_the_bullet_passes(self):
+        self.child("- api-server: an HPA scales it on CPU\n\nHPA QoS PDB Helm nodes needed")
+        self.assertEqual(self.rule(PARENT, "**No cut.**\n\napi-server: an HPA scales it on CPU")[0], [])
+
+    def test_a_child_line_carried_in_a_table_row_passes(self):
+        self.child("api-server: an HPA scales it on CPU\n\nHPA QoS PDB Helm nodes needed")
+        summary = "| Cluster | Finding |\n| --- | --- |\n| seeded-a | api-server: an HPA scales it on CPU |"
+        self.assertEqual(self.rule(PARENT, summary)[0], [])
+
+    def test_check_lines_right_under_the_block_are_not_dependency_lines(self):
+        self.child("api-server: an HPA scales it on CPU\n- PDB: none selects it\n- Helm: release web\n- Limits: cpu=10m\nQoS nodes needed")
+        self.assertEqual(self.rule(PARENT, "api-server: an HPA scales it on CPU")[0], [])
+
+    def test_linked_namespaced_numbered_and_kind_openings_count(self):
+        self.card("t_own", body=SKILL_BODY)
+        tail = "\n\nHPA: yes. QoS Burstable. PDB none. Helm none. 2 nodes needed."
+        for opening in (
+            "[inference-server](https://console.example/x): an HPA scales it on CPU",
+            "seeded-capacity/inference-server: an HPA scales it on CPU",
+            "1. inference-server: an HPA scales it on CPU",
+            "+ inference-server: an HPA scales it on CPU",
+            "Deployment inference-server: an HPA scales it on CPU",
+        ):
+            with self.subTest(opening=opening):
+                self.assertEqual(self.rule("t_own", opening + tail)[0], [])
+
+    def test_a_status_line_is_not_a_dependency_line(self):
+        self.card("t_own", body=SKILL_BODY)
+        reasons = self.rule("t_own", "Status: done\n\nHPA QoS PDB Helm nodes needed")[0]
+        self.assertTrue(any("open `result`" in r for r in reasons), reasons)
+
+    def test_a_not_found_leg_is_not_refused_and_not_carried(self):
+        self.card("t_own", body=SKILL_BODY)
+        self.assertEqual(self.rule("t_own", "Neither workload is on seeded-b: the namespaces do not exist.")[0], [])
+        self.child("inference-server: not on this cluster")
+        self.assertEqual(self.rule(PARENT, "**Found on seeded-a only.**")[0], [])
+
+    def test_checks_named_only_in_the_evidence_section_do_not_count(self):
+        self.card("t_own", body=SKILL_BODY)
+        result = "api-server: no dependency found\n\n" + kvc.EVIDENCE_HEADING + "\n$ kubectl get hpa,pdb\nqos helm allocatable"
+        reasons = self.rule("t_own", result)[0]
+        self.assertTrue(any("does not show these checks" in r for r in reasons), reasons)
+
+
 class SharedRefusalTest(RuleTestCase):
     def test_the_gate_refuses_once_then_accepts(self):
         self.card(CHILD, body=SKILL_BODY)
