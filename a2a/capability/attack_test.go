@@ -502,17 +502,20 @@ func TestAnUnknownVerbIsRefusedRatherThanAllowed(t *testing.T) {
 }
 
 func TestAnUnknownTierIsRefusedRatherThanRanked(t *testing.T) {
-	// The subtle one: an unknown tier compares equal to itself, so a
-	// narrowing check that ranked by string would pass `tier: root` under
-	// `tier: root` and a Permits that defaulted to zero would rank it below
-	// everything — refused by accident today, allowed by accident the first
-	// time somebody reorders the constants.
+	// The subtle one: an unknown tier compares equal to itself, and a
+	// lookup that defaulted to an empty verb set would make it a subset of
+	// everything, so `tier: root` would narrow under any parent and Permits
+	// would refuse it only by accident.
 	e := Entry{Tier: Tier("root"), Scope: "project/P", Delegate: podA}
 	if err := e.Validate(); err == nil {
 		t.Fatal("an unknown tier validated")
 	}
 	mustRefuse(t, Narrows(Entry{Tier: Tier("root"), Scope: "project/P"}, e), "not in the lattice")
 	mustRefuse(t, Permits(e, VerbTaskExecute, "project/P"), "not in the lattice")
+	// An unknown parent over a known child: Minter.Attenuate passes the
+	// caller's parent straight in, so this check is the only guard there.
+	known := Entry{Tier: TierDeveloperTeam, Scope: "project/P", Delegate: podA}
+	mustRefuse(t, Narrows(Entry{Tier: Tier("root"), Scope: "project/P"}, known), "parent carries a tier that is not in the lattice")
 }
 
 // --- the store's contract -------------------------------------------------
