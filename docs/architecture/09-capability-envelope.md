@@ -239,6 +239,22 @@ other way and keep their reasons, because those reach a legitimate caller holdin
 capability who needs to know what it lacks. The split is deliberate: chain shape is not the
 caller's business, and what a capability permits is.
 
+**Profile tasks** (#3659). A tier permits an explicit set of verbs, not a rank, and narrowing means a
+child's set is inside its parent's. Two tiers exist for profile tasks: `read` (`task.execute` and
+`profile.run`) and `unattended` (`profile.run` only). Neither nests with `platform` ⊃
+`cluster-admin` ⊃ `developer-team`. A profile task's root carries one more field, `profile`, the
+AgentProfile the gateway minted it for, and only a profile tier carries one. A profile tier
+narrows only to itself, and a child carries its parent's profile unchanged, so no hop can relabel a
+human's `read` grant as `unattended` or choose which profile its chain may run. The dispatcher asks the verb `profile.run` with two request fields of its own,
+`profile` and `tier`, and a target scope (`project/P/location/L/cluster/C`, or the install's
+`namespace/N` for a task with no target, never empty). The verifier allows it only when the verb is
+in the grant's tier set, the target is inside the grant's scope, `tier` is the grant's own tier and
+`profile` is the grant's profile. It still answers yes or no, and the dispatcher never reads a tier
+out of the grant. Any other verb carrying `profile` or `tier` is refused rather than having the
+fields ignored. These refusals are verb refusals, so they keep their reasons. That tells the asker which tier and
+profile the grant carries, which 09's split allows: the asker is the leaf delegate, already holding
+the capability.
+
 The caller identity in the first check **must be request-scoped**. An identity shared across
 concurrent requests cannot separate them, and the guarantee this design exists to make is void
 without it. "The identity the verifier authenticates" below states what that requires of the
@@ -683,7 +699,7 @@ the party being revoked from. **Shipped in that state**: no component deletes a 
 revocation -- the property this design prefers over TTLs, and the reason it can tolerate "nothing
 expires" -- is the one advertised feature with no implementation behind it.
 
-**The envelope has no requester field.** It carries a tier and a scope. [03](03-security-model.md)
+**The envelope has no requester field.** It carries a tier and a scope (and, for a profile task, the profile it was minted for). [03](03-security-model.md)
 §4a stays canonical for the requirement and that requirement is authorization against the
 requester's own identity, which a hop cannot perform from a resolved capability because it does not
 know who the human is. The goal below is written as "agent ceiling ∩ requester" while the mechanism

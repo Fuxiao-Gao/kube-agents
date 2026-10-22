@@ -32,13 +32,30 @@ const (
 	TierPlatform      Tier = "platform"
 	TierClusterAdmin  Tier = "cluster-admin"
 	TierDeveloperTeam Tier = "developer-team"
+
+	// TierRead and TierUnattended are the profile tiers (#3659; the
+	// design is #3660's "Tiers and identity").
+	// A grant at one of them is a root the gateway mints for a profile
+	// task, and it always names its profile. They do not nest with the
+	// three above or with each other: a profile tier narrows only to
+	// itself, so a hop can never relabel a human's read grant as a
+	// trigger's unattended one (see Narrows).
+	TierRead       Tier = "read"
+	TierUnattended Tier = "unattended"
 )
+
+// profileTiers are the tiers a grant must name a profile at, and the only
+// tiers that may. Unattended's verb set happens to sit inside read's, so the
+// subset rule alone would let read narrow to unattended; Narrows refuses any
+// change of tier into or out of this set.
+var profileTiers = map[Tier]bool{TierRead: true, TierUnattended: true}
 
 // Scope is a `/`-segmented resource path, and containment is segment prefix:
 //
 //	project/P
 //	project/P/cluster/C
 //	project/P/cluster/C/ns/N
+//	project/P/location/L/cluster/C   (a profile task's target, #3659)
 //
 // 09 §3's example narrows `scope: project-P` to `scope: cluster-C` with nothing
 // linking the two, which cannot be checked — a cluster named in isolation could
@@ -90,6 +107,13 @@ type Entry struct {
 	// the API server's attestation. So the name is predictable by the
 	// parent before the credential exists, which is what 09 §5 asks for.
 	Delegate string `json:"delegate"`
+
+	// Profile is the AgentProfile the gateway minted this grant for. It is
+	// set exactly when the tier is a profile tier (read, unattended), and
+	// empty otherwise. profile.run is refused unless the request names
+	// this profile, so a grant minted for one profile cannot run another.
+	// A child carries its parent's profile unchanged.
+	Profile string `json:"profile,omitempty"`
 
 	// Parent pins the entry this one descends from. Nil for a root.
 	Parent *Ref `json:"parent,omitempty"`
@@ -205,6 +229,16 @@ func (e Entry) Validate() error {
 	if err := checkToken("delegate", e.Delegate); err != nil {
 		return err
 	}
+	switch {
+	case profileTiers[e.Tier] && e.Profile == "":
+		// Without this a read root with no profile would let the first
+		// hop choose any profile its chain may run.
+		return refuse("entry at a profile tier names no profile")
+	case !profileTiers[e.Tier] && e.Profile != "":
+		return refuse("entry names a profile at a tier that is not a profile tier")
+	case e.Profile != "" && !validProfileName(e.Profile):
+		return refuse("entry carries a profile name that is not a DNS label")
+	}
 	if e.Parent != nil {
 		if e.Parent.Key == "" {
 			return refuse("parent reference has no key")
@@ -282,6 +316,12 @@ func Narrows(parent, child Entry) error {
 	if !cs.subsetOf(ps) {
 		return refuse("child widens the tier: its verb set is not inside the parent's")
 	}
+	if (profileTiers[parent.Tier] || profileTiers[child.Tier]) && child.Tier != parent.Tier {
+		return refuse("child widens the tier: a profile tier narrows only to itself")
+	}
+	if child.Profile != parent.Profile {
+		return refuse("child changes or drops the parent's profile")
+	}
 	if !parent.Scope.Contains(child.Scope) {
 		return refuse("child widens the scope")
 	}
@@ -346,4 +386,23 @@ func ValidateNamespace(namespace string) error {
 			"would build is a different ceiling than the one intended", namespace, "/")
 	}
 	return nil
+}
+
+// validProfileName is a DNS-1123 label, the form an AgentProfile's name takes:
+// lowercase alphanumerics and '-', starting and ending alphanumeric, at most 63
+// bytes. Tier names take the same form, so both are also valid subject tokens.
+func validProfileName(s string) bool {
+	if len(s) == 0 || len(s) > 63 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+		case c == '-' && i > 0 && i < len(s)-1:
+		default:
+			return false
+		}
+	}
+	return true
 }
