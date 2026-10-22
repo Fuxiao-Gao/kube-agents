@@ -249,6 +249,12 @@ jobs:
   # runs every directory in PYTHON_TEST_DIRS on it.
   test-agent-python:
     name: Run Python Unit Tests on the agent image's Python
+    # Not on a merge-queue run: it is not a required check, so the queue
+    # neither waits for it nor stops on its red, and there it would only spend
+    # runner time. It still runs on every pull request and every push to main.
+    # Remove this line if the job becomes a required check: a skipped job
+    # reports success to a required check, so the queue would never run it.
+    if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     permissions:
@@ -304,6 +310,8 @@ jobs:
   # git SHA pinned in bench/pyproject.toml.
   bench-tests:
     name: Run Bench Harness Tests
+    # Not on a merge-queue run, for the same reason as test-agent-python.
+    if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
