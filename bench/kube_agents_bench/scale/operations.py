@@ -43,6 +43,8 @@ RELAY_START_SECONDS = 15
 # What a new install starts without: the agent's data and session metadata, the shell's data, the bus's data.
 RESET_CLAIMS = ("platform-agent-data", "system-metadata", "data-platform-agent-shell-0", "data-platform-agent-a2a-nats-0")
 RESET_STATEFUL_PODS = ("platform-agent-shell-0", "platform-agent-a2a-nats-0")
+NATS_POD = "platform-agent-a2a-nats-0"
+PROVISION_JOB_FRAGMENT = "a2a-provision"
 
 
 @dataclass
@@ -189,5 +191,26 @@ def reset(context: str, namespace: str) -> None:
     for claim in RESET_CLAIMS:
         kube.kubectl(context, "delete", "pvc", claim, "-n", namespace, "--wait=false", "--ignore-not-found")
     for pod in RESET_STATEFUL_PODS:
-        kube.kubectl(context, "delete", "pod", pod, "-n", namespace, "--wait=false", "--ignore-not-found")
+        kube.kubectl(context, "delete", "pod", pod, "-n", namespace, "--wait=true", "--ignore-not-found",
+                     timeout=RESET_TIMEOUT_SECONDS)
+    # An empty bus has none of its JetStream buckets; the install creates them with a provision Job,
+    # which the operator renders again once the completed one is deleted.
+    kube.kubectl(context, "wait", "-n", namespace, "--for=condition=Ready", f"pod/{NATS_POD}",
+                 f"--timeout={RESET_TIMEOUT_SECONDS}s", timeout=RESET_TIMEOUT_SECONDS)
+    jobs = kube.kubectl(context, "get", "jobs", "-n", namespace, "--no-headers", "-o", "name")
+    for job in (line.strip() for line in jobs.splitlines()):
+        if PROVISION_JOB_FRAGMENT in job:
+            kube.kubectl(context, "delete", "-n", namespace, job, "--wait=true", timeout=RESET_TIMEOUT_SECONDS)
+    _wait_provisioned(context, namespace)
     restart(context, namespace)
+
+
+def _wait_provisioned(context: str, namespace: str) -> None:
+    deadline = time.monotonic() + RESET_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        jobs = kube.kubectl_json(context, "get", "jobs", "-n", namespace)["items"]
+        provision = [j for j in jobs if PROVISION_JOB_FRAGMENT in j["metadata"]["name"]]
+        if provision and all(j.get("status", {}).get("succeeded") for j in provision):
+            return
+        time.sleep(READY_POLL_SECONDS)
+    raise kube.CommandError("the bus provision Job did not complete after the reset")
