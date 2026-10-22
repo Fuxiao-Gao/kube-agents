@@ -11,7 +11,11 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import subprocess
+import sys
+import tempfile
 import time
+from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
@@ -28,6 +32,17 @@ RESET_TIMEOUT_SECONDS = 1800
 READY_POLL_SECONDS = 10
 TOKEN_BUCKETS = {"tokens_input": "input", "tokens_output": "output", "tokens_cached": "cache_read"}
 RATE_LIMIT_MARKERS = ("429", "RESOURCE_EXHAUSTED", "rate limit", "Too many concurrent runs")
+# The agent pod runs under gVisor, which kubectl port-forward cannot reach, so the harness rides
+# the repository's kubectl-exec relay into the sidecar that fronts the agent API (bench/README.md,
+# "Sandboxed installs").
+RELAY_SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "hermes-dashboard-tunnel.py"
+RELAY_CONTAINER = "agent-api-auth"
+RELAY_REMOTE_PORT = 8643
+RELAY_LOCAL_PORT = 18642
+RELAY_START_SECONDS = 15
+# What a new install starts without: the agent's data and session metadata, the shell's data, the bus's data.
+RESET_CLAIMS = ("platform-agent-data", "system-metadata", "data-platform-agent-shell-0", "data-platform-agent-a2a-nats-0")
+RESET_STATEFUL_PODS = ("platform-agent-shell-0", "platform-agent-a2a-nats-0")
 
 
 @dataclass
@@ -46,8 +61,44 @@ def agent_env(context: str, namespace: str) -> dict[str, str]:
     return {
         "AGENT_CLUSTER_CONTEXT": context,
         "AGENT_NAMESPACE": namespace,
+        "AGENT_LOCAL_PORT": str(RELAY_LOCAL_PORT),
         "PLATFORM_AGENT_TOKEN": base64.b64decode(encoded).decode(),
     }
+
+
+class Relay:
+    """The kubectl-exec relay to the agent API, run with a kubeconfig of one context.
+
+    The relay resolves its pod through the current kubectl context; giving it a
+    kubeconfig holding only the install's context keeps it off whatever context
+    the caller has selected, and it re-resolves the pod after a gateway restart.
+    """
+
+    def __init__(self, context: str, namespace: str) -> None:
+        self.context = context
+        self.namespace = namespace
+        self.proc: subprocess.Popen[bytes] | None = None
+        self.kubeconfig = Path(tempfile.mkstemp(prefix="harness-scale-", suffix=".kubeconfig")[1])
+
+    def start(self) -> None:
+        self.kubeconfig.write_text(kube.kubectl(self.context, "config", "view", "--minify", "--flatten",
+                                                f"--context={self.context}"))
+        self.kubeconfig.chmod(0o600)
+        self.proc = subprocess.Popen(
+            [sys.executable, str(RELAY_SCRIPT), "--namespace", self.namespace, "--container", RELAY_CONTAINER,
+             "--remote-port", str(RELAY_REMOTE_PORT), "--local-port", str(RELAY_LOCAL_PORT)],
+            env={**os.environ, "KUBECONFIG": str(self.kubeconfig)},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        time.sleep(RELAY_START_SECONDS)
+        if self.proc.poll() is not None:
+            raise kube.CommandError("the agent API relay exited at start")
+
+    def stop(self) -> None:
+        if self.proc and self.proc.poll() is None:
+            self.proc.terminate()
+            self.proc.wait()
+        self.kubeconfig.unlink(missing_ok=True)
 
 
 def _prompt_worker(prompt: str, env: dict[str, str]) -> dict[str, Any]:
@@ -127,14 +178,16 @@ def restart(context: str, namespace: str) -> None:
 
 
 def reset(context: str, namespace: str) -> None:
-    """Give the agent a fresh data volume, as a new install has, then wait for it.
+    """Give the agent the empty state a new install has, then wait for it.
 
-    The PVC is deleted while mounted, so it waits in Terminating; deleting the
-    pod releases it, and the operator renders a new claim and pod. The onboarding
-    jobs then run as on a first install, without re-running Terraform.
+    Each claim is deleted while mounted, so it waits in Terminating; deleting
+    the pods that mount it releases it, and the operator renders new claims and
+    pods. The onboarding jobs then run as on a first install, without re-running
+    Terraform. The sandbox's SSH key volume is kept: a new install would mint a
+    new key, which changes nothing the measurement reads.
     """
-    claims = kube.kubectl(context, "get", "pvc", "-n", namespace, "--no-headers", "-o", "name")
-    for claim in claims.splitlines():
-        if claim.strip():
-            kube.kubectl(context, "delete", "-n", namespace, claim.strip(), "--wait=false")
+    for claim in RESET_CLAIMS:
+        kube.kubectl(context, "delete", "pvc", claim, "-n", namespace, "--wait=false", "--ignore-not-found")
+    for pod in RESET_STATEFUL_PODS:
+        kube.kubectl(context, "delete", "pod", pod, "-n", namespace, "--wait=false", "--ignore-not-found")
     restart(context, namespace)

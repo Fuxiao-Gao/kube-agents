@@ -137,9 +137,12 @@ class Runner:
         kube.apply(first, fixtures.warning_manifests(int(values["warning_events"])))
 
     def _applied_level(self, context: str, fixture: str) -> int | None:
-        out = kube.kubectl(context, "get", "namespaces", "-l", f"{fixtures.FIXTURE_LABEL}={fixture}",
-                           "-o", f"jsonpath={{.items[0].metadata.labels.harness-scale/level}}")
-        return int(out) if out.strip().isdigit() else None
+        items = kube.kubectl_json(context, "get", "namespaces", "-l", f"{fixtures.FIXTURE_LABEL}={fixture}")["items"]
+        levels = {item["metadata"].get("labels", {}).get(LEVEL_LABEL, "") for item in items}
+        if not items:
+            return None
+        # Namespaces of two levels mean an interrupted change; report a mismatch so it is redone.
+        return int(levels.pop()) if len(levels) == 1 and next(iter(levels)).isdigit() else -1
 
     def _wait_fixture_gone(self, context: str, fixture: str) -> None:
         kube.kubectl(context, "wait", "--for=delete", "namespace", "-l", f"{fixtures.FIXTURE_LABEL}={fixture}",
@@ -215,6 +218,8 @@ class Runner:
                                                           s.factor, s.level, s.operation.name, s.run) not in done]
         LOG.info("%s runs pending of %s", len(pending), len(specs))
         awaiting: list[tuple[float, records.Record]] = []
+        relay = operations.Relay(self.install.context, self.install.namespace)
+        relay.start()
         try:
             for (factor, level), group in itertools.groupby(pending, key=lambda s: (s.factor, s.level)):
                 values = self.apply_level(factor, level)
@@ -224,6 +229,7 @@ class Runner:
                     awaiting = self.flush_peaks(awaiting, wait=False)
         finally:
             self.stop_churn()
+            relay.stop()
             self.flush_peaks(awaiting, wait=True)
 
     def flush_peaks(self, awaiting: list[tuple[float, records.Record]], wait: bool) -> list[tuple[float, records.Record]]:
