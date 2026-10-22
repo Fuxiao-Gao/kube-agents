@@ -693,10 +693,7 @@ operator's lever: while it is set, step 0 is skipped and every run, an empty com
 the matrix. `/test pull-kube-agents-smoke-test` on the same head posts `pending`, which wins until
 that run reports (`/retest` does not, because it reruns only failed contexts), and that run too
 reuses the head's green: a genuine re-run of the matrix at an unchanged head is not something a pull
-request can ask for — a non-inert push is. Do not post `/test pull-kube-agents-smoke-test` on a
-pull request that is in the merge queue. The run posts a pending smoke status, and if the queue's
-`Smoke gate` reads it before the run reports, the queue fails the group and removes the pull
-request. `/retest` is fine: it reruns only failed contexts. Step 0 prefers the newest green at the head, so a newer
+request can ask for — a non-inert push is. Step 0 prefers the newest green at the head, so a newer
 red at the same head is overridden on the next trigger, and the script's header says why to read
 such a red as flake or as a real break, not as noise. The success status the Prow bot posts at the
 head for an admin's `/override`, pointing at that comment on this pull request, counts as the third
@@ -704,6 +701,12 @@ kind of verdict, so a run after an override reuses it in seconds. The reused run
 ordinary `Job succeeded.`; the `/override` comment, the build log's `REVALIDATED` line and a key the
 run leaves in its `finished.json` metadata are the record that it was one, and step 0 reads the key
 so that such a run is never itself taken for a green.
+
+Do not post `/test pull-kube-agents-smoke-test` on a pull request that is in the merge queue. The
+run posts a pending smoke status, and if the queue's `Smoke gate` reads it before the run reports,
+the queue fails the group and removes the pull request. The sweep puts it back once after the first
+such removal since the last push, but a second one keeps it out until a push. `/retest` is fine: it
+reruns only failed contexts.
 
 No verdict carries across a change to what the job grades. When the blocking job's `spec.mode`
 changes in `oss-test-infra` (the swap to `next`, or a rollback to `today`), set the repository

@@ -519,10 +519,12 @@ an ancestor of pr<N>`. Phase −1 is supposed to withhold the narrowed option in
 One thing the skill has no way to know about:
 
 - **Merge mechanics are part of this review.** Run `gh pr checks <N> --repo "$REPO"`, then read
-  the `Smoke gate` and `Merge labels` statuses on the head commit, the labels, and whether the pull
-  request is in the merge queue. A gate shows on the head only when it is green.
-  `docs/pull-request-workflow.md`, "How a change merges", has the commands and says what each one
-  means. A `mergeStateStatus` of `DIRTY` means a conflict, which you have probably already found.
+  the `Smoke gate`, `Merge labels` and smoke statuses on the head commit, the labels, and whether
+  auto-merge is on. A gate shows on the head only when it is green.
+  `docs/pull-request-workflow.md`, "How a change merges", has the commands, says what each one
+  means, and links the queue page that lists the queued pull requests. Do not read `mergeStateStatus` as a verdict: open pull requests here commonly read
+  `BLOCKED`. `DIRTY` is the one signal it does carry, and it means the conflict you have probably
+  already found.
 
 The skill's step 6 does not apply: dispositions belong to the author, and you fix nothing here. Its
 "single confident first pass" constraint does, and it covers the saved file, the PR comment, and

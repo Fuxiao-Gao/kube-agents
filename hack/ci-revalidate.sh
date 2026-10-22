@@ -79,7 +79,7 @@
 # record (no ARTIFACTS directory, an unwritable file) does not reuse an
 # override.
 #
-# A batch job (Tide tested several pull requests merged together this way) is
+# A batch job (one in which Tide tested several pull requests merged together) is
 # revalidated pull by pull: every one must hold a reusable verdict, else the
 # batch runs in full. PULL_REFS carries the batch's pulls; a serial presubmit
 # names its one pull in PULL_NUMBER and PULL_PULL_SHA.

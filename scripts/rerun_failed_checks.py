@@ -13,7 +13,7 @@ comment reaches Prow, which re-runs its own failed jobs, so one word covers
 both kinds of check.
 
 What is re-run is what reads red at the head, read the way Tide read it when
-this script was written. It takes the check runs at the head commit -- the latest attempt of each check suite,
+this script was written. The script takes the check runs at the head commit -- the latest attempt of each check suite,
 which is what GitHub's commit rollup lists -- and keeps the best state per
 check name: success (`success`, `neutral`, `skipped`) over pending (not
 completed) over failure (any other completed conclusion). A name whose best
