@@ -34,10 +34,10 @@ func retiredPermits(t Tier, v Verb) string {
 	}
 	have, ok := retiredTierRank[t]
 	if !ok {
-		return "capability carries a tier that is not in the lattice"
+		return "capability carries a tier that is not a known tier"
 	}
 	if have < retiredTierRank[need] {
-		return "below the tier the verb requires"
+		return "does not permit the verb"
 	}
 	return ""
 }
@@ -45,11 +45,11 @@ func retiredPermits(t Tier, v Verb) string {
 func retiredNarrows(parent, child Tier) string {
 	pr, ok := retiredTierRank[parent]
 	if !ok {
-		return "parent carries a tier that is not in the lattice"
+		return "parent carries a tier that is not a known tier"
 	}
 	cr, ok := retiredTierRank[child]
 	if !ok {
-		return "child carries a tier that is not in the lattice"
+		return "child carries a tier that is not a known tier"
 	}
 	if cr > pr {
 		return "child widens the tier"
@@ -117,8 +117,8 @@ func TestTierSetsKeepTheVocabulary(t *testing.T) {
 // subset check against any parent.
 func TestAnUnknownTierIsRefusedNotEmpty(t *testing.T) {
 	err := Entry{Tier: Tier("root"), Scope: "project/P", Delegate: "d"}.Validate()
-	if err == nil || !strings.Contains(err.Error(), "not in the lattice") {
-		t.Fatalf("Validate with an unknown tier = %v, want a refusal naming the lattice", err)
+	if err == nil || !strings.Contains(err.Error(), "is not a known tier") {
+		t.Fatalf("Validate with an unknown tier = %v, want a refusal naming an unknown tier", err)
 	}
 	// The empty set is the dangerous one: it is a subset of everything.
 	if !(verbSet{}).subsetOf(tierVerbs[TierDeveloperTeam]) {

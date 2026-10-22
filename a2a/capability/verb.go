@@ -108,10 +108,10 @@ func Permits(e Entry, v Verb, r Scope) error {
 	}
 	set, ok := tierVerbs[e.Tier]
 	if !ok {
-		return refuse("capability carries a tier that is not in the lattice")
+		return refuse("capability carries a tier that is not a known tier")
 	}
 	if !set.has(v) {
-		return refuse("capability's tier does not permit the verb (below the tier the verb requires): its verb set does not include it")
+		return refuse("capability's tier does not permit the verb: its verb set does not include it")
 	}
 	if err := r.validate(); err != nil {
 		return refuse("the resource is not a well-formed scope")
@@ -122,9 +122,9 @@ func Permits(e Entry, v Verb, r Scope) error {
 	return nil
 }
 
-// Verbs returns the verb vocabulary, sorted for the conformance suite. The
-// suite holds this table to the documented one in both directions, the way
-// profiles.TestFieldsMatchTheSpecTable holds the profile struct to its spec.
+// Verbs returns the verb vocabulary, every verb some tier's set names,
+// sorted. TestTierSetsKeepTheVocabulary holds it to the verbs the retired
+// rank knew.
 func Verbs() []Verb {
 	all := verbSet{}
 	for _, set := range tierVerbs {

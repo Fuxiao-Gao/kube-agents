@@ -197,7 +197,7 @@ func writerOf(key string) (principal string, isRoot bool, err error) {
 // every parent's.
 func (e Entry) Validate() error {
 	if _, ok := tierVerbs[e.Tier]; !ok {
-		return refuse("entry carries a tier that is not in the lattice")
+		return refuse("entry carries a tier that is not a known tier")
 	}
 	if err := e.Scope.validate(); err != nil {
 		return err
@@ -273,11 +273,11 @@ func (s Scope) Contains(other Scope) bool {
 func Narrows(parent, child Entry) error {
 	ps, ok := tierVerbs[parent.Tier]
 	if !ok {
-		return refuse("parent carries a tier that is not in the lattice")
+		return refuse("parent carries a tier that is not a known tier")
 	}
 	cs, ok := tierVerbs[child.Tier]
 	if !ok {
-		return refuse("child carries a tier that is not in the lattice")
+		return refuse("child carries a tier that is not a known tier")
 	}
 	if !cs.subsetOf(ps) {
 		return refuse("child widens the tier: its verb set is not inside the parent's")
