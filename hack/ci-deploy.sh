@@ -321,7 +321,7 @@ readonly PLATFORM_AGENT_CR_DELETE_TIMEOUT="120s"
 # hack/eval/gitlab-cases.txt, beside the today-mode GitLab nightly); and the
 # release-candidate eval's postsubmit, which grades a candidate in the mode a
 # new install gets (hack/ci-eval-rc.sh). The today lane's on-demand presubmit
-# is optional, so Tide never batches it, and a pull request's run of it
+# is optional, so Tide never batched it, and a pull request's run of it
 # carries a PULL_NUMBER. Section 2b admits the flag on a run whose JOB_NAME is
 # one of these (space-separated, matched whole) or that carries a PULL_NUMBER
 # -- a presubmit is admitted by the second on a pull request and the blocking
