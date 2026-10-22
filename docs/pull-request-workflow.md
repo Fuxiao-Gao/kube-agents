@@ -645,8 +645,8 @@ gh api repos/gke-labs/kube-agents/rules/branches/main \
   --jq '.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context'
 ```
 
-Every workflow behind one of those Actions checks also runs for a pull request whose base is a
-`release/` branch, and `tests/test_merge_group_triggers.py` fails if one is filtered back to `main`.
+Every workflow behind one of those checks, bar `Smoke gate` and `Merge labels`, also runs for a
+pull request whose base is a `release/` branch, and `tests/test_merge_group_triggers.py` fails if one is filtered back to `main`.
 A backport pull request branches from `upstream/release/<X.Y>` and targets it; the release runbook
 in `scripts/release/README.md` ("Patch releases from a release line") is what happens after it
 merges. A `release/` branch requires the same contexts bar `Smoke gate` and `Merge labels`, also
@@ -707,8 +707,10 @@ changes in `oss-test-infra` (the swap to `next`, or a rollback to `today`), set 
 variable `SMOKE_PIN_NOT_BEFORE` right after it merges, to that merge time plus the job's 360-minute
 timeout (a run in flight at the change reports afterwards). `Smoke gate` then stays pending on a
 green whose build first reported before that time, until a run from after it replaces it, and its
-pending text asks for a push. Check the value before you set it: an unparsable one fails
-`Smoke gate` on every queue commit. A head `Smoke gate` already posted green stays green, so such a
+pending text asks for a push. Check the value before you set it: an unparsable one exits
+`merge_gate.py` before it decides anything, so it fails `Smoke gate` on every queue commit and
+stops the enqueue sweep, which then turns auto-merge on or off for nobody until the value is
+fixed. A head `Smoke gate` already posted green stays green, so such a
 pull request enters the queue, fails its group, and stays out after its one retry until a push.
 Ship the change with `EVAL_SKIP_REVALIDATION=1` on the job, so its runs do not reuse the old green.
 The follow-up that drops that lever sets `EVAL_REVALIDATION_NOT_BEFORE` on the job to the same time
