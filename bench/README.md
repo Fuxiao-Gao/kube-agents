@@ -2,6 +2,8 @@
 
 Evaluation harness that runs [kubernetes-sigs/devops-bench](https://github.com/kubernetes-sigs/devops-bench) against the Platform Agent, with devops-bench consumed as a pip-installed library (pinned git SHA — no PyPI release yet) instead of the legacy evaluator baked into the eval image. Tasks and the agent transport live here, so kube-agents and devops-bench ship independently.
 
+Load and sizing measurements of the harness at fleet scale, as opposed to answer quality, are planned in [`docs/designs/agent-harness-bottlenecks.md`](../docs/designs/agent-harness-bottlenecks.md).
+
 ## Layout
 
 - `kube_agents_bench/harness.py` — the `kubeagents` agent harness: establishes `kubectl port-forward` to `svc/platform-agent` when the local port is closed, POSTs the task prompt to `/v1/responses`, and waits out any work the agent delegates to a subagent. That transport needs either a standard-runtime install or a relay pre-opened on its local port — see [Sandboxed installs](#sandboxed-installs). Environment variables are documented in the module docstring.
