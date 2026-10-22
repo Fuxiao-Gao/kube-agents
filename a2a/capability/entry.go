@@ -40,7 +40,9 @@ const (
 	// task, and it always names its profile. They do not nest with the
 	// three above or with each other: a profile tier narrows only to
 	// itself, so a hop can never relabel a human's read grant as a
-	// trigger's unattended one (see Narrows).
+	// trigger's unattended one (see Narrows). A child task gets its own
+	// root from the gateway rather than a hop, which is how fan-out crosses
+	// profiles.
 	TierRead       Tier = "read"
 	TierUnattended Tier = "unattended"
 )
@@ -79,8 +81,9 @@ type Ref struct {
 
 func (r Ref) String() string { return r.Key + " @" + strconv.FormatUint(r.Revision, 10) }
 
-// Entry is 09 §3's shape: three fields, plus the pinned link to the parent it
-// descends from. A root has no parent.
+// Entry is 09 §3's shape: tier, scope and delegate, an optional profile for a
+// profile task (#3659), and the pinned link to the parent it descends from. A
+// root has no parent.
 //
 // There is deliberately no action list. A4 owes 09 that amendment along with
 // the per-call lookup, and adding one here would ship a schema A4 immediately
@@ -113,7 +116,10 @@ type Entry struct {
 	// set exactly when the tier is a profile tier (read, unattended), and
 	// empty otherwise. profile.run is refused unless the request names
 	// this profile, so a grant minted for one profile cannot run another.
-	// A child carries its parent's profile unchanged.
+	// A hop (a child entry a broker writes) carries its parent's profile
+	// unchanged, so no broker chooses which profile its chain runs. A profile
+	// task's child task does not hop: the gateway mints it a fresh root,
+	// naming the child's own profile at the parent's tier.
 	Profile string `json:"profile,omitempty"`
 
 	// Parent pins the entry this one descends from. Nil for a root.

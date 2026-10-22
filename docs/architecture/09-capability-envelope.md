@@ -245,16 +245,19 @@ a child's set is inside its parent's. Two tiers exist for profile tasks: `read` 
 `cluster-admin` ⊃ `developer-team`. A profile task's root carries one more field, `profile`, the
 AgentProfile it is minted for, and only a profile tier carries one. The gateway's per-profile mint
 is not built yet; until it is, every root is the install-wide one described in §5. A profile tier
-narrows only to itself, and a child carries its parent's profile unchanged, so no hop can relabel a
-human's `read` grant as `unattended` or choose which profile its chain may run. The dispatcher asks
-the verb `profile.run` with two request fields of its own, `profile` and `tier`, and a target scope
-(`project/P/location/L/cluster/C`, or the install's `namespace/N` for a task with no target, never
-empty). The verifier allows it only when the verb is in the grant's tier set, the target is inside
-the grant's scope, `tier` is the grant's own tier and `profile` is the grant's profile. It still
-answers yes or no, and the dispatcher never reads a tier out of the grant. Any other verb carrying
-`profile` or `tier` is refused rather than having the fields ignored. These refusals are verb
-refusals, so they keep their reasons. That tells the asker which tier and profile the grant carries,
-which the split above allows: the asker is the leaf delegate, already holding the capability.
+narrows only to itself, and a hop (a child entry a broker writes) carries its parent's profile
+unchanged, so no hop can relabel a human's `read` grant as `unattended` or choose which profile its
+chain may run. A profile task's child task does not hop: the gateway mints it a fresh root, naming
+the child's profile at the parent's tier, with a target inside the parent's, which is how fan-out
+crosses profiles. The dispatcher asks the verb `profile.run` with two request fields of its own,
+`profile` and `tier`, and a target scope (`project/P/location/L/cluster/C`, or the install's
+`namespace/N` for a task with no target, never empty). The verifier allows it only when the verb is
+in the grant's tier set, the target is inside the grant's scope, `tier` is the grant's own tier and
+`profile` is the grant's profile. It still answers yes or no, and the dispatcher never reads a tier
+out of the grant. Any other verb carrying `profile` or `tier` is refused rather than having the
+fields ignored. These refusals are verb refusals, so they keep their reasons. That tells the asker
+which tier and profile the grant carries, which the split above allows: the asker is the leaf
+delegate, already holding the capability.
 
 The caller identity in the first check **must be request-scoped**. An identity shared across
 concurrent requests cannot separate them, and the guarantee this design exists to make is void
