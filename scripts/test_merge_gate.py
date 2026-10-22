@@ -472,7 +472,7 @@ PUSHED = "2026-10-13T10:00:00Z"
 
 
 def removal(actor="octocat", at="2026-10-13T11:00:00Z", reason=None):
-    event = {"createdAt": at, "actor": {"login": actor}}
+    event = {"createdAt": at, "actor": {"__typename": "User", "login": actor}}
     if reason is not None:
         event["reason"] = reason
     return event
@@ -596,6 +596,60 @@ class SweepTest(unittest.TestCase):
         self.assertEqual(api.comment_reads, [f"/repos/{REPO}/issues/7/comments?since=2026-10-13T11:00:00Z"])
         # Prow reads a slash command at the start of a line; no line of the comment may start one.
         self.assertFalse(any(line.startswith("/") for line in body.splitlines()))
+
+    def _comment_for(self, reason, actor="github-merge-queue"):
+        pull = {"number": 7, "id": "PR_7", "removal": removal(actor, reason=reason)}
+        return gate.left_out_comment(pull, "<!-- marker -->", gate.left_out_line(pull))
+
+    def test_every_comment_carries_the_line_and_the_lgtm_note(self):
+        for reason in ("failed_checks", "manual", "merge_conflict", "something_new", None):
+            with self.subTest(reason=reason):
+                pull = {"number": 7, "id": "PR_7", "removal": removal("octocat", reason=reason)}
+                body = gate.left_out_comment(pull, "<!-- marker -->", gate.left_out_line(pull))
+                self.assertTrue(body.startswith("<!-- marker -->\nThis pull request was removed from the merge queue"))
+                self.assertIn("```text\n" + gate.left_out_line(pull) + "\n```", body)
+                self.assertIn("A push keeps `lgtm` for members of gke-labs/Googlers. Other authors may need a new `/lgtm`.", body)
+                self.assertFalse(any(line.startswith("/") for line in body.splitlines()))
+
+    def test_a_second_failed_check_asks_for_a_fix_or_an_empty_push_then_a_write_user(self):
+        body = self._comment_for("failed_checks")
+        self.assertIn("because a required check failed again, after the one retry", body)
+        self.assertIn("If a check found a real problem, push a fix.", body)
+        self.assertIn("If it was a flake, push an empty commit, and the sweep puts it back once its checks pass:", body)
+        self.assertIn('```shell\ngit commit --allow-empty -m "Re-enter the merge queue" && git push\n```', body)
+        self.assertIn("If that does not work, ask a write user to run this command:", body)
+        self.assertIn("```shell\ngh api graphql -f query='" + gate.ENABLE_COMMAND_QUERY.format(id="PR_7") + "'\n```", body)
+        self.assertLess(body.index("push an empty commit"), body.index("ask a write user"))
+
+    def test_a_manual_removal_names_who_and_asks_for_a_push_or_a_hold(self):
+        body = self._comment_for("manual", actor="octocat")
+        self.assertIn("removed from the merge queue by @octocat.", body)
+        self.assertIn("If @octocat did not mean to keep it out, push (an empty commit is enough), and the sweep puts it back once its checks pass:", body)
+        self.assertIn("git commit --allow-empty", body)
+        self.assertIn("If they did mean to keep it out, they should add a hold label (`/hold`), so that it stays out after the next push.", body)
+        self.assertNotIn("ask a write user", body)
+
+    def test_only_a_user_is_mentioned(self):
+        app = {"number": 7, "id": "PR_7", "removal": {"createdAt": "t", "reason": "manual", "actor": {"__typename": "Bot", "login": "some-app[bot]"}}}
+        body = gate.left_out_comment(app, "<!-- marker -->", gate.left_out_line(app))
+        self.assertIn("removed from the merge queue by `some-app`.", body)
+        self.assertNotIn("@some-app", body)
+        nobody = {"number": 7, "id": "PR_7", "removal": {"createdAt": "t", "reason": "manual", "actor": None}}
+        body = gate.left_out_comment(nobody, "<!-- marker -->", gate.left_out_line(nobody))
+        self.assertIn("removed from the merge queue by unknown.", body)
+        self.assertNotIn("@unknown", body)
+
+    def test_a_merge_conflict_asks_for_a_rebase(self):
+        body = self._comment_for("merge_conflict")
+        self.assertIn("because it conflicts with `main`, or with a pull request ahead of it in the queue.", body)
+        self.assertIn("Rebase onto `main`, fix any conflict, and push. The sweep puts it back after its checks pass.", body)
+        self.assertNotIn("--allow-empty", body)
+
+    def test_another_reason_is_named_and_gets_the_push_then_write_user_advice(self):
+        body = self._comment_for("something_new")
+        self.assertIn("removed from the merge queue (reason: something_new).", body)
+        self.assertIn("git commit --allow-empty", body)
+        self.assertIn("ask a write user to run this command:", body)
 
     def test_a_failed_comment_read_is_logged_and_does_not_fail_the_sweep(self):
         api = FakeAPI(nodes=[node(7, APPROVED, timeline=[removal()])])

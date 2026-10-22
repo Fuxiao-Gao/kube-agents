@@ -71,8 +71,10 @@ again would put the same failing tree back in the queue every five minutes.
 One exception: after the first `failed_checks` removal since the push, the
 sweep puts it back once, because a flaky or cancelled check gets the same
 reason as a real failure. A second one keeps it out.
-The sweep posts one comment on such a pull request, with the reason and the
-command a write user runs to put it back.
+The sweep posts one comment on such a pull request, with the reason and what
+to do for that reason. The first step is always a push: a fix, a rebase, or an
+empty commit. For a failed check, or a reason the comment does not name, a
+write user's re-add command follows if the push does not work.
 """
 
 import argparse
@@ -145,26 +147,78 @@ DISABLE = "disable"
 LEFT_OUT = "left out"
 #: What a left-out line says when the removal event carries no reason or actor.
 UNKNOWN_REMOVAL_FIELD = "unknown"
+#: The removal reason GitHub writes for a failed or cancelled `merge_group` check. A flake and a
+#: real failure both get it, so the sweep puts the pull request back once per head commit.
+FAILED_CHECKS_REASON = "failed_checks"
 #: Opens the comment that tells the author why the sweep left the pull request out. Keyed on the
 #: removal's time, so each removal gets one comment and a later removal gets a new one.
 LEFT_OUT_MARKER = "<!-- merge-queue-left-out {removed} -->"
 LEFT_OUT_COMMENT = """{marker}
-This pull request was removed from the merge queue. The enqueue sweep puts a pull request back \
-once after a failed check, and it does not put this one back until a new push. The sweep logged:
+{headline} The sweep logged:
 
 ```text
 {line}
 ```
 
-If the removal was a flake, ask a write user to run this command:
+{advice}
+
+A push keeps `lgtm` for members of {team}. Other authors may need a new `/lgtm`.
+"""
+#: The GraphQL type of an actor the comment may @-mention; an App or an unknown actor is named
+#: without the `@`, so the comment pings no account that only shares its name.
+USER_ACTOR_TYPE = "User"
+#: The other two removal reasons the comment answers by name.
+MANUAL_REASON = "manual"
+MERGE_CONFLICT_REASON = "merge_conflict"
+#: The commands the comment hands the author and a write user.
+EMPTY_PUSH_COMMAND = 'git commit --allow-empty -m "Re-enter the merge queue" && git push'
+ENABLE_COMMAND = "gh api graphql -f query='{query}'"
+#: The comment's first line and advice, per removal reason. The sweep posts it only when the pull
+#: request stays out, so a `failed_checks` one has already had its retry.
+LEFT_OUT_HEADLINES = {
+    FAILED_CHECKS_REASON: "This pull request was removed from the merge queue because a required check failed again, "
+    "after the one retry the enqueue sweep gives it.",
+    MANUAL_REASON: "This pull request was removed from the merge queue by {who}.",
+    MERGE_CONFLICT_REASON: "This pull request was removed from the merge queue because it conflicts with `main`, "
+    "or with a pull request ahead of it in the queue.",
+}
+LEFT_OUT_HEADLINE_OTHER = "This pull request was removed from the merge queue (reason: {why})."
+LEFT_OUT_ADVICE = {
+    FAILED_CHECKS_REASON: """If a check found a real problem, push a fix.
+
+If it was a flake, push an empty commit, and the sweep puts it back once its checks pass:
 
 ```shell
-gh api graphql -f query='{enable}'
+{push}
 ```
 
-If a check found a real problem, push a fix. If a person removed it on purpose, add a hold label \
-so that it stays out after the next push.
-"""
+If that does not work, ask a write user to run this command:
+
+```shell
+{enable}
+```""",
+    MANUAL_REASON: """If {who} did not mean to keep it out, push (an empty commit is enough), and the sweep puts \
+it back once its checks pass:
+
+```shell
+{push}
+```
+
+If they did mean to keep it out, they should add a hold label (`/hold`), so that it stays out after \
+the next push.""",
+    MERGE_CONFLICT_REASON: "Rebase onto `main`, fix any conflict, and push. The sweep puts it back after its checks pass.",
+}
+LEFT_OUT_ADVICE_OTHER = """Push a fix, or an empty commit, and the sweep puts it back once its checks pass:
+
+```shell
+{push}
+```
+
+If that does not work, ask a write user to run this command:
+
+```shell
+{enable}
+```"""
 #: The sweep's own login when `--actor` names no App: `GITHUB_TOKEN`'s, which makes no queue
 #: call. A write run always passes the App's slug, whose own dequeue of a held pull request does
 #: not keep it out; a dry run has no App token, so it may report that dequeue as a removal.
@@ -178,11 +232,8 @@ PUSH_REMOVAL_WINDOW = timedelta(minutes=2)
 CHECK_SUITES_READ = 10
 #: Queue removals read per pull request: enough to count the `failed_checks` ones since the push.
 REMOVALS_READ = 10
-#: The removal reason GitHub writes for a failed or cancelled `merge_group` check. A flake and a
-#: real failure both get it, so the sweep puts the pull request back once per head commit.
-FAILED_CHECKS_REASON = "failed_checks"
 #: How many times per head commit the sweep puts a pull request back after `failed_checks`
-#: removals. `LEFT_OUT_COMMENT` and the sweep's log line say "once"; change them with it.
+#: removals. `LEFT_OUT_HEADLINES` and the sweep's log line say "one retry"; change them with it.
 FAILED_CHECKS_RETRIES = 1
 
 #: The smoke and the gates are commit statuses; the rollup also carries check runs, which this skips.
@@ -197,7 +248,7 @@ query($owner: String!, $name: String!, $base: String!, $after: String) {
         autoMergeRequest { enabledAt }
         mergeQueueEntry { id }
         timelineItems(last: %(removals)d, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) {
-          nodes { ... on RemovedFromMergeQueueEvent { createdAt reason actor { login } } }
+          nodes { ... on RemovedFromMergeQueueEvent { createdAt reason actor { __typename login } } }
         }
         commits(last: 1) { nodes { commit {
           checkSuites(first: %(suites)d) { nodes { createdAt } }
@@ -512,8 +563,31 @@ def left_out_line(pull):
     )
 
 
+def left_out_comment(pull, marker, line):
+    """The comment body for a pull request the sweep leaves out: why, the logged line, what to do."""
+    removal = pull.get("removal") or {}
+    actor = removal.get("actor") or {}
+    login = actor.get("login")
+    why = removal.get("reason") or UNKNOWN_REMOVAL_FIELD
+    if login and actor.get("__typename") == USER_ACTOR_TYPE:
+        who = f"@{login}"
+    else:
+        who = f"`{login.removesuffix(BOT_SUFFIX)}`" if login else UNKNOWN_REMOVAL_FIELD
+    fields = {
+        "who": who,
+        "why": why,
+        "push": EMPTY_PUSH_COMMAND,
+        "enable": ENABLE_COMMAND.format(query=ENABLE_COMMAND_QUERY.format(id=pull["id"])),
+    }
+    headline = LEFT_OUT_HEADLINES.get(why, LEFT_OUT_HEADLINE_OTHER).format(**fields)
+    advice = LEFT_OUT_ADVICE.get(why, LEFT_OUT_ADVICE_OTHER).format(**fields)
+    return LEFT_OUT_COMMENT.format(marker=marker, headline=headline, line=line, advice=advice, team=STICKY_LGTM_TEAM)
+
+
 def comment_left_out(api, pull, line, dry_run=False):
-    """Post `line` once as a comment on a pull request the sweep leaves out. Returns a log line.
+    """Post the left-out comment, with `line` in it, once on a pull request the sweep leaves out.
+
+    Returns a log line.
 
     One comment per removal: the sweep runs every five minutes, so it reads the
     comments since the removal first and skips a pull request that already has
@@ -531,7 +605,7 @@ def comment_left_out(api, pull, line, dry_run=False):
         if any((comment.get("body") or "").startswith(marker) for comment in api.get_all(since)):
             return f"#{pull['number']}: left-out comment already posted"
         if not dry_run:
-            body = LEFT_OUT_COMMENT.format(marker=marker, line=line, enable=ENABLE_COMMAND_QUERY.format(id=pull["id"]))
+            body = left_out_comment(pull, marker, line)
             api.post(path, {"body": body})
     except Exception as error:  # a notice that fails must not turn every sweep red
         return f"#{pull['number']}: left-out comment not posted: {error}"
