@@ -709,6 +709,12 @@ override identity or correlation fields.
   rereads the evidence and repeats the same request as one action. After a
   configuration change, the page waits for or monitors the rollout and replaces
   the status with the updated connection result.
+- **Harness limits:** a Setup page that needs no connection. It reads the
+  committed load measurements (`bench/scale/harness-limits.json`, designed in
+  [agent-harness-bottlenecks.md](agent-harness-bottlenecks.md)), or a labelled
+  sample until they exist, and answers two sizing questions: whether given
+  container limits hold a described fleet, and what limits, machine type and
+  node count that fleet needs.
 - **Observability:** an always-visible navigation group containing Overview,
   Activity Explorer, Task Kanban, and Scheduled Cron. A shared connection gate
   replaces provider-backed content with concise connection guidance until the
