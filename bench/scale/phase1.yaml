@@ -1,0 +1,94 @@
+# Phase 1 of docs/designs/agent-harness-bottlenecks.md: each factor at the base and one higher level.
+# Every target value can be overridden with SCALE_<KEY> in the environment (SCALE_PROJECT_ID, ...).
+phase: phase1
+
+target:
+  project_id: haoxuw-gke-dev
+  host_context: gke_haoxuw-gke-dev_us-central1-c_scale-host
+  host_cluster: scale-host
+  host_location: us-central1-c
+  namespace: kubeagents-system
+  zone: us-central1-c
+  cluster_prefix: scale-
+  mode: next
+  commit: eeb8a95ceb0a9efd66434161f87820b35b65360c
+  # Relative to this file.
+  data_file: harness-limits.json
+
+# The base point; a factor's level replaces its base value and the rest stay.
+base:
+  clusters: 2
+  nodes: 2
+  objects: 100
+  churn_per_minute: 10
+  warning_events: 1
+  concurrent: 1
+  listing_pods: 100
+
+# The higher level per factor. The base value is listed first and is not re-run per factor.
+factors:
+  clusters: [2, 8]
+  nodes: [2, 100]
+  objects: [100, 4000]
+  churn_per_minute: [10, 1000]
+  warning_events: [1, 100]
+  concurrent: [1, 15]
+  listing_pods: [100, 4000]
+
+settings:
+  # Settle time after a level is applied, before an operation starts.
+  settle_seconds: 300
+  # Pods per fixture node the runner plans for (110 is GKE's per-node maximum; system Pods take the rest).
+  pods_per_node: 90
+  fixture_machine_type: e2-small
+  fixture_pool: scale-pool
+  # How long a churned Pod lives before the churner deletes it.
+  churn_pod_lifetime_seconds: 30
+  # Seconds the runner waits for the install to register a changed cluster count.
+  cluster_registration_timeout_seconds: 5400
+
+operations:
+  onboarding:
+    kind: reset_soak
+    factors: [clusters, objects]
+    runs: 1
+    window_seconds: 7200
+  watcher_soak:
+    kind: soak
+    factors: [nodes, churn_per_minute, warning_events]
+    runs: 1
+    window_seconds: 3600
+  fleet_audit:
+    kind: prompt
+    factors: [clusters, objects, listing_pods]
+    runs: 3
+    timeout_seconds: 3600
+    prompt: >-
+      Run a fleet audit across every cluster you manage and report the findings,
+      grouped by cluster.
+  fan_out:
+    kind: prompt
+    factors: [clusters, concurrent]
+    runs: 3
+    timeout_seconds: 2400
+    prompt: Which of my clusters, if any, are stressed right now? Check every cluster.
+    follow_up: Which clusters do you monitor?
+  upgrade_readiness:
+    kind: prompt
+    factors: [clusters]
+    runs: 3
+    timeout_seconds: 2400
+    prompt: Run the upgrade readiness report for every cluster and summarize what blocks an upgrade.
+  boot_burst:
+    kind: restart_soak
+    factors: [warning_events]
+    runs: 3
+    window_seconds: 900
+  listing:
+    kind: prompt
+    factors: [listing_pods]
+    runs: 3
+    timeout_seconds: 1800
+    prompt: >-
+      List every pod in namespace scale-listing on cluster scale-01 with its node and status,
+      as one table.

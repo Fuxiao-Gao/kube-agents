@@ -197,7 +197,7 @@ Building comes first and takes about 2–3 days, so Phase 1 is about 5 days of e
 Steps, in order:
 
 1. The experiment install, its Standard host cluster, the test clusters, and the scope exclusions on both installs (Decisions 5–7).
-2. The fixtures and runner under `bench/scale/`, built to Decision 9 with the Phase 1 config, and their tests: the object mix for the 4,000 level, the node-pool scaling, the churn and burst generators, the 4,000-pod listing, and a loop that runs the operations and merges records into `bench/scale/harness-limits.json`.
+2. The fixtures and runner (`bench/kube_agents_bench/scale/`, with the Phase 1 plan in `bench/scale/phase1.yaml`), built to Decision 9, and their tests: the object mix for the 4,000 level, the node-pool scaling, the churn and burst generators, the 4,000-pod listing, and a loop that runs the operations and merges records into `bench/scale/harness-limits.json`.
 3. The base run.
 4. The other runs.
 5. An admin console page that loads `bench/scale/harness-limits.json` and shows, per metric, the two points against the metric's threshold, with the raw data in a toggled section. It answers the two sizing questions from the two-point estimates.
