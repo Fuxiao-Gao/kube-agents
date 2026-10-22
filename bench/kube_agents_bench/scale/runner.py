@@ -32,8 +32,8 @@ DEFAULT_POOL_NODES = 2
 # Cloud Monitoring needs a few minutes before a window's last points are queryable.
 MONITORING_DELAY_SECONDS = 240
 REGISTRATION_POLL_SECONDS = 60
-REGISTERED_JSONPATH = "{.status.usage.clustersRegistered}"
-PLATFORM_AGENT_RESOURCE = "platformagents"
+# Time for a restarted watcher to list and sync every cluster before it is asked what it watches.
+WATCHER_START_SECONDS = 180
 RESPONSE_FITS = ["response_seconds", "first_card_seconds"]
 LEVEL_LABEL = "harness-scale/level"
 ISO_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -84,22 +84,31 @@ class Runner:
         self.wait_registered(count)
 
     def wait_registered(self, count: int) -> None:
+        """Wait for a Cluster Agent profile per test cluster, then make the event watcher watch them.
+
+        The watcher builds its watch set once, at start, from the profiles that
+        exist then; a profile the reconcile scaffolds later is not watched until
+        the watcher restarts. So once every profile exists, a test cluster the
+        watcher does not report is fixed by restarting the gateway pod, which is
+        what an operator would have to do, and the restart is logged.
+        """
+        names = set(self.cluster_names(count))
         timeout = float(self.settings.get("cluster_registration_timeout_seconds", 0))
         deadline = time.monotonic() + timeout
-        while True:
-            try:
-                value = kube.kubectl(self.install.context, "get", PLATFORM_AGENT_RESOURCE, "-n",
-                                     self.install.namespace, "-o", f"jsonpath={REGISTERED_JSONPATH}")
-                registered = int(value.split()[0]) if value.strip() else -1
-            except (kube.CommandError, ValueError):
-                registered = -1
-            if registered == count:
-                return
+        while self.install.profile_clusters() & names != names:
             if time.monotonic() >= deadline:
-                LOG.warning("install registers %s clusters, expected %s; continuing", registered, count)
-                return
-            LOG.info("waiting for registration: %s of %s clusters", registered, count)
+                LOG.warning("profiles for %s missing after %ss; continuing",
+                            sorted(names - self.install.profile_clusters()), timeout)
+                break
+            LOG.info("waiting for Cluster Agent profiles: %s of %s", len(self.install.profile_clusters() & names), count)
             time.sleep(REGISTRATION_POLL_SECONDS)
+        watched = self.install.watched_clusters() & names
+        if watched != names:
+            LOG.warning("event watcher watches %s of %s test clusters; restarting the gateway so it re-reads profiles",
+                        len(watched), count)
+            operations.restart(self.install.context, self.install.namespace)
+            time.sleep(WATCHER_START_SECONDS)
+            LOG.info("event watcher now watches %s", sorted(self.install.watched_clusters() & names))
 
     def ensure_nodes(self, values: dict[str, float]) -> None:
         pods = fixtures.fixture_pods(values, int(self.settings["churn_pod_lifetime_seconds"]))
@@ -267,6 +276,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--factor", default=BASE_FACTOR)
     parser.add_argument("--level", type=float, default=0)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--limit", type=int, default=0, help="stop after this many runs (0: all)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     plan = load_plan(args.config)
@@ -275,6 +285,8 @@ def main(argv: list[str] | None = None) -> int:
         if (not args.only_factor or s.factor == args.only_factor)
         and (not args.only_operation or s.operation.name == args.only_operation)
     ]
+    if args.limit:
+        specs = specs[: args.limit]
     if args.command == "plan":
         for spec in specs:
             print(f"{spec.factor:18} {spec.level:>8g} {spec.operation.name:18} run {spec.run}")

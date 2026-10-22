@@ -33,6 +33,14 @@ LOCALHOST = "127.0.0.1"
 METRICS_PATH = "/metrics"
 PYTHON_FETCH = "import sys, urllib.request; sys.stdout.write(urllib.request.urlopen(sys.argv[1]).read().decode())"
 SIDECAR_RESTART_POLICY = "Always"
+GATEWAY_FRAGMENT = "gateway"
+AGENT_CONTAINER = "platform-agent"
+PROFILES_DIR = "/opt/data/profiles"
+# The scaffolder names a profile cluster-<project>-<cluster>-<location>; the project is
+# known, so the cluster is what lies between it and the location (a region or zone).
+PROFILE_PREFIX = "cluster-"
+LOCATION_SUFFIX_RE = re.compile(r"-[a-z]+-[a-z]+[0-9]+(?:-[a-z])?$")
+WATCHER_CLUSTER_UP = "k8s_event_watcher_cluster_up"
 # (snapshot attribute, pod name fragment, container, env var naming the port or None for its first port)
 SCRAPE_TARGETS = (
     ("watcher", "gateway", "agent-api-auth", "EVENT_WATCHER_METRICS_PORT"),
@@ -205,6 +213,33 @@ class Install:
                     snap.errors.append(f"scrape {pod['metadata']['name']}: {exc}")
             setattr(snap, attr, samples)
         return snap
+
+    def profile_clusters(self) -> set[str]:
+        """Cluster names that have a Cluster Agent profile on the agent's data volume."""
+        pod = self.pod_named(GATEWAY_FRAGMENT)
+        if not pod:
+            return set()
+        try:
+            out = kube.kubectl(self.context, "exec", "-n", self.namespace, pod["metadata"]["name"], "-c",
+                               AGENT_CONTAINER, "--", "sh", "-c", f"ls {PROFILES_DIR} 2>/dev/null || true")
+        except kube.CommandError:
+            return set()
+        prefix = f"{PROFILE_PREFIX}{self.project}-"
+        names = set()
+        for entry in out.split():
+            if not entry.startswith(prefix):
+                continue
+            rest = entry[len(prefix):]
+            match = LOCATION_SUFFIX_RE.search(rest)
+            if match:
+                names.add(rest[: match.start()])
+        return names
+
+    def watched_clusters(self) -> set[str]:
+        """Cluster names the event watcher reports as up."""
+        samples = self.snapshot().watcher
+        return {labels.get("cluster", "") for name, labels, value in samples
+                if name == WATCHER_CLUSTER_UP and value >= 1}
 
     def pvc_metrics(self) -> list[Metric]:
         """Used and total bytes of the agent's data volume, and the largest profile."""
