@@ -2,8 +2,8 @@
 """Keep a pull request with unresolved review threads out of the merge queue.
 
 `main` requires every review conversation resolved before a merge. The pool is
-the pull requests the enqueue sweep (`merge_gate.py sweep`) would put in the
-queue: not a draft, carrying `lgtm` and `approved`. The script was written for
+the pull requests the enqueue sweep (`merge_gate.py sweep`) turns auto-merge on
+for: not a draft, carrying `lgtm` and `approved`. The script was written for
 Tide, which did not read the conversation rule: it picked the lowest-numbered
 pull request in its pool, GitHub refused the merge, and Tide retried it every
 ~85 seconds ahead of every other one. #608 and #1197 held the whole queue that

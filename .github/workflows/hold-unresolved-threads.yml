@@ -19,8 +19,8 @@ name: Hold Unresolved Threads
 # `pull_request_review_thread`, but from a fork -- where every pull request
 # here comes from -- that event hands the workflow a read-only token, so it
 # cannot be the mechanism. The `labeled` fast path closes the window that
-# matters most: the moment `lgtm` or `approved` lands is the moment the
-# enqueue sweep would otherwise turn auto-merge on, and `pull_request_target` carries a write token
+# matters most: the moment `lgtm` or `approved` lands is also the moment the
+# enqueue sweep's own fast path turns auto-merge on, and `pull_request_target` carries a write token
 # whatever the head's origin. Nothing from the pull request is checked out or
 # read as code on either path.
 on:
