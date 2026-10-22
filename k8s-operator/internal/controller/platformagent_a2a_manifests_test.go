@@ -595,9 +595,9 @@ func TestHandleDeletionReapsOnlyTheLabeledJetStreamPVC(t *testing.T) {
 	})
 }
 
-// The web read surface: a websocket listener (still plain ws, unlike the TLS
-// client listener), a ClusterIP port
-// for it, and a `web` user that can watch everything and say nothing —
+// The web read surface: a websocket listener on TLS from the bus's serving
+// pair (#3651; TestTheRenderedWebsocketListenerServesTLS runs it), a ClusterIP
+// port for it, and a `web` user that can watch everything and say nothing —
 // subscribe on a2a.>, the JetStream read API, its own inbox, and no publish
 // reach beyond those. The read-only web rail is the consumer; kubectl
 // port-forward is the demo transport, which is why ClusterIP is enough.
@@ -607,8 +607,20 @@ func TestBuildA2ANATSConfigWebsocketAndWebUser(t *testing.T) {
 	if !strings.Contains(conf, "websocket {") {
 		t.Fatal("nats.conf has no websocket block")
 	}
-	if !strings.Contains(conf, "no_tls: true") {
-		t.Error("websocket block does not state plain ws (no_tls: true)")
+	// Slice the websocket block so a tls block elsewhere (the client
+	// listener's) cannot stand in for its own.
+	ws := conf[strings.Index(conf, "websocket {"):]
+	ws = ws[:strings.Index(ws, "\n}\n")]
+	if strings.Contains(ws, "no_tls") {
+		t.Error("websocket block still sets no_tls")
+	}
+	for _, line := range []string{
+		`cert_file: "` + a2aNATSTLSMountDir + "/" + a2aNATSTLSCertKey + `"`,
+		`key_file: "` + a2aNATSTLSMountDir + "/" + a2aNATSTLSKeyKey + `"`,
+	} {
+		if !strings.Contains(ws, line) {
+			t.Errorf("websocket block has no %s; it must serve the bus's serving pair", line)
+		}
 	}
 	if !strings.Contains(conf, "port: 9222") {
 		t.Error("websocket listener is not on 9222")

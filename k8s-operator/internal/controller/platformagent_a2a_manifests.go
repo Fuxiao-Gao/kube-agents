@@ -2092,18 +2092,19 @@ max_control_line: 65536
 
 # Websocket listener for the console page and the read-only web user.
 #
-# Plain ws IS the playground posture, stated rather than implied, and stated
-# accurately: the CONNECT frame carries a password in cleartext across the
-# pod network. The Service is ClusterIP, so nothing OUTSIDE the cluster
-# reaches this listener. An ingress NetworkPolicy fences the pod network too:
-# 4222 from the enumerated bus clients, 9222 from the console server alone,
-# and no pod-network peer for 8222. The console server is admitted because it
-# is the page's proxy. A browser reaches it through a kubectl port-forward and
-# it forwards the websocket here with the browser's headers intact. It is not
-# an in-cluster door for anything else. A port-forward straight to 9222 still
-# works for local tooling and the live tests, because it enters from the
-# node, which NetworkPolicy does not govern. The client listener above is
-# TLS; this one is still plain.
+# TLS, from the same serving pair as the client listener (the tls block
+# above): the CONNECT frame carries a password, so the pod-network leg from
+# the console server is encrypted and verified against the bus CA. The
+# Service is ClusterIP, so nothing OUTSIDE the cluster reaches this listener.
+# An ingress NetworkPolicy fences the pod network too: 4222 from the
+# enumerated bus clients, 9222 from the console server alone, and no
+# pod-network peer for 8222. The console server is admitted because it is the
+# page's proxy. A browser reaches it through a kubectl port-forward and it
+# forwards the websocket here over wss, with the browser's headers intact. It
+# is not an in-cluster door for anything else. A port-forward straight to
+# 9222 still enters from the node, which NetworkPolicy does not govern, but it
+# now needs a TLS client that trusts the bus CA and names the Service as its
+# server name: a browser cannot, so the page always goes through the console.
 #
 # The origin allow-list is the console server's origin as the browser sees it
 # through the documented port-forward. The proxy forwards Origin unchanged,
@@ -2120,7 +2121,10 @@ max_control_line: 65536
 # The boundary is the grant lists below.
 websocket {
   port: ` + strconv.Itoa(a2aNATSWebSocketPort) + `
-  no_tls: true
+  tls {
+    cert_file: "` + a2aNATSTLSMountDir + `/` + a2aNATSTLSCertKey + `"
+    key_file: "` + a2aNATSTLSMountDir + `/` + a2aNATSTLSKeyKey + `"
+  }
   allowed_origins: [` + a2aConsoleOriginList() + `]
 }
 
@@ -2424,9 +2428,10 @@ func buildA2ANATSService(agent *agentv1alpha1.PlatformAgent) *corev1.Service {
 			Ports: []corev1.ServicePort{
 				{Name: "client", Port: a2aNATSClientPort},
 				{Name: "monitor", Port: a2aNATSMonitorPort},
-				// The web user's transport. ClusterIP on purpose: the demo
-				// reaches it with kubectl port-forward, and plain ws must not
-				// be reachable any other way.
+				// The console server's transport to the bus, wss under the
+				// bus CA. ClusterIP on purpose: nothing outside the cluster
+				// is meant to reach it, and a browser reaches the console
+				// server, not this port.
 				{Name: "websocket", Port: a2aNATSWebSocketPort},
 			},
 		},
@@ -2599,7 +2604,9 @@ func buildA2ASessionNetworkPolicy(agent *agentv1alpha1.PlatformAgent, dnsCluster
 // its own pods' app label and nothing wider. It is not an in-cluster door for
 // anything else, and a new ws client is a peer to decide on here, not a reason
 // to widen this one. A port-forward straight to 9222 still enters from the
-// node and still works for local tooling and the live tests.
+// node, for tooling that trusts the bus CA and names the Service as its TLS
+// server name; a browser cannot, so the page and the live web tests go
+// through the console server.
 func buildA2ANATSNetworkPolicy(agent *agentv1alpha1.PlatformAgent) *networkingv1.NetworkPolicy {
 	tcp := corev1.ProtocolTCP
 
