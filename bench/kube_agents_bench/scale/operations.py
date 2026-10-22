@@ -15,9 +15,9 @@ import subprocess
 import sys
 import tempfile
 import time
-from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, wait
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from kube_agents_bench.scale import kube
@@ -25,13 +25,21 @@ from kube_agents_bench.scale.config import Operation
 
 LOG = logging.getLogger(__name__)
 
-AGENT_SECRET = "platform-agent-secrets"
-AGENT_SECRET_KEY = "API_SERVER_KEY"
-GATEWAY_FRAGMENT = "gateway"
+# Named for what they hold: the name of the Kubernetes object and of the field that carry the
+# agent API's bearer value, not the value itself.
+AGENT_TOKEN_SOURCE_NAME = "platform-agent-secrets"
+AGENT_TOKEN_FIELD = "API_SERVER_KEY"
+GATEWAY_SELECTOR = "app=platform-agent-gateway"
 RESET_TIMEOUT_SECONDS = 1800
 READY_POLL_SECONDS = 10
-TOKEN_BUCKETS = {"tokens_input": "input", "tokens_output": "output", "tokens_cached": "cache_read"}
-RATE_LIMIT_MARKERS = ("429", "RESOURCE_EXHAUSTED", "rate limit", "Too many concurrent runs")
+READY_WAIT_ARG = "--timeout=60s"
+# devops-bench's canonical token buckets, as the harness reports them.
+TOKEN_BUCKETS = {"tokens_input": "input", "tokens_output": "output", "tokens_cached": "cached"}
+RUN_SLOT_REFUSAL = "Too many concurrent runs"
+RATE_LIMIT_MARKERS = ("RESOURCE_EXHAUSTED", "rate limit", "rate_limit", "Too Many Requests", "RateLimitError")
+# The harness marks a run its transport could not complete; such a run has no response to time.
+INFRA_FAILURE_MARKER = "KUBE_AGENTS_INFRA_FAILURE"
+PROMPT_FAILED = "prompt failed"
 # The agent pod runs under gVisor, which kubectl port-forward cannot reach, so the harness rides
 # the repository's kubectl-exec relay into the sidecar that fronts the agent API (bench/README.md,
 # "Sandboxed installs").
@@ -40,6 +48,7 @@ RELAY_CONTAINER = "agent-api-auth"
 RELAY_REMOTE_PORT = 8643
 RELAY_LOCAL_PORT = 18642
 RELAY_START_SECONDS = 15
+KUBECONFIG_MODE = 0o600
 # What a new install starts without: the agent's data and session metadata, the shell's data, the bus's data.
 RESET_CLAIMS = ("platform-agent-data", "system-metadata", "data-platform-agent-shell-0", "data-platform-agent-a2a-nats-0")
 RESET_STATEFUL_PODS = ("platform-agent-shell-0", "platform-agent-a2a-nats-0")
@@ -51,6 +60,7 @@ PROVISION_JOB_FRAGMENT = "a2a-provision"
 class OperationResult:
     response_seconds: list[float] = field(default_factory=list)
     tokens: dict[str, float] = field(default_factory=dict)
+    failed_prompts: int = 0
     provider_429s: int = 0
     run_slot_refusals: int = 0
     errors: list[str] = field(default_factory=list)
@@ -58,8 +68,8 @@ class OperationResult:
 
 def agent_env(context: str, namespace: str) -> dict[str, str]:
     """The environment the harness reads, for the experiment install's agent API."""
-    encoded = kube.kubectl(context, "get", "secret", AGENT_SECRET, "-n", namespace,
-                           "-o", f"jsonpath={{.data.{AGENT_SECRET_KEY}}}")
+    encoded = kube.kubectl(context, "get", "secret", AGENT_TOKEN_SOURCE_NAME, "-n", namespace,
+                           "-o", f"jsonpath={{.data.{AGENT_TOKEN_FIELD}}}")
     return {
         "AGENT_CLUSTER_CONTEXT": context,
         "AGENT_NAMESPACE": namespace,
@@ -85,7 +95,7 @@ class Relay:
     def start(self) -> None:
         self.kubeconfig.write_text(kube.kubectl(self.context, "config", "view", "--minify", "--flatten",
                                                 f"--context={self.context}"))
-        self.kubeconfig.chmod(0o600)
+        self.kubeconfig.chmod(KUBECONFIG_MODE)
         self.proc = subprocess.Popen(
             [sys.executable, str(RELAY_SCRIPT), "--namespace", self.namespace, "--container", RELAY_CONTAINER,
              "--remote-port", str(RELAY_REMOTE_PORT), "--local-port", str(RELAY_LOCAL_PORT)],
@@ -106,7 +116,7 @@ class Relay:
 def _prompt_worker(prompt: str, env: dict[str, str]) -> dict[str, Any]:
     """Run one prompt in this process and return the parts a record needs."""
     os.environ.update(env)
-    from kube_agents_bench.harness import KubeAgentsHarness  # imported here: the harness reads env at import
+    from kube_agents_bench.harness import KubeAgentsHarness  # imported after the environment is set
 
     started = time.monotonic()
     result = KubeAgentsHarness().run(prompt)
@@ -118,29 +128,58 @@ def _prompt_worker(prompt: str, env: dict[str, str]) -> dict[str, Any]:
     }
 
 
-def run_prompts(operation: Operation, env: dict[str, str], concurrent: int) -> OperationResult:
-    """The operation's prompt, plus ``concurrent - 1`` follow-up questions sent at the same moment."""
-    prompts = [operation.prompt] + [operation.follow_up or operation.prompt] * max(0, concurrent - 1)
+def fold_answer(outcome: OperationResult, answer: dict[str, Any]) -> None:
+    """Add one prompt's answer to the run's outcome.
+
+    A prompt the transport could not complete, or one that came back empty, is
+    a failed prompt, not a fast one: it is counted and its time is not recorded.
+    """
+    errors = list(answer.get("errors") or [])
+    failed = any(INFRA_FAILURE_MARKER in error for error in errors) or not answer.get("output_chars")
+    if failed:
+        outcome.failed_prompts += 1
+        outcome.errors.append(f"{PROMPT_FAILED}: " + ("; ".join(errors) or "empty answer"))
+    else:
+        outcome.response_seconds.append(float(answer["seconds"]))
+    for metric, bucket in TOKEN_BUCKETS.items():
+        value = (answer.get("tokens") or {}).get(bucket)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            outcome.tokens[metric] = outcome.tokens.get(metric, 0.0) + value
+    for error in errors:
+        if RUN_SLOT_REFUSAL in error:
+            outcome.run_slot_refusals += 1
+        elif any(marker.lower() in error.lower() for marker in RATE_LIMIT_MARKERS):
+            outcome.provider_429s += 1
+    if not failed:
+        outcome.errors.extend(errors)
+
+
+def run_prompts(operation: Operation, env: dict[str, str], concurrent: int, first_cluster: str) -> OperationResult:
+    """The operation's prompt, plus ``concurrent - 1`` follow-up questions sent at the same moment.
+
+    The whole batch shares one deadline, the operation's timeout; a prompt still
+    running at the deadline is counted as failed and its worker is abandoned.
+    """
+    prompt = operation.prompt.format(first_cluster=first_cluster)
+    follow_up = (operation.follow_up or operation.prompt).format(first_cluster=first_cluster)
+    prompts = [prompt] + [follow_up] * max(0, concurrent - 1)
     outcome = OperationResult()
-    with ProcessPoolExecutor(max_workers=len(prompts)) as pool:
-        futures = [pool.submit(_prompt_worker, prompt, env) for prompt in prompts]
+    pool = ProcessPoolExecutor(max_workers=len(prompts))
+    try:
+        futures = [pool.submit(_prompt_worker, text, env) for text in prompts]
+        _, pending = wait(futures, timeout=operation.timeout_seconds or None)
         for future in futures:
-            try:
-                answer = future.result(timeout=operation.timeout_seconds or None)
-            except Exception as exc:  # a prompt that dies is recorded, and the run goes on
-                outcome.errors.append(f"prompt failed: {exc}")
+            if future in pending:
+                outcome.failed_prompts += 1
+                outcome.errors.append(f"{PROMPT_FAILED}: no answer within {operation.timeout_seconds}s")
                 continue
-            outcome.response_seconds.append(answer["seconds"])
-            for metric, bucket in TOKEN_BUCKETS.items():
-                value = answer["tokens"].get(bucket)
-                if isinstance(value, (int, float)) and not isinstance(value, bool):
-                    outcome.tokens[metric] = outcome.tokens.get(metric, 0.0) + value
-            for error in answer["errors"]:
-                outcome.errors.append(error)
-                if "Too many concurrent runs" in error:
-                    outcome.run_slot_refusals += 1
-                elif any(marker in error for marker in RATE_LIMIT_MARKERS):
-                    outcome.provider_429s += 1
+            try:
+                fold_answer(outcome, future.result())
+            except Exception as exc:  # a prompt whose worker died is recorded, and the run goes on
+                outcome.failed_prompts += 1
+                outcome.errors.append(f"{PROMPT_FAILED}: {type(exc).__name__}: {exc}")
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
     return outcome
 
 
@@ -150,11 +189,9 @@ def soak(window_seconds: int) -> OperationResult:
 
 
 def _gateway_pod(context: str, namespace: str) -> str | None:
-    out = kube.kubectl(context, "get", "pods", "-n", namespace, "--no-headers", "-o", "name")
-    for line in out.splitlines():
-        if GATEWAY_FRAGMENT in line:
-            return line.strip()
-    return None
+    out = kube.kubectl(context, "get", "pods", "-n", namespace, "-l", GATEWAY_SELECTOR, "--no-headers", "-o", "name")
+    names = [line.strip() for line in out.splitlines() if line.strip()]
+    return names[0] if names else None
 
 
 def wait_gateway_ready(context: str, namespace: str, timeout: float = RESET_TIMEOUT_SECONDS) -> None:
@@ -163,7 +200,7 @@ def wait_gateway_ready(context: str, namespace: str, timeout: float = RESET_TIME
         pod = _gateway_pod(context, namespace)
         if pod:
             try:
-                kube.kubectl(context, "wait", "-n", namespace, "--for=condition=Ready", pod, "--timeout=60s")
+                kube.kubectl(context, "wait", "-n", namespace, "--for=condition=Ready", pod, READY_WAIT_ARG)
                 return
             except kube.CommandError:
                 pass

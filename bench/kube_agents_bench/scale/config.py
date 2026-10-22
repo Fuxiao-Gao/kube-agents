@@ -26,10 +26,13 @@ TARGET_KEYS = (
     "namespace",
     "zone",
     "cluster_prefix",
+    "cluster_label",
     "mode",
-    "commit",
     "data_file",
 )
+REQUIRED_TARGET_KEYS = ("project_id", "host_cluster", "host_location", "namespace", "zone", "cluster_prefix", "cluster_label")
+# gcloud's kube context name for a cluster.
+HOST_CONTEXT_FORMAT = "gke_{project}_{location}_{cluster}"
 DEFAULT_RUNS = 1
 
 
@@ -88,7 +91,7 @@ class Plan:
         return specs
 
 
-def load_plan(path: Path, environ: dict[str, str] | None = None) -> Plan:
+def load_plan(path: Path, environ: dict[str, str] | None = None, validate_target: bool = True) -> Plan:
     environ = dict(os.environ) if environ is None else environ
     raw = yaml.safe_load(path.read_text())
     target = {key: str(value) for key, value in (raw.get("target") or {}).items()}
@@ -96,9 +99,18 @@ def load_plan(path: Path, environ: dict[str, str] | None = None) -> Plan:
         override = environ.get(ENV_PREFIX + key.upper())
         if override:
             target[key] = override
-    missing = [key for key in ("project_id", "host_context", "namespace") if not target.get(key)]
+    missing = [key for key in REQUIRED_TARGET_KEYS if not target.get(key)] if validate_target else []
     if missing:
-        raise ValueError(f"{path}: target is missing {', '.join(missing)}")
+        names = ", ".join(ENV_PREFIX + key.upper() for key in missing)
+        raise ValueError(f"{path}: target is missing {', '.join(missing)}; set {names}")
+    if validate_target:
+        expected = HOST_CONTEXT_FORMAT.format(project=target["project_id"], location=target["host_location"],
+                                              cluster=target["host_cluster"])
+        target.setdefault("host_context", expected)
+    # The runner resets the install this context reaches; refuse one that is not the host cluster's.
+    if validate_target and not target["host_context"].endswith(f"_{target['host_cluster']}"):
+        raise ValueError(f"{path}: host_context {target['host_context']!r} does not name host_cluster "
+                         f"{target['host_cluster']!r}")
     operations = [
         Operation(
             name=name,

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 from collections.abc import Iterable
 from typing import Any
@@ -24,6 +25,10 @@ RESIZE_TIMEOUT_SECONDS = 1800
 CREATE_CLUSTER_TIMEOUT_SECONDS = 1800
 APPLY_CHUNK = 500
 FIELD_MANAGER = "harness-scale"
+ARGS_SHOWN = 6
+STDERR_TAIL_CHARS = 2000
+FIXTURE_DISK_GB = 20
+RELEASE_CHANNEL = "regular"
 CONTEXT_FORMAT = "gke_{project}_{location}_{cluster}"
 # Kinds the runner counts in every test cluster; the record's totals use these names.
 COUNTED_KINDS = {
@@ -49,7 +54,8 @@ def run(args: list[str], *, stdin: str | None = None, timeout: float = DEFAULT_T
         args, input=stdin, capture_output=True, text=True, timeout=timeout, check=False
     )
     if proc.returncode != 0:
-        raise CommandError(f"{' '.join(args[:6])}... exited {proc.returncode}: {proc.stderr.strip()[-2000:]}")
+        shown = " ".join(args[:ARGS_SHOWN])
+        raise CommandError(f"{shown}... exited {proc.returncode}: {proc.stderr.strip()[-STDERR_TAIL_CHARS:]}")
     return proc.stdout
 
 
@@ -114,12 +120,23 @@ def gcloud(*args: str, project: str, timeout: float = DEFAULT_TIMEOUT_SECONDS) -
     return run([GCLOUD, *args, f"--project={project}", "--quiet"], timeout=timeout)
 
 
-def clusters_with_prefix(project: str, zone: str, prefix: str) -> list[str]:
+def clusters_with_prefix(project: str, zone: str, prefix: str, label: str) -> list[str]:
+    """Test clusters: ``<prefix>NN`` in ``zone`` that also carry ``label``.
+
+    The runner deletes what this returns, so both the name and the label must match.
+    """
+    key, _, value = label.partition("=")
     out = gcloud(
         "container", "clusters", "list", f"--zone={zone}",
-        f"--filter=name~^{prefix}[0-9]+$", "--format=value(name)", project=project,
+        f"--filter=name~^{re.escape(prefix)}[0-9]+$ AND resourceLabels.{key}={value}",
+        "--format=value(name)", project=project,
     )
     return sorted(line.strip() for line in out.splitlines() if line.strip())
+
+
+def has_context(context: str) -> bool:
+    out = run([KUBECTL, "config", "get-contexts", "-o", "name"])
+    return context in out.split()
 
 
 def node_pool_size(project: str, zone: str, cluster: str, pool: str) -> int | None:
@@ -144,7 +161,7 @@ def ensure_node_pool(project: str, zone: str, cluster: str, pool: str, machine_t
     if current is None:
         gcloud(
             "container", "node-pools", "create", pool, f"--cluster={cluster}", f"--zone={zone}",
-            f"--machine-type={machine_type}", f"--num-nodes={size}", "--disk-size=20",
+            f"--machine-type={machine_type}", f"--num-nodes={size}", f"--disk-size={FIXTURE_DISK_GB}",
             project=project, timeout=RESIZE_TIMEOUT_SECONDS,
         )
         return
@@ -158,7 +175,7 @@ def ensure_node_pool(project: str, zone: str, cluster: str, pool: str, machine_t
 def create_cluster(project: str, zone: str, cluster: str, machine_type: str, nodes: int, labels: str) -> None:
     gcloud(
         "container", "clusters", "create", cluster, f"--zone={zone}", f"--num-nodes={nodes}",
-        f"--machine-type={machine_type}", "--release-channel=regular", f"--labels={labels}",
+        f"--machine-type={machine_type}", f"--release-channel={RELEASE_CHANNEL}", f"--labels={labels}",
         f"--workload-pool={project}.svc.id.goog",
         project=project, timeout=CREATE_CLUSTER_TIMEOUT_SECONDS,
     )

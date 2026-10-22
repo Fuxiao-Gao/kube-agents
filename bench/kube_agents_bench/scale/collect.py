@@ -3,6 +3,11 @@
 Container memory and CPU come from Cloud Monitoring over the run's own time
 window rather than from cgroup ``memory.peak``, which counts from container start
 and would carry one run's peak into the next.
+
+Counters are read per pod, and a run reports their growth pod by pod: a pod that
+did not exist when the run started (the gateway after a restart, every stateful
+pod after a reset) counts from zero, so replacing a pod neither subtracts the old
+pod's totals nor hides what the new one did.
 """
 
 from __future__ import annotations
@@ -13,6 +18,7 @@ import re
 import time
 import urllib.parse
 import urllib.request
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -20,6 +26,8 @@ from kube_agents_bench.scale import kube
 from kube_agents_bench.scale.records import Metric
 
 LOG = logging.getLogger(__name__)
+
+Sample = tuple[str, dict[str, str], float]
 
 MONITORING_URL = "https://monitoring.googleapis.com/v3/projects/{project}/timeSeries"
 MEMORY_METRIC = "kubernetes.io/container/memory/used_bytes"
@@ -29,11 +37,15 @@ CPU_METRIC = "kubernetes.io/container/cpu/core_usage_time"
 ALIGNMENT_SECONDS = 60
 QUOTA_PROJECT_HEADER = "x-goog-user-project"
 HTTP_TIMEOUT_SECONDS = 60
+RFC3339_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 LOCALHOST = "127.0.0.1"
 METRICS_PATH = "/metrics"
 PYTHON_FETCH = "import sys, urllib.request; sys.stdout.write(urllib.request.urlopen(sys.argv[1]).read().decode())"
 SIDECAR_RESTART_POLICY = "Always"
-GATEWAY_FRAGMENT = "gateway"
+RUNNING_PHASE = "Running"
+# The agent's pod, by the label the operator gives it; a name substring would also match the
+# A2A chat gateway (platform-agent-a2a-gateway-*) on installs that run one.
+GATEWAY_SELECTOR = "app=platform-agent-gateway"
 # The agent's data volume: profiles, sessions, the kanban board. The other claims (bus, shell) are not it.
 AGENT_DATA_CLAIM = "platform-agent-data"
 AGENT_CONTAINER = "platform-agent"
@@ -43,14 +55,16 @@ PROFILES_DIR = "/opt/data/profiles"
 PROFILE_PREFIX = "cluster-"
 LOCATION_SUFFIX_RE = re.compile(r"-[a-z]+-[a-z]+[0-9]+(?:-[a-z])?$")
 WATCHER_CLUSTER_UP = "k8s_event_watcher_cluster_up"
-# (snapshot attribute, pod name fragment, container, env var naming the port or None for its first port)
+# (snapshot attribute, label selector, container, env var naming the port or None for its first port)
 SCRAPE_TARGETS = (
-    ("watcher", "gateway", "agent-api-auth", "EVENT_WATCHER_METRICS_PORT"),
-    ("proxy", "credential-proxy", "envoy-credential-proxy", "CREDENTIAL_PROXY_METRICS_PORT"),
-    ("litellm", "litellm", "litellm-container", None),
+    ("watcher", GATEWAY_SELECTOR, "agent-api-auth", "EVENT_WATCHER_METRICS_PORT"),
+    ("proxy", "app=platform-agent-credential-proxy", "envoy-credential-proxy", "CREDENTIAL_PROXY_METRICS_PORT"),
+    ("litellm", "app=litellm", "litellm-container", None),
 )
 OOM_REASON = "OOMKilled"
 BYTES_PER_KIB = 1024
+DF_CAPACITY_COLUMN = 1
+DF_USED_COLUMN = 2
 # Log lines that stand in for the two metrics the harness does not export yet.
 LOG_PATTERNS = {
     "triage_lost": re.compile(r"Aborting troubleshooting trigger"),
@@ -65,6 +79,7 @@ WATCHER_COUNTERS = {
 }
 PROXY_REFUSALS = "kubeagents_credential_proxy_admission_refusals_total"
 PROXY_WAIT = "kubeagents_credential_proxy_admission_wait_seconds"
+PROXY_WAIT_QUANTILES = (("proxy_wait_p50_seconds", 0.5), ("proxy_wait_max_seconds", 1.0))
 TOKEN_FAMILIES = {
     "tokens_input": re.compile(r"^litellm_input_tokens(_metric)?(_total)?$"),
     "tokens_output": re.compile(r"^litellm_output_tokens(_metric)?(_total)?$"),
@@ -72,12 +87,16 @@ TOKEN_FAMILIES = {
 }
 SAMPLE_RE = re.compile(r"^(?P<name>[a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{(?P<labels>[^}]*)\})?\s+(?P<value>\S+)")
 LABEL_RE = re.compile(r'(\w+)="((?:[^"\\]|\\.)*)"')
+QUANTITY_SUFFIXES = {
+    "Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4,
+    "k": 1000, "M": 1000**2, "G": 1000**3, "T": 1000**4, "m": 0.001,
+}
 
 
 # --- Prometheus text ---------------------------------------------------------------------------
 
 
-def parse_prometheus(text: str) -> list[tuple[str, dict[str, str], float]]:
+def parse_prometheus(text: str) -> list[Sample]:
     samples = []
     for line in text.splitlines():
         if not line or line.startswith("#"):
@@ -94,11 +113,11 @@ def parse_prometheus(text: str) -> list[tuple[str, dict[str, str], float]]:
     return samples
 
 
-def family_sum(samples: list[tuple[str, dict[str, str], float]], name: str) -> float:
+def family_sum(samples: Iterable[Sample], name: str) -> float:
     return sum(value for sample, _, value in samples if sample == name)
 
 
-def histogram_buckets(samples: list[tuple[str, dict[str, str], float]], name: str) -> dict[float, float]:
+def histogram_buckets(samples: Iterable[Sample], name: str) -> dict[float, float]:
     """Cumulative bucket counts by upper bound, summed over label sets."""
     buckets: dict[float, float] = {}
     for sample, labels, value in samples:
@@ -127,7 +146,7 @@ def histogram_quantile(cumulative: dict[float, float], quantile: float) -> float
     return bounds[-1]
 
 
-def scrape(context: str, namespace: str, pod: str, container: str, port: int) -> list[tuple[str, dict[str, str], float]]:
+def scrape(context: str, namespace: str, pod: str, container: str, port: int) -> list[Sample]:
     """Read a container's /metrics from inside the pod.
 
     Neither the API server's pod proxy (NetworkPolicy drops it) nor port-forward
@@ -140,19 +159,30 @@ def scrape(context: str, namespace: str, pod: str, container: str, port: int) ->
     return parse_prometheus(out)
 
 
+def parse_quantity(text: str) -> float:
+    for suffix in sorted(QUANTITY_SUFFIXES, key=len, reverse=True):
+        if text.endswith(suffix):
+            return float(text[: -len(suffix)]) * QUANTITY_SUFFIXES[suffix]
+    return float(text)
+
+
 # --- the host install ----------------------------------------------------------------------------
 
 
 @dataclass
 class Snapshot:
-    """Counter values at one moment, so a run reports the difference across its window."""
+    """Counter values at one moment, per pod, so a run reports their growth across its window."""
 
-    restarts: dict[str, int] = field(default_factory=dict)
-    oomkills: dict[str, int] = field(default_factory=dict)
-    watcher: list[tuple[str, dict[str, str], float]] = field(default_factory=list)
-    proxy: list[tuple[str, dict[str, str], float]] = field(default_factory=list)
-    litellm: list[tuple[str, dict[str, str], float]] = field(default_factory=list)
+    # (pod, container) -> restartCount
+    restarts: dict[tuple[str, str], int] = field(default_factory=dict)
+    # (pod, container) whose last termination was an OOM kill
+    oom: set[tuple[str, str]] = field(default_factory=set)
+    # scrape target -> pod -> samples
+    scraped: dict[str, dict[str, list[Sample]]] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
+
+    def samples(self, target: str) -> list[Sample]:
+        return [sample for pod in self.scraped.get(target, {}).values() for sample in pod]
 
 
 class Install:
@@ -165,14 +195,23 @@ class Install:
         self.cluster = cluster
         self.location = location
 
-    def pods(self) -> list[dict[str, Any]]:
-        return kube.kubectl_json(self.context, "get", "pods", "-n", self.namespace)["items"]
+    def pods(self, selector: str | None = None) -> list[dict[str, Any]]:
+        args = ["get", "pods", "-n", self.namespace] + (["-l", selector] if selector else [])
+        return kube.kubectl_json(self.context, *args)["items"]
 
-    def pod_named(self, fragment: str) -> dict[str, Any] | None:
-        for pod in self.pods():
-            if fragment in pod["metadata"]["name"] and pod["status"].get("phase") == "Running":
-                return pod
-        return None
+    def gateway_pod(self) -> dict[str, Any] | None:
+        running = [pod for pod in self.pods(GATEWAY_SELECTOR) if pod["status"].get("phase") == RUNNING_PHASE]
+        return running[0] if running else None
+
+    def image(self) -> str:
+        """The agent container's image, the build a record describes."""
+        pod = self.gateway_pod()
+        if not pod:
+            return ""
+        for container in pod["spec"]["containers"]:
+            if container["name"] == AGENT_CONTAINER:
+                return str(container.get("image", ""))
+        return ""
 
     def limits(self) -> dict[str, dict[str, float]]:
         result: dict[str, dict[str, float]] = {}
@@ -188,37 +227,51 @@ class Install:
                     result[container["name"]] = entry
         return result
 
-    def snapshot(self) -> Snapshot:
-        snap = Snapshot()
+    def replicas(self) -> dict[str, int]:
+        """Per container name, how many running pods carry it."""
+        counts: dict[str, int] = {}
         for pod in self.pods():
+            if pod["status"].get("phase") != RUNNING_PHASE:
+                continue
+            for container in _running_containers(pod):
+                counts[container["name"]] = counts.get(container["name"], 0) + 1
+        return counts
+
+    def snapshot(self, targets: Iterable[str] | None = None) -> Snapshot:
+        wanted = set(targets) if targets is not None else {target[0] for target in SCRAPE_TARGETS}
+        snap = Snapshot()
+        pods = self.pods()
+        for pod in pods:
+            name = pod["metadata"]["name"]
             for status in pod["status"].get("containerStatuses", []) + pod["status"].get("initContainerStatuses", []):
-                name = status["name"]
-                snap.restarts[name] = snap.restarts.get(name, 0) + int(status.get("restartCount", 0))
-                last = status.get("lastState", {}).get("terminated", {})
-                if last.get("reason") == OOM_REASON:
-                    snap.oomkills[name] = snap.oomkills.get(name, 0) + 1
-        running = [pod for pod in self.pods() if pod["status"].get("phase") == "Running"]
-        for attr, fragment, container, env_name in SCRAPE_TARGETS:
-            # Every replica: counters are per process, so a family's total is the sum over pods.
-            matching = [pod for pod in running if fragment in pod["metadata"]["name"]]
+                key = (name, status["name"])
+                snap.restarts[key] = int(status.get("restartCount", 0))
+                if status.get("lastState", {}).get("terminated", {}).get("reason") == OOM_REASON:
+                    snap.oom.add(key)
+        for attr, selector, container, env_name in SCRAPE_TARGETS:
+            if attr not in wanted:
+                continue
+            per_pod: dict[str, list[Sample]] = {}
+            matching = [pod for pod in self.pods(selector) if pod["status"].get("phase") == RUNNING_PHASE]
             if not matching:
-                snap.errors.append(f"no running {fragment} pod")
-            samples: list[tuple[str, dict[str, str], float]] = []
+                snap.errors.append(f"no running pod for {selector}")
+            # Every replica: counters are per process, so a family's total is the sum over pods.
             for pod in matching:
+                name = pod["metadata"]["name"]
                 port = _metrics_port(pod, container, env_name)
                 if not port:
-                    snap.errors.append(f"no metrics port on {pod['metadata']['name']}/{container}")
+                    snap.errors.append(f"no metrics port on {name}/{container}")
                     continue
                 try:
-                    samples += scrape(self.context, self.namespace, pod["metadata"]["name"], container, port)
+                    per_pod[name] = scrape(self.context, self.namespace, name, container, port)
                 except kube.CommandError as exc:
-                    snap.errors.append(f"scrape {pod['metadata']['name']}: {exc}")
-            setattr(snap, attr, samples)
+                    snap.errors.append(f"scrape {name}: {exc}")
+            snap.scraped[attr] = per_pod
         return snap
 
     def profile_clusters(self) -> set[str]:
         """Cluster names that have a Cluster Agent profile on the agent's data volume."""
-        pod = self.pod_named(GATEWAY_FRAGMENT)
+        pod = self.gateway_pod()
         if not pod:
             return set()
         try:
@@ -239,7 +292,7 @@ class Install:
 
     def watched_clusters(self) -> set[str]:
         """Cluster names the event watcher reports as up."""
-        samples = self.snapshot().watcher
+        samples = self.snapshot(targets=["watcher"]).samples("watcher")
         return {labels.get("cluster", "") for name, labels, value in samples
                 if name == WATCHER_CLUSTER_UP and value >= 1}
 
@@ -259,8 +312,8 @@ class Install:
                     try:
                         df = kube.kubectl(self.context, *target, "df", "-k", path).splitlines()[-1].split()
                         metrics = [
-                            Metric("pvc_capacity_bytes", float(df[1]) * BYTES_PER_KIB),
-                            Metric("pvc_used_bytes", float(df[2]) * BYTES_PER_KIB),
+                            Metric("pvc_capacity_bytes", float(df[DF_CAPACITY_COLUMN]) * BYTES_PER_KIB),
+                            Metric("pvc_used_bytes", float(df[DF_USED_COLUMN]) * BYTES_PER_KIB),
                         ]
                         du = kube.kubectl(self.context, *target, "sh", "-c",
                                           f"du -sk {path}/profiles/* 2>/dev/null || true")
@@ -274,6 +327,11 @@ class Install:
         return []
 
     def log_counts(self, since: str) -> dict[str, int]:
+        """Log-line counts since ``since`` in the pods running now.
+
+        A pod replaced during the window took its log with it, so a run that
+        restarts the gateway counts the new pod's lines only.
+        """
         counts = {name: 0 for name in LOG_PATTERNS}
         for pod in self.pods():
             for container in _running_containers(pod):
@@ -318,7 +376,8 @@ class Install:
             "aggregation.alignmentPeriod": f"{ALIGNMENT_SECONDS}s",
             "aggregation.perSeriesAligner": aligner,
         }
-        url = MONITORING_URL.format(project=self.project) + "?" + urllib.parse.urlencode(params)
+        base_url = MONITORING_URL.format(project=self.project)
+        url = base_url + "?" + urllib.parse.urlencode(params)
         series: list[dict[str, Any]] = []
         while url:
             request = urllib.request.Request(
@@ -328,7 +387,7 @@ class Install:
                 page = json.loads(resp.read().decode())
             series.extend(page.get("timeSeries", []))
             next_token = page.get("nextPageToken")
-            url = (MONITORING_URL.format(project=self.project) + "?" + urllib.parse.urlencode({**params, "pageToken": next_token})) if next_token else ""
+            url = base_url + "?" + urllib.parse.urlencode({**params, "pageToken": next_token}) if next_token else ""
         return series
 
 
@@ -347,8 +406,9 @@ def _metrics_port(pod: dict[str, Any], container_name: str, env_name: str | None
             for env in container.get("env", []):
                 if env.get("name") == env_name and str(env.get("value", "")).isdigit():
                     return int(env["value"])
+            return None
         ports = [p["containerPort"] for p in container.get("ports", []) if "containerPort" in p]
-        return ports[0] if ports and not env_name else None
+        return ports[0] if ports else None
     return None
 
 
@@ -358,46 +418,51 @@ def _point_value(point: dict[str, Any]) -> float:
 
 
 def _rfc3339(epoch: float) -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+    return time.strftime(RFC3339_FORMAT, time.gmtime(epoch))
 
 
-QUANTITY_SUFFIXES = {
-    "Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4,
-    "k": 1000, "M": 1000**2, "G": 1000**3, "T": 1000**4, "m": 0.001,
-}
-
-
-def parse_quantity(text: str) -> float:
-    for suffix in sorted(QUANTITY_SUFFIXES, key=len, reverse=True):
-        if text.endswith(suffix):
-            return float(text[: -len(suffix)]) * QUANTITY_SUFFIXES[suffix]
-    return float(text)
+def _growth(before: Snapshot, after: Snapshot, target: str, family: str) -> float:
+    """A counter family's growth, pod by pod; a pod new since ``before`` counts from zero."""
+    total = 0.0
+    for pod, samples in after.scraped.get(target, {}).items():
+        total += family_sum(samples, family) - family_sum(before.scraped.get(target, {}).get(pod, []), family)
+    return total
 
 
 def counter_metrics(before: Snapshot, after: Snapshot) -> list[Metric]:
-    """The counters' growth across a run's window, as metrics."""
+    """The counters' growth across a run's window, as metrics, pod by pod."""
     metrics: list[Metric] = []
-    for container, value in after.restarts.items():
-        metrics.append(Metric("restarts", float(value - before.restarts.get(container, 0)), container))
-    # A container that restarted in the window with OOMKilled as its last termination was OOM-killed;
-    # lastState holds only the latest termination, so this counts containers, not kills.
-    for container in after.restarts:
-        restarted = after.restarts[container] > before.restarts.get(container, 0)
-        metrics.append(Metric("oomkills", float(restarted and container in after.oomkills), container))
-    for name, family in WATCHER_COUNTERS.items():
-        if after.watcher:
-            metrics.append(Metric(name, family_sum(after.watcher, family) - family_sum(before.watcher, family)))
-    if after.proxy:
-        metrics.append(Metric("proxy_refusals", family_sum(after.proxy, PROXY_REFUSALS) - family_sum(before.proxy, PROXY_REFUSALS)))
-        delta = bucket_delta(histogram_buckets(before.proxy, PROXY_WAIT), histogram_buckets(after.proxy, PROXY_WAIT))
-        for name, quantile in (("proxy_wait_p50_seconds", 0.5), ("proxy_wait_max_seconds", 1.0)):
+    restarts: dict[str, int] = {}
+    oomkills: dict[str, int] = {}
+    for (pod, container), count in after.restarts.items():
+        grown = max(0, count - before.restarts.get((pod, container), 0))
+        restarts[container] = restarts.get(container, 0) + grown
+        # lastState holds only the latest termination, so this counts pods whose container
+        # restarted in the window and was last killed for memory, not every kill.
+        if grown and (pod, container) in after.oom:
+            oomkills[container] = oomkills.get(container, 0) + 1
+    for container in sorted(restarts):
+        metrics.append(Metric("restarts", float(restarts[container]), container))
+        metrics.append(Metric("oomkills", float(oomkills.get(container, 0)), container))
+    if after.scraped.get("watcher"):
+        for name, family in WATCHER_COUNTERS.items():
+            metrics.append(Metric(name, _growth(before, after, "watcher", family)))
+    if after.scraped.get("proxy"):
+        metrics.append(Metric("proxy_refusals", _growth(before, after, "proxy", PROXY_REFUSALS)))
+        delta: dict[float, float] = {}
+        for pod, samples in after.scraped["proxy"].items():
+            grown = bucket_delta(histogram_buckets(before.scraped.get("proxy", {}).get(pod, []), PROXY_WAIT),
+                                 histogram_buckets(samples, PROXY_WAIT))
+            for bound, value in grown.items():
+                delta[bound] = delta.get(bound, 0.0) + value
+        for name, quantile in PROXY_WAIT_QUANTILES:
             value = histogram_quantile(delta, quantile)
             if value is not None and value != float("inf"):
                 metrics.append(Metric(name, value))
-    if after.litellm:
-        names = {sample for sample, _, _ in after.litellm}
+    if after.scraped.get("litellm"):
+        names = {sample for sample, _, _ in after.samples("litellm")}
         for metric, pattern in TOKEN_FAMILIES.items():
             family = next((name for name in sorted(names) if pattern.match(name)), None)
             if family:
-                metrics.append(Metric(metric, family_sum(after.litellm, family) - family_sum(before.litellm, family)))
+                metrics.append(Metric(metric, _growth(before, after, "litellm", family)))
     return metrics

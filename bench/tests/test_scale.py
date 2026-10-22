@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from kube_agents_bench.scale import collect, fixtures, records
+from kube_agents_bench.scale import collect, fixtures, kube, operations, records, runner
 from kube_agents_bench.scale.collect import Snapshot
 from kube_agents_bench.scale.config import load_plan
 
@@ -49,7 +49,7 @@ def test_load_refuses_another_schema(tmp_path):
 
 
 def test_phase1_matrix_runs_base_once_and_each_factor_only_for_its_operations():
-    plan = load_plan(PHASE1, environ={})
+    plan = load_plan(PHASE1, environ={}, validate_target=False)
     specs = plan.matrix()
     base = [s for s in specs if s.factor == "base"]
     assert len(base) == sum(op.runs for op in plan.operations)
@@ -63,6 +63,7 @@ def test_phase1_matrix_runs_base_once_and_each_factor_only_for_its_operations():
 
 def test_environment_overrides_the_target():
     plan = load_plan(PHASE1, environ={"SCALE_PROJECT_ID": "other-project", "SCALE_MODE": "today"})
+    assert plan.target["host_context"].startswith("gke_other-project_")
     assert plan.target["project_id"] == "other-project"
     assert plan.target["mode"] == "today"
 
@@ -85,7 +86,7 @@ def test_objects_manifests_hold_the_level_and_carry_the_label():
 
 
 def test_fixture_pods_counts_every_fixture():
-    values = {"clusters": 2, "objects": 4000, "warning_events": 100, "listing_pods": 100, "churn_per_minute": 1000}
+    values = {"clusters": 2, "objects": 4000, "failing_pods": 100, "listing_pods": 100, "churn_per_minute": 1000}
     # Each of 2 clusters takes half the churn; only the first holds the listing and the failing workload.
     assert fixtures.fixture_pods(values, 30) == 1200 + 250 + 100 + 100
     assert fixtures.fixture_pods(values, 30, first=False) == 1200 + 250
@@ -111,17 +112,14 @@ def test_parse_prometheus_sums_families_and_reads_buckets():
     assert collect.histogram_quantile({}, 0.5) is None
 
 
-def test_counter_metrics_report_growth_across_the_window():
-    before = Snapshot(restarts={"agent-api-auth": 1}, watcher=collect.parse_prometheus(PROMETHEUS_TEXT))
-    after_text = PROMETHEUS_TEXT.replace('{cluster="b"} 5', '{cluster="b"} 25').replace("1000", "1600")
-    after = Snapshot(restarts={"agent-api-auth": 2}, oomkills={"agent-api-auth": 1},
-                     watcher=collect.parse_prometheus(after_text), litellm=collect.parse_prometheus(after_text))
-    before.litellm = collect.parse_prometheus(PROMETHEUS_TEXT)
+def test_counter_metrics_sum_tokens_over_replicas():
+    before = Snapshot(scraped={"litellm": {"a": collect.parse_prometheus(PROMETHEUS_TEXT),
+                                           "b": collect.parse_prometheus(PROMETHEUS_TEXT)}})
+    after_text = PROMETHEUS_TEXT.replace("1000", "1600")
+    after = Snapshot(scraped={"litellm": {"a": collect.parse_prometheus(after_text),
+                                          "b": collect.parse_prometheus(after_text)}})
     metrics = {(m.name, m.container): m.value for m in collect.counter_metrics(before, after)}
-    assert metrics[("restarts", "agent-api-auth")] == 1
-    assert metrics[("oomkills", "agent-api-auth")] == 1
-    assert metrics[("watcher_events_seen", None)] == 20
-    assert metrics[("tokens_input", None)] == 600
+    assert metrics[("tokens_input", None)] == 1200
 
 
 @pytest.mark.parametrize(
@@ -130,3 +128,86 @@ def test_counter_metrics_report_growth_across_the_window():
 )
 def test_parse_quantity(text, expected):
     assert collect.parse_quantity(text) == pytest.approx(expected)
+
+
+ENV = {"SCALE_PROJECT_ID": "example-project"}
+
+
+def test_target_names_no_project_and_is_validated():
+    with pytest.raises(ValueError, match="SCALE_PROJECT_ID"):
+        load_plan(PHASE1, environ={})
+    plan = load_plan(PHASE1, environ=ENV)
+    assert plan.target["host_context"] == "gke_example-project_us-central1-c_scale-host"
+    with pytest.raises(ValueError, match="does not name host_cluster"):
+        load_plan(PHASE1, environ={**ENV, "SCALE_HOST_CONTEXT": "gke_example-project_us-central1_platform-agent-host"})
+    # plan needs no target at all
+    assert load_plan(PHASE1, environ={}, validate_target=False).matrix()
+
+
+def _scraped(pod: str, text: str) -> dict[str, dict[str, list]]:
+    return {"watcher": {pod: collect.parse_prometheus(text)}}
+
+
+def test_counter_growth_counts_a_replaced_pod_from_zero():
+    old_text = "k8s_event_watcher_events_seen_total 20000\nk8s_event_watcher_session_creates_total 900\n"
+    new_text = "k8s_event_watcher_events_seen_total 500\nk8s_event_watcher_session_creates_total 40\n"
+    before = Snapshot(restarts={("gw-old", "agent-api-auth"): 3}, scraped=_scraped("gw-old", old_text))
+    after = Snapshot(
+        restarts={("gw-new", "agent-api-auth"): 1}, oom={("gw-new", "agent-api-auth")},
+        scraped=_scraped("gw-new", new_text),
+    )
+    metrics = {(m.name, m.container): m.value for m in collect.counter_metrics(before, after)}
+    assert metrics[("restarts", "agent-api-auth")] == 1
+    assert metrics[("oomkills", "agent-api-auth")] == 1
+    assert metrics[("watcher_events_seen", None)] == 500
+    assert metrics[("watcher_session_creates", None)] == 40
+
+
+def test_counter_growth_on_a_kept_pod_is_the_difference():
+    before = Snapshot(restarts={("gw", "c"): 2}, scraped=_scraped("gw", "k8s_event_watcher_events_seen_total 10\n"))
+    after = Snapshot(restarts={("gw", "c"): 2}, scraped=_scraped("gw", "k8s_event_watcher_events_seen_total 25\n"))
+    metrics = {(m.name, m.container): m.value for m in collect.counter_metrics(before, after)}
+    assert metrics[("restarts", "c")] == 0
+    assert metrics[("oomkills", "c")] == 0
+    assert metrics[("watcher_events_seen", None)] == 15
+
+
+def test_churner_carries_fractions_so_low_rates_hold():
+    churner = fixtures.Churner(["a", "b"], per_minute=10, lifetime_seconds=30)
+    batches_per_minute = 60 // fixtures.CHURN_BATCH_SECONDS
+    per_cluster = sum(churner.next_batch() for _ in range(batches_per_minute * 10))
+    # 10 per minute across 2 clusters is 5 per cluster per minute, over 10 minutes.
+    assert per_cluster == 50
+
+
+def test_a_failed_prompt_is_counted_not_timed():
+    outcome = operations.OperationResult()
+    operations.fold_answer(outcome, {"seconds": 2.0, "output_chars": 0, "tokens": {},
+                                     "errors": ["KUBE_AGENTS_INFRA_FAILURE: transport"]})
+    operations.fold_answer(outcome, {"seconds": 40.0, "output_chars": 120,
+                                     "tokens": {"input": 10, "output": 3, "cached": 7}, "errors": []})
+    assert outcome.response_seconds == [40.0]
+    assert outcome.failed_prompts == 1
+    assert outcome.errors[0].startswith(operations.PROMPT_FAILED)
+    assert outcome.tokens == {"tokens_input": 10, "tokens_output": 3, "tokens_cached": 7}
+
+
+def test_commit_of_reads_a_commit_pinned_tag_only():
+    sha = "eeb8a95ceb0a9efd66434161f87820b35b65360c"
+    assert runner.commit_of(f"ghcr.io/gke-labs/kube-agents/platform-agent:{sha}") == sha
+    assert runner.commit_of("ghcr.io/gke-labs/kube-agents/platform-agent:0.9.0") == ""
+    assert runner.commit_of("registry.example:5000/platform-agent") == ""
+
+
+class _FailingInstall:
+    def container_peaks(self, start, end):
+        raise kube.CommandError("gcloud auth application-default print-access-token exited 1")
+
+
+def test_a_monitoring_failure_costs_the_record_its_peaks_only():
+    plan = load_plan(PHASE1, environ=ENV)
+    run = runner.Runner(plan, Path("/nonexistent/harness-limits.json"))
+    run.install = _FailingInstall()
+    record = _record()
+    run.add_peaks(record)
+    assert record.errors and record.errors[0].startswith("monitoring: CommandError")

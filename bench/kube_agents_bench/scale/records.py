@@ -55,8 +55,13 @@ class Record:
     run: int
     started: str
     ended: str
+    image: str = ""
+    # Every factor's planned value at this point; totals hold what the clusters really had.
+    values: dict[str, float] = field(default_factory=dict)
     totals: dict[str, int] = field(default_factory=dict)
     limits: dict[str, dict[str, float]] = field(default_factory=dict)
+    # Per container name, how many running pods carried it.
+    replicas: dict[str, int] = field(default_factory=dict)
     metrics: list[Metric] = field(default_factory=list)
     provider_429s: int = 0
     excluded_from: list[str] = field(default_factory=list)

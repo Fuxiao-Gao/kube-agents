@@ -39,6 +39,8 @@ HPA_CPU_UTILIZATION = 80
 SERVICE_PORT = 80
 CONFIGMAP_DATA_KEY = "settings"
 CHURN_BATCH_SECONDS = 10
+BATCH_LABEL = "harness-scale/batch"
+BATCH_ID_LENGTH = 8
 SECONDS_PER_MINUTE = 60
 # The object mix per level (namespaces, Deployments, ConfigMaps); each Deployment
 # brings 1 Service, 1 HPA and REPLICAS_PER_DEPLOYMENT Pods. Levels not listed
@@ -177,7 +179,7 @@ def fixture_pods(values: dict[str, float], churn_lifetime_seconds: int, first: b
     churn_live = math.ceil(values["churn_per_minute"] * churn_lifetime_seconds / SECONDS_PER_MINUTE / clusters)
     pods = object_mix(int(values["objects"])).pods + churn_live
     if first:
-        pods += int(values["warning_events"]) + int(values["listing_pods"])
+        pods += int(values["failing_pods"]) + int(values["listing_pods"])
     return pods
 
 
@@ -190,10 +192,11 @@ def delete_fixture(context: str, fixture: str) -> None:
 class Churner:
     """Creates and deletes Pods at a steady rate until stopped.
 
-    Every ``CHURN_BATCH_SECONDS`` it creates one batch of bare pause Pods and
-    deletes the batches older than ``lifetime_seconds``, so the cluster sees
-    ``per_minute`` creations and as many deletions per minute, with about
-    ``per_minute * lifetime_seconds / 60`` Pods alive at once.
+    Every ``CHURN_BATCH_SECONDS`` it creates one batch of bare pause Pods per
+    cluster and deletes the batches older than ``lifetime_seconds``. A rate
+    that does not divide into whole Pods per batch carries the remainder to the
+    next batch, so 10 per minute over two clusters is 10 per minute, not one
+    per cluster per batch. ``achieved_per_minute`` is what it really created.
     """
 
     def __init__(self, contexts: list[str], per_minute: float, lifetime_seconds: int) -> None:
@@ -202,55 +205,75 @@ class Churner:
         self.lifetime_seconds = lifetime_seconds
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._carry = 0.0
+        self._started = 0.0
         self.created = 0
         self.errors: list[str] = []
 
-    def _batch_size(self) -> int:
-        per_batch = self.per_minute * CHURN_BATCH_SECONDS / SECONDS_PER_MINUTE / max(1, len(self.contexts))
-        return max(1, round(per_batch))
+    def next_batch(self) -> int:
+        """Pods per cluster in the next batch, carrying the fraction forward."""
+        wanted = self.per_minute * CHURN_BATCH_SECONDS / SECONDS_PER_MINUTE / max(1, len(self.contexts)) + self._carry
+        size = int(wanted)
+        self._carry = wanted - size
+        return size
+
+    @property
+    def achieved_per_minute(self) -> float:
+        elapsed = time.monotonic() - self._started if self._started else 0.0
+        return self.created * SECONDS_PER_MINUTE / elapsed if elapsed > 0 else 0.0
 
     def start(self) -> None:
         for context in self.contexts:
             kube.apply(context, [_namespace(CHURN_NAMESPACE, "churn")])
+        self._started = time.monotonic()
         self._thread = threading.Thread(target=self._loop, name="churner", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
+        """Stop, and delete the churned Pods still alive, so the next level starts without them."""
         self._stop.set()
         if self._thread:
             self._thread.join()
+        for context in self.contexts:
+            try:
+                kube.kubectl(context, "delete", "pods", "-n", CHURN_NAMESPACE, "-l", f"{FIXTURE_LABEL}=churn",
+                             "--wait=false", "--ignore-not-found")
+            except Exception as exc:  # cleanup is best effort; the next level re-applies its own
+                self.errors.append(f"churn cleanup: {exc}")
+
+    def _batch(self, size: int) -> list[dict[str, Any]]:
+        batch = uuid.uuid4().hex[:BATCH_ID_LENGTH]
+        return [
+            {
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {
+                    "name": f"churn-{batch}-{index:04d}",
+                    "namespace": CHURN_NAMESPACE,
+                    "labels": {**_labels("churn"), BATCH_LABEL: batch},
+                },
+                "spec": _pod_spec(PAUSE_IMAGE),
+            }
+            for index in range(size)
+        ]
 
     def _loop(self) -> None:
         live: list[tuple[float, str]] = []
         while not self._stop.is_set():
             started = time.monotonic()
-            batch = uuid.uuid4().hex[:8]
-            pods = [
-                {
-                    "apiVersion": "v1",
-                    "kind": "Pod",
-                    "metadata": {
-                        "name": f"churn-{batch}-{index:04d}",
-                        "namespace": CHURN_NAMESPACE,
-                        "labels": {**_labels("churn"), "harness-scale/batch": batch},
-                    },
-                    "spec": _pod_spec(PAUSE_IMAGE),
-                }
-                for index in range(self._batch_size())
-            ]
-            for context in self.contexts:
-                try:
-                    kube.apply(context, pods)
-                    self.created += len(pods)
-                except kube.CommandError as exc:
-                    self.errors.append(str(exc))
-            live.append((started, batch))
-            while live and started - live[0][0] >= self.lifetime_seconds:
-                _, old = live.pop(0)
-                for context in self.contexts:
-                    try:
+            try:
+                size = self.next_batch()
+                if size:
+                    pods = self._batch(size)
+                    for context in self.contexts:
+                        kube.apply(context, pods)
+                        self.created += len(pods)
+                    live.append((started, pods[0]["metadata"]["labels"][BATCH_LABEL]))
+                while live and started - live[0][0] >= self.lifetime_seconds:
+                    _, old = live.pop(0)
+                    for context in self.contexts:
                         kube.kubectl(context, "delete", "pods", "-n", CHURN_NAMESPACE, "-l",
-                                     f"harness-scale/batch={old}", "--wait=false")
-                    except kube.CommandError as exc:
-                        self.errors.append(str(exc))
+                                     f"{BATCH_LABEL}={old}", "--wait=false")
+            except Exception as exc:  # a failed batch is recorded and the churn goes on
+                self.errors.append(f"churn: {type(exc).__name__}: {exc}")
             self._stop.wait(max(0.0, CHURN_BATCH_SECONDS - (time.monotonic() - started)))
