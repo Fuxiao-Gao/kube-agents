@@ -17,6 +17,7 @@ import argparse
 import itertools
 import logging
 import math
+import signal
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -47,6 +48,7 @@ COMMIT_LENGTH = 40
 HEX_DIGITS = set("0123456789abcdef")
 PREFLIGHT_SHELL = "/bin/sh"
 PREFLIGHT_TIMEOUT_SECONDS = 600
+TERMINATED_EXIT_CODE = 143
 
 
 def _now_iso() -> str:
@@ -79,6 +81,7 @@ class Runner:
         self.churner: fixtures.Churner | None = None
         # Problems that make a level differ from its plan; every record of the level carries them.
         self.level_errors: list[str] = []
+        self.relay_port = 0
 
     # --- the fleet ----------------------------------------------------------------------------
 
@@ -247,7 +250,7 @@ class Runner:
         started_iso = _now_iso()
         LOG.info("run %s %s=%s #%s", op.name, spec.factor, spec.level, spec.run)
         if op.kind == "prompt":
-            env = operations.agent_env(self.install.context, self.install.namespace)
+            env = operations.agent_env(self.install.context, self.install.namespace, self.relay_port)
             outcome = operations.run_prompts(op, env, int(values["concurrent"]), self.cluster_names(count)[0])
         elif op.kind == "soak":
             outcome = operations.soak(op.window_seconds)
@@ -308,6 +311,7 @@ class Runner:
         awaiting: list[tuple[float, records.Record]] = []
         relay = operations.Relay(self.install.context, self.install.namespace)
         relay.start()
+        self.relay_port = relay.port
         try:
             for (factor, level), group in itertools.groupby(todo, key=lambda s: (s.factor, s.level)):
                 try:
@@ -393,6 +397,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, default=0, help="stop after this many runs (0: all)")
     parser.add_argument("--delete-fleet", action="store_true", help="teardown: delete the test clusters")
     args = parser.parse_args(argv)
+    # SIGTERM ends the run like Ctrl-C does, so the churner, the relay and pending peaks are cleaned up.
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(TERMINATED_EXIT_CODE))
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     plan = load_plan(args.config, validate_target=args.command != "plan")
     specs = [

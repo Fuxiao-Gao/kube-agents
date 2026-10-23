@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -46,7 +47,7 @@ PROMPT_FAILED = "prompt failed"
 RELAY_SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "hermes-dashboard-tunnel.py"
 RELAY_CONTAINER = "agent-api-auth"
 RELAY_REMOTE_PORT = 8643
-RELAY_LOCAL_PORT = 18642
+LOCALHOST = "127.0.0.1"
 RELAY_START_SECONDS = 15
 KUBECONFIG_MODE = 0o600
 # What a new install starts without: the agent's data and session metadata, the shell's data, the bus's data.
@@ -66,14 +67,14 @@ class OperationResult:
     errors: list[str] = field(default_factory=list)
 
 
-def agent_env(context: str, namespace: str) -> dict[str, str]:
-    """The environment the harness reads, for the experiment install's agent API."""
+def agent_env(context: str, namespace: str, local_port: int) -> dict[str, str]:
+    """The environment the harness reads, for the experiment install's agent API on ``local_port``."""
     encoded = kube.kubectl(context, "get", "secret", AGENT_TOKEN_SOURCE_NAME, "-n", namespace,
                            "-o", f"jsonpath={{.data.{AGENT_TOKEN_FIELD}}}")
     return {
         "AGENT_CLUSTER_CONTEXT": context,
         "AGENT_NAMESPACE": namespace,
-        "AGENT_LOCAL_PORT": str(RELAY_LOCAL_PORT),
+        "AGENT_LOCAL_PORT": str(local_port),
         "PLATFORM_AGENT_TOKEN": base64.b64decode(encoded).decode(),
     }
 
@@ -89,6 +90,7 @@ class Relay:
     def __init__(self, context: str, namespace: str) -> None:
         self.context = context
         self.namespace = namespace
+        self.port = 0
         self.proc: subprocess.Popen[bytes] | None = None
         self.kubeconfig = Path(tempfile.mkstemp(prefix="harness-scale-", suffix=".kubeconfig")[1])
 
@@ -96,9 +98,13 @@ class Relay:
         self.kubeconfig.write_text(kube.kubectl(self.context, "config", "view", "--minify", "--flatten",
                                                 f"--context={self.context}"))
         self.kubeconfig.chmod(KUBECONFIG_MODE)
+        # A free port each time, so a relay another run left behind cannot block this one.
+        with socket.socket() as probe:
+            probe.bind((LOCALHOST, 0))
+            self.port = int(probe.getsockname()[1])
         self.proc = subprocess.Popen(
             [sys.executable, str(RELAY_SCRIPT), "--namespace", self.namespace, "--container", RELAY_CONTAINER,
-             "--remote-port", str(RELAY_REMOTE_PORT), "--local-port", str(RELAY_LOCAL_PORT)],
+             "--remote-port", str(RELAY_REMOTE_PORT), "--local-port", str(self.port)],
             env={**os.environ, "KUBECONFIG": str(self.kubeconfig)},
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
