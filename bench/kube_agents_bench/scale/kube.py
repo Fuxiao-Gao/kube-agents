@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 import time
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
 
 import yaml
@@ -27,6 +29,8 @@ CREATE_CLUSTER_TIMEOUT_SECONDS = 1800
 APPLY_CHUNK = 500
 FIELD_MANAGER = "harness-scale"
 ARGS_SHOWN = 6
+KUBECONFIG_ENV = "KUBECONFIG"
+PRIVATE_KUBECONFIG_MODE = 0o600
 RETRY_ATTEMPTS = 7
 RETRY_FIRST_DELAY_SECONDS = 10
 RETRY_MAX_DELAY_SECONDS = 300
@@ -88,6 +92,19 @@ def run(args: list[str], *, stdin: str | None = None, timeout: float = DEFAULT_T
         time.sleep(delay)
         delay = min(delay * 2, RETRY_MAX_DELAY_SECONDS)
     raise CommandError(f"{shown}... failed")
+
+
+def use_private_kubeconfig(path: Path) -> None:
+    """Copy the caller's kubeconfig to ``path`` and point every later kubectl and gcloud call at it.
+
+    The default kubeconfig is shared with every other tool and session on the
+    machine; a concurrent rewrite of it can drop a context mid-campaign. The
+    copy is the runner's alone, and gcloud writes new test clusters into it.
+    """
+    flattened = run([KUBECTL, "config", "view", "--flatten", "--raw"])
+    path.write_text(flattened)
+    path.chmod(PRIVATE_KUBECONFIG_MODE)
+    os.environ[KUBECONFIG_ENV] = str(path)
 
 
 def context_name(project: str, location: str, cluster: str) -> str:

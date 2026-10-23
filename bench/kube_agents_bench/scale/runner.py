@@ -20,6 +20,7 @@ import math
 import re
 import signal
 import sys
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -478,6 +479,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{len(specs)} runs")
         return 0
     data_file = args.config.resolve().parent / plan.target.get("data_file", DEFAULT_DATA_FILE)
+    kube.use_private_kubeconfig(Path(tempfile.mkstemp(prefix="harness-scale-runner-", suffix=".kubeconfig")[1]))
     runner = Runner(plan, data_file)
     if args.command == "run":
         runner.run(specs, args.force, args.limit)
