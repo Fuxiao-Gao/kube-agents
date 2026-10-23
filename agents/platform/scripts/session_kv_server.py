@@ -3659,18 +3659,28 @@ def _is_fleet_audit_job(profile: str, job_id: str) -> bool:
     except Exception as exc:
         logger.warning(f"Audit headline skipped: {profile} cron roster unreadable: {exc}")
         return False
-    return _roster_runs_fleet_audit(store, job_id)
+    return _roster_fleet_audit_job(store, job_id) is not None
 
 
-def _roster_runs_fleet_audit(store: Any, job_id: str) -> bool:
-    """Whether `job_id` in a cron roster's parsed JSON runs the fleet-audit skill."""
+def _roster_fleet_audit_job(store: Any, job_id: str) -> str | None:
+    """The roster's own id for `job_id` when that job runs the fleet-audit skill, else None.
+
+    The string returned is the roster entry's: equal to `job_id`, and read from
+    the roster file rather than taken from whoever asked.
+    """
     jobs = store.get("jobs") if isinstance(store, dict) else store
     for job in jobs if isinstance(jobs, list) else []:
-        if isinstance(job, dict) and str(job.get("id") or "") == job_id:
-            # Hermes accepts a list, a single string, or the legacy `skill` field.
-            skills = job.get("skills") or job.get("skill") or []
-            return FLEET_AUDIT_SKILL in ([skills] if isinstance(skills, str) else skills)
-    return False
+        if not isinstance(job, dict):
+            continue
+        roster_id = str(job.get("id") or "")
+        if roster_id != job_id:
+            continue
+        # Hermes accepts a list, a single string, or the legacy `skill` field.
+        skills = job.get("skills") or job.get("skill") or []
+        if FLEET_AUDIT_SKILL in ([skills] if isinstance(skills, str) else skills):
+            return roster_id
+        return None
+    return None
 
 
 def _is_managed_github_repo(repo: str) -> bool:
@@ -3961,15 +3971,26 @@ def _mark_run_posted(profile: str, job_id: str, run: str) -> None:
         logger.error(f"Relay for {profile}/{job_id}: run {run} not marked posted: {exc!r}")
 
 
-def _is_shipped_audit_job(job_id: str) -> bool:
-    """Whether the image's Platform Agent roster ships `job_id` as a fleet-audit job."""
+def _shipped_audit_job(job_id: str) -> str | None:
+    """The image roster's own id for `job_id` when it ships as a fleet-audit job, else None.
+
+    The roster is the allowlist, and the value handed back is its element rather
+    than the request's string that matched it. `job_id` arrives on the
+    `/v1/cron-reports` body, and the callers in the branch this guards name a
+    file with it that `sandbox_exec.read_bytes` opens through the sandbox's
+    shell. CodeQL's `py/command-line-injection` query counts no quoting as a
+    sanitizer, only a comparison against a literal or a barrier a model names,
+    so the request's copy would carry its taint to that shell however it was
+    escaped; the roster's copy, read from the image, never had any. Equal by
+    value, so nothing downstream changes.
+    """
     try:
         with open(IMAGE_PLATFORM_ROSTER, encoding="utf-8") as handle:
             store = json.load(handle)
     except (OSError, ValueError) as exc:
         logger.warning(f"Relay for {job_id}: image roster unreadable: {exc}")
-        return False
-    return _roster_runs_fleet_audit(store, job_id)
+        return None
+    return _roster_fleet_audit_job(store, job_id)
 
 
 def _delivering_run_start(profile: str, job_id: str) -> float | None:
@@ -4528,19 +4549,21 @@ def submit_cron_report(request_data: Dict[str, Any]) -> Dict[str, str]:
     failure_flagged = from_scheduler and request_data.get(SCHEDULER_FAILURE_KEY) is True
     failure: SchedulerFailure | None = None
     failure_run = ""
-    if from_scheduler and _is_fleet_audit_job(profile, job_id) and _is_shipped_audit_job(job_id):
-        if failure_flagged and not _record_written_by_this_run(profile, job_id):
+    # The roster's copy of the job id, not the request's.
+    audit_job = _shipped_audit_job(job_id) if from_scheduler and _is_fleet_audit_job(profile, job_id) else None
+    if audit_job is not None:
+        if failure_flagged and not _record_written_by_this_run(profile, audit_job):
             # The scheduler's line for a failed run: it says why the run
             # failed, and the record on disk is an earlier run's. Marking that
             # record posted keeps a later run that never reached `start` from
             # posting it as its own.
-            failure_run = _record_run(job_id)
+            failure_run = _record_run(audit_job)
             failure = scheduler_failure_line(profile, job_id, title, report)
         else:
             # The flag is read off the text, which the model can also write:
             # a run that wrote its own record reached `finish`, so its report
             # is posted whatever its last message says.
-            report, audit_run = audit_chat_report(profile, job_id, title)
+            report, audit_run = audit_chat_report(profile, audit_job, title)
     elif failure_flagged:
         failure = scheduler_failure_line(profile, job_id, title, report)
     if failure is not None:
@@ -4548,7 +4571,7 @@ def submit_cron_report(request_data: Dict[str, Any]) -> Dict[str, str]:
         if _failure_already_posted(profile, job_id, failure.reason):
             # Posted once already, with no clean run since: the channel knows.
             if failure_run:
-                _mark_run_posted(profile, job_id, failure_run)
+                _mark_run_posted(profile, audit_job, failure_run)
             logger.info(f"Relay for {profile}/{job_id}: the same failure was posted already; not posting it again")
             return {
                 "status": CRON_REPORT_SUPPRESSED,
@@ -4578,7 +4601,8 @@ def submit_cron_report(request_data: Dict[str, Any]) -> Dict[str, str]:
     if error:
         raise HTTPException(status_code=502, detail=f"chat relay failed: {error}")
     if audit_run or failure_run:
-        _mark_run_posted(profile, job_id, audit_run or failure_run)
+        # Keyed by the same string `audit_chat_report` reads it back under.
+        _mark_run_posted(profile, audit_job, audit_run or failure_run)
     if failure is not None:
         _record_failure_posted(profile, job_id, failure.reason)
     # 200, because the report is in the channel and the run did its job. `relay`
