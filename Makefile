@@ -317,7 +317,7 @@ PYTHON_TEST_SHARD_COUNT = $(word 2,$(subst /, ,$(PYTHON_TEST_SHARD)))
 # refuses as a path that is not a file, so the shard fails rather than reading
 # green having run nothing.
 PYTHON_TEST_SHARD_BAD := invalid-PYTHON_TEST_SHARD
-PYTHON_TEST_SHARD_ORDER = $(shell printf '%s\n' $(PYTHON_TEST_RUN_ORDER) | awk -v k='$(PYTHON_TEST_SHARD_INDEX)' -v n='$(PYTHON_TEST_SHARD_COUNT)' -v bad='$(PYTHON_TEST_SHARD_BAD)' 'BEGIN { if (k !~ /^[1-9][0-9]*$$/ || n !~ /^[1-9][0-9]*$$/ || k + 0 > n + 0) { print bad; done = 1; exit } } (NR - 1) % n == k - 1 { print; c++ } END { if (!c && !done) print bad }')
+PYTHON_TEST_SHARD_ORDER = $(shell printf '%s\n' $(PYTHON_TEST_RUN_ORDER) | awk -v s='$(PYTHON_TEST_SHARD)' -v k='$(PYTHON_TEST_SHARD_INDEX)' -v n='$(PYTHON_TEST_SHARD_COUNT)' -v bad='$(PYTHON_TEST_SHARD_BAD)' 'BEGIN { if (s !~ /^[1-9][0-9]*\/[1-9][0-9]*$$/ || k + 0 > n + 0) { print bad; done = 1; exit } } (NR - 1) % n == k - 1 { print; c++ } END { if (!c && !done) print bad }')
 
 # How many of those files `test-python` and `coverage` run at once. They are
 # separate `python3` processes that share nothing -- each cd's into its own

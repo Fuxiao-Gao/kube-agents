@@ -102,10 +102,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The full history, as the single job had before the split; the
-          # diff-cover step that needed it now runs in the `test` job.
-          fetch-depth: 0
-          # Nothing after checkout needs git credentials, and this job
+          # The default depth: the sweep reads no history (the agent-image
+          # job runs the same sweep at this depth), and diff-cover, which
+          # does, runs in the `test` job. Nothing after checkout needs git
+          # credentials, and this job
           # executes the pull request's own Makefile and tests -- don't
           # leave a token on disk for them to read.
           persist-credentials: false
@@ -240,13 +240,14 @@ jobs:
             requirements-test.txt
             admin_console/requirements.txt
 
-      # The same requirements file as the shards. coverage is unpinned there,
-      # so a release between the shards' install and this one could change
-      # the data schema; combine then fails, which fails the check closed.
+      # The two tools alone: nothing here imports the code under test. Both
+      # are unpinned in requirements-test.txt as here, so a coverage release
+      # between the shards' install and this one could change the data
+      # schema; combine then fails, which fails the check closed.
       - name: Install coverage and diff-cover
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install -r requirements-test.txt
+          python3 -m pip install coverage diff-cover
 
       - name: Download the shards' coverage
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2

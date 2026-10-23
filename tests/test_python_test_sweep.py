@@ -590,10 +590,17 @@ class ShardTest(unittest.TestCase):
         self.assertEqual(len(joined), len(set(joined)), "a file is in two shards")
 
     def test_a_malformed_shard_is_a_word_the_worker_refuses(self):
-        for value in ("0/3", "4/3", "1/0", "x", "1", "2/x"):
+        for value in ("0/3", "4/3", "1/0", "x", "1", "2/x", "1/3/9", "1 2/3"):
             with self.subTest(value=value):
                 _, shard = _shard(value)
                 self.assertEqual(shard, [SHARD_BAD])
+
+    def test_a_shard_that_would_get_no_file_is_refused(self):
+        # A valid value over a list too short to give this shard a file: the
+        # END rule, not the value check, has to refuse it.
+        with fixture_files() as (green, _red):
+            _, shard = _shard("2/3", [f"PYTHON_TEST_FILES={green}"])
+        self.assertEqual(shard, [SHARD_BAD])
 
     def test_a_shard_runs_and_reports_only_its_own_files(self):
         with fixture_files() as (green, red):
