@@ -93,7 +93,7 @@ the contract for why.
 
 A case whose spec reads live cluster state must declare it. A check that reads the
 agent's own install rather than the seeded fleet (the `bootstrap_*` checks,
-`sandbox_tree_matches_image`, `findings_item_state`, `oobe_audits_started`, `relay_posted_as_written`, `audit_chat_report_posted`, `audit_report_stored`, `report_store_reply`) is not a fixture read, and a case carrying only those needs
+`sandbox_tree_matches_image`, `findings_item_state`, `oobe_audits_started`, `relay_posted_as_written`, `audit_chat_report_posted`, `audit_report_stored`, `report_store_reply`, `workload_incident_folded`) is not a fixture read, and a case carrying only those needs
 no `fixtures:`. `fixtures: []` is the declaration for a case that plants its own state — `gpu-stress-test-diagnosis` brings up
 its own Terraform stack and depends on no fixture — and an absent key on such a case is a
 finding, because a grep that returns one case for a role has to mean one case uses it. A
@@ -206,7 +206,7 @@ deployment's ready replicas land in a range). A fourth, `fleet_resource_property
 this repository's `resource_property` against the seeded-fleet cluster that carries a
 fixture role, named by `fixture_role:` rather than by cluster.
 
-Twelve read what the run produced, from this repository
+Fourteen read what the run produced, from this repository
 (`bench/kube_agents_bench/verifiers.py`, registered through the
 `devops_bench.verifiers` entry-point group in `bench/pyproject.toml`):
 `report_contains` (phrases in the agent's answer; its `forbidden_patterns`, `required_patterns` and
@@ -246,13 +246,13 @@ the workers' included; a report that states none passes), `tool_called` (calls i
 trajectory), `ledger_issue_contains` (the GitHub ledger issue a fleet audit
 published), `pull_request_opened` (the remediation pull request the run opened,
 resolved through GitHub and required to be this run's rather than an earlier
-repetition's, unless the case sets `accepts_stream_pull_request` and runs on an audit stream, which also admits one an earlier run on its audit stream opened in the job's GitOps repository on that audit's remediation branch; `unchanged_paths` also fails one whose diff changes a listed path, and `content` asserts over the YAML or text in the files it adds), `github_writes` (every pull request or branch under the agent's
+repetition's, unless the case sets `accepts_stream_pull_request` and runs on an audit stream, which also admits one an earlier run on its audit stream opened in the job's GitOps repository on that audit's remediation branch; `unchanged_paths` also fails one whose diff changes a listed path, `removed_paths` one that does not delete every listed path, and `content` asserts over the YAML or text in the files it adds), `github_writes` (every pull request or branch under the agent's
 prefix written to the case's GitOps repository since the repetition started; it
 passes on a write, so a case wraps it in `none` to say the agent wrote nothing
 it was not asked for, and the inject lane appends exactly that entry to every
 case it runs), `worker_commands` (regular expressions over the terminal commands
 the delegated workers ran, read from the worker log of each card the front agent filed before the harness
-purges it and, for any card with no log line (the cards those workers filed in turn, or a filed card that ran only code), from its tagged `terminal` and `execute_code` calls in the trajectory; each of its `exempt_patterns` removes the text it matches from a
+purges it and, for any card with no log line (the cards those workers filed in turn, or a filed card that ran only code), from its tagged `terminal` and `execute_code` calls in the trajectory, and with `after_result_pattern` set from every card's tagged calls as typed, beside the logs when the check has no forbidden set; each of its `exempt_patterns` removes the text it matches from a
 command, a log line or a tagged call alike, before the forbidden list reads it, and nothing else, and takes a
 command it touched out of the required list, for a command that can fetch and
 send nothing but carries a forbidden word as its argument, such as a plain
@@ -261,7 +261,17 @@ line is still graded; or with `required_runs` a script by its basename and the f
 follow it on the same shell segment, read from the command's argv as the shell splits
 it, so a quoted mention of the invocation is one word and not a run, and a run made through a script file or a shell's standard input is not read, since the argv names the file or the shell; each flag is read as the exact word, so the script named is built with `allow_abbrev=False`; `word_patterns` are regular expressions each of which some later word of the segment must match on its own, and `forbidden_runs` is the same shape for a run no worker may make, such as a `kubectl get` of the objects a script grades; with `after_result_pattern` the commands come from the workers' tagged `terminal` and `execute_code` calls in the trajectory instead, with their results as the record stores them, a JSON string with newlines escaped, and the forbidden set applies only to the calls after the first whose result matched, failed or not, one window per delegated card and the cards its worker fanned out; `forbidden_result_patterns` then grade the later results too; a trajectory with no tagged call at all, none readable (every code-tool argument withheld), a call with no numeric time, or a capture with gaps and no hit, is `status: "error"`, where a worker whose tagged calls are all MCP calls grades as zero commands), `worker_agents` (regular expressions every one of which must match the
 profile at least one delegated worker ran as, read from the tags the harness puts on the
-workers' trajectory entries), `replay_card` (the status and comments of the card a
+workers' trajectory entries), `worker_budget` (the turn budget a delegated worker ran under,
+read from two records: Hermes' one-shot checkpoint notice, `You have used N of M iterations`,
+which a kanban worker gets in its newest tool result at 90% of a finite cap and the worker
+capture carries in the tagged call's `result`, and the run row a worker that goes on to exhaust
+the cap closes with `Iteration budget exhausted (N/M)`; `budget` is the `M` every such record must
+name; a worker that finishes inside 90% of its cap records neither, so the check is for a card
+written to outrun the cap; a run whose cards have no run rows, in which no attempt
+ran out and none completed either (the harness archives a card still running at its delegation
+ceiling, which closes the attempt `reclaimed`), or whose capture recorded gaps and no attempt ran
+out, is `status: "error"`),
+`replay_card` (the status and comments of the card a
 card-wake replay planted, read before the harness archives it), `reply_is_silent`
 (whether the gateway would post the closing message, or with `reply: answer` a question
 replay's reply to the answer turn, at all, by its own silence rule), and
@@ -324,6 +334,11 @@ to is the judge's to grade. `oobe_audits_started`, in its own module
 `cron/executions.db` in the agent pod, and passes when the stage's `.oobe_audits_fired` lists each
 of the four first-run audits as marked due and each has a run claimed since the stage marked it
 that got going (running, completed, or ended after its start), each starting only after the one before it in the chain ended.
+`workload_incident_folded`, in its own module (`bench/kube_agents_bench/incidents.py`), reads a
+workload's rows of one object `kind` (default `Pod`) from the Session KV server's event ledger in the agent pod and passes when at least
+`min_folded` of them were folded into its newest admitted incident, which must be newer than the
+run's start less `max_age_sec`; it keys on that incident rather than a time window because the stack
+plants its burst before the turn starts.
 `relay_posted_as_written`, in its own module (`bench/kube_agents_bench/relay.py`), reads the
 `relay-report` stack's state file and what the Session KV server stored for the report's threads,
 and passes when the route answered `delivered` and every stored post is the report exactly; a

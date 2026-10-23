@@ -296,6 +296,12 @@ FIXTURE_NOT_READY = {
         "project (the postsubmit reconcile); no pool project has the seeded-scaled-zero "
         "namespace or its Gateway"
     ),
+    # Needs a GitOps repository that declares the namespace under a path a
+    # reconciler syncs; no pool project's repository has one. Run by hand on
+    # the GitOps-wired dev lane (gitops-target-1, sackheads/kage-fleet-dev).
+    "delete-namespace-declared-pr": (
+        "#3576: needs a declared, reconciler-synced namespace in the pool GitOps repositories"
+    ),
     # Needs a GitOps repository with a Config Connector + Config Sync sibling
     # cluster; no pool project has one. Run by hand on the GitOps-wired dev
     # lane (ka-fleet-dev-1, sackheads/kage-fleet-dev).
@@ -315,6 +321,12 @@ FIXTURE_NOT_READY = {
         "#3560: needs an eval install with more than ten clusters in scope, so a "
         "fleet question reaches the ten-card fan-out bound; the seeded fleet and "
         "every dev install have five or fewer"
+    ),
+    "upgrades-readiness-lb-drain-timeout": (
+        "#3524: needs bench/tf/fleet's drain-timeout backend service on seeded-b's default "
+        "pool (the readiness-lb-drain-timeout role) applied to every pool project (fleet "
+        "re-apply); no pool project has a backend service draining longer than the 600 s "
+        "GKE waits per node"
     ),
     "scope-excluded-cluster-not-listed": (
         "#3213: needs an eval install whose PlatformAgent spec.scope.exclude.clusters "
@@ -365,6 +377,13 @@ FIXTURE_NOT_READY = {
         "#2419: needs an install with no forge (a PlatformAgent with no "
         "spec.integration); every CI eval install has a GitHub forge, so no CI tier "
         "can run it; run it by hand against such an install"
+    ),
+    "fleet-audit-forge-without-issues-keeps-the-ledger-in-the-store": (
+        "#1154: needs an install whose forge's capabilities declare no issue verbs "
+        "and labels: false (an install whose forge declares no issue tracker, as a "
+        "Bitbucket provider does), and the no-pdb-workload declaration of #2228; "
+        "every CI eval install has a GitHub forge, so no CI tier can run it; run it "
+        "by hand against such an install"
     ),
     "fleet-audit-ledger-goes-to-the-gitops-repository": (
         "#3536: needs an install whose PlatformAgent declares a second managed "
@@ -523,6 +542,7 @@ CHECK_ASSERTIONS: dict[str, tuple[str, ...]] = {
     "tool_called": ("tool_names",),
     "worker_commands": ("required_patterns", "forbidden_patterns", "required_runs", "forbidden_runs", "forbidden_result_patterns"),
     "worker_agents": ("required_agents",),
+    "worker_budget": ("budget",),
     "replay_card": ("status_in", "status_not_in", "comment_phrases", "decoy_status_in"),
     # No assertion field: "the gateway would post nothing" is the assertion; `reply` only picks
     # which reply is graded.
@@ -562,6 +582,10 @@ CHECK_ASSERTIONS: dict[str, tuple[str, ...]] = {
     # case planted. The rows it names are the assertion; with none it could
     # only pass.
     "findings_item_state": ("finding_ids",),
+    # This repository, agent-pod-reading: how many of a workload's events the
+    # session daemon folded into its newest incident. The count is the
+    # assertion; min_folded is at least 1, so it cannot pass on nothing folded.
+    "workload_incident_folded": ("min_folded",),
     # This repository, agent-pod-reading. No field: whether every post a planted
     # report produced is that report, exactly, is the whole assertion.
     "relay_posted_as_written": (),

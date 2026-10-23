@@ -65,14 +65,14 @@ class DeleteRequestsRouteToTheDeletionSectionTest(unittest.TestCase):
     opened the deletion section; it probed a `kubectl delete` instead (#3077,
     #3086's repro runs). Both descriptions name the split."""
 
-    def test_submit_suggestion_claims_deletions_as_a_stop(self):
-        # The section answers every delete with a stated stop (the declared
-        # path is #3233), so the description must not promise a removal.
+    def test_submit_suggestion_claims_deletions(self):
+        # The section removes a declared object's manifest in a pull request
+        # and stops on anything else (#3233), and the description says both.
         description = _description("submit-suggestion")
         self.assertIn("delete a resource", description)
         self.assertIn("Deleting a resource", description)
-        self.assertIn("stated stop, never a pull request", description)
-        self.assertNotIn("removes the resource's manifest", description)
+        self.assertIn("pull request that removes the declaring manifest", description)
+        self.assertIn("stated stop when the repository does not declare it", description)
 
     def test_cluster_agent_lifecycle_disclaims_them(self):
         description = _description("cluster-agent-lifecycle")
@@ -112,6 +112,36 @@ class InstallGuidesAreReadNotSearchedTest(unittest.TestCase):
         content = (REPO_ROOT / "agents/platform/skills/gke-cluster-creation/SKILL.md").read_text(encoding="utf-8")
         self.assertIn("a template default applies only where the workload", content)
         self.assertIn("Search-result snippets are not requirements", content)
+
+
+class SubmitSuggestionHandsEditsToTheirAuthoringSkillTest(unittest.TestCase):
+    """#2999's lane run: asked to raise a Terraform node pool's autoscaling
+    maximum, the agent went straight to submit-suggestion, edited the .tf, and
+    never loaded gcp-terraform, so tofu fmt never ran (#3565). Step 2 hands a
+    Terraform, Config Connector or Helm-chart edit to its authoring skill."""
+
+    def test_step_two_names_each_authoring_skill(self):
+        content = (REPO_ROOT / "agents/platform/skills/submit-suggestion/SKILL.md").read_text(encoding="utf-8")
+        step2 = content[content.index("### Step 2: Make the Changes"):content.index("### Deleting a resource")]
+        for skill in ("gcp-terraform", "gcp-config-connector", "gitops-helm-chart"):
+            self.assertIn(f"**{skill}**", step2)
+        self.assertIn("follow it from its Step 1", step2)
+        # The authoring skill submits its own branch; editing this skill's copy
+        # would leave submit with nothing to find.
+        self.assertIn("Leave the copy you prepared here unused", step2)
+        # A review round or an open proposal already fixes the branch; the
+        # authoring skill's own prepare and submit would open a second PR.
+        self.assertIn("When the branch is already decided, stay on it.", step2)
+        self.assertIn("not its Step 1 `prepare`, its branch name or\nits submit", step2)
+
+    def test_review_rounds_apply_the_same_table(self):
+        # Step 5 is where pr-conversation enters; a .tf edit in a review round
+        # takes the authoring skill's rules too.
+        content = (REPO_ROOT / "agents/platform/skills/submit-suggestion/SKILL.md").read_text(encoding="utf-8")
+        step5 = content[content.index("### Step 5: Addressing Review Feedback"):]
+        self.assertIn("authoring skill's rules here too (Step 2's table)", step5)
+        self.assertIn("`tofu fmt` after any `.tf` edit", step5)
+        self.assertIn("submit do not apply: stay on `<source>` in this copy", step5)
 
 if __name__ == "__main__":
     unittest.main()
