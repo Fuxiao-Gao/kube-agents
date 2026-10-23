@@ -114,13 +114,17 @@ func TestAProfilePodReachesEverythingItsOwnWorkNeeds(t *testing.T) {
 
 		// The dispatcher hand-off and the lease, at the entry's tier, for
 		// this pod alone (#3655).
-		lib.DispatchAcceptSubject(auditor, "read", auditorPod1):                                    false,
-		lib.ProfileLeaseSubject(lib.ProfileLeaseKey(auditor, "read", auditorPod1, "task-1")):       false,
-		"$JS.API.STREAM.INFO.KV_" + lib.ProfileLeaseBucket:                                         false,
-		lib.DispatchAcceptSubject(auditor, "unattended", auditorPod1):                              true,
-		lib.ProfileLeaseSubject(lib.ProfileLeaseKey(auditor, "unattended", auditorPod1, "task-1")): true,
-		lib.ProfileLeaseSubject(lib.ProfileLeaseKey(auditor, "read", auditorPod2, "task-1")):       true,
-		lib.DispatchAcceptSubject(auditor, "read", auditorPod2):                                    true,
+		lib.DispatchAcceptSubject(auditor, "read", auditorPod1):       false,
+		lib.DispatchLeaseSubject(auditor, "read", auditorPod1):        false,
+		lib.DispatchAcceptSubject(auditor, "unattended", auditorPod1): true,
+		lib.DispatchLeaseSubject(auditor, "unattended", auditorPod1):  true,
+		lib.DispatchAcceptSubject(auditor, "read", auditorPod2):       true,
+		// A renewal on another pod's subject is refused at the bus.
+		lib.DispatchLeaseSubject(auditor, "read", auditorPod2): true,
+		// No grant on the lease bucket: a put on any key, with a rollup
+		// header, would purge every lease.
+		lib.ProfileLeaseSubject(lib.ProfileLeaseKey(auditor, "read", auditorPod1, "task-1")): true,
+		"$JS.API.STREAM.INFO.KV_" + lib.ProfileLeaseBucket:                                   true,
 
 		"a2a.topics." + auditorPublishTopic:                                                      false,
 		"$JS.API.STREAM.INFO." + lib.StreamTopicsState:                                           false,
@@ -513,8 +517,8 @@ func TestAWorkersDispatchAndLeaseGrantsAreItsOwn(t *testing.T) {
 		t.Fatal(err)
 	}
 	own := map[string]bool{
-		lib.DispatchAcceptSubject(auditor, "read", auditorPod1):                              true,
-		lib.ProfileLeaseSubject(lib.ProfileLeaseKey(auditor, "read", auditorPod1, "task-1")): true,
+		lib.DispatchAcceptSubject(auditor, "read", auditorPod1): true,
+		lib.DispatchLeaseSubject(auditor, "read", auditorPod1):  true,
 	}
 	for subject := range own {
 		if !grantsCover(g.Publish, subject) {
@@ -531,7 +535,7 @@ func TestAWorkersDispatchAndLeaseGrantsAreItsOwn(t *testing.T) {
 	} {
 		for _, subject := range []string{
 			lib.DispatchAcceptSubject(other.profile, other.tier, other.pod),
-			lib.ProfileLeaseSubject(lib.ProfileLeaseKey(other.profile, other.tier, other.pod, "task-1")),
+			lib.DispatchLeaseSubject(other.profile, other.tier, other.pod),
 		} {
 			if grantsCover(g.Publish, subject) {
 				t.Errorf("publish %s is granted to %s/read/%s", subject, auditor, auditorPod1)
@@ -541,9 +545,10 @@ func TestAWorkersDispatchAndLeaseGrantsAreItsOwn(t *testing.T) {
 			t.Errorf("subscribe %s is granted to %s/read/%s", lib.DispatchSubject(other.profile, other.tier, other.pod), auditor, auditorPod1)
 		}
 	}
-	for _, p := range g.Publish {
-		if strings.HasPrefix(p, "$JS.API.") && strings.Contains(p, "KV_"+lib.ProfileLeaseBucket) && p != "$JS.API.STREAM.INFO.KV_"+lib.ProfileLeaseBucket {
-			t.Errorf("a KV API grant wider than STREAM.INFO on the lease bucket: %s", p)
+	// No grant on the lease bucket at all: a worker never writes it.
+	for _, p := range append(append([]string{}, g.Publish...), g.Subscribe...) {
+		if strings.Contains(p, lib.ProfileLeaseBucket) {
+			t.Errorf("a grant on the lease bucket: %s", p)
 		}
 	}
 

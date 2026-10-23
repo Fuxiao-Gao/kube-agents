@@ -44,9 +44,10 @@ import (
 // a profile allows, so the tier is the entry's. What a worker does with it is
 // the hand-off and the lease, both scoped to its own (profile, tier, pod):
 // the dispatcher's request on lib.DispatchSubject, its answer on
-// lib.DispatchAcceptSubject, and puts on its own lease keys
-// (lib.ProfileLeaseKey) with STREAM.INFO on the bucket, which binding the
-// bucket needs, and nothing wider. The task subjects carry no tier (#3660,
+// lib.DispatchAcceptSubject, and its lease renewals on
+// lib.DispatchLeaseSubject. No grant on the lease bucket itself: a KV bucket
+// allows rollup headers, so a put on any key would let a worker purge every
+// lease, and the dispatcher is the bucket's only writer. The task subjects carry no tier (#3660,
 // "Subjects"), so the .events publish and the .in reader still reach every
 // task of the profile at any tier, as before tiers; per-task credentials
 // close that (#3889) before a tier stronger than read is live.
@@ -156,8 +157,7 @@ func profileWorkerGrants(profile, tier, pod string) Grants {
 	g.Subscribe = append(g.Subscribe, lib.DispatchSubject(profile, tier, pod))
 	g.Publish = append(g.Publish,
 		lib.DispatchAcceptSubject(profile, tier, pod),
-		lib.ProfileLeaseSubject(lib.ProfileLeaseKey(profile, tier, pod, ">")),
-		"$JS.API.STREAM.INFO.KV_"+lib.ProfileLeaseBucket,
+		lib.DispatchLeaseSubject(profile, tier, pod),
 	)
 	return g
 }
