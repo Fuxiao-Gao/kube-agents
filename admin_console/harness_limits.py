@@ -9,13 +9,18 @@ computes.
 
 A run's ``totals`` are sums over its test clusters. A factor counted per
 cluster (nodes, objects) sits on its axis at its total divided by the run's
-cluster count, the unit of its level and of the page's input.
+cluster count, the unit of its level and of the page's input. A factor that
+the totals do not count sits at the run's planned value, ``values``.
 
 A chart fits one straight line per operation, factor and metric, over the base
 runs and that factor's runs. A prediction for a fleet starts from the largest
 base value of any operation and adds, per factor, the largest increase that any
 operation's line predicts from the factor's base to the fleet. The factors are
 independent in this sum: it does not model how two factors interact.
+
+The node answer follows Decision 3: one node pool for every pod. The machine
+type is the smallest that holds the largest pod's recommended requests, and the
+node count holds the requests of every pod, replicas included.
 """
 
 from __future__ import annotations
@@ -39,28 +44,32 @@ DEFAULT_MODE = "next"
 COMMIT_LABEL_LENGTH = 12
 # "YYYY-MM-DD", the date part of a record's ISO 8601 start time.
 DATE_LENGTH = 10
+# Between the parts of the commit selector's label.
+LABEL_SEPARATOR = " · "
 
 # Factor names, as bench/scale/phase1.yaml spells them.
 CLUSTERS = "clusters"
 NODES = "nodes"
 OBJECTS = "objects"
 CHURN = "churn_per_minute"
-WARNING_EVENTS = "warning_events"
+# A count, not a rate: the Pods that fail their image pull at the same time.
+FAILING_PODS = "failing_pods"
 CONCURRENT = "concurrent"
 LISTING_PODS = "listing_pods"
 # The kinds the design counts as objects. Their summed totals, per cluster, are
 # the objects factor's measured value, so the cluster's own objects count too.
 OBJECT_KINDS = ("namespaces", "deployments", "services", "hpas", "pods", "configmaps")
 # The plan's base point (bench/scale/phase1.yaml `base:`, the design's "Base
-# numbers"), per cluster for nodes and objects. A base record has level 0, so
-# this value puts it on the axis of a factor that its totals do not count.
+# numbers"), per cluster for nodes and objects. Only data without `values`
+# (each factor's planned value, which older records lack) reads it: a base
+# record's place on the axis of a factor that its totals do not count.
 PLAN_BASE_LEVELS = MappingProxyType(
     {
         CLUSTERS: 2.0,
         NODES: 2.0,
         OBJECTS: 100.0,
         CHURN: 10.0,
-        WARNING_EVENTS: 1.0,
+        FAILING_PODS: 1.0,
         CONCURRENT: 1.0,
         LISTING_PODS: 100.0,
     }
@@ -74,20 +83,42 @@ OOMKILLS = "oomkills"
 PVC_USED = "pvc_used_bytes"
 PVC_CAPACITY = "pvc_capacity_bytes"
 PROFILE_MAX = "profile_bytes_max"
+PROFILES = "profiles"
 PROXY_WAIT_P50 = "proxy_wait_p50_seconds"
 PROXY_WAIT_MAX = "proxy_wait_max_seconds"
 PROXY_REFUSALS = "proxy_refusals"
 WATCHER_SEEN = "watcher_events_seen"
+WATCHER_SEEN_RATE = "watcher_events_seen_per_minute"
 WATCHER_CREATES = "watcher_session_creates"
 WATCHER_INJECTED = "watcher_events_injected"
+WATCHER_SUPPRESSED = "watcher_quota_suppressed"
 TRIAGE_LOST = "triage_lost"
 RUN_SLOT_REFUSALS = "run_slot_refusals"
+FAILED_PROMPTS = "failed_prompts"
+RESPONSE = "response_seconds"
 TOKENS_INPUT = "tokens_input"
 TOKENS_OUTPUT = "tokens_output"
 TOKENS_CACHED = "tokens_cached"
-FIRST_CARD = "first_card_seconds"
-RESPONSE = "response_seconds"
-SWEEP = "sweep_seconds"
+RUN_TOKENS_INPUT = "run_tokens_input"
+RUN_TOKENS_OUTPUT = "run_tokens_output"
+RUN_TOKENS_CACHED = "run_tokens_cached"
+CHURN_ACHIEVED = "churn_achieved_per_minute"
+# A run with a failed prompt is left out of these fits: the runner times only
+# the prompts that completed, so the run's value omits the one that failed.
+PROMPT_FAILURE_FITS = (RESPONSE,)
+# How the runner writes a failed prompt into a record's errors: a line with
+# this prefix, or the harness's transport-failure marker in the line.
+PROMPT_FAILED_PREFIX = "prompt failed"
+INFRA_FAILURE_MARKER = "KUBE_AGENTS_INFRA_FAILURE"
+# Decision 3 sizes the node by the largest pod. The gateway pod holds these
+# containers; every other container, an unlisted name included, is a pod of
+# its own.
+GATEWAY_POD = "platform-agent-gateway"
+POD_CONTAINERS = MappingProxyType(
+    {GATEWAY_POD: ("platform-agent", "agent-api-auth", "hermes-bridge", "fluent-bit")}
+)
+# The pods that carry a container when a record does not count them.
+DEFAULT_REPLICAS = 1
 # The keys of a record's `limits` entry, and the metric each one bounds.
 LIMIT_MEMORY = "memory_bytes"
 LIMIT_CPU = "cpu_cores"
@@ -135,6 +166,8 @@ INTERPOLATED_LABEL = "within the measured range"
 MEASURED_LABEL = "measured at the base point"
 BASE_VALUE_LABEL = "base value"
 NO_VALUE = "—"
+YES_LABEL = "✓ yes"
+NO_LABEL = "no"
 LIMIT_LABEL = "{container} limit"
 PVC_CAPACITY_LABEL = "PVC capacity {capacity}"
 # The columns of the editable limits table.
@@ -174,7 +207,10 @@ UNFIXABLE = MappingProxyType(
         TRIAGE_LOST: (
             "A triage start makes one attempt with a 10 s timeout. No setting changes it."
         ),
-        FIRST_CARD: RESPONSE_NOTE,
+        FAILED_PROMPTS: (
+            "The agent API gave no answer, an empty answer or a transport failure. "
+            "The errors column of the raw records names the cause."
+        ),
         RESPONSE: RESPONSE_NOTE,
     }
 )
@@ -214,9 +250,12 @@ FACTORS = MappingProxyType(
             "Pods created per minute",
             help="Pods created and deleted per minute, across the fleet.",
         ),
-        WARNING_EVENTS: FactorSpec(
-            "Warning events per minute",
-            help="Warning events per minute, across the fleet.",
+        FAILING_PODS: FactorSpec(
+            "Pods failing at once",
+            help=(
+                "Pods failing at once: the Pods of one workload that fail their image "
+                "pull at the same time. Each one writes Warning events."
+            ),
         ),
         CONCURRENT: FactorSpec(
             "Concurrent requests",
@@ -224,7 +263,7 @@ FACTORS = MappingProxyType(
         ),
         LISTING_PODS: FactorSpec(
             "Pods in the largest listing",
-            help="Pods in the largest single `kubectl get pods -A` that the agent reads.",
+            help="Pods in the one namespace that the largest single agent listing reads.",
         ),
     }
 )
@@ -246,20 +285,26 @@ METRICS = MappingProxyType(
         PVC_USED: MetricSpec("Data PVC used", "GiB", GIB),
         PVC_CAPACITY: MetricSpec("Data PVC capacity", "GiB", GIB),
         PROFILE_MAX: MetricSpec("Largest profile", "MiB", MIB),
+        PROFILES: MetricSpec("Profiles on the data PVC"),
         PROXY_WAIT_P50: MetricSpec("Credential proxy wait, median", "s"),
         PROXY_WAIT_MAX: MetricSpec("Credential proxy wait, maximum", "s"),
         PROXY_REFUSALS: MetricSpec("Credential proxy refusals"),
         WATCHER_SEEN: MetricSpec("Watcher events seen"),
+        WATCHER_SEEN_RATE: MetricSpec("Watcher events seen per minute"),
         WATCHER_CREATES: MetricSpec("Watcher session creates"),
         WATCHER_INJECTED: MetricSpec("Watcher events injected"),
+        WATCHER_SUPPRESSED: MetricSpec("Watcher events suppressed by quota"),
         TRIAGE_LOST: MetricSpec("Triage starts lost"),
         RUN_SLOT_REFUSALS: MetricSpec("Run-slot refusals"),
-        TOKENS_INPUT: MetricSpec("Input tokens"),
-        TOKENS_OUTPUT: MetricSpec("Output tokens"),
-        TOKENS_CACHED: MetricSpec("Cached tokens"),
-        FIRST_CARD: MetricSpec("Time to first card", "s"),
+        FAILED_PROMPTS: MetricSpec("Failed prompts"),
         RESPONSE: MetricSpec("Response time", "s"),
-        SWEEP: MetricSpec("Sweep duration", "s"),
+        TOKENS_INPUT: MetricSpec("Input tokens, every caller"),
+        TOKENS_OUTPUT: MetricSpec("Output tokens, every caller"),
+        TOKENS_CACHED: MetricSpec("Cached tokens, every caller"),
+        RUN_TOKENS_INPUT: MetricSpec("Input tokens, the run's prompts"),
+        RUN_TOKENS_OUTPUT: MetricSpec("Output tokens, the run's prompts"),
+        RUN_TOKENS_CACHED: MetricSpec("Cached tokens, the run's prompts"),
+        CHURN_ACHIEVED: MetricSpec("Pods created per minute, achieved"),
     }
 )
 
@@ -273,13 +318,11 @@ class Line:
     critical: bool = True
 
 
-# The design's Metrics table: the credential proxy queue fails the Cluster
-# Agent preflight above 15 s and refuses at 60 s; the response-time gates are
-# "<30s OK, >60s investigate"; OOMKills, restarts and lost work fail at any count.
-PROXY_WAIT_LINES = (
-    Line(15.0, "15 s: Cluster Agent preflight"),
-    Line(60.0, "60 s: broker refuses"),
-)
+# The design's Metrics table: the credential proxy's broker refuses a command
+# that waits 60 s for admission; the response-time gates are "<30s OK, >60s
+# investigate"; OOMKills, restarts, lost work and failed prompts fail at any
+# count. A metric without a line here is charted without a threshold.
+PROXY_WAIT_LINES = (Line(60.0, "60 s: broker refuses"),)
 RESPONSE_LINES = (
     Line(30.0, "30 s: OK", critical=False),
     Line(60.0, "60 s: investigate"),
@@ -289,13 +332,13 @@ FIXED_LINES = MappingProxyType(
     {
         PROXY_WAIT_P50: PROXY_WAIT_LINES,
         PROXY_WAIT_MAX: PROXY_WAIT_LINES,
-        FIRST_CARD: RESPONSE_LINES,
         RESPONSE: RESPONSE_LINES,
         RESTARTS: ABOVE_ZERO,
         OOMKILLS: ABOVE_ZERO,
         PROXY_REFUSALS: ABOVE_ZERO,
         RUN_SLOT_REFUSALS: ABOVE_ZERO,
         TRIAGE_LOST: ABOVE_ZERO,
+        FAILED_PROMPTS: ABOVE_ZERO,
     }
 )
 # A metric whose threshold is another metric of the same run.
@@ -304,7 +347,7 @@ CAPACITY_METRICS = MappingProxyType({PVC_USED: PVC_CAPACITY})
 # and the metadata question asked during it. The other operations are long
 # reports, such as a fleet audit; their response time is charted without a gate.
 QUERY_OPERATIONS = ("fan_out",)
-QUERY_METRICS = (FIRST_CARD, RESPONSE)
+QUERY_METRICS = (RESPONSE,)
 
 
 @dataclass(frozen=True)
@@ -330,7 +373,7 @@ MACHINE_TYPES = (
     MachineType("e2-standard-4", 4, 16, 13.3, 3.92, "The installer's Standard-mode default"),
     MachineType("e2-standard-8", 8, 32, 28.3, 7.91, "Next step up, same family"),
     MachineType("n2-standard-16", 16, 64, 58.4, 15.89, "Large fleet, CPU-bound fan-outs"),
-    MachineType("n2-highmem-16", 16, 128, 118.4, 15.89, "Large fleet, memory-bound caches"),
+    MachineType("n2-highmem-16", 16, 128, 118.6, 15.89, "Large fleet, memory-bound caches"),
 )
 
 
@@ -356,26 +399,47 @@ class Record:
     started: str
     ended: str
     metrics: tuple[Measurement, ...]
+    # The fields below are optional in the file: a record written before the
+    # runner recorded them still loads.
+    image: str = ""
+    # Every factor's planned value at the run's point.
+    values: Mapping[str, float] = field(default_factory=dict)
     totals: Mapping[str, float] = field(default_factory=dict)
     limits: Mapping[str, Mapping[str, float]] = field(default_factory=dict)
+    # Per container, the running pods that carried it.
+    replicas: Mapping[str, float] = field(default_factory=dict)
     provider_429s: int = 0
     excluded_from: tuple[str, ...] = ()
-    _values: dict[tuple[str, str | None], float] = field(
+    errors: tuple[str, ...] = ()
+    _readings: dict[tuple[str, str | None], float] = field(
         init=False, repr=False, compare=False
     )
 
     def __post_init__(self) -> None:
-        values: dict[tuple[str, str | None], float] = {}
+        readings: dict[tuple[str, str | None], float] = {}
         for measurement in self.metrics:
-            values.setdefault((measurement.name, measurement.container), measurement.value)
-        object.__setattr__(self, "_values", values)
+            readings.setdefault((measurement.name, measurement.container), measurement.value)
+        object.__setattr__(self, "_readings", readings)
 
     @property
     def is_base(self) -> bool:
         return self.factor == BASE_FACTOR
 
+    @property
+    def prompt_failed(self) -> bool:
+        return any(
+            error.startswith(PROMPT_FAILED_PREFIX) or INFRA_FAILURE_MARKER in error
+            for error in self.errors
+        )
+
+    def excluded(self, metric: str) -> bool:
+        """Whether the run is left out of the metric's fit and base value."""
+        return metric in self.excluded_from or (
+            metric in PROMPT_FAILURE_FITS and self.prompt_failed
+        )
+
     def value(self, metric: str, container: str | None = None) -> float | None:
-        return self._values.get((metric, container))
+        return self._readings.get((metric, container))
 
 
 @dataclass(frozen=True)
@@ -522,6 +586,61 @@ class Recommendation:
 
 
 @dataclass(frozen=True)
+class PodRequest:
+    """One pod's recommended requests: the sum of its containers' recommended limits."""
+
+    name: str
+    containers: tuple[str, ...]
+    replicas: int
+    memory_bytes: float
+    cpu_cores: float
+
+
+@dataclass(frozen=True)
+class NodePlan:
+    """Decision 3: one node pool holds every pod."""
+
+    pods: tuple[PodRequest, ...]
+
+    @property
+    def largest_memory_pod(self) -> PodRequest | None:
+        return max(self.pods, key=lambda pod: pod.memory_bytes, default=None)
+
+    @property
+    def largest_cpu_pod(self) -> PodRequest | None:
+        return max(self.pods, key=lambda pod: pod.cpu_cores, default=None)
+
+    @property
+    def largest_memory_bytes(self) -> float:
+        """The largest memory request of one pod, which one node must hold."""
+        return self.largest_memory_pod.memory_bytes if self.largest_memory_pod else 0.0
+
+    @property
+    def largest_cpu_cores(self) -> float:
+        return self.largest_cpu_pod.cpu_cores if self.largest_cpu_pod else 0.0
+
+    @property
+    def total_memory_bytes(self) -> float:
+        return sum(pod.memory_bytes * pod.replicas for pod in self.pods)
+
+    @property
+    def total_cpu_cores(self) -> float:
+        return sum(pod.cpu_cores * pod.replicas for pod in self.pods)
+
+    @property
+    def machine(self) -> MachineType | None:
+        """The smallest machine type that holds the largest pod; None when none does."""
+        return smallest_machine(self.largest_memory_bytes, self.largest_cpu_cores)
+
+    @property
+    def nodes(self) -> int | None:
+        machine = self.machine
+        if machine is None:
+            return None
+        return nodes_needed(machine, self.total_memory_bytes, self.total_cpu_cores)
+
+
+@dataclass(frozen=True)
 class ChartSeries:
     name: str
     container: str | None
@@ -599,13 +718,13 @@ def _record(item: Any, where: str) -> Record:
     limits = item.get("limits", {})
     if not isinstance(limits, dict):
         raise HarnessDataError(f"{where}: limits is not an object")
-    excluded = item.get("excluded_from", [])
-    if not isinstance(excluded, list) or not all(isinstance(name, str) for name in excluded):
-        raise HarnessDataError(f"{where}: excluded_from is not a list of names")
     measurements = (
         _measurement(entry, f"{where}: metric {index + 1}")
         for index, entry in enumerate(metrics)
     )
+    image = item.get("image", "")
+    if not isinstance(image, str):
+        raise HarnessDataError(f"{where}: image is not a string")
     return Record(
         key=_text(item, "key", where),
         commit=_text(item, "commit", where),
@@ -618,6 +737,8 @@ def _record(item: Any, where: str) -> Record:
         started=_text(item, "started", where),
         ended=_text(item, "ended", where),
         metrics=tuple(entry for entry in measurements if entry is not None),
+        image=image,
+        values=MappingProxyType(_numbers(item.get("values", {}), f"{where}: values")),
         totals=MappingProxyType(_numbers(item.get("totals", {}), f"{where}: totals")),
         limits=MappingProxyType(
             {
@@ -627,8 +748,10 @@ def _record(item: Any, where: str) -> Record:
                 for container, values in limits.items()
             }
         ),
+        replicas=MappingProxyType(_numbers(item.get("replicas", {}), f"{where}: replicas")),
         provider_429s=int(_number(item.get("provider_429s", 0), f"{where}: provider_429s")),
-        excluded_from=tuple(excluded),
+        excluded_from=_texts(item, "excluded_from", where),
+        errors=_texts(item, "errors", where),
     )
 
 
@@ -650,6 +773,14 @@ def _text(item: dict, name: str, where: str) -> str:
     if not isinstance(value, str):
         raise HarnessDataError(f"{where}: {name} is missing or not a string")
     return value
+
+
+def _texts(item: dict, name: str, where: str) -> tuple[str, ...]:
+    """An optional list of strings; an absent one is empty."""
+    values = item.get(name, [])
+    if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+        raise HarnessDataError(f"{where}: {name} is not a list of strings")
+    return tuple(values)
 
 
 def _number(value: Any, where: str) -> float:
@@ -676,10 +807,13 @@ def commits(records: Iterable[Record]) -> list[str]:
 
 
 def commit_label(records: Iterable[Record], commit: str) -> str:
+    """The commit, its runs' images where they recorded one, its phases and its latest date."""
     selected = [record for record in records if record.commit == commit]
+    images = ", ".join(sorted({record.image for record in selected if record.image}))
     phases = ", ".join(sorted({record.phase for record in selected}))
     latest = max(record.started for record in selected)
-    return f"{commit[:COMMIT_LABEL_LENGTH]} · {phases} · {latest[:DATE_LENGTH]}"
+    parts = (commit[:COMMIT_LABEL_LENGTH], images, phases, latest[:DATE_LENGTH])
+    return LABEL_SEPARATOR.join(part for part in parts if part)
 
 
 def modes(records: Iterable[Record], commit: str) -> list[str]:
@@ -795,7 +929,13 @@ def _cell(value: Any) -> float:
 
 
 def factor_value(record: Record, factor: str) -> float | None:
-    """Where a run sits on a factor's axis: its measured value, else its level."""
+    """Where a run sits on a factor's axis.
+
+    A factor that the totals count sits at its measured value, per cluster
+    when the factor is counted per cluster. Any other factor sits at the run's
+    planned value. A record without planned values falls back to its level,
+    or, for a base record, to the plan's base point.
+    """
     spec = FACTORS.get(factor)
     kinds = (factor,) if factor in record.totals else spec.total_kinds if spec else ()
     if kinds and all(kind in record.totals for kind in kinds):
@@ -805,9 +945,11 @@ def factor_value(record: Record, factor: str) -> float | None:
         clusters = record.totals.get(CLUSTERS)
         if clusters:
             return total / clusters
+    if factor in record.values:
+        return record.values[factor]
     if record.factor == factor:
         return record.level
-    if record.is_base:
+    if record.is_base and not record.values:
         return PLAN_BASE_LEVELS.get(factor)
     return None
 
@@ -829,7 +971,7 @@ def series_points(
         if x is None or y is None:
             continue
         points.append(
-            Point(x, y, record.key, record.run, record.is_base, metric in record.excluded_from)
+            Point(x, y, record.key, record.run, record.is_base, record.excluded(metric))
         )
     return tuple(sorted(points, key=lambda point: (point.x, point.key)))
 
@@ -881,7 +1023,7 @@ def _base_value(
     values = [
         value
         for record in base_records(records, operation)
-        if metric not in record.excluded_from
+        if not record.excluded(metric)
         and (value := record.value(metric, container)) is not None
     ]
     return _mean(values) if values else None
@@ -906,7 +1048,12 @@ def fleet_value(factor: str, fleet: Mapping[str, float]) -> float | None:
 
 
 def base_fleet(records: Sequence[Record]) -> dict[str, float]:
-    """The fleet inputs that put every factor at the base point of the data."""
+    """The fleet inputs that put every factor at the base point of the data.
+
+    Without base runs or runs of its own, a factor takes the planned value of
+    the other factors' lowest runs, which hold it at the base; data without
+    planned values takes the plan's base point.
+    """
     base = [
         record for operation in operations(records) for record in base_records(records, operation)
     ]
@@ -917,7 +1064,7 @@ def base_fleet(records: Sequence[Record]) -> dict[str, float]:
             for record in base
             if (record.is_base or record.factor == factor)
             and (value := factor_value(record, factor)) is not None
-        ]
+        ] or [record.values[factor] for record in base if factor in record.values]
         fleet[factor] = _mean(values) if values else PLAN_BASE_LEVELS[factor]
     return fleet
 
@@ -1068,10 +1215,21 @@ def resource_checks(
     selected: Sequence[str],
     limits: Mapping[str, Mapping[str, float]],
 ) -> list[Check]:
-    """Each container's predicted memory and CPU peak against its limit."""
+    """Each container's predicted memory and CPU peak against its limit.
+
+    A resource that no run measured for a container has no check: a container
+    that reports only restarts, such as an init container, has no data for one.
+    """
+    measured = {
+        (measurement.name, measurement.container)
+        for record in records
+        for measurement in record.metrics
+    }
     checks = []
     for container in selected:
         for metric, key in CONTAINER_LIMIT_KEYS.items():
+            if (metric, container) not in measured:
+                continue
             limit = limits.get(container, {}).get(key)
             lines = (
                 (Line(limit, LIMIT_LABEL.format(container=container)),)
@@ -1177,25 +1335,64 @@ def recommendations(
     ]
 
 
-def requested_total(items: Iterable[Recommendation]) -> tuple[float, float]:
-    """The memory bytes and CPU cores the recommended requests add up to."""
-    items = list(items)
-    memory = sum(item.memory_bytes or 0.0 for item in items)
-    cpu = sum(item.cpu_cores or 0.0 for item in items)
-    return memory, cpu
+def latest_replicas(records: Iterable[Record]) -> dict[str, float]:
+    """Per container, the replica count of the latest run that counted it."""
+    replicas: dict[str, float] = {}
+    for record in sorted(records, key=lambda item: (item.started, item.key)):
+        replicas.update(record.replicas)
+    return replicas
+
+
+def pod_of(container: str) -> str:
+    """The pod a container runs in: the gateway pod, or a pod of its own."""
+    return next(
+        (pod for pod, members in POD_CONTAINERS.items() if container in members), container
+    )
+
+
+def node_plan(items: Iterable[Recommendation], replicas: Mapping[str, float]) -> NodePlan:
+    """The recommendations grouped into pods, each with its replica count.
+
+    A container with no recommended memory or CPU, such as one that reports
+    only restarts, requests nothing and is left out.
+    """
+    grouped: dict[str, list[Recommendation]] = {}
+    for item in items:
+        if item.memory_bytes is None and item.cpu_cores is None:
+            continue
+        grouped.setdefault(pod_of(item.container), []).append(item)
+    return NodePlan(
+        tuple(
+            PodRequest(
+                name,
+                tuple(item.container for item in members),
+                max(int(replicas.get(item.container, DEFAULT_REPLICAS)) for item in members),
+                sum(item.memory_bytes or 0.0 for item in members),
+                sum(item.cpu_cores or 0.0 for item in members),
+            )
+            for name, members in grouped.items()
+        )
+    )
+
+
+def fits(machine: MachineType, memory_bytes: float, cpu_cores: float) -> bool:
+    return (
+        machine.allocatable_memory_bytes >= memory_bytes and machine.allocatable_cpu >= cpu_cores
+    )
 
 
 def smallest_machine(memory_bytes: float, cpu_cores: float) -> MachineType | None:
-    """The first machine type whose allocatable memory and CPU hold the requests."""
+    """The first machine type whose allocatable memory and CPU hold one pod's requests."""
     return next(
-        (
-            machine
-            for machine in MACHINE_TYPES
-            if machine.allocatable_memory_bytes >= memory_bytes
-            and machine.allocatable_cpu >= cpu_cores
-        ),
-        None,
+        (machine for machine in MACHINE_TYPES if fits(machine, memory_bytes, cpu_cores)), None
     )
+
+
+def nodes_needed(machine: MachineType, memory_bytes: float, cpu_cores: float) -> int:
+    """The nodes of one machine type that the requests need, per resource; the larger count."""
+    by_memory = math.ceil(memory_bytes / machine.allocatable_memory_bytes - EPSILON)
+    by_cpu = math.ceil(cpu_cores / machine.allocatable_cpu - EPSILON)
+    return max(1, by_memory, by_cpu)
 
 
 def memory_quantity(value_bytes: float) -> str:
@@ -1362,22 +1559,48 @@ def recommendation_rows(items: Iterable[Recommendation]) -> list[dict[str, str]]
     return rows
 
 
-def machine_rows(memory_bytes: float, cpu_cores: float) -> list[dict[str, str]]:
-    return [
-        {
-            "Machine type": machine.name,
-            "vCPU": str(machine.vcpu),
-            "Memory": f"{machine.memory_gib:g} GiB",
-            "Allocatable memory": f"{machine.allocatable_memory_gib:g} GiB",
-            "Allocatable CPU": f"{machine.allocatable_cpu:g}",
-            "Fits": "✓ yes"
-            if machine.allocatable_memory_bytes >= memory_bytes
-            and machine.allocatable_cpu >= cpu_cores
-            else "no",
-            "Why it is on the list": machine.reason,
-        }
-        for machine in MACHINE_TYPES
-    ]
+def _request_text(memory_bytes: float, cpu_cores: float) -> tuple[str, str]:
+    return (
+        memory_quantity(memory_bytes) if memory_bytes > 0 else NO_VALUE,
+        cpu_quantity(cpu_cores) if cpu_cores > 0 else NO_VALUE,
+    )
+
+
+def pod_rows(plan: NodePlan) -> list[dict[str, str]]:
+    """Each pod's recommended requests, the inputs of the node answer."""
+    rows = []
+    for pod in plan.pods:
+        memory, cpu = _request_text(pod.memory_bytes, pod.cpu_cores)
+        rows.append(
+            {
+                "Pod": pod.name,
+                "Containers": ", ".join(pod.containers),
+                "Replicas": str(pod.replicas),
+                "Memory request": memory,
+                "CPU request": cpu,
+            }
+        )
+    return rows
+
+
+def machine_rows(plan: NodePlan) -> list[dict[str, str]]:
+    rows = []
+    for machine in MACHINE_TYPES:
+        holds = fits(machine, plan.largest_memory_bytes, plan.largest_cpu_cores)
+        nodes = nodes_needed(machine, plan.total_memory_bytes, plan.total_cpu_cores)
+        rows.append(
+            {
+                "Machine type": machine.name,
+                "vCPU": str(machine.vcpu),
+                "Memory": f"{machine.memory_gib:g} GiB",
+                "Allocatable memory": f"{machine.allocatable_memory_gib:g} GiB",
+                "Allocatable CPU": f"{machine.allocatable_cpu:g}",
+                "Holds the largest pod": YES_LABEL if holds else NO_LABEL,
+                "Nodes for every pod": str(nodes) if holds else NO_VALUE,
+                "Why it is on the list": machine.reason,
+            }
+        )
+    return rows
 
 
 def unfixable_rows(checks: Iterable[Check]) -> list[dict[str, str]]:
@@ -1408,17 +1631,23 @@ def record_rows(records: Iterable[Record]) -> list[dict[str, Any]]:
             "Run": record.run,
             "Started": record.started,
             "Ended": record.ended,
+            "Image": record.image,
+            "Errors": "; ".join(record.errors),
             "Provider 429s": record.provider_429s,
             "Excluded from": ", ".join(record.excluded_from),
-            "Totals": ", ".join(f"{name}={value:g}" for name, value in record.totals.items()),
+            "Values": _pairs(record.values),
+            "Totals": _pairs(record.totals),
             "Limits": "; ".join(
-                f"{container}: "
-                + ", ".join(f"{name}={value:g}" for name, value in values.items())
-                for container, values in record.limits.items()
+                f"{container}: {_pairs(values)}" for container, values in record.limits.items()
             ),
+            "Replicas": _pairs(record.replicas),
         }
         for record in records
     ]
+
+
+def _pairs(values: Mapping[str, float]) -> str:
+    return ", ".join(f"{name}={value:g}" for name, value in values.items())
 
 
 def measurement_rows(records: Iterable[Record]) -> list[dict[str, Any]]:
@@ -1433,7 +1662,7 @@ def measurement_rows(records: Iterable[Record]) -> list[dict[str, Any]]:
             "Container": measurement.container or "",
             "Value": measurement.value,
             "Shown as": format_value(measurement.name, measurement.value),
-            "Excluded from fit": measurement.name in record.excluded_from,
+            "Excluded from fit": record.excluded(measurement.name),
         }
         for record in records
         for measurement in record.metrics

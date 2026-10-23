@@ -18,6 +18,8 @@ from admin_console.ui import PALETTE, section_title
 
 KEY_PREFIX = "harness_limits"
 DESIGN_DOC = "docs/designs/agent-harness-bottlenecks.md"
+# The commit selector's label carries the image, so it takes the wider column.
+SELECTOR_WIDTHS = (3, 1)
 FLEET_COLUMNS = 4
 CHART_COLUMNS = 2
 FLEET_STEP = 1.0
@@ -49,25 +51,41 @@ FIELD_CAPTION = (
     "the keys they set. The controller-manager's limit is a Helm chart value."
 )
 NODE_CAPTION = (
-    "Each container requests its recommended limit, so all containers can reach "
-    "their peaks at the same time. The sum covers the selected containers only; "
-    "other pods on the node pool need room too. On Autopilot there is no node "
-    "choice: set the requests only."
+    "All kube-agents pods run on one node pool, so the node answer counts every "
+    "measured container, selected or not. Each container requests its recommended "
+    "limit, so all containers can reach their peaks at the same time. A pod is its "
+    "containers. The gateway pod holds {gateway}. Every other container is a pod "
+    "of its own. The node count is the requests of all pods, replicas included, "
+    "divided by one node's allocatable memory and CPU. It takes the larger of the "
+    "two results. On Autopilot there is no node choice: set the requests only."
 )
+NODE_PLAN = (
+    "Node pool: **{nodes} × {machine}**. It is the smallest machine type that holds "
+    "the largest pod requests: {memory} of memory ({memory_pod}) and {cpu} of CPU "
+    "({cpu_pod}). All pods, replicas included, request {total_memory} of memory and "
+    "{total_cpu} of CPU."
+)
+NO_MACHINE = (
+    "No listed machine type holds the largest pod requests: {memory} of memory "
+    "({memory_pod}) and {cpu} of CPU ({cpu_pod})."
+)
+NO_PODS = "No container has a memory or CPU measurement to size a node from."
 MARGIN_NOTE = (
-    "Why 30%: the margin covers what the fit does not. That is the spread between "
-    "the runs at a point, bursts shorter than the sampling interval (the boot "
-    "burst, a fan-out), and garbage-collector headroom: the event watcher sets "
-    "GOMEMLIMIT to half of its container limit. Inside the measured range, 30% is "
-    "the whole margin. Past the largest measured point, it does not include the "
-    "error of the fit."
+    "Why 30%: the margin covers three things that the fit does not. They are the "
+    "spread between the runs at a point, bursts shorter than the sampling interval "
+    "(the boot burst, a fan-out), and garbage-collector headroom: the event watcher "
+    "sets GOMEMLIMIT to half of its container limit. The 30% is the whole margin. "
+    "Phase 1 draws no error band, because two points give no spread to build one "
+    "from. A prediction past the largest measured point is labelled predicted, "
+    "not measured."
 )
 CHART_CAPTION = (
-    "Filled points are runs. Open points are runs that a provider 429 excluded "
-    "from the fit. The solid line is the fit over the measured range; with two "
-    "distinct values it is a two-point estimate. The dashed line is predicted, "
-    "not measured. Dotted lines are thresholds: a container's limit in its colour, "
-    "the fixed thresholds in the warning and failure colours."
+    "Filled points are runs. Open points are runs left out of the fit: a response "
+    "time from a run that saw a provider 429 or a failed prompt. The solid line is "
+    "the fit over the measured range; with two distinct values it is a two-point "
+    "estimate. The dashed line is predicted, not measured. Dotted lines are "
+    "thresholds: a container's limit in its colour, the fixed thresholds in the "
+    "warning and failure colours."
 )
 
 recover_app_shell()
@@ -101,7 +119,7 @@ if not dataset.records:
     st.info(f"`{hl.display_path(dataset.path)}` has no records yet.")
     st.stop()
 
-commit_column, mode_column = st.columns(2)
+commit_column, mode_column = st.columns(SELECTOR_WIDTHS)
 commit = commit_column.selectbox(
     "Commit",
     hl.commits(dataset.records),
@@ -209,31 +227,42 @@ section_title(
     "What node size and container limits does this fleet need?",
     "Each recommended limit is the predicted peak plus 30%.",
 )
-if not selected:
-    st.info("Select a container to size it.")
-else:
-    recommendations = hl.recommendations(records, fleet, selected)
-    table(hl.recommendation_rows(recommendations))
-    st.caption(FIELD_CAPTION)
-    memory_bytes, cpu_cores = hl.requested_total(recommendations)
-    machine = hl.smallest_machine(memory_bytes, cpu_cores)
-    requested = (
-        f"{hl.memory_quantity(memory_bytes)} of memory and "
-        f"{hl.cpu_quantity(cpu_cores)} of CPU"
+recommendations = hl.recommendations(records, fleet, available)
+if selected:
+    table(
+        hl.recommendation_rows(
+            item for item in recommendations if item.container in selected
+        )
     )
-    if machine is not None:
+    st.caption(FIELD_CAPTION)
+else:
+    st.info("Select a container to see its recommended limits.")
+plan = hl.node_plan(recommendations, hl.latest_replicas(records))
+if not plan.pods:
+    st.info(NO_PODS)
+else:
+    largest = {
+        "memory": hl.memory_quantity(plan.largest_memory_bytes),
+        "memory_pod": plan.largest_memory_pod.name,
+        "cpu": hl.cpu_quantity(plan.largest_cpu_cores),
+        "cpu_pod": plan.largest_cpu_pod.name,
+    }
+    if plan.machine is not None:
         st.success(
-            f"Smallest machine type: **{machine.name}**. Its allocatable "
-            f"{machine.allocatable_memory_gib:g} GiB and {machine.allocatable_cpu:g} "
-            f"CPU hold the {requested} that the selected containers request."
+            NODE_PLAN.format(
+                nodes=plan.nodes,
+                machine=plan.machine.name,
+                total_memory=hl.memory_quantity(plan.total_memory_bytes),
+                total_cpu=hl.cpu_quantity(plan.total_cpu_cores),
+                **largest,
+            )
         )
     else:
-        st.error(
-            f"None of the five machine types holds the {requested} that the "
-            "selected containers request on one node."
-        )
-    table(hl.machine_rows(memory_bytes, cpu_cores))
-    st.caption(NODE_CAPTION)
+        st.error(NO_MACHINE.format(**largest))
+    table(hl.pod_rows(plan))
+    table(hl.machine_rows(plan))
+    *first, last = hl.POD_CONTAINERS[hl.GATEWAY_POD]
+    st.caption(NODE_CAPTION.format(gateway=f"{', '.join(first)} and {last}"))
 pvc = hl.predict(records, hl.PVC_USED, None, fleet)
 if pvc is not None:
     st.markdown(

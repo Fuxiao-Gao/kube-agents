@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,10 +17,17 @@ from admin_console.charts import harness_limit_chart
 REPO_ROOT = Path(__file__).resolve().parents[2]
 APP_PATH = REPO_ROOT / "admin_console" / "app.py"
 PAGE_PATH = "views/harness_limits.py"
+PAGE_SOURCE = REPO_ROOT / "admin_console" / "views" / "harness_limits.py"
+MODULE_SOURCE = REPO_ROOT / "admin_console" / "harness_limits.py"
 PLAN_PATH = REPO_ROOT / "bench" / "scale" / "phase1.yaml"
+SCALE_README = REPO_ROOT / "bench" / "scale" / "README.md"
 MIB = 1024**2
 GIB = 1024**3
 BASE_TOTALS = {"clusters": 2, "nodes": 4}
+# A run-level metric without a threshold, for the fitting and prediction tests.
+RUN_METRIC = hl.WATCHER_SEEN
+PROMPT_FAILURE = "prompt failed: no answer within 2400s"
+TEST_PROJECT = "test-project-01"
 
 
 def record(
@@ -35,7 +43,9 @@ def record(
     commit: str = "a" * 40,
     mode: str = "next",
     started: str = "",
+    **optional,
 ) -> dict:
+    """A record as the runner writes it; ``optional`` adds image, values, replicas or errors."""
     return {
         "key": f"{commit[:8]}|{mode}|{factor}|{level:g}|{operation}|{run}",
         "commit": commit,
@@ -55,7 +65,13 @@ def record(
         ],
         "provider_429s": 1 if excluded else 0,
         "excluded_from": list(excluded),
+        **optional,
     }
+
+
+def planned(**changes: float) -> dict:
+    """Every factor's planned value: the plan's base point with ``changes`` applied."""
+    return {**hl.PLAN_BASE_LEVELS, **changes}
 
 
 def parse(*items: dict) -> tuple[hl.Record, ...]:
@@ -73,13 +89,26 @@ def memory(container: str, mib: float) -> tuple:
 def clusters_line(base: float = 100.0, at_eight: float = 160.0) -> tuple[hl.Record, ...]:
     """A metric of 100 at the base (2 clusters) and 160 at 8: 10 per cluster."""
     return parse(
-        record(metrics=((hl.SWEEP, None, base),)),
+        record(metrics=((RUN_METRIC, None, base),)),
         record(
             "clusters",
             8,
-            metrics=((hl.SWEEP, None, at_eight),),
+            metrics=((RUN_METRIC, None, at_eight),),
             totals={"clusters": 8, "nodes": 16},
         ),
+    )
+
+
+def recommendation(container: str, memory_mib: float | None, cpu: float | None):
+    """A recommendation whose predicted peaks are the given values, before the margin."""
+
+    def peak(metric: str, value: float | None) -> hl.Prediction | None:
+        return None if value is None else hl.Prediction(metric, container, value, "fleet_audit", ())
+
+    return hl.Recommendation(
+        container,
+        peak(hl.MEMORY_PEAK, None if memory_mib is None else memory_mib * MIB),
+        peak(hl.CPU_PEAK, cpu),
     )
 
 
@@ -135,26 +164,62 @@ class LoadingTest(unittest.TestCase):
             parse(broken)
 
     def test_a_reading_that_is_not_finite_is_dropped(self):
-        (loaded,) = parse(record(metrics=((hl.SWEEP, None, math.nan), (hl.RESPONSE, None, 3.0))))
+        (loaded,) = parse(record(metrics=((RUN_METRIC, None, math.nan), (hl.RESPONSE, None, 3.0))))
 
-        self.assertIsNone(loaded.value(hl.SWEEP))
+        self.assertIsNone(loaded.value(RUN_METRIC))
         self.assertEqual(loaded.value(hl.RESPONSE), 3.0)
 
     def test_fields_outside_the_schema_are_ignored(self):
-        extra = record(metrics=((hl.SWEEP, None, 1.0),))
-        extra["errors"] = ["scrape litellm: timed out"]
+        extra = record(metrics=((RUN_METRIC, None, 1.0),))
+        extra["notes"] = "written by a later runner"
 
         (loaded,) = parse(extra)
 
-        self.assertEqual(loaded.value(hl.SWEEP), 1.0)
+        self.assertEqual(loaded.value(RUN_METRIC), 1.0)
+
+    def test_a_record_without_the_newer_fields_still_loads(self):
+        (loaded,) = parse(record())
+
+        self.assertEqual(loaded.image, "")
+        self.assertEqual(dict(loaded.values), {})
+        self.assertEqual(dict(loaded.replicas), {})
+        self.assertEqual(loaded.errors, ())
+
+    def test_image_values_replicas_and_errors_load(self):
+        image = "ghcr.io/gke-labs/kube-agents/platform-agent:" + "a" * 40
+        (loaded,) = parse(
+            record(
+                image=image,
+                values=planned(clusters=8),
+                replicas={"litellm-container": 2},
+                errors=["monitoring: TimeoutError: timed out"],
+            )
+        )
+
+        self.assertEqual(loaded.image, image)
+        self.assertEqual(loaded.values[hl.CLUSTERS], 8)
+        self.assertEqual(loaded.values[hl.FAILING_PODS], 1)
+        self.assertEqual(loaded.replicas["litellm-container"], 2)
+        self.assertEqual(loaded.errors, ("monitoring: TimeoutError: timed out",))
+
+    def test_errors_that_are_not_strings_are_refused(self):
+        with self.assertRaisesRegex(hl.HarnessDataError, "errors is not a list of strings"):
+            parse(record(errors=[{"reason": "timeout"}]))
 
     def test_the_checked_in_sample_is_clearly_fake_and_two_point(self):
         records = hl.load_dataset(REPO_ROOT / "missing.json").records
 
         self.assertEqual({item.commit for item in records}, {"0" * 40})
         self.assertEqual({item.phase for item in records}, {"sample"})
-        self.assertEqual(hl.factors(records), [hl.CLUSTERS, hl.NODES, hl.OBJECTS])
+        self.assertEqual(
+            hl.factors(records),
+            [hl.CLUSTERS, hl.NODES, hl.OBJECTS, hl.FAILING_PODS, hl.CONCURRENT],
+        )
         self.assertTrue(any(item.is_base for item in records))
+        for item in records:
+            with self.subTest(record=item.key):
+                self.assertEqual(set(item.values), set(hl.FACTORS))
+                self.assertTrue(item.image.endswith(item.commit))
         for operation in hl.operations(records):
             for factor in hl.factors(records, operation):
                 with self.subTest(operation=operation, factor=factor):
@@ -201,21 +266,43 @@ class FactorValueTest(unittest.TestCase):
 
         self.assertEqual(hl.factor_value(loaded, hl.NODES), 100)
 
-    def test_a_base_record_sits_at_its_totals_or_the_plan_base(self):
-        (loaded,) = parse(record())
+    def test_a_factor_the_totals_do_not_count_sits_at_its_planned_value(self):
+        failing, base = parse(
+            record(hl.FAILING_PODS, 100, values=planned(failing_pods=100)),
+            record(values=planned(churn_per_minute=20, concurrent=3)),
+        )
 
-        self.assertEqual(hl.factor_value(loaded, hl.NODES), 2)
-        self.assertEqual(hl.factor_value(loaded, hl.OBJECTS), hl.PLAN_BASE_LEVELS[hl.OBJECTS])
-        self.assertEqual(hl.factor_value(loaded, hl.CHURN), hl.PLAN_BASE_LEVELS[hl.CHURN])
+        self.assertEqual(hl.factor_value(failing, hl.FAILING_PODS), 100)
+        self.assertEqual(hl.factor_value(base, hl.FAILING_PODS), 1)
+        # The record's planned values win over the plan's base point.
+        self.assertEqual(hl.factor_value(base, hl.CHURN), 20)
+        self.assertEqual(hl.factor_value(base, hl.CONCURRENT), 3)
+        self.assertEqual(hl.factor_value(base, hl.LISTING_PODS), 100)
+
+    def test_the_totals_win_over_the_planned_value(self):
+        (loaded,) = parse(
+            record(hl.CLUSTERS, 8, totals={"clusters": 7, "nodes": 21}, values=planned(clusters=8))
+        )
+
+        self.assertEqual(hl.factor_value(loaded, hl.CLUSTERS), 7)
+        self.assertEqual(hl.factor_value(loaded, hl.NODES), 3)
+
+    def test_only_a_base_record_without_values_takes_the_plan_base(self):
+        without, partial = parse(record(), record(values={hl.CLUSTERS: 2}))
+
+        self.assertEqual(hl.factor_value(without, hl.NODES), 2)
+        self.assertEqual(hl.factor_value(without, hl.OBJECTS), hl.PLAN_BASE_LEVELS[hl.OBJECTS])
+        self.assertEqual(hl.factor_value(without, hl.CHURN), hl.PLAN_BASE_LEVELS[hl.CHURN])
+        self.assertIsNone(hl.factor_value(partial, hl.CHURN))
 
     def test_a_run_of_another_factor_is_not_on_the_axis(self):
         records = parse(
-            record(metrics=((hl.SWEEP, None, 1.0),)),
-            record("clusters", 8, metrics=((hl.SWEEP, None, 2.0),)),
-            record(hl.CHURN, 1000, metrics=((hl.SWEEP, None, 3.0),)),
+            record(metrics=((RUN_METRIC, None, 1.0),)),
+            record("clusters", 8, metrics=((RUN_METRIC, None, 2.0),)),
+            record(hl.CHURN, 1000, metrics=((RUN_METRIC, None, 3.0),)),
         )
 
-        points = hl.series_points(records, "fleet_audit", hl.CHURN, hl.SWEEP)
+        points = hl.series_points(records, "fleet_audit", hl.CHURN, RUN_METRIC)
 
         self.assertEqual([(item.x, item.y) for item in points], [(10.0, 1.0), (1000.0, 3.0)])
 
@@ -274,6 +361,48 @@ class FitTest(unittest.TestCase):
         self.assertIsNone(hl.fit_line(response))
         self.assertIsNotNone(hl.fit_line(used))
 
+    def test_a_failed_prompt_leaves_the_run_out_of_the_response_fit_only(self):
+        records = parse(
+            record(metrics=((hl.RESPONSE, None, 20.0), memory("agent-api-auth", 400))),
+            record(
+                run=2,
+                metrics=((hl.RESPONSE, None, 900.0), memory("agent-api-auth", 420)),
+                errors=[PROMPT_FAILURE],
+            ),
+            record(
+                "clusters",
+                8,
+                metrics=((hl.RESPONSE, None, 50.0), memory("agent-api-auth", 700)),
+                totals={"clusters": 8},
+                errors=["scrape litellm: timed out"],
+            ),
+        )
+
+        response = hl.series_points(records, "fleet_audit", hl.CLUSTERS, hl.RESPONSE)
+        used = hl.series_points(
+            records, "fleet_audit", hl.CLUSTERS, hl.MEMORY_PEAK, "agent-api-auth"
+        )
+        prediction = hl.predict(records, hl.RESPONSE, None, hl.base_fleet(records))
+
+        self.assertEqual([item.excluded for item in response], [False, True, False])
+        self.assertFalse(any(item.excluded for item in used))
+        # The base value is the run whose prompts all completed.
+        self.assertAlmostEqual(prediction.value, 20)
+        self.assertEqual(
+            [row["Excluded from fit"] for row in hl.measurement_rows(records[1:2])],
+            [True, False],
+        )
+
+    def test_the_transport_failure_marker_also_marks_a_failed_prompt(self):
+        marked, unrelated = parse(
+            record(errors=["KUBE_AGENTS_INFRA_FAILURE: relay closed"]),
+            record(errors=["no running pod for app=litellm"]),
+        )
+
+        self.assertTrue(marked.excluded(hl.RESPONSE))
+        self.assertFalse(marked.excluded(hl.MEMORY_PEAK))
+        self.assertFalse(unrelated.excluded(hl.RESPONSE))
+
 
 class PredictionTest(unittest.TestCase):
     def fleet(self, records, **inputs: float) -> dict[str, float]:
@@ -282,7 +411,7 @@ class PredictionTest(unittest.TestCase):
     def test_at_the_base_point_the_prediction_is_the_measured_base(self):
         records = clusters_line()
 
-        prediction = hl.predict(records, hl.SWEEP, None, hl.base_fleet(records))
+        prediction = hl.predict(records, RUN_METRIC, None, hl.base_fleet(records))
 
         self.assertAlmostEqual(prediction.value, 100)
         self.assertEqual(hl.basis(prediction), "measured at the base point")
@@ -290,7 +419,7 @@ class PredictionTest(unittest.TestCase):
     def test_inside_the_measured_range_the_line_interpolates(self):
         records = clusters_line()
 
-        prediction = hl.predict(records, hl.SWEEP, None, self.fleet(records, clusters=5))
+        prediction = hl.predict(records, RUN_METRIC, None, self.fleet(records, clusters=5))
 
         self.assertAlmostEqual(prediction.value, 130)
         self.assertEqual(
@@ -300,7 +429,7 @@ class PredictionTest(unittest.TestCase):
     def test_past_the_largest_measured_value_it_is_predicted_not_measured(self):
         records = clusters_line()
 
-        prediction = hl.predict(records, hl.SWEEP, None, self.fleet(records, clusters=20))
+        prediction = hl.predict(records, RUN_METRIC, None, self.fleet(records, clusters=20))
 
         self.assertAlmostEqual(prediction.value, 280)
         self.assertEqual(
@@ -310,18 +439,18 @@ class PredictionTest(unittest.TestCase):
 
     def test_each_factor_adds_its_increase_from_its_own_base(self):
         records = parse(
-            record(metrics=((hl.SWEEP, None, 100.0),)),
+            record(metrics=((RUN_METRIC, None, 100.0),)),
             record(
-                "clusters", 8, metrics=((hl.SWEEP, None, 160.0),), totals={"clusters": 8, "nodes": 16}
+                "clusters", 8, metrics=((RUN_METRIC, None, 160.0),), totals={"clusters": 8, "nodes": 16}
             ),
             record(
-                "nodes", 100, metrics=((hl.SWEEP, None, 198.0),), totals={"clusters": 2, "nodes": 200}
+                "nodes", 100, metrics=((RUN_METRIC, None, 198.0),), totals={"clusters": 2, "nodes": 200}
             ),
         )
 
         # Clusters add 10 for each of 6 more; nodes add 1 for each of 8 more per cluster.
         prediction = hl.predict(
-            records, hl.SWEEP, None, self.fleet(records, clusters=8, nodes=10)
+            records, RUN_METRIC, None, self.fleet(records, clusters=8, nodes=10)
         )
 
         self.assertAlmostEqual(prediction.value, 168)
@@ -334,21 +463,21 @@ class PredictionTest(unittest.TestCase):
 
     def test_the_largest_base_and_the_largest_increase_count(self):
         records = parse(
-            record(metrics=((hl.SWEEP, None, 100.0),)),
+            record(metrics=((RUN_METRIC, None, 100.0),)),
             record(
-                "clusters", 8, metrics=((hl.SWEEP, None, 130.0),), totals={"clusters": 8}
+                "clusters", 8, metrics=((RUN_METRIC, None, 130.0),), totals={"clusters": 8}
             ),
-            record(operation="fan_out", metrics=((hl.SWEEP, None, 80.0),)),
+            record(operation="fan_out", metrics=((RUN_METRIC, None, 80.0),)),
             record(
                 "clusters",
                 8,
                 operation="fan_out",
-                metrics=((hl.SWEEP, None, 140.0),),
+                metrics=((RUN_METRIC, None, 140.0),),
                 totals={"clusters": 8},
             ),
         )
 
-        prediction = hl.predict(records, hl.SWEEP, None, self.fleet(records, clusters=8))
+        prediction = hl.predict(records, RUN_METRIC, None, self.fleet(records, clusters=8))
 
         # The fleet audit's base (100) plus the fan-out's increase (60).
         self.assertEqual(prediction.base_operation, "fleet_audit")
@@ -368,36 +497,74 @@ class PredictionTest(unittest.TestCase):
 
     def test_without_base_runs_each_factors_lowest_level_is_the_base(self):
         records = parse(
-            record("clusters", 2, metrics=((hl.SWEEP, None, 100.0),), totals={"clusters": 2}),
-            record("clusters", 8, metrics=((hl.SWEEP, None, 160.0),), totals={"clusters": 8}),
+            record("clusters", 2, metrics=((RUN_METRIC, None, 100.0),), totals={"clusters": 2}),
+            record("clusters", 8, metrics=((RUN_METRIC, None, 160.0),), totals={"clusters": 8}),
         )
 
-        prediction = hl.predict(records, hl.SWEEP, None, self.fleet(records, clusters=4))
+        prediction = hl.predict(records, RUN_METRIC, None, self.fleet(records, clusters=4))
 
         self.assertAlmostEqual(prediction.base, 100)
         self.assertAlmostEqual(prediction.value, 120)
 
-    def test_a_factor_measured_at_one_level_is_reported_without_a_fit(self):
+    def test_without_base_runs_the_default_fleet_reads_the_planned_values(self):
         records = parse(
-            record(metrics=((hl.SWEEP, None, 100.0),)),
-            record(hl.CHURN, 10, metrics=((hl.SWEEP, None, 101.0),)),
+            record("clusters", 2, totals={"clusters": 2}, values=planned(churn_per_minute=20)),
+            record(
+                "clusters",
+                8,
+                totals={"clusters": 8},
+                values=planned(clusters=8, churn_per_minute=20),
+            ),
         )
 
-        prediction = hl.predict(records, hl.SWEEP, None, self.fleet(records, churn_per_minute=1000))
+        fleet = hl.base_fleet(records)
+
+        self.assertEqual(fleet[hl.CLUSTERS], 2)
+        self.assertEqual(fleet[hl.CHURN], 20)
+
+    def test_a_factor_measured_at_one_level_is_reported_without_a_fit(self):
+        records = parse(
+            record(metrics=((RUN_METRIC, None, 100.0),)),
+            record(hl.CHURN, 10, metrics=((RUN_METRIC, None, 101.0),)),
+        )
+
+        prediction = hl.predict(
+            records, RUN_METRIC, None, self.fleet(records, churn_per_minute=1000)
+        )
 
         self.assertEqual(prediction.missing_fits, (hl.CHURN,))
         self.assertIn("no fit for churn_per_minute", hl.basis(prediction))
+
+    def test_a_factor_outside_the_totals_is_fitted_on_its_planned_values(self):
+        records = parse(
+            record(operation="watcher_soak", metrics=((RUN_METRIC, None, 400.0),), values=planned()),
+            record(
+                hl.FAILING_PODS,
+                100,
+                operation="watcher_soak",
+                metrics=((RUN_METRIC, None, 6340.0),),
+                values=planned(failing_pods=100),
+            ),
+        )
+
+        prediction = hl.predict(records, RUN_METRIC, None, self.fleet(records, failing_pods=50))
+
+        # 60 more events for each Pod failing at once, from 1 to 50.
+        self.assertAlmostEqual(prediction.value, 400 + 60 * 49)
 
     def test_the_default_fleet_is_the_base_point_of_the_data(self):
         records = hl.load_dataset(REPO_ROOT / "missing.json").records
 
         fleet = hl.base_fleet(records)
 
-        # 356 objects over the sample's 2 base clusters; churn is not in totals.
+        # 356 objects over the sample's 2 base clusters; the factors that the
+        # totals do not count sit at the base records' planned values.
         self.assertEqual(fleet[hl.CLUSTERS], 2)
         self.assertEqual(fleet[hl.NODES], 2)
         self.assertEqual(fleet[hl.OBJECTS], 178)
-        self.assertEqual(fleet[hl.CHURN], hl.PLAN_BASE_LEVELS[hl.CHURN])
+        self.assertEqual(fleet[hl.CHURN], 10)
+        self.assertEqual(fleet[hl.FAILING_PODS], 1)
+        self.assertEqual(fleet[hl.CONCURRENT], 1)
 
 
 class CheckTest(unittest.TestCase):
@@ -454,18 +621,53 @@ class CheckTest(unittest.TestCase):
     def test_a_container_without_a_limit_is_reported(self):
         self.assertEqual(self.checks(8, {})[hl.CPU_PEAK].status, hl.NO_LIMIT)
 
+    def test_a_resource_no_run_measured_has_no_check(self):
+        records = parse(
+            record(metrics=(memory("agent-api-auth", 500), (hl.RESTARTS, "provision", 0))),
+            record("clusters", 8, metrics=(memory("agent-api-auth", 800),), totals={"clusters": 8}),
+        )
+
+        checks = hl.resource_checks(
+            records, hl.base_fleet(records), ["agent-api-auth", "provision"], {}
+        )
+
+        self.assertEqual(
+            [(check.container, check.metric) for check in checks],
+            [("agent-api-auth", hl.MEMORY_PEAK)],
+        )
+
     def test_the_response_gate_warns_above_30_s_and_fails_above_60_s(self):
         self.assertEqual(hl.evaluate(20, hl.RESPONSE_LINES), (hl.PASS, None))
         self.assertEqual(hl.evaluate(45, hl.RESPONSE_LINES)[0], hl.WARN)
         status, crossed = hl.evaluate(70, hl.RESPONSE_LINES)
         self.assertEqual((status, crossed.label), (hl.FAIL, "60 s: investigate"))
 
-    def test_the_credential_proxy_fails_above_the_15_s_preflight(self):
-        self.assertEqual(hl.evaluate(16, hl.PROXY_WAIT_LINES)[0], hl.FAIL)
+    def test_the_credential_proxy_wait_fails_only_at_the_60_s_broker_refusal(self):
+        self.assertEqual([line.value for line in hl.PROXY_WAIT_LINES], [60.0])
+        self.assertEqual(hl.evaluate(16, hl.PROXY_WAIT_LINES)[0], hl.PASS)
+        self.assertEqual(hl.evaluate(61, hl.PROXY_WAIT_LINES)[0], hl.FAIL)
 
     def test_any_count_above_zero_fails(self):
         self.assertEqual(hl.evaluate(0, hl.ABOVE_ZERO)[0], hl.PASS)
         self.assertEqual(hl.evaluate(0.2, hl.ABOVE_ZERO)[0], hl.FAIL)
+
+    def test_a_failed_prompt_fails_its_check(self):
+        records = parse(
+            record(metrics=((hl.FAILED_PROMPTS, None, 0),)),
+            record(
+                hl.CONCURRENT,
+                15,
+                metrics=((hl.FAILED_PROMPTS, None, 1),),
+                values=planned(concurrent=15),
+            ),
+        )
+        fleet = {**hl.base_fleet(records), hl.CONCURRENT: 15}
+
+        (check,) = hl.threshold_checks(records, fleet, [])
+
+        self.assertEqual(check.lines, hl.ABOVE_ZERO)
+        self.assertEqual(check.status, hl.FAIL)
+        self.assertEqual([row["Check"] for row in hl.unfixable_rows([check])], ["Failed prompts"])
 
     def test_reached_at_is_the_share_of_growth_that_crosses_the_threshold(self):
         base = hl.base_fleet(self.records)
@@ -562,9 +764,6 @@ class RecommendationTest(unittest.TestCase):
         self.assertIn("operator.resources", items["manager"].field)
         self.assertIsNone(items["manager"].cpu_cores)
         self.assertEqual(items["litellm"].field, hl.NO_FIELD)
-        memory_total, cpu_total = hl.requested_total(items.values())
-        self.assertAlmostEqual(memory_total, 1.3 * (440 + 40 + 300) * MIB)
-        self.assertAlmostEqual(cpu_total, 0.65)
 
     def test_quantities_round_up(self):
         self.assertEqual(hl.memory_quantity(1.3 * 440 * MIB), "572Mi")
@@ -591,6 +790,108 @@ class RecommendationTest(unittest.TestCase):
                 self.assertLess(machine.allocatable_cpu, machine.vcpu)
                 self.assertLess(machine.allocatable_memory_gib, machine.memory_gib)
 
+    def test_allocatable_memory_is_the_design_table(self):
+        self.assertEqual(
+            {machine.name: machine.allocatable_memory_gib for machine in hl.MACHINE_TYPES},
+            {
+                "e2-standard-2": 6.1,
+                "e2-standard-4": 13.3,
+                "e2-standard-8": 28.3,
+                "n2-standard-16": 58.4,
+                "n2-highmem-16": 118.6,
+            },
+        )
+
+
+class NodePlanTest(unittest.TestCase):
+    def test_the_gateway_containers_are_one_pod_and_each_other_is_its_own(self):
+        plan = hl.node_plan(
+            [
+                recommendation("platform-agent", 1000, 0.5),
+                recommendation("agent-api-auth", 400, 0.1),
+                recommendation("hermes-bridge", 200, 0.1),
+                recommendation("fluent-bit", 50, 0.05),
+                recommendation("envoy-credential-proxy", 500, 0.3),
+                recommendation("a-container-not-in-the-mapping", 100, 0.1),
+            ],
+            {},
+        )
+
+        pods = {pod.name: pod for pod in plan.pods}
+        self.assertEqual(
+            pods[hl.GATEWAY_POD].containers,
+            ("platform-agent", "agent-api-auth", "hermes-bridge", "fluent-bit"),
+        )
+        self.assertAlmostEqual(pods[hl.GATEWAY_POD].memory_bytes, 1.3 * 1650 * MIB)
+        self.assertAlmostEqual(pods[hl.GATEWAY_POD].cpu_cores, 1.3 * 0.75)
+        self.assertEqual(
+            sorted(pods),
+            sorted([hl.GATEWAY_POD, "envoy-credential-proxy", "a-container-not-in-the-mapping"]),
+        )
+
+    def test_the_machine_holds_the_largest_pod_and_the_count_holds_every_pod(self):
+        # Two pods of 4 GiB and 1 CPU each, after the margin: one fits an
+        # e2-standard-2 (6.1 GiB, 1.93 CPU); both need two of them.
+        plan = hl.node_plan(
+            [
+                recommendation("platform-agent", 4096 / 1.3, 1 / 1.3),
+                recommendation("envoy-credential-proxy", 4096 / 1.3, 1 / 1.3),
+            ],
+            {},
+        )
+
+        self.assertEqual(plan.machine.name, "e2-standard-2")
+        self.assertEqual(plan.nodes, 2)
+        self.assertAlmostEqual(plan.total_memory_bytes, 8 * GIB)
+
+    def test_replicas_multiply_a_pod_and_default_to_one(self):
+        items = [
+            recommendation("platform-agent", 1000 / 1.3, 1.0 / 1.3),
+            recommendation("litellm-container", 1000 / 1.3, 0.5 / 1.3),
+        ]
+
+        once = hl.node_plan(items, {})
+        three = hl.node_plan(items, {"litellm-container": 3})
+
+        self.assertEqual([pod.replicas for pod in once.pods], [1, 1])
+        self.assertAlmostEqual(once.total_cpu_cores, 1.5)
+        self.assertAlmostEqual(three.total_cpu_cores, 2.5)
+        # 2.5 CPU on e2-standard-2 nodes of 1.93 allocatable CPU each.
+        self.assertEqual((three.machine.name, three.nodes), ("e2-standard-2", 2))
+
+    def test_the_node_count_takes_the_larger_of_memory_and_cpu(self):
+        machine = hl.MACHINE_TYPES[0]
+
+        self.assertEqual(hl.nodes_needed(machine, 5 * GIB, 5.0), 3)
+        self.assertEqual(hl.nodes_needed(machine, 13 * GIB, 0.5), 3)
+        self.assertEqual(hl.nodes_needed(machine, 0.0, 0.0), 1)
+
+    def test_a_pod_no_machine_holds_has_no_machine_and_no_node_count(self):
+        plan = hl.node_plan([recommendation("platform-agent", 120 * 1024 / 1.3, 1.0)], {})
+
+        self.assertIsNone(plan.machine)
+        self.assertIsNone(plan.nodes)
+        rows = hl.machine_rows(plan)
+        self.assertEqual({row["Holds the largest pod"] for row in rows}, {hl.NO_LABEL})
+        self.assertEqual({row["Nodes for every pod"] for row in rows}, {hl.NO_VALUE})
+
+    def test_a_container_without_a_recommendation_requests_nothing(self):
+        plan = hl.node_plan(
+            [recommendation("platform-agent", 1000, 0.5), recommendation("provision", None, None)],
+            {},
+        )
+
+        self.assertEqual([pod.name for pod in plan.pods], [hl.GATEWAY_POD])
+
+    def test_the_latest_run_that_counted_a_container_sets_its_replicas(self):
+        records = parse(
+            record(started="2026-10-23T01:00:00Z", replicas={"litellm-container": 3, "manager": 1}),
+            record(run=2, started="2026-10-23T02:00:00Z", replicas={"litellm-container": 2}),
+            record(run=3, started="2026-10-23T03:00:00Z"),
+        )
+
+        self.assertEqual(hl.latest_replicas(records), {"litellm-container": 2, "manager": 1})
+
 
 class PlanTest(unittest.TestCase):
     @unittest.skipUnless(PLAN_PATH.exists(), "no Phase 1 plan in this checkout")
@@ -607,6 +908,62 @@ class PlanTest(unittest.TestCase):
         )
         self.assertEqual(set(plan["factors"]), set(hl.FACTORS))
         self.assertIn(hl.QUERY_OPERATIONS[0], plan["operations"])
+
+
+class MetricContractTest(unittest.TestCase):
+    def readme_metrics(self) -> set[str]:
+        """The metric names in bench/scale/README.md, the runner's documented output."""
+        section = SCALE_README.read_text().split("Metric names:", 1)[1]
+        return set(re.findall(r"`([a-z0-9_]+)`", section))
+
+    def test_every_metric_the_runner_writes_has_a_spec_and_no_other(self):
+        self.assertEqual(set(hl.METRICS), self.readme_metrics())
+
+    def test_a_metric_has_a_threshold_only_where_the_design_sets_one(self):
+        self.assertEqual(
+            set(hl.FIXED_LINES),
+            {
+                hl.PROXY_WAIT_P50,
+                hl.PROXY_WAIT_MAX,
+                hl.RESPONSE,
+                hl.RESTARTS,
+                hl.OOMKILLS,
+                hl.PROXY_REFUSALS,
+                hl.RUN_SLOT_REFUSALS,
+                hl.TRIAGE_LOST,
+                hl.FAILED_PROMPTS,
+            },
+        )
+        self.assertEqual(dict(hl.CAPACITY_METRICS), {hl.PVC_USED: hl.PVC_CAPACITY})
+        # No check reads a TPM quota: no token count has a threshold.
+        tokens = {name for name in hl.METRICS if "tokens" in name}
+        self.assertFalse(tokens & set(hl.FIXED_LINES))
+
+    def test_the_newer_metrics_are_charted_where_present(self):
+        newer = (
+            hl.FAILED_PROMPTS,
+            hl.CHURN_ACHIEVED,
+            hl.WATCHER_SEEN_RATE,
+            hl.RUN_TOKENS_INPUT,
+            hl.PROFILES,
+            hl.WATCHER_SUPPRESSED,
+        )
+        records = parse(
+            record(metrics=tuple((name, None, 1.0) for name in newer)),
+            record(
+                "clusters",
+                8,
+                metrics=tuple((name, None, 4.0) for name in newer),
+                totals={"clusters": 8},
+            ),
+        )
+
+        charts = hl.metric_charts(records, "fleet_audit", hl.CLUSTERS, [], hl.base_fleet(records))
+
+        self.assertEqual([chart.metric for chart in charts], [name for name in hl.METRICS if name in newer])
+        lines = {chart.metric: chart.lines for chart in charts}
+        self.assertEqual(lines.pop(hl.FAILED_PROMPTS), hl.ABOVE_ZERO)
+        self.assertEqual(set(lines.values()), {()})
 
 
 class ChartTest(unittest.TestCase):
@@ -650,6 +1007,28 @@ class ChartTest(unittest.TestCase):
 
         self.assertEqual(colors, {None: "#000001", "a": "#000001", "b": "#000002", "c": "#999999"})
 
+    def test_the_failing_pods_axis_is_a_count_from_the_planned_values(self):
+        charts = hl.metric_charts(
+            self.records, "watcher_soak", hl.FAILING_PODS, self.containers, self.fleet
+        )
+        chart = next(chart for chart in charts if chart.metric == hl.MEMORY_PEAK)
+
+        self.assertEqual(chart.x_title, "Pods failing at once")
+        self.assertEqual(sorted({point.x for point in chart.series[0].points}), [1.0, 100.0])
+        self.assertNotIn("minute", hl.FACTORS[hl.FAILING_PODS].help)
+
+    def test_the_commit_label_shows_the_image_when_a_run_recorded_one(self):
+        image = "ghcr.io/gke-labs/kube-agents/platform-agent:" + "b" * 40
+        records = parse(
+            record(commit="a" * 40),
+            record(commit="b" * 40, image=image),
+        )
+
+        self.assertEqual(hl.commit_label(records, "a" * 40), "aaaaaaaaaaaa · phase1 · 2026-10-23")
+        self.assertEqual(
+            hl.commit_label(records, "b" * 40), f"bbbbbbbbbbbb · {image} · phase1 · 2026-10-23"
+        )
+
 
 class HarnessLimitsPageTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -660,7 +1039,7 @@ class HarnessLimitsPageTest(unittest.TestCase):
                 os.environ,
                 {
                     "KUBE_AGENTS_ADMIN_USER": "admin@example.com",
-                    "KUBE_AGENTS_GCLOUD_PROJECT": "test-project-01",
+                    "KUBE_AGENTS_GCLOUD_PROJECT": TEST_PROJECT,
                     "KUBE_AGENTS_ADMIN_CONNECTION_STATE": str(root / "connection.json"),
                 },
             ),
@@ -687,8 +1066,56 @@ class HarnessLimitsPageTest(unittest.TestCase):
         self.assertTrue(any("Sample data" in item.value for item in app.warning))
         self.assertFalse(any("Connect a project" in item.value for item in app.info))
         self.assertTrue(any("checks pass" in item.value for item in app.success))
-        self.assertTrue(any("e2-standard-4" in item.value for item in app.success))
+        # The gateway pod (3,235Mi, 1,586m) fits an e2-standard-2; every pod's
+        # 2,717m of CPU needs two of them.
+        self.assertTrue(any("**2 × e2-standard-2**" in item.value for item in app.success))
         self.assertEqual(app.expander[-1].label, "Raw records")
+        raw = app.expander[-1].dataframe[0].value
+        self.assertIn("Errors", raw.columns)
+        self.assertIn(PROMPT_FAILURE, set(raw["Errors"]))
+
+    def test_the_failing_pods_input_is_a_count(self):
+        app = self.open_page()
+
+        (failing,) = [item for item in app.number_input if item.label == "Pods failing at once"]
+
+        self.assertEqual(failing.value, 1.0)
+        self.assertNotIn("minute", failing.help)
+
+    def test_the_margin_note_claims_no_error_band(self):
+        app = self.open_page()
+
+        (note,) = [item.value for item in app.info if "Why 30%" in item.value]
+
+        self.assertIn("The 30% is the whole margin.", note)
+        self.assertIn("Phase 1 draws no error band", note)
+        self.assertIn("predicted, not measured", note)
+
+    def test_the_page_names_no_project_or_cluster(self):
+        app = self.open_page()
+        shown = [
+            str(item.value)
+            for kind in ("title", "markdown", "caption", "info", "success", "warning", "error")
+            for item in getattr(app.main, kind)
+        ]
+
+        self.assertTrue(shown)
+        self.assertFalse([text for text in shown if TEST_PROJECT in text])
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML is not installed")
+        target = yaml.safe_load(PLAN_PATH.read_text())["target"]
+        # The host cluster, a test cluster (<prefix>NN) and the zone.
+        patterns = [
+            re.escape(target["host_cluster"]),
+            re.escape(target["cluster_prefix"]) + r"\d",
+            re.escape(target["zone"]),
+        ]
+        for path in (PAGE_SOURCE, MODULE_SOURCE, hl.SAMPLE_PATH):
+            with self.subTest(path=path.name):
+                text = path.read_text()
+                self.assertFalse([pattern for pattern in patterns if re.search(pattern, text)])
 
     def test_a_larger_fleet_fails_and_is_predicted_not_measured(self):
         app = self.open_page()
@@ -700,6 +1127,7 @@ class HarnessLimitsPageTest(unittest.TestCase):
         self.assertTrue(
             any("predicted, not measured" in item.value for item in app.warning)
         )
+        self.assertTrue(any("**2 × n2-standard-16**" in item.value for item in app.success))
 
 
 if __name__ == "__main__":

@@ -187,13 +187,19 @@ connection. Until that file exists, the page shows
 sample. The plan, metrics and thresholds are those of the
 [harness bottlenecks design](../docs/designs/agent-harness-bottlenecks.md).
 
-For the selected commit and mode, the page plots each metric against each
-factor's measured value (per cluster for nodes and objects), one operation at a
-time, with a straight-line fit and its dashed prediction. A line through two
-distinct values is a two-point estimate; past the largest measured value it is
-predicted, not measured. For the fleet entered on the page, it answers the
-design's two questions: are the container limits enough, and which limits and
-machine type does the fleet need. The raw records are in a collapsed section.
+For the selected commit and mode, the page plots each metric against one
+factor, one operation at a time. A factor sits at its measured value from the
+run's totals, per cluster for nodes and objects; a factor that the totals do not
+count sits at the run's planned value. Each chart has a straight-line fit and
+its dashed prediction. A line through two distinct values is a two-point
+estimate; past the largest measured value it is predicted, not measured. A run
+with a provider 429 or a failed prompt stays out of the response-time fit.
+
+For the fleet entered on the page, the page answers the design's two questions:
+are the container limits enough, and which limits, machine type and node count
+does the fleet need. The machine type is the smallest that holds the largest
+pod's recommended requests; the node count holds every pod, replicas included.
+The raw records, with each run's errors, are in a collapsed section.
 
 ## Chat
 
