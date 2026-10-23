@@ -1883,11 +1883,20 @@ Mutation(
     Mutation(
         "A3-slack-foreign-workspace-admitted",
         "a2a/gateway/slack.go",
-        ("\tif s.foreignSender(m) {\n\t\treturn InboundMessage{}, false\n\t}\n", ""),
+        ("\trefused, author := s.foreignSender(m)\n\tif refused {\n\t\treturn InboundMessage{}, false\n\t}\n",
+         "\t_, author := s.foreignSender(m)\n"),
         "test_A3_another_workspaces_member_is_not_a_turn",
         "drop the workspace check, so under allow-all a Slack Connect guest from "
         "another organisation is admitted as slack:<member id> with the install's "
         "capability",
+    ),
+    Mutation(
+        "A3-slack-guest-admitted-without-an-entry",
+        "a2a/gateway/slack.go",
+        ("\treturn entry, s.guests[entry]", "\treturn entry, true"),
+        "test_A3_another_workspaces_member_is_not_a_turn",
+        "admit every member of another workspace as slack:T…:U…, entry or not, so "
+        "allow-all serves any connected organisation",
     ),
     Mutation(
         "A3-slack-map-asserts-member-prefix",
