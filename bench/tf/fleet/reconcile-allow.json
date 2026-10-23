@@ -6,7 +6,7 @@
   },
   {
     "address": "terraform_data.scaled_zero_status",
-    "why": "the scaled-zero-gateway fixture's status writer (defects-a.tf) is replaced whenever its GatewayClass, Gateway or HTTPRoute is created or replaced, so a re-created object gets the controller status no controller writes; the resource holds no state of its own, and the replace re-runs gateway_status.py",
+    "why": "the scaled-zero-gateway fixture's status writer (defects-a.tf) is replaced whenever gateway_status.py changes or its GatewayClass, Gateway or HTTPRoute is created or replaced, so a re-created object gets the controller status no controller writes; the resource holds no state of its own, and the replace re-runs gateway_status.py",
     "standing": true
   }
 ]

@@ -130,5 +130,17 @@ class GatewayStatusTest(unittest.TestCase):
         self.assertEqual(api.patches, {})
 
 
+class StatusWriterTriggerTest(unittest.TestCase):
+    def test_a_changed_script_re_runs_the_writer(self):
+        # A provisioner's command is not part of the resource's state, so
+        # without the script's hash in triggers_replace an edited
+        # gateway_status.py would plan nothing on a planted project.
+        stack = (_REPO_ROOT / "bench" / "tf" / "fleet" / "defects-a.tf").read_text()
+        block = stack[stack.index('resource "terraform_data" "scaled_zero_status"'):]
+        block = block[: block.index("\n}\n")]
+        self.assertIn('triggers_replace = [filesha256("${path.module}/gateway_status.py")]', block)
+        self.assertIn('command     = "${path.module}/gateway_status.py"', block)
+
+
 if __name__ == "__main__":
     unittest.main()

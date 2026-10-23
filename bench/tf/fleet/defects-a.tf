@@ -1994,6 +1994,16 @@ resource "kubernetes_deployment_v1" "scaled_zero_backend" {
         labels = { app = "storefront" }
       }
       spec {
+        # Compliance SOP 2.7 and 2.11, as on every planted workload: no API
+        # token, non-root with a seccomp filter. The pods never run.
+        automount_service_account_token = false
+        security_context {
+          run_as_non_root = true
+          run_as_user     = 65534
+          seccomp_profile {
+            type = "RuntimeDefault"
+          }
+        }
         container {
           name  = "web"
           image = "registry.k8s.io/pause:3.9"
@@ -2035,6 +2045,16 @@ resource "kubernetes_deployment_v1" "scaled_zero_proxy" {
         labels = local.scaled_zero_proxy_labels
       }
       spec {
+        # Compliance SOP 2.7 and 2.11, as on every planted workload: no API
+        # token, non-root with a seccomp filter. The pods never run.
+        automount_service_account_token = false
+        security_context {
+          run_as_non_root = true
+          run_as_user     = 65534
+          seccomp_profile {
+            type = "RuntimeDefault"
+          }
+        }
         container {
           name  = "envoy"
           image = "registry.k8s.io/pause:3.9"
@@ -2085,7 +2105,8 @@ resource "kubernetes_manifest" "scaled_zero_route" {
 }
 
 # The status a controller would write. Written once, on create, and again
-# whenever the GatewayClass, the Gateway or the route is created or replaced:
+# whenever gateway_status.py changes, or the GatewayClass, the Gateway or the
+# route is created or replaced:
 # a re-created object starts with the CRD's default Pending status, which the
 # stall check reads as a different stall. That replace is a standing
 # reconcile-allow.json entry. An out-of-band edit to the status is drift the
@@ -2093,6 +2114,9 @@ resource "kubernetes_manifest" "scaled_zero_route" {
 # NoResources) and no reconcile repairs, because nothing re-plans this
 # resource: the README's hand recoveries say how to re-run it.
 resource "terraform_data" "scaled_zero_status" {
+  # A changed script is a changed status: its hash re-runs it on every project.
+  triggers_replace = [filesha256("${path.module}/gateway_status.py")]
+
   provisioner "local-exec" {
     interpreter = ["python3"]
     command     = "${path.module}/gateway_status.py"
