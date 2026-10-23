@@ -21,8 +21,8 @@ An `AgentProfile` is not a Hermes profile on its own: the platform and cluster t
 apiVersion: kubeagents.x-k8s.io/v1alpha1
 kind: AgentProfile
 metadata:
-  # A dot-free DNS-1123 label of at most 55 characters: it is the addressee on the bus.
-  # `platform` is reserved.
+  # A dot-free DNS-1123 label: it is the addressee on the bus. At most 50 characters,
+  # or 44 if allowedTiers includes unattended. `platform` is reserved.
   name: auditor
   namespace: kubeagents-system
 spec:
@@ -42,7 +42,7 @@ spec:
       - shared.annotations
     subscribeTopics:
       - shared.blueprint
-  identity: {} # absent: the operator creates a ServiceAccount with no RBAC
+  identity: {} # absent: the operator creates a ServiceAccount per tier, with no RBAC
   lifecycle:
     activeDeadlineSeconds: 1800
     ttlSecondsAfterFinished: 600
@@ -61,8 +61,8 @@ Topic grants are written without the `a2a.topics.` prefix, as `shared.{topic}` o
 
 A profile binds to the PlatformAgent in its own namespace. With that agent on `mode: next`, the operator renders three things per profile:
 
-- A ServiceAccount, `agentprofile-<name>`, owned by the profile, with token automount off and no RoleBinding. If `spec.identity.serviceAccountName` names an existing ServiceAccount, that one is used and none is created. Naming a ServiceAccount does hand the profile's pods whatever RBAC it holds.
-- A bus identity for that ServiceAccount in the auth callout's identity map. Its pods may publish task events and read task input for this profile's tasks, and use the topics the profile names. Nothing else. The scope is the profile, not one task: two pods of the same profile can reach each other's task subjects.
+- A ServiceAccount per allowed tier, `agentprofile-<name>-<tier>`, in the profile namespace (see below). Each has token automount off and no RoleBinding, and carries the profile's name and UID, since an owner reference can't cross namespaces. If `spec.identity.serviceAccountName` names an existing ServiceAccount in the profile namespace, that one is used and none is created. A named ServiceAccount can serve only one tier, so the CRD refuses it alongside more than one entry in `allowedTiers`. Naming a ServiceAccount does hand the profile's pods whatever RBAC it holds.
+- A bus identity per tier in the auth callout's identity map, user `profile-<name>-<tier>`. Its pods may publish task events and read task input for this profile's tasks, take work the dispatcher sends to that pod on `a2a.dispatch.<name>.<tier>.<pod>`, accept it and renew its lease there, and use the topics the profile names. Nothing else. The task-subject scope is the profile, not one task: two pods of the same profile can reach each other's task subjects (#3889 tracks narrowing that to the task).
 - An agent card on `a2a.agents.<name>`, rendered from `spec.description`. Deleting the profile on a `mode: next` install publishes a tombstone in its place before the profile is removed. A profile deleted while its PlatformAgent is on `today`, while its namespace holds no PlatformAgent or more than one, or while the operator has no bus identity, is removed without one.
 
 When a bound `AgentProfile`'s name matches a built-in optional specialist template baked into the `platform-agent` image (`tse`), the operator also sets `KUBE_AGENTS_ENABLED_PROFILES` on the gateway Deployment (which triggers a gateway pod rollout when `tse` is added or removed so the entrypoint scaffolds or archives `$HERMES_HOME/profiles/tse`). Ordinary `AgentProfile` resources (such as `chat` or `auditor`) do not touch `KUBE_AGENTS_ENABLED_PROFILES` and do not roll the gateway pod.
@@ -83,13 +83,15 @@ Writing an `AgentProfile` grants a bus identity, so treat create and update on `
 
 Profile workers run in their own namespace, `<agent-namespace>-profiles`, which the chart creates on a `mode: next` install. The operator never creates it, and treats a namespace of that name as the profile namespace only when it carries the chart's `app.kubernetes.io/component: profiles` label and its `meta.helm.sh/release-namespace` annotation naming the agent's namespace. Into it the operator renders a pod quota and a NetworkPolicy that lets its pods reach DNS, the bus and LiteLLM and nothing else, and only then admits that namespace on the bus's and LiteLLM's own policies. LiteLLM is reached without a key, so anyone who can create a pod in that namespace can use the install's model credentials. Treat pod create there like pod create in the agent's own namespace.
 
+The profile's ServiceAccounts live there too. While the namespace is missing, or doesn't carry the chart's markers, a profile renders no identity and withdraws its card, and `IdentityReady` says `ProfileNamespaceAbsent`.
+
 Nothing runs a pod from a profile yet. The dispatcher and the warm workers come later.
 
 ## Status
 
-| Field                       | Meaning                                                                                                                                                                                                              |
-| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `status.agentRef`           | The PlatformAgent the profile is bound to.                                                                                                                                                                           |
-| `status.serviceAccountName` | The ServiceAccount its pods run as.                                                                                                                                                                                  |
-| `IdentityReady` condition   | The ServiceAccount and bus identity are rendered, or why not (`ModeNotNext`, `ModeNotRecognized`, `NoPlatformAgent`, `MultiplePlatformAgents`, `InvalidProfile`, `ServiceAccountRefused`, `ServiceAccountNotFound`). |
-| `CardPublished` condition   | The agent card is on the directory, or why not (`BusUnavailable`, `OperatorBusIdentityUnconfigured`, `IdentityNotRendered`, or the same mode and binding reasons as `IdentityReady`).                                |
+| Field                       | Meaning                                                                                                                                                                                                                                        |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status.agentRef`           | The PlatformAgent the profile is bound to.                                                                                                                                                                                                     |
+| `status.serviceAccountName` | The ServiceAccounts its pods run as, one per tier, comma-separated.                                                                                                                                                                            |
+| `IdentityReady` condition   | The ServiceAccount and bus identity are rendered, or why not (`ModeNotNext`, `ModeNotRecognized`, `NoPlatformAgent`, `MultiplePlatformAgents`, `InvalidProfile`, `ServiceAccountRefused`, `ServiceAccountNotFound`, `ProfileNamespaceAbsent`). |
+| `CardPublished` condition   | The agent card is on the directory, or why not (`BusUnavailable`, `OperatorBusIdentityUnconfigured`, `IdentityNotRendered`, or the same mode and binding reasons as `IdentityReady`).                                                          |

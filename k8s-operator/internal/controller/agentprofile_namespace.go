@@ -203,12 +203,12 @@ func profileNamespacePeer(agent *agentv1alpha1.PlatformAgent) networkingv1.Netwo
 // doesn't exist is an install the chart didn't make it for (a CR applied by
 // hand, or a chart from before #3655): profile work renders nothing there,
 // and the operator never creates it.
-func (r *PlatformAgentReconciler) profileNamespaceExists(ctx context.Context, agent *agentv1alpha1.PlatformAgent) (bool, error) {
+func profileNamespaceReady(ctx context.Context, reader client.Reader, agent *agentv1alpha1.PlatformAgent) (bool, error) {
 	// Through a2aReader: Namespace is a kind this controller doesn't
 	// otherwise watch, and a cached Get would start a cluster-wide informer
 	// for it on every install.
 	var ns corev1.Namespace
-	if err := r.a2aReader().Get(ctx, types.NamespacedName{Name: profileNamespaceName(agent)}, &ns); err != nil {
+	if err := reader.Get(ctx, types.NamespacedName{Name: profileNamespaceName(agent)}, &ns); err != nil {
 		if apierrors.IsNotFound(err) {
 			return false, nil
 		}
@@ -226,6 +226,11 @@ func (r *PlatformAgentReconciler) profileNamespaceExists(ctx context.Context, ag
 		return false, nil
 	}
 	return true, nil
+}
+
+// profileNamespaceExists is profileNamespaceReady through the uncached reader.
+func (r *PlatformAgentReconciler) profileNamespaceExists(ctx context.Context, agent *agentv1alpha1.PlatformAgent) (bool, error) {
+	return profileNamespaceReady(ctx, r.a2aReader(), agent)
 }
 
 // reconcileProfileFence applies the profile namespace's fence, and reports

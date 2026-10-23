@@ -66,7 +66,7 @@ const (
 func testAgentProfile(namespace, name string, mutate ...func(*agentv1alpha1.AgentProfile)) agentv1alpha1.AgentProfile {
 	p := agentv1alpha1.AgentProfile{
 		TypeMeta:   metav1.TypeMeta{APIVersion: agentv1alpha1.GroupVersion.String(), Kind: "AgentProfile"},
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Generation: 1},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Generation: 1, UID: types.UID("uid-" + name)},
 		Spec: agentv1alpha1.AgentProfileSpec{
 			Description: "Read-only SRE scoped to one cluster.",
 			Persona:     agentv1alpha1.AgentProfilePersona{Image: "registry.example/persona-cluster:1"},
@@ -247,8 +247,9 @@ func TestTheCRDTopicPatternIsTheOperatorsRecheck(t *testing.T) {
 
 // --- the identity map -------------------------------------------------------
 
-// A profile renders one narrowed entry, keyed on its ServiceAccount, carrying
-// its name and topics and no grants: the callout derives the subjects.
+// A profile renders one narrowed entry per tier, keyed on that tier's
+// ServiceAccount in the profile namespace, carrying its name, tier and topics
+// and no grants: the callout derives the subjects.
 func TestAProfileRendersANarrowedMapEntry(t *testing.T) {
 	withoutOperatorBusPrincipal(t)
 	agent := a2aTestAgent()
@@ -258,12 +259,15 @@ func TestAProfileRendersANarrowedMapEntry(t *testing.T) {
 	})
 	entries := renderedMapEntries(t, agent, []agentv1alpha1.AgentProfile{auditor})
 
-	e, ok := entries["profile-auditor"]
+	e, ok := entries["profile-auditor-read"]
 	if !ok {
-		t.Fatalf("no entry for the profile; got %v", entries)
+		t.Fatalf("no entry for the profile's read tier; got %v", entries)
 	}
-	if e.ServiceAccount != "system:serviceaccount:test-ns:agentprofile-auditor" {
-		t.Errorf("serviceAccount = %q", e.ServiceAccount)
+	if e.ServiceAccount != "system:serviceaccount:test-ns-profiles:agentprofile-auditor-read" {
+		t.Errorf("serviceAccount = %q, want the read tier's, in the profile namespace", e.ServiceAccount)
+	}
+	if e.Tier != agentv1alpha1.AgentProfileTierRead {
+		t.Errorf("tier = %q, want read", e.Tier)
 	}
 	if e.Narrowing != a2aNarrowingProfile || e.Profile != "auditor" {
 		t.Errorf("narrowing/profile = %q/%q, want profile/auditor", e.Narrowing, e.Profile)
@@ -316,13 +320,13 @@ func TestARefusedProfileIsLeftOutAndTheMapStillRenders(t *testing.T) {
 			t.Errorf("a profile naming a reserved ServiceAccount rendered %q", user)
 		}
 	}
-	if _, ok := entries["profile-platform"]; ok {
+	if _, ok := entries["profile-platform-read"]; ok {
 		t.Error("a profile named platform rendered; that is the bridge's addressee")
 	}
-	if _, ok := entries["profile-b-second"]; ok {
+	if _, ok := entries["profile-b-second-read"]; ok {
 		t.Error("the second profile naming shared-sa rendered; two entries under one key fail the whole map")
 	}
-	for _, want := range []string{"profile-a-first", "profile-fine", "session", "provision", "agent", "verifier"} {
+	for _, want := range []string{"profile-a-first-read", "profile-fine-read", "session", "provision", "agent", "verifier"} {
 		if _, ok := entries[want]; !ok {
 			t.Errorf("%q is missing from the map", want)
 		}
@@ -342,26 +346,31 @@ func TestARefusedProfileIsLeftOutAndTheMapStillRenders(t *testing.T) {
 	}
 }
 
-// A profile on the operator's own ServiceAccount, when the operator runs in
-// the agent's namespace, is refused: its key would duplicate the operator's
-// entry, which fails the whole map, and its pods would run with the operator's
-// RBAC. Refused by the rendered key set, not by a list.
-func TestAProfileOnTheOperatorsServiceAccountIsRefused(t *testing.T) {
+// A profile naming the operator's ServiceAccount, when the operator runs in
+// the agent's namespace, gets a ServiceAccount of that name in the profile
+// namespace: a different principal, whose map key can't collide with the
+// operator's entry, so both render.
+func TestAProfileNamingTheOperatorsServiceAccountIsADifferentPrincipal(t *testing.T) {
 	agent := a2aTestAgent()
 	t.Setenv(operatorNamespaceEnvVar, agent.Namespace)
 	t.Setenv(operatorServiceAccountEnvVar, testOperatorSA)
 	sneaky := testAgentProfile(agent.Namespace, "sneaky", func(p *agentv1alpha1.AgentProfile) {
 		p.Spec.Identity.ServiceAccountName = testOperatorSA
 	})
-	if r := resolveAgentProfileIdentities(agent, []agentv1alpha1.AgentProfile{sneaky})["sneaky"]; r.refused == nil {
-		t.Fatal("a profile on the operator's ServiceAccount was not refused")
-	}
 	entries := renderedMapEntries(t, agent, []agentv1alpha1.AgentProfile{sneaky})
-	if _, ok := entries["profile-sneaky"]; ok {
-		t.Error("the profile on the operator's ServiceAccount rendered an entry")
+	op, ok := entries[a2aOperatorBusUser]
+	if !ok {
+		t.Fatal("the operator's own entry is missing")
 	}
-	if _, ok := entries[a2aOperatorBusUser]; !ok {
-		t.Error("the operator's own entry is missing; the refusal took it out instead of the profile")
+	prof, ok := entries["profile-sneaky-read"]
+	if !ok {
+		t.Fatal("the profile's entry is missing")
+	}
+	if op.ServiceAccount == prof.ServiceAccount {
+		t.Errorf("the profile's key %q is the operator's; two entries under one key fail the whole map", prof.ServiceAccount)
+	}
+	if prof.ServiceAccount != a2aServiceAccountName(profileNamespaceName(agent), testOperatorSA) {
+		t.Errorf("the profile's key = %q, want the ServiceAccount of that name in the profile namespace", prof.ServiceAccount)
 	}
 }
 
@@ -394,10 +403,10 @@ func TestAMalformedProfileDropsOutWithoutFailingTheMap(t *testing.T) {
 		testAgentProfile(agent.Namespace, "fine"),
 	}
 	entries := renderedMapEntries(t, agent, profiles)
-	if _, ok := entries["profile-fine"]; !ok {
+	if _, ok := entries["profile-fine-read"]; !ok {
 		t.Error("the good profile is missing")
 	}
-	for _, bad := range []string{"profile-a.b", "profile-badtopic"} {
+	for _, bad := range []string{"profile-a.b-read", "profile-badtopic-read"} {
 		if _, ok := entries[bad]; ok {
 			t.Errorf("%s rendered", bad)
 		}
@@ -410,16 +419,16 @@ func TestAForeignServiceAccountIsNotAdopted(t *testing.T) {
 	withOperatorBusPrincipal(t)
 	agent := a2aTestAgent()
 	p := testAgentProfile(agent.Namespace, "auditor")
-	foreign := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "agentprofile-auditor", Namespace: agent.Namespace}}
+	foreign := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "agentprofile-auditor-read", Namespace: profileNamespaceName(agent)}}
 	h := newProfileHarness(t, agent, &p, foreign)
 	h.reconcile(agent.Namespace, "auditor")
 
 	if c := condition(h.profile(agent.Namespace, "auditor"), agentv1alpha1.AgentProfileConditionIdentityReady); c.Reason != reasonAgentProfileRefused {
 		t.Errorf("IdentityReady reason = %q, want %q", c.Reason, reasonAgentProfileRefused)
 	}
-	sa, _ := h.serviceAccount(agent.Namespace, "agentprofile-auditor")
-	if len(sa.OwnerReferences) != 0 {
-		t.Errorf("the foreign ServiceAccount was adopted: %v", sa.OwnerReferences)
+	sa, _ := h.serviceAccount(profileNamespaceName(agent), "agentprofile-auditor-read")
+	if sa.Annotations[agentProfileUIDAnnotation] != "" {
+		t.Errorf("the foreign ServiceAccount was adopted: %v", sa.Annotations)
 	}
 	bound, err := boundAgentProfiles(context.Background(), h.c, agent)
 	if err != nil || len(bound) != 0 {
@@ -690,6 +699,14 @@ type profileHarness struct {
 func newProfileHarness(t *testing.T, objs ...client.Object) *profileHarness {
 	t.Helper()
 	scheme := setupScheme()
+	// The chart makes the profile namespace on a next install; a harness
+	// with an agent gets it, as the profile's ServiceAccounts live there.
+	for _, o := range objs {
+		if agent, ok := o.(*agentv1alpha1.PlatformAgent); ok {
+			objs = append(objs, chartProfileNamespace(agent))
+			break
+		}
+	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).
 		WithStatusSubresource(&agentv1alpha1.AgentProfile{}).Build()
 	dir := newFakeDirectory()
@@ -780,16 +797,16 @@ func TestAnAgentProfileOnANextInstallRendersItsServiceAccountAndCard(t *testing.
 		t.Errorf("RequeueAfter = %v, want the resync %v so a lost card is republished", res.RequeueAfter, agentProfileResync)
 	}
 
-	sa, ok := h.serviceAccount(agent.Namespace, "agentprofile-auditor")
+	sa, ok := h.serviceAccount(profileNamespaceName(agent), "agentprofile-auditor-read")
 	if !ok {
-		t.Fatal("no ServiceAccount for the profile")
+		t.Fatal("no ServiceAccount for the profile's read tier in the profile namespace")
 	}
 	if sa.AutomountServiceAccountToken == nil || *sa.AutomountServiceAccountToken {
 		t.Error("the profile's ServiceAccount automounts its token; the bus token is a projected volume the pod names")
 	}
 	got := h.profile(agent.Namespace, "auditor")
-	if !metav1.IsControlledBy(sa, got) {
-		t.Error("the profile does not control its ServiceAccount, so deleting the profile leaves it behind")
+	if !agentProfileOwnsServiceAccount(sa, got) || sa.Labels[agentProfileTierLabel] != agentv1alpha1.AgentProfileTierRead {
+		t.Error("the profile's ServiceAccount doesn't carry its name, tier and UID, so the operator can't tell it's the profile's to delete")
 	}
 	if !slices.Contains(got.Finalizers, agentProfileFinalizer) {
 		t.Error("no finalizer: deleting the profile would not wait for its tombstone")
@@ -799,7 +816,7 @@ func TestAnAgentProfileOnANextInstallRendersItsServiceAccountAndCard(t *testing.
 			t.Errorf("%s = %s/%s %q, want True", typ, c.Status, c.Reason, c.Message)
 		}
 	}
-	if got.Status.ServiceAccountName != "agentprofile-auditor" || got.Status.AgentRef != agent.Name {
+	if got.Status.ServiceAccountName != "agentprofile-auditor-read" || got.Status.AgentRef != agent.Name {
 		t.Errorf("status = %+v", got.Status)
 	}
 	if !slices.Equal(h.dir.publishes, []string{"card:auditor"}) {
@@ -919,7 +936,7 @@ func TestAFlipToTodayRemovesTheProfilesServiceAccount(t *testing.T) {
 	p := testAgentProfile(agent.Namespace, "auditor")
 	h := newProfileHarness(t, agent, &p)
 	h.reconcile(agent.Namespace, "auditor")
-	if _, ok := h.serviceAccount(agent.Namespace, "agentprofile-auditor"); !ok {
+	if _, ok := h.serviceAccount(profileNamespaceName(agent), "agentprofile-auditor-read"); !ok {
 		t.Fatal("precondition: no ServiceAccount on next")
 	}
 
@@ -932,7 +949,7 @@ func TestAFlipToTodayRemovesTheProfilesServiceAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.reconcile(agent.Namespace, "auditor")
-	if _, ok := h.serviceAccount(agent.Namespace, "agentprofile-auditor"); ok {
+	if _, ok := h.serviceAccount(profileNamespaceName(agent), "agentprofile-auditor-read"); ok {
 		t.Error("the profile's ServiceAccount survived a flip to today")
 	}
 	// today tears the bus down, so the connection held for it goes too.
@@ -1024,7 +1041,7 @@ func TestEnsureServiceAccountRefusesAForeignOneItDidNotSeeCreated(t *testing.T) 
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: agent.Namespace, Name: "auditor"}, &live); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.ensureServiceAccount(context.Background(), &live, "agentprofile-auditor"); !errors.Is(err, errForeignServiceAccount) {
+	if err := r.ensureServiceAccount(context.Background(), &live, profileNamespaceName(agent), agentProfileTierIdentity{tier: agentv1alpha1.AgentProfileTierRead, serviceAccount: "agentprofile-auditor-read"}); !errors.Is(err, errForeignServiceAccount) {
 		t.Fatalf("ensureServiceAccount = %v, want errForeignServiceAccount", err)
 	}
 	if !created {
@@ -1136,10 +1153,10 @@ func TestAMalformedServiceAccountNameDropsOutWithoutFailingTheMap(t *testing.T) 
 	agent := a2aTestAgent()
 	bad := testAgentProfile(agent.Namespace, "bad", func(p *agentv1alpha1.AgentProfile) { p.Spec.Identity.ServiceAccountName = "foo:bar" })
 	entries := renderedMapEntries(t, agent, []agentv1alpha1.AgentProfile{bad, testAgentProfile(agent.Namespace, "fine")})
-	if _, ok := entries["profile-bad"]; ok {
+	if _, ok := entries["profile-bad-read"]; ok {
 		t.Error("a profile with a malformed serviceAccountName rendered")
 	}
-	if _, ok := entries["profile-fine"]; !ok {
+	if _, ok := entries["profile-fine-read"]; !ok {
 		t.Error("the good profile is missing")
 	}
 }
@@ -1239,22 +1256,22 @@ func TestAProfileNameRefusalSaysWhatIsWrong(t *testing.T) {
 	dotted := testAgentProfile(agent.Namespace, "a.b")
 	long := testAgentProfile(agent.Namespace, strings.Repeat("a", agentProfileNameMax+1))
 	got := resolveAgentProfileIdentities(agent, []agentv1alpha1.AgentProfile{dotted, long})
-	for name, want := range map[string]string{dotted.Name: "not a dot-free DNS-1123 label", long.Name: "longer than"} {
+	for name, want := range map[string]string{dotted.Name: "not a dot-free DNS-1123 label", long.Name: "too long for tier read"} {
 		if r := got[name]; r.refused == nil || !strings.Contains(r.refused.Error(), want) {
 			t.Errorf("profile %q refused with %v, want a message containing %q", name, r.refused, want)
 		}
 	}
 }
 
-// A profile name past 55 characters would make its map user (profile-<name>)
-// longer than one DNS-1123 label, which the callout refuses for the whole map.
-// It is refused alone; the map still renders.
+// A profile name too long for its tiers would make a map user
+// (profile-<name>-<tier>) longer than one DNS-1123 label, which the callout
+// refuses for the whole map. It is refused alone; the map still renders.
 func TestAProfileNameTooLongForItsBusIdentityDropsOut(t *testing.T) {
 	withoutOperatorBusPrincipal(t)
 	agent := a2aTestAgent()
 	long := testAgentProfile(agent.Namespace, strings.Repeat("a", agentProfileNameMax+1))
 	entries := renderedMapEntries(t, agent, []agentv1alpha1.AgentProfile{long, testAgentProfile(agent.Namespace, "fine")})
-	if _, ok := entries["profile-fine"]; !ok {
+	if _, ok := entries["profile-fine-read"]; !ok {
 		t.Error("the good profile is missing")
 	}
 	if len(entries) == 0 {
@@ -1266,7 +1283,7 @@ func TestAProfileNameTooLongForItsBusIdentityDropsOut(t *testing.T) {
 		}
 	}
 	at := testAgentProfile(agent.Namespace, strings.Repeat("a", agentProfileNameMax))
-	if _, ok := renderedMapEntries(t, agent, []agentv1alpha1.AgentProfile{at})["profile-"+at.Name]; !ok {
+	if _, ok := renderedMapEntries(t, agent, []agentv1alpha1.AgentProfile{at})["profile-"+at.Name+"-read"]; !ok {
 		t.Errorf("a %d-character profile name, the most that fits, was refused", agentProfileNameMax)
 	}
 }
@@ -1400,6 +1417,29 @@ func TestTheTSEProfileExampleIsAStrictAgentProfile(t *testing.T) {
 	for _, grant := range append(append([]string(nil), p.Spec.Bus.PublishTopics...), p.Spec.Bus.SubscribeTopics...) {
 		if !strings.Contains(script, "a2a.topics."+grant) {
 			t.Errorf("the tse profile grants %q, which the provision script does not provision", grant)
+		}
+	}
+}
+
+// A per-tier ServiceAccount has no owner reference, so a change to one has to
+// map back to its profile by label and namespace, or a hand delete waits for
+// the resync.
+func TestAProfileServiceAccountChangeWakesItsProfile(t *testing.T) {
+	sa := func(ns string, labels map[string]string) *corev1.ServiceAccount {
+		return &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "agentprofile-auditor-read", Namespace: ns, Labels: labels}}
+	}
+	named := map[string]string{agentProfileNameLabel: "auditor"}
+	got := profileServiceAccountRequest(sa("kubeagents-system-profiles", named))
+	if len(got) != 1 || got[0].Namespace != "kubeagents-system" || got[0].Name != "auditor" {
+		t.Errorf("requests = %v, want kubeagents-system/auditor", got)
+	}
+	for _, other := range []*corev1.ServiceAccount{
+		sa("kubeagents-system", named),
+		sa("-profiles", named),
+		sa("kubeagents-system-profiles", nil),
+	} {
+		if got := profileServiceAccountRequest(other); len(got) != 0 {
+			t.Errorf("%s/%v mapped to %v, want nothing", other.Namespace, other.Labels, got)
 		}
 	}
 }
