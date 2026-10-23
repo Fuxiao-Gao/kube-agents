@@ -1058,6 +1058,7 @@ class A3TheTaskPlaneSubjectSaysWhoWroteIt(unittest.TestCase):
 
     NOTIFY_PROBE = "chat.notify.gchat"
     NOTIFY_SLACK_PROBE = "chat.notify.slack"
+    NOTIFY_CONSOLE_PROBE = "chat.notify.console"
     NOTIFY_REPLY_PROBE = "chat.notify.reply.agent.r1"
 
     def test_A3_a_notify_has_one_writer_and_its_answer_has_one(self) -> None:
@@ -1065,7 +1066,8 @@ class A3TheTaskPlaneSubjectSaysWhoWroteIt(unittest.TestCase):
 
         The gateway posts what arrives on `chat.notify.gchat` (or, on a
         Slack-armed gateway, `chat.notify.slack`) to the home channel as the
-        install's bot, so a second writer there is a second
+        install's bot, and what arrives on `chat.notify.console` into a console
+        conversation, so a second writer there is a second
         principal that can make the bot speak; and the agent takes the answer
         as the gateway's word on where the post landed, so a second writer on
         the reply namespace -- the agent itself included -- can forge it. The
@@ -1076,6 +1078,7 @@ class A3TheTaskPlaneSubjectSaysWhoWroteIt(unittest.TestCase):
         for probe, want in (
             (self.NOTIFY_PROBE, ["agent"]),
             (self.NOTIFY_SLACK_PROBE, ["agent"]),
+            (self.NOTIFY_CONSOLE_PROBE, ["agent"]),
             (self.NOTIFY_REPLY_PROBE, ["gateway"]),
         ):
             writers = sorted(

@@ -2265,10 +2265,20 @@ Mutation(
         "channel without the agent",
     ),
     Mutation(
+        "A3-bridge-sends-a-console-notify",
+        "k8s-operator/internal/controller/platformagent_a2a_identities.go",
+        ('\t\t"a2a.tasks." + a2aBridgeAddressee + ".*.events",\n\t\t"$KV.runtime-state.>",',
+         '\t\t"a2a.tasks." + a2aBridgeAddressee + ".*.events",\n\t\t"chat.notify.console",\n\t\t"$KV.runtime-state.>",'),
+        "test_A3_a_notify_has_one_writer_and_its_answer_has_one",
+        "grant the static bridge publish on the console notify subject, so "
+        "a task the bridge runs can put a report into any console "
+        "conversation whose context it knows, without the agent",
+    ),
+    Mutation(
         "A3-agent-answers-its-own-notify",
         "k8s-operator/internal/controller/platformagent_a2a_identities.go",
-        ("\tpublish = append(publish, a2aNotifySubjectGchat, a2aNotifySubjectSlack)\n",
-         "\tpublish = append(publish, a2aNotifySubjectGchat, a2aNotifySubjectSlack, a2aNotifyReplySubjects)\n"),
+        ("\tpublish = append(publish, a2aNotifySubjectGchat, a2aNotifySubjectSlack, a2aNotifySubjectConsole)\n",
+         "\tpublish = append(publish, a2aNotifySubjectGchat, a2aNotifySubjectSlack, a2aNotifySubjectConsole, a2aNotifyReplySubjects)\n"),
         "test_A3_a_notify_has_one_writer_and_its_answer_has_one",
         "give the agent publish on the notify reply namespace, the symmetric-"
         "looking grant (it already reads there). The agent can then forge the "
@@ -2288,8 +2298,8 @@ Mutation(
     Mutation(
         "A3-agent-answers-the-board",
         "k8s-operator/internal/controller/platformagent_a2a_identities.go",
-        ("\tpublish = append(publish, a2aNotifySubjectGchat, a2aNotifySubjectSlack)\n",
-         "\tpublish = append(publish, a2aNotifySubjectGchat, a2aNotifySubjectSlack, a2aBoardReplySubjects)\n"),
+        ("\tpublish = append(publish, a2aNotifySubjectGchat, a2aNotifySubjectSlack, a2aNotifySubjectConsole)\n",
+         "\tpublish = append(publish, a2aNotifySubjectGchat, a2aNotifySubjectSlack, a2aNotifySubjectConsole, a2aBoardReplySubjects)\n"),
         "test_A3_a_board_request_has_one_writer_and_its_answer_has_one",
         "give the agent publish on the board reply namespace, so the agent "
         "container can answer the gateway's board request itself. What it "
