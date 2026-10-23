@@ -929,6 +929,11 @@
 # namespace; the incumbent's delivery checks and safeguards.
 ./tasks/autoops-warning-event-triage-state-stamp/task.yaml
 
+# gke-cluster-autoscaler skill probe: on GKE 1.36.3-gke.1244000 or later a
+# zonal stockout cools down only its own zone, so the healthy zones keep
+# provisioning the preferred tier. deployer: noop, transcript-only.
+./tasks/autoscaler-zonal-stockout-cooldown-scope-probe/task.yaml
+
 # #3090: the first onboarding report opens with the scan counts and the line
 # `inventory_findings.py select` prints, graded by equality. The
 # bootstrap-ranking stack with a planted report that has no critical finding;
