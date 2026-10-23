@@ -34,6 +34,7 @@ LOG = logging.getLogger("harness-scale")
 TEST_CLUSTER_FORMAT = "{prefix}{index:02d}"
 TEST_CLUSTER_MACHINE_TYPE = "e2-standard-2"
 DEFAULT_POOL_NODES = 2
+CLUSTER_CREATE_ATTEMPTS = 3
 # Cloud Monitoring needs a few minutes before a window's last points are queryable.
 MONITORING_DELAY_SECONDS = 240
 REGISTRATION_POLL_SECONDS = 60
@@ -132,8 +133,19 @@ class Runner:
         self.wait_registered(count)
 
     def _create_cluster(self, name: str) -> None:
-        LOG.info("creating test cluster %s", name)
-        kube.create_cluster(self.project, self.zone, name, TEST_CLUSTER_MACHINE_TYPE, DEFAULT_POOL_NODES, self.label)
+        """Create a test cluster; a create GKE fails (an internal error) is deleted and tried again."""
+        for attempt in range(1, CLUSTER_CREATE_ATTEMPTS + 1):
+            LOG.info("creating test cluster %s (attempt %s)", name, attempt)
+            try:
+                kube.create_cluster(self.project, self.zone, name, TEST_CLUSTER_MACHINE_TYPE,
+                                    DEFAULT_POOL_NODES, self.label)
+                return
+            except kube.CommandError:
+                if attempt == CLUSTER_CREATE_ATTEMPTS:
+                    raise
+                LOG.warning("creating %s failed; deleting what GKE left and retrying", name)
+                if name in kube.clusters_with_prefix(self.project, self.zone, self.prefix, self.label):
+                    kube.delete_cluster(self.project, self.zone, name)
 
     def wait_registered(self, count: int) -> None:
         """Wait for a Cluster Agent profile per test cluster, then make the event watcher watch exactly them.
