@@ -73,7 +73,8 @@ pyyaml
 # hermes-agent through rich; nothing above pulls it in.
 markdown-it-py
 
-# `make coverage`, which the CI `test` job runs. coverage runs the unittest suite
+# `make coverage`, which the CI `test-shard` jobs run (the `test` job joins their
+# data with `make coverage-merge`). coverage runs the unittest suite
 # under measurement; diff-cover reads the resulting coverage.xml plus the
 # branch diff to report coverage of changed lines only. Neither is imported by
 # anything under test -- they are tooling, listed here so the local and CI

@@ -548,5 +548,104 @@ class CoverageStrictTest(unittest.TestCase):
         self.assertNotIn(f"==> {green}", done.stdout)
 
 
+#: Marker and probe for the shard cases: the files one shard runs, as make expands them.
+SHARD_MARKER = "SWEEP-SHARD:"
+SHARD_MAKEFILE = f"""\
+include Makefile
+sweep-shard:
+\t@echo "{ORDER_MARKER}$(PYTHON_TEST_RUN_ORDER)"; echo "{SHARD_MARKER}$(PYTHON_TEST_SHARD_ORDER)"
+"""
+#: The word a malformed PYTHON_TEST_SHARD expands to, which the worker refuses.
+SHARD_BAD = "invalid-PYTHON_TEST_SHARD"
+
+
+def _shard(value, args=()):
+    """(PYTHON_TEST_RUN_ORDER, PYTHON_TEST_SHARD_ORDER) for PYTHON_TEST_SHARD=value."""
+    done = _with_wrapper(SHARD_MAKEFILE, "sweep-shard", [f"PYTHON_TEST_SHARD={value}", *args])
+    return _marked(done.stdout, ORDER_MARKER), _marked(done.stdout, SHARD_MARKER)
+
+
+class ShardTest(unittest.TestCase):
+    """CI runs the sweep as three shards; together they must be the sweep, once.
+
+    A file in no shard never runs and nothing says so; a file in two runs
+    twice; a malformed shard that ran nothing would read green. Each of those
+    is a quiet way for the required check to stop meaning what it says.
+    """
+
+    def test_the_default_shard_is_the_whole_run_order(self):
+        order, shard = _shard("1/1")
+        self.assertTrue(order)
+        self.assertEqual(shard, order)
+
+    def test_three_shards_split_the_run_order_round_robin_once(self):
+        shards = []
+        for index in (1, 2, 3):
+            with self.subTest(shard=index):
+                order, shard = _shard(f"{index}/3")
+                self.assertEqual(shard, order[index - 1 :: 3])
+                shards.append(shard)
+        joined = [path for shard in shards for path in shard]
+        self.assertEqual(sorted(joined), sorted(order), "the three shards are not a partition of the run order")
+        self.assertEqual(len(joined), len(set(joined)), "a file is in two shards")
+
+    def test_a_malformed_shard_is_a_word_the_worker_refuses(self):
+        for value in ("0/3", "4/3", "1/0", "x", "1", "2/x"):
+            with self.subTest(value=value):
+                _, shard = _shard(value)
+                self.assertEqual(shard, [SHARD_BAD])
+
+    def test_a_shard_runs_and_reports_only_its_own_files(self):
+        with fixture_files() as (green, red):
+            files = [green, red, MISSING_FILE]
+            done = _with_wrapper(
+                DISCOVER_MAKEFILE,
+                "sweep-probe",
+                [f"PYTHON_TEST_FILES={' '.join(files)}", "PYTHON_TEST_JOBS=2", "PYTHON_TEST_SHARD=2/3"],
+            )
+        self.assertEqual(_failed(done.stdout), red)
+        self.assertIn(f"==> {red}", done.stdout)
+        self.assertNotIn(f"==> {green}", done.stdout)
+        self.assertNotIn(f"==> {MISSING_FILE}", done.stdout)
+
+    def test_coverage_merge_refuses_missing_shard_data(self):
+        """The join fails closed before coverage.py runs: a shard that left no
+        directory, no data or no failing-file list reads as red, not green."""
+        merge = "include Makefile\nmerge-probe: coverage-merge\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            dirs = [pathlib.Path(tmp, f"python-coverage-shard-{index}") for index in (1, 2, 3)]
+            for shard in dirs:
+                shard.mkdir()
+                (shard / ".coverage").write_text("")
+                (shard / "failed-files.txt").write_text("")
+            cases = {
+                "a shard directory missing": ([dirs[0], dirs[1]], None),
+                "a shard without data": (dirs, dirs[1] / ".coverage"),
+                "a shard without its failing-file list": (dirs, dirs[2] / "failed-files.txt"),
+            }
+            for name, (present, removed) in cases.items():
+                with self.subTest(name):
+                    if removed is not None:
+                        removed.unlink()
+                    done = _with_wrapper(
+                        merge,
+                        "merge-probe",
+                        [f"COVERAGE_SHARD_DIRS={' '.join(str(d) for d in present)}", "COVERAGE_SHARD_COUNT=3"],
+                    )
+                    self.assertNotEqual(done.returncode, 0, done.stdout + done.stderr)
+                    self.assertIn("ERROR:", done.stdout + done.stderr)
+                    if removed is not None:
+                        removed.write_text("")
+
+    def test_a_malformed_shard_fails_the_sweep(self):
+        with fixture_files() as (green, _red):
+            done = _with_wrapper(
+                PROBE_MAKEFILE,
+                "sweep-probe",
+                [f"PYTHON_TEST_FILES={green}", "PYTHON_TEST_JOBS=1", "PYTHON_TEST_SHARD=4/3"],
+            )
+        self.assertEqual(_failed(done.stdout), SHARD_BAD)
+
+
 if __name__ == "__main__":
     unittest.main()
