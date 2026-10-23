@@ -228,3 +228,15 @@ def test_run_retries_transient_failures_only(monkeypatch):
     monkeypatch.setattr(kube.subprocess, "run", lambda *a, **k: Proc(1, "Error from server (NotFound)"))
     with pytest.raises(kube.CommandError):
         kube.run(["kubectl", "get", "pods"])
+
+
+def test_a_host_named_like_the_prefix_is_not_a_test_cluster():
+    plan = load_plan(PHASE1, environ=ENV)
+    run = runner.Runner(plan, Path("/nonexistent/harness-limits.json"))
+    assert run.test_clusters({"scale-host", "scale-01", "scale-02", "other-01"}) == {"scale-01", "scale-02"}
+
+
+def test_record_keys_keep_a_non_sha_build_whole():
+    assert records.record_key("rc_2610220514_eeb8a95", "next", "base", 0, "fan_out", 1).startswith("rc_2610220514_eeb8a95|")
+    assert records.record_key("rc_2610221000_abc1234", "next", "base", 0, "fan_out", 1) != records.record_key(
+        "rc_2610220514_eeb8a95", "next", "base", 0, "fan_out", 1)

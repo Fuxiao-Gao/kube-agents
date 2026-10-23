@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -17,14 +18,19 @@ from typing import Any
 SCHEMA_VERSION = 1
 KEY_SEPARATOR = "|"
 COMMIT_KEY_LENGTH = 8
+FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 JSON_INDENT = 2
 
 
 def record_key(commit: str, mode: str, factor: str, level: float, operation: str, run: int) -> str:
-    """The identity of one run: replaced on re-run, distinct across commits."""
-    return KEY_SEPARATOR.join(
-        [commit[:COMMIT_KEY_LENGTH], mode, factor, _level_text(level), operation, str(run)]
-    )
+    """The identity of one run: replaced on re-run, distinct across builds.
+
+    A commit SHA is shortened; any other build name (a release tag such as
+    ``rc_2610220514_eeb8a95``) is kept whole, because its prefix is shared by
+    other builds.
+    """
+    build = commit[:COMMIT_KEY_LENGTH] if FULL_SHA_RE.match(commit) else commit
+    return KEY_SEPARATOR.join([build, mode, factor, _level_text(level), operation, str(run)])
 
 
 def _level_text(level: float) -> str:

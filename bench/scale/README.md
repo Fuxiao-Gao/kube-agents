@@ -1,5 +1,11 @@
 # bench/scale
 
+## High level summary
+
+The harness is the Platform Agent and its supporting components. This directory holds the plan and the results of a load measurement of the harness. The runner applies a fleet size to test clusters. It then runs agent operations and records what each container used. The admin console reads the results and gives container limits and a node size for a fleet.
+
+## Details
+
 Load and sizing measurements of the agent harness at fleet scale. The plan, the metrics and their
 thresholds are in
 [`docs/designs/agent-harness-bottlenecks.md`](../../docs/designs/agent-harness-bottlenecks.md).
@@ -28,22 +34,22 @@ make scale-run                             # run it, resuming from harness-limit
 cluster, and the runner refuses a `SCALE_HOST_CONTEXT` that does not name it, because an onboarding
 run resets the state volumes of the install that context reaches. The runner creates and deletes test
 clusters named `<cluster_prefix>NN` in the target zone that carry the plan's `cluster_label`, and
-touches no other cluster.
+creates or deletes no other cluster. On the host cluster, it restarts the agent's pods and, for each onboarding run, deletes and re-creates the install's state volumes.
 
 `SCALE_PREFLIGHT` names a shell command the runner runs before each level and each run, for a
 project where something outside the install can undo its preconditions: an organization's IAM
 automation that strips service-account bindings, for one. A failing preflight is logged and the run
 goes on.
 
-The runner module takes more than the two targets:
+The runner module takes more than the two targets. Install bench first (`make test-bench-deps`, or `uv sync` in `bench/`), so the harness the prompts go through can be imported:
 
 ```bash
 cd bench
-python -m kube_agents_bench.scale.runner run ../bench/scale/phase1.yaml --only-factor clusters --limit 3
-python -m kube_agents_bench.scale.runner run <plan> --force          # re-run and replace existing keys
-python -m kube_agents_bench.scale.runner apply <plan> --factor objects --level 4000
-python -m kube_agents_bench.scale.runner teardown <plan>             # remove fixtures, shrink pools
-python -m kube_agents_bench.scale.runner teardown <plan> --delete-fleet
+python3 -m kube_agents_bench.scale.runner run ../bench/scale/phase1.yaml --only-factor clusters --limit 3
+python3 -m kube_agents_bench.scale.runner run <plan> --force          # re-run and replace existing keys
+python3 -m kube_agents_bench.scale.runner apply <plan> --factor objects --level 4000
+python3 -m kube_agents_bench.scale.runner teardown <plan>             # remove fixtures, shrink pools
+python3 -m kube_agents_bench.scale.runner teardown <plan> --delete-fleet
 ```
 
 The agent API is reached through the repository's `kubectl exec` relay
@@ -111,9 +117,9 @@ The agent API is reached through the repository's `kubectl exec` relay
 
 `key` is `commit[:8]|mode|factor|level|operation|run`; a record with the same key replaces the old
 one. `commit` is the commit the agent image's tag pins (the tag itself when it is not a commit), read
-from the install, so a new build is a new set of keys. A base record has `factor` `base` and `level`
+from the install. The key holds the commit's first 8 characters, or the whole tag when the tag is not a commit, so a new build is a new set of keys. A base record has `factor` `base` and `level`
 0; `values` holds every factor's planned value at the point, base records included. `totals` holds
-what the test clusters really had, summed over the fleet, and fits use the totals. `limits` and
+what the test clusters really had, summed over the fleet; fits use the totals for the factors the totals count (clusters, nodes, objects) and `values` for the rest. `limits` and
 `replicas` are read from the live pods during the run. A metric without `container` belongs to the
 run. `excluded_from` names the fits the record is left out of: `["response_seconds"]` when a prompt
 run saw a provider 429. `errors` lists what made the run differ from its plan: a failed prompt, a

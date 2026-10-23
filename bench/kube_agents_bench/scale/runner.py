@@ -17,6 +17,7 @@ import argparse
 import itertools
 import logging
 import math
+import re
 import signal
 import sys
 import time
@@ -88,6 +89,12 @@ class Runner:
     def cluster_names(self, count: int) -> list[str]:
         return [TEST_CLUSTER_FORMAT.format(prefix=self.prefix, index=index) for index in range(1, count + 1)]
 
+    def test_clusters(self, names: set[str]) -> set[str]:
+        """The test-fleet names among ``names``: ``<prefix>NN`` only, so a host cluster named
+        ``<prefix>host`` is never taken for a test cluster."""
+        pattern = re.compile(rf"^{re.escape(self.prefix)}[0-9]+$")
+        return {name for name in names if pattern.match(name)}
+
     def contexts(self, count: int) -> list[str]:
         return [kube.context_name(self.project, self.zone, name) for name in self.cluster_names(count)]
 
@@ -135,13 +142,13 @@ class Runner:
             LOG.info("waiting for Cluster Agent profiles: %s of %s", len(profiles & names), count)
             time.sleep(REGISTRATION_POLL_SECONDS)
             profiles = self.install.profile_clusters()
-        test_watched = {name for name in self.install.watched_clusters() if name.startswith(self.prefix)}
+        test_watched = self.test_clusters(self.install.watched_clusters())
         if test_watched != names:
             LOG.warning("event watcher watches %s, test fleet is %s; restarting the gateway so it re-reads profiles",
                         sorted(test_watched), sorted(names))
             operations.restart(self.install.context, self.install.namespace)
             time.sleep(WATCHER_START_SECONDS)
-            test_watched = {name for name in self.install.watched_clusters() if name.startswith(self.prefix)}
+            test_watched = self.test_clusters(self.install.watched_clusters())
             if test_watched != names:
                 self.level_errors.append(f"event watcher watches {sorted(test_watched)}, test fleet is {sorted(names)}")
 

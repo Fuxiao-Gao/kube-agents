@@ -315,8 +315,9 @@ class Install:
                             Metric("pvc_capacity_bytes", float(df[DF_CAPACITY_COLUMN]) * BYTES_PER_KIB),
                             Metric("pvc_used_bytes", float(df[DF_USED_COLUMN]) * BYTES_PER_KIB),
                         ]
+                        # Cluster Agent profiles only; the Platform Agent's own profile is not one.
                         du = kube.kubectl(self.context, *target, "sh", "-c",
-                                          f"du -sk {path}/profiles/* 2>/dev/null || true")
+                                          f"du -sk {path}/profiles/{PROFILE_PREFIX}* 2>/dev/null || true")
                         sizes = [float(line.split()[0]) * BYTES_PER_KIB for line in du.splitlines() if line.strip()]
                         if sizes:
                             metrics.append(Metric("profile_bytes_max", max(sizes)))
