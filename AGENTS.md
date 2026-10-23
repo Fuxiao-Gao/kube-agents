@@ -233,9 +233,9 @@ Roster, inject-lane exclusions: `docs/eval-gate-roster.md`; verdict ladder:
 [`docs/designs/testing-strategy.md`](docs/designs/testing-strategy.md) §4.2. On a red, read the
 health bot comment and <https://storage.cloud.google.com/kube-agents-dashboards/evals/index.html>:
 fix a regression your PR caused, or file a `presubmit-gate` issue for a gate flake. One `/retest` is
-reasonable for a suspected transient; never merge around a red gate or tell anyone to.
+fine for a suspected transient; never merge around a red gate or tell anyone to.
 `/override` (admin-only) is only for a red the eval crew classified as not the PR's. Never `/test`
-the smoke on a PR in the merge queue ([mechanics](docs/pull-request-workflow.md#how-a-change-merges)).
+the smoke on an approved PR with a green `Smoke gate` ([why](docs/pull-request-workflow.md#how-a-change-merges)).
 
 ## Automated Review After Opening a Pull Request
 
