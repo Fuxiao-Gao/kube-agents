@@ -860,10 +860,12 @@ class WorkflowNameJoinTest(unittest.TestCase):
         self.assertIn("coverage-merge", runs)
         shard_runs = " ".join(step.get("run", "") for step in shards["steps"])
         self.assertIn("COVERAGE_STRICT=1", shard_runs)
-        self.assertIn("PYTHON_TEST_SHARD=", shard_runs)
+        # In the environment, not on make's command line, where it would also
+        # travel in MAKEFLAGS into every make the tests start.
+        self.assertNotIn("PYTHON_TEST_SHARD", shard_runs)
         count = len(shards["strategy"]["matrix"]["shard"])
         self.assertEqual(shards["strategy"]["matrix"]["shard"], list(range(1, count + 1)))
-        shard_env = " ".join(str((step.get("env") or {}).get("SHARD", "")) for step in shards["steps"])
+        shard_env = " ".join(str((step.get("env") or {}).get("PYTHON_TEST_SHARD", "")) for step in shards["steps"])
         self.assertIn(f"/{count}", shard_env, "a shard divides the sweep by another count than the matrix has")
         self.assertIn(f"COVERAGE_SHARD_COUNT={count}", runs, "the join expects another shard count than the matrix has")
         self.assertFalse(shards["strategy"].get("fail-fast", True), "one red shard would cancel the others")

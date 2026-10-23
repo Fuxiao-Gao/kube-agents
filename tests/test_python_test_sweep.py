@@ -107,8 +107,9 @@ def _has_coverage():
     the package too. Without this they do not fail honestly
     there: the strict case asserts a non-zero exit and gets one from the
     missing package rather than from the gate, so it passes while testing
-    nothing. The `test` job installs requirements-test.txt, which is the job
-    whose verdict the gate controls and where these must not skip.
+    nothing. The `test-shard` jobs install requirements-test.txt; they run the
+    sweeps whose verdicts the required check joins, and these must not skip
+    there.
     """
     return (
         subprocess.run(
@@ -186,7 +187,7 @@ def _run_make(args, cwd=None):
     return run_make(args, timeout=SWEEP_TIMEOUT_SECONDS, cwd=cwd)
 
 
-def _with_wrapper(makefile, target, args, cwd=None):
+def _with_wrapper(makefile, target, args, cwd=None, extra_env=None):
     """Run `target` from a wrapper makefile that includes the repository's.
 
     From another `cwd`, both that include and the Makefile's own `include
@@ -197,7 +198,12 @@ def _with_wrapper(makefile, target, args, cwd=None):
         wrapper.write(makefile)
         wrapper_path = wrapper.name
     try:
-        return _run_make(["-I", str(REPO_ROOT), "-f", wrapper_path, target, *args], cwd=cwd)
+        return run_make(
+            ["-I", str(REPO_ROOT), "-f", wrapper_path, target, *args],
+            timeout=SWEEP_TIMEOUT_SECONDS,
+            cwd=cwd,
+            extra_env=extra_env,
+        )
     finally:
         os.unlink(wrapper_path)
 
@@ -616,22 +622,30 @@ class ShardTest(unittest.TestCase):
         self.assertNotIn(f"==> {MISSING_FILE}", done.stdout)
 
     def test_a_test_the_shard_runs_does_not_inherit_the_shard(self):
-        """make exports a command-line variable into the recipe's environment,
-        so without `unexport` every test that drives the Makefile would shard
-        its own fixtures inside a CI shard (the first live run failed so)."""
+        """CI sets PYTHON_TEST_SHARD in the environment. Without `unexport`, every
+        test that drives the Makefile would shard its own fixtures inside a CI
+        shard (the first live run failed so). The probe reads the whole
+        environment, MAKEFLAGS included, not only the variable's own line."""
         probe = (
             "include Makefile\n"
             "sweep-probe:\n"
-            '\t@$(call sweep_python_test_files,sh -c "env | grep ^PYTHON_TEST_SHARD= ; true" probe)\n'
+            '\t@$(call sweep_python_test_files,sh -c "env | grep PYTHON_TEST_SHARD ; true" probe)\n'
         )
         with fixture_files() as (green, _red):
             done = _with_wrapper(
                 probe,
                 "sweep-probe",
-                [f"PYTHON_TEST_FILES={green}", "PYTHON_TEST_JOBS=1", "PYTHON_TEST_SHARD=1/1"],
+                [f"PYTHON_TEST_FILES={green}", "PYTHON_TEST_JOBS=1"],
+                extra_env={"PYTHON_TEST_SHARD": "1/1"},
             )
         self.assertIn(f"==> {green}", done.stdout, done.stdout + done.stderr)
-        self.assertNotIn("PYTHON_TEST_SHARD=", _block(done.stdout, green))
+        self.assertNotIn("PYTHON_TEST_SHARD", _block(done.stdout, green))
+
+    def test_coverage_merge_refuses_a_strict_value_that_is_neither_0_nor_1(self):
+        merge = "include Makefile\nmerge-probe: coverage-merge\n"
+        done = _with_wrapper(merge, "merge-probe", ["COVERAGE_STRICT=true", "COVERAGE_SHARD_COUNT=3"])
+        self.assertNotEqual(0, done.returncode, done.stdout + done.stderr)
+        self.assertIn("COVERAGE_STRICT must be 0 or 1", done.stdout + done.stderr)
 
     def test_coverage_merge_refuses_missing_shard_data(self):
         """The join fails closed before coverage.py runs: a shard that left no

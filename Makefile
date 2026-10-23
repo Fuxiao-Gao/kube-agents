@@ -306,9 +306,11 @@ PYTHON_TEST_RUN_ORDER = $(foreach heavy,$(PYTHON_TEST_HEAVY_FILES),$(filter $(he
 # front spread one to a shard and shard 1 holds the heaviest of each n. The
 # default, 1/1, is the whole sweep, unchanged.
 PYTHON_TEST_SHARD ?= 1/1
-# Kept out of the environment of the tests the sweep runs: make exports a
-# variable set on its command line, and a test that drives the Makefile itself
-# (tests/test_python_test_sweep.py) would otherwise shard its own fixtures.
+# Kept out of the environment of the tests the sweep runs, or a test that
+# drives the Makefile itself (tests/test_python_test_sweep.py) would shard its
+# own fixtures. CI sets it in the environment, which `unexport` covers; set on
+# make's command line it would also travel in MAKEFLAGS, which `unexport`
+# does not cover and tests/_run_make.py drops.
 unexport PYTHON_TEST_SHARD
 PYTHON_TEST_SHARD_INDEX = $(word 1,$(subst /, ,$(PYTHON_TEST_SHARD)))
 PYTHON_TEST_SHARD_COUNT = $(word 2,$(subst /, ,$(PYTHON_TEST_SHARD)))
@@ -634,6 +636,13 @@ COVERAGE_SHARD_DIRS ?= $(wildcard $(COVERAGE_DIR)/python-coverage-shard-*)
 COVERAGE_SHARD_COUNT ?= 1
 
 coverage-merge: ## Join the coverage the sharded `make coverage` runs left in COVERAGE_SHARD_DIRS: one coverage.xml, one total, and COVERAGE_STRICT over every shard's failing files.
+# The same refusal as in `coverage`, for the same reason: a truthy-looking
+# spelling would read as "not 1" to the gate below and pass a red list.
+	@case "$(COVERAGE_STRICT)" in \
+		0|1) ;; \
+		*) echo "ERROR: COVERAGE_STRICT must be 0 or 1, got '$(COVERAGE_STRICT)'."; \
+		   exit 1;; \
+	esac
 	@found=$(words $(COVERAGE_SHARD_DIRS)); \
 	if [ "$$found" != "$(COVERAGE_SHARD_COUNT)" ]; then \
 		echo "ERROR: expected $(COVERAGE_SHARD_COUNT) shard coverage directories under $(COVERAGE_DIR), found $$found: $(COVERAGE_SHARD_DIRS)"; \

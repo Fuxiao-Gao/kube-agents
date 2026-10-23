@@ -176,11 +176,13 @@ jobs:
       # red suite.
       #
       # PYTHON_TEST_SHARD: this job's third of the sweep. Its coverage and its
-      # list of failing files go to the join in `test` below.
+      # list of failing files go to the join in `test` below. Set in the
+      # environment, not on make's command line: a command-line value also
+      # travels in MAKEFLAGS into every make the tests start.
       - name: Run Python unit tests under coverage
         env:
-          SHARD: ${{ matrix.shard }}/3
-        run: make coverage COVERAGE_SKIP_GO=1 COVERAGE_STRICT=1 PYTHON_TEST_SHARD="$SHARD"
+          PYTHON_TEST_SHARD: ${{ matrix.shard }}/3
+        run: make coverage COVERAGE_SKIP_GO=1 COVERAGE_STRICT=1
 
       # !cancelled() rather than success(): a shard with a red file still
       # hands its coverage and its failing-file list to the join, which is
@@ -231,14 +233,12 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # No pip cache: the shards' cache holds the whole test set, and this job
+      # installs two packages.
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version-file: ".python-version"
-          cache: "pip"
-          cache-dependency-path: |
-            requirements-test.txt
-            admin_console/requirements.txt
 
       # The two tools alone: nothing here imports the code under test. Both
       # are unpinned in requirements-test.txt as here, so a coverage release
