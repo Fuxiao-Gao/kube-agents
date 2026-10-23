@@ -379,6 +379,7 @@ class Runner:
                     records.merge(self.data_file, [record])
                     awaiting.append((time.time(), record))
                     awaiting = self.flush_peaks(awaiting, wait=False)
+                    self.backfill_peaks(skip={pending.key for _, pending in awaiting})
         finally:
             self.stop_churn()
             relay.stop()
@@ -403,10 +404,15 @@ class Runner:
             LOG.info("recorded %s", record.key)
         return left
 
-    def backfill_peaks(self) -> None:
-        """Add peaks to records a stopped run merged without them (it stopped inside the wait)."""
+    def backfill_peaks(self, skip: set[str] | None = None) -> None:
+        """Add peaks to records a stopped run merged without them (it stopped inside the wait).
+
+        Runs at start and after every run, so a record that was too fresh at start is
+        filled once Monitoring has its window; ``skip`` names records this run still holds.
+        """
         data = records.load(self.data_file)
         stale = [r for r in data["records"] if not any(m["name"] == PEAK_METRIC for m in r["metrics"])
+                 and r["key"] not in (skip or set())
                  and _epoch(r["ended"]) + MONITORING_DELAY_SECONDS < time.time()]
         for raw in stale:
             record = records.Record.from_dict(raw)
