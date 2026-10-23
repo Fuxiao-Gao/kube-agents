@@ -211,3 +211,20 @@ def test_a_monitoring_failure_costs_the_record_its_peaks_only():
     record = _record()
     run.add_peaks(record)
     assert record.errors and record.errors[0].startswith("monitoring: CommandError")
+
+
+def test_run_retries_transient_failures_only(monkeypatch):
+    calls = []
+
+    class Proc:
+        def __init__(self, code, err):
+            self.returncode, self.stderr, self.stdout = code, err, "ok"
+
+    outcomes = [Proc(1, "print credential failed: failed to retrieve access token"), Proc(0, "")]
+    monkeypatch.setattr(kube.subprocess, "run", lambda *a, **k: calls.append(1) or outcomes.pop(0))
+    monkeypatch.setattr(kube.time, "sleep", lambda s: None)
+    assert kube.run(["kubectl", "get", "pods"]) == "ok"
+    assert len(calls) == 2
+    monkeypatch.setattr(kube.subprocess, "run", lambda *a, **k: Proc(1, "Error from server (NotFound)"))
+    with pytest.raises(kube.CommandError):
+        kube.run(["kubectl", "get", "pods"])

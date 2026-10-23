@@ -292,13 +292,21 @@ class Runner:
         relay.start()
         try:
             for (factor, level), group in itertools.groupby(todo, key=lambda s: (s.factor, s.level)):
-                values = self.apply_level(factor, level)
+                try:
+                    values = self.apply_level(factor, level)
+                except Exception:  # a level that cannot be applied is skipped; a resume retries it
+                    LOG.exception("could not apply %s=%s; skipping its runs", factor, level)
+                    continue
                 for spec in group:
-                    if spec.operation.kind != "reset_soak":
-                        # A reset (or a restart the agent did itself) leaves the watcher on the host
-                        # cluster only; every other operation is measured with the fleet watched.
-                        self.wait_registered(int(values["clusters"]))
-                    record = self.execute(spec, values)
+                    try:
+                        if spec.operation.kind != "reset_soak":
+                            # A reset (or a restart the agent did itself) leaves the watcher on the host
+                            # cluster only; every other operation is measured with the fleet watched.
+                            self.wait_registered(int(values["clusters"]))
+                        record = self.execute(spec, values)
+                    except Exception:  # one failed run is skipped; its key stays pending for a resume
+                        LOG.exception("run %s %s=%s #%s failed; skipping it", spec.operation.name, factor, level, spec.run)
+                        continue
                     # Merged at once without its peaks, so a crash loses nothing; merged again with them.
                     records.merge(self.data_file, [record])
                     awaiting.append((time.time(), record))

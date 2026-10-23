@@ -10,6 +10,7 @@ import json
 import logging
 import re
 import subprocess
+import time
 from collections.abc import Iterable
 from typing import Any
 
@@ -26,6 +27,17 @@ CREATE_CLUSTER_TIMEOUT_SECONDS = 1800
 APPLY_CHUNK = 500
 FIELD_MANAGER = "harness-scale"
 ARGS_SHOWN = 6
+RETRY_ATTEMPTS = 7
+RETRY_FIRST_DELAY_SECONDS = 10
+RETRY_MAX_DELAY_SECONDS = 300
+# Failures that pass on their own: credentials, network, an API server that is briefly away.
+TRANSIENT_RE = re.compile(
+    r"failed to retrieve access token|Unable to connect to the server|i/o timeout|connection refused"
+    r"|connection reset|TLS handshake timeout|ServiceUnavailable|server is currently unable|getaddrinfo"
+    r"|no such host|unexpected EOF|Internal error occurred|etcdserver|context deadline exceeded"
+    r"|There was a problem refreshing your current auth tokens|Temporary failure in name resolution",
+    re.I,
+)
 STDERR_TAIL_CHARS = 2000
 FIXTURE_DISK_GB = 20
 RELEASE_CHANNEL = "regular"
@@ -49,14 +61,31 @@ class CommandError(RuntimeError):
 
 
 def run(args: list[str], *, stdin: str | None = None, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> str:
-    LOG.debug("run: %s", " ".join(args))
-    proc = subprocess.run(
-        args, input=stdin, capture_output=True, text=True, timeout=timeout, check=False
-    )
-    if proc.returncode != 0:
-        shown = " ".join(args[:ARGS_SHOWN])
-        raise CommandError(f"{shown}... exited {proc.returncode}: {proc.stderr.strip()[-STDERR_TAIL_CHARS:]}")
-    return proc.stdout
+    """Run a command; retry it with backoff when it fails for a reason that passes.
+
+    A day-long campaign meets expired tokens, a dropped network and API-server
+    blips. Those are retried; any other failure is raised at once.
+    """
+    shown = " ".join(args[:ARGS_SHOWN])
+    delay = RETRY_FIRST_DELAY_SECONDS
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        LOG.debug("run: %s", " ".join(args))
+        try:
+            proc = subprocess.run(args, input=stdin, capture_output=True, text=True, timeout=timeout, check=False)
+        except subprocess.TimeoutExpired:
+            error = f"{shown}... timed out after {timeout}s"
+        else:
+            if proc.returncode == 0:
+                return proc.stdout
+            error = f"{shown}... exited {proc.returncode}: {proc.stderr.strip()[-STDERR_TAIL_CHARS:]}"
+            if not TRANSIENT_RE.search(proc.stderr):
+                raise CommandError(error)
+        if attempt == RETRY_ATTEMPTS:
+            raise CommandError(error)
+        LOG.warning("transient failure (attempt %s of %s), retrying in %ss: %s", attempt, RETRY_ATTEMPTS, delay, error[:300])
+        time.sleep(delay)
+        delay = min(delay * 2, RETRY_MAX_DELAY_SECONDS)
+    raise CommandError(f"{shown}... failed")
 
 
 def context_name(project: str, location: str, cluster: str) -> str:
