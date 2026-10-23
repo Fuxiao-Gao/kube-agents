@@ -328,7 +328,7 @@ def harness_limit_chart(chart: MetricChart, colors: Mapping[str | None, str]) ->
                     },
                     customdata=[[point.key, point.run] for point in points],
                     hovertemplate=(
-                        f"<b>{name}</b><br>%{{x:,.0f}} · %{{y:,.2f}}{unit}"
+                        f"<b>{name}</b><br>%{{x:,.1f}} · %{{y:,.2f}}{unit}"
                         "<br>run %{customdata[1]} · %{customdata[0]}<extra></extra>"
                     ),
                 )
@@ -349,7 +349,7 @@ def harness_limit_chart(chart: MetricChart, colors: Mapping[str | None, str]) ->
                         showlegend=False,
                         line={"color": color, "width": HARNESS_LINE_WIDTH, "dash": dash},
                         hovertemplate=(
-                            f"<b>{name}</b> · {label}<br>%{{x:,.0f}} · %{{y:,.2f}}{unit}"
+                            f"<b>{name}</b> · {label}<br>%{{x:,.1f}} · %{{y:,.2f}}{unit}"
                             "<extra></extra>"
                         ),
                     )

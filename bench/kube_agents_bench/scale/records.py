@@ -62,6 +62,8 @@ class Record:
     started: str
     ended: str
     image: str = ""
+    # The measurement runner's own commit, so a change in how a metric is read is visible.
+    runner: str = ""
     # Every factor's planned value at this point; totals hold what the clusters really had.
     values: dict[str, float] = field(default_factory=dict)
     totals: dict[str, int] = field(default_factory=dict)
@@ -76,6 +78,13 @@ class Record:
     @property
     def key(self) -> str:
         return record_key(self.commit, self.mode, self.factor, self.level, self.operation, self.run)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Record:
+        fields = {k: v for k, v in data.items() if k in cls.__dataclass_fields__ and k != "metrics"}
+        record = cls(**fields)
+        record.metrics = [Metric(m["name"], m["value"], m.get("container")) for m in data.get("metrics", [])]
+        return record
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)

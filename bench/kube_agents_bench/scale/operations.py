@@ -10,18 +10,19 @@ from __future__ import annotations
 
 import base64
 import logging
+import multiprocessing
 import os
 import socket
 import subprocess
 import sys
 import tempfile
 import time
-from concurrent.futures import ProcessPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from kube_agents_bench.scale import kube
+from kube_agents_bench.scale.collect import GATEWAY_SELECTOR
 from kube_agents_bench.scale.config import Operation
 
 LOG = logging.getLogger(__name__)
@@ -30,7 +31,6 @@ LOG = logging.getLogger(__name__)
 # agent API's bearer value, not the value itself.
 AGENT_TOKEN_SOURCE_NAME = "platform-agent-secrets"
 AGENT_TOKEN_FIELD = "API_SERVER_KEY"
-GATEWAY_SELECTOR = "app=platform-agent-gateway"
 RESET_TIMEOUT_SECONDS = 1800
 READY_POLL_SECONDS = 10
 READY_WAIT_ARG = "--timeout=60s"
@@ -40,7 +40,11 @@ RUN_SLOT_REFUSAL = "Too many concurrent runs"
 RATE_LIMIT_MARKERS = ("RESOURCE_EXHAUSTED", "rate limit", "rate_limit", "Too Many Requests", "RateLimitError")
 # The harness marks a run its transport could not complete; such a run has no response to time.
 INFRA_FAILURE_MARKER = "KUBE_AGENTS_INFRA_FAILURE"
+# The eval lane's inject-door switches; cleared so every prompt takes the agent API.
+INJECT_ENV = ("AGENT_TRANSPORT", "AGENT_INJECT_TOKEN", "AGENT_INJECT_URL", "AGENT_INJECT_SERVICE")
 PROMPT_FAILED = "prompt failed"
+SPAWN = "spawn"
+NO_DEADLINE_SECONDS = 86400
 # The agent pod runs under gVisor, which kubectl port-forward cannot reach, so the harness rides
 # the repository's kubectl-exec relay into the sidecar that fronts the agent API (bench/README.md,
 # "Sandboxed installs").
@@ -71,12 +75,14 @@ def agent_env(context: str, namespace: str, local_port: int) -> dict[str, str]:
     """The environment the harness reads, for the experiment install's agent API on ``local_port``."""
     encoded = kube.kubectl(context, "get", "secret", AGENT_TOKEN_SOURCE_NAME, "-n", namespace,
                            "-o", f"jsonpath={{.data.{AGENT_TOKEN_FIELD}}}")
-    return {
+    env = {name: "" for name in INJECT_ENV}  # the agent API path, whatever the caller exported
+    env.update({
         "AGENT_CLUSTER_CONTEXT": context,
         "AGENT_NAMESPACE": namespace,
         "AGENT_LOCAL_PORT": str(local_port),
         "PLATFORM_AGENT_TOKEN": base64.b64decode(encoded).decode(),
-    }
+    })
+    return env
 
 
 class Relay:
@@ -142,7 +148,12 @@ def fold_answer(outcome: OperationResult, answer: dict[str, Any]) -> None:
     """
     errors = list(answer.get("errors") or [])
     failed = any(INFRA_FAILURE_MARKER in error for error in errors) or not answer.get("output_chars")
-    if failed:
+    rate_limited = any(marker.lower() in error.lower() for error in errors for marker in RATE_LIMIT_MARKERS)
+    if failed and rate_limited:
+        # The provider refused, not the harness: a 429, which excludes the run from the response fit.
+        outcome.provider_429s += 1
+        outcome.errors.append("provider rate limit: " + "; ".join(errors))
+    elif failed:
         outcome.failed_prompts += 1
         outcome.errors.append(f"{PROMPT_FAILED}: " + ("; ".join(errors) or "empty answer"))
     else:
@@ -154,38 +165,40 @@ def fold_answer(outcome: OperationResult, answer: dict[str, Any]) -> None:
     for error in errors:
         if RUN_SLOT_REFUSAL in error:
             outcome.run_slot_refusals += 1
-        elif any(marker.lower() in error.lower() for marker in RATE_LIMIT_MARKERS):
-            outcome.provider_429s += 1
     if not failed:
+        if rate_limited:
+            outcome.provider_429s += 1
         outcome.errors.extend(errors)
 
 
 def run_prompts(operation: Operation, env: dict[str, str], concurrent: int, first_cluster: str) -> OperationResult:
     """The operation's prompt, plus ``concurrent - 1`` follow-up questions sent at the same moment.
 
-    The whole batch shares one deadline, the operation's timeout; a prompt still
-    running at the deadline is counted as failed and its worker is abandoned.
+    The whole batch shares one deadline, the operation's timeout. A prompt still
+    running at the deadline is counted as failed, and its worker is terminated so
+    it cannot load the next run.
     """
     prompt = operation.prompt.format(first_cluster=first_cluster)
     follow_up = (operation.follow_up or operation.prompt).format(first_cluster=first_cluster)
     prompts = [prompt] + [follow_up] * max(0, concurrent - 1)
     outcome = OperationResult()
-    pool = ProcessPoolExecutor(max_workers=len(prompts))
+    deadline = time.monotonic() + (operation.timeout_seconds or NO_DEADLINE_SECONDS)
+    pool = multiprocessing.get_context(SPAWN).Pool(processes=len(prompts))
     try:
-        futures = [pool.submit(_prompt_worker, text, env) for text in prompts]
-        _, pending = wait(futures, timeout=operation.timeout_seconds or None)
-        for future in futures:
-            if future in pending:
+        pending = [pool.apply_async(_prompt_worker, (text, env)) for text in prompts]
+        for job in pending:
+            remaining = max(0.0, deadline - time.monotonic())
+            try:
+                fold_answer(outcome, job.get(timeout=remaining))
+            except multiprocessing.TimeoutError:
                 outcome.failed_prompts += 1
                 outcome.errors.append(f"{PROMPT_FAILED}: no answer within {operation.timeout_seconds}s")
-                continue
-            try:
-                fold_answer(outcome, future.result())
             except Exception as exc:  # a prompt whose worker died is recorded, and the run goes on
                 outcome.failed_prompts += 1
                 outcome.errors.append(f"{PROMPT_FAILED}: {type(exc).__name__}: {exc}")
     finally:
-        pool.shutdown(wait=False, cancel_futures=True)
+        pool.terminate()
+        pool.join()
     return outcome
 
 
@@ -195,9 +208,9 @@ def soak(window_seconds: int) -> OperationResult:
 
 
 def _gateway_pod(context: str, namespace: str) -> str | None:
-    out = kube.kubectl(context, "get", "pods", "-n", namespace, "-l", GATEWAY_SELECTOR, "--no-headers", "-o", "name")
-    names = [line.strip() for line in out.splitlines() if line.strip()]
-    return names[0] if names else None
+    pods = kube.kubectl_json(context, "get", "pods", "-n", namespace, "-l", GATEWAY_SELECTOR)["items"]
+    live = [p for p in pods if not p["metadata"].get("deletionTimestamp")]
+    return f"pod/{live[0]['metadata']['name']}" if live else None
 
 
 def wait_gateway_ready(context: str, namespace: str, timeout: float = RESET_TIMEOUT_SECONDS) -> None:
@@ -233,9 +246,13 @@ def reset(context: str, namespace: str) -> None:
     """
     for claim in RESET_CLAIMS:
         kube.kubectl(context, "delete", "pvc", claim, "-n", namespace, "--wait=false", "--ignore-not-found")
+    has_bus = bool(kube.kubectl(context, "get", "pod", NATS_POD, "-n", namespace, "--ignore-not-found", "-o", "name").strip())
     for pod in RESET_STATEFUL_PODS:
         kube.kubectl(context, "delete", "pod", pod, "-n", namespace, "--wait=true", "--ignore-not-found",
                      timeout=RESET_TIMEOUT_SECONDS)
+    if not has_bus:  # a mode-today install runs no bus
+        restart(context, namespace)
+        return
     # An empty bus has none of its JetStream buckets; the install creates them with a provision Job,
     # which the operator renders again once the completed one is deleted.
     kube.kubectl(context, "wait", "-n", namespace, "--for=condition=Ready", f"pod/{NATS_POD}",

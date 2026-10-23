@@ -41,6 +41,8 @@ TRANSIENT_RE = re.compile(
 STDERR_TAIL_CHARS = 2000
 FIXTURE_DISK_GB = 20
 RELEASE_CHANNEL = "regular"
+NODE_POOL_LABEL = "cloud.google.com/gke-nodepool"
+WORKLOAD_POOL_SUFFIX = ".svc.id.goog"
 CONTEXT_FORMAT = "gke_{project}_{location}_{cluster}"
 # Kinds the runner counts in every test cluster; the record's totals use these names.
 COUNTED_KINDS = {
@@ -168,6 +170,27 @@ def has_context(context: str) -> bool:
     return context in out.split()
 
 
+def get_credentials(project: str, zone: str, cluster: str) -> None:
+    """Add a cluster's kube context without changing the caller's current one.
+
+    gcloud makes the new context current; another tool in the same shell would
+    then act on a test cluster, so the previous current context is put back.
+    """
+    try:
+        previous = run([KUBECTL, "config", "current-context"]).strip()
+    except CommandError:
+        previous = ""
+    run([GCLOUD, "container", "clusters", "get-credentials", cluster, f"--zone={zone}", f"--project={project}"])
+    if previous:
+        run([KUBECTL, "config", "use-context", previous])
+
+
+def cluster_labels(project: str, location: str, cluster: str) -> dict[str, str]:
+    out = gcloud("container", "clusters", "describe", cluster, f"--location={location}",
+                 "--format=json(resourceLabels)", project=project)
+    return dict(json.loads(out or "{}").get("resourceLabels") or {})
+
+
 def node_pool_size(project: str, zone: str, cluster: str, pool: str) -> int | None:
     """The pool's live node count, or ``None`` when the pool does not exist."""
     try:
@@ -179,7 +202,7 @@ def node_pool_size(project: str, zone: str, cluster: str, pool: str) -> int | No
         return None
     nodes = kubectl(
         context_name(project, zone, cluster), "get", "nodes", "-l",
-        f"cloud.google.com/gke-nodepool={pool}", "--no-headers", "-o", "name",
+        f"{NODE_POOL_LABEL}={pool}", "--no-headers", "-o", "name",
     )
     return sum(1 for line in nodes.splitlines() if line.strip())
 
@@ -205,7 +228,7 @@ def create_cluster(project: str, zone: str, cluster: str, machine_type: str, nod
     gcloud(
         "container", "clusters", "create", cluster, f"--zone={zone}", f"--num-nodes={nodes}",
         f"--machine-type={machine_type}", f"--release-channel={RELEASE_CHANNEL}", f"--labels={labels}",
-        f"--workload-pool={project}.svc.id.goog",
+        f"--workload-pool={project}{WORKLOAD_POOL_SUFFIX}",
         project=project, timeout=CREATE_CLUSTER_TIMEOUT_SECONDS,
     )
 

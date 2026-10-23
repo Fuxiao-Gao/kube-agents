@@ -34,7 +34,7 @@ make scale-run                             # run it, resuming from harness-limit
 cluster, and the runner refuses a `SCALE_HOST_CONTEXT` that does not name it, because an onboarding
 run resets the state volumes of the install that context reaches. The runner creates and deletes test
 clusters named `<cluster_prefix>NN` in the target zone that carry the plan's `cluster_label`, and
-creates or deletes no other cluster. On the host cluster, it restarts the agent's pods and, for each onboarding run, deletes and re-creates the install's state volumes.
+creates or deletes no other cluster. On the host cluster, it restarts the agent's pods and, for each onboarding run, deletes and re-creates the install's state volumes; it refuses that reset unless the host cluster also carries the plan's `cluster_label`. Adding a test cluster's kube context leaves your current context as it was.
 
 `SCALE_PREFLIGHT` names a shell command the runner runs before each level and each run, for a
 project where something outside the install can undo its preconditions: an organization's IAM
@@ -74,6 +74,7 @@ The agent API is reached through the repository's `kubectl exec` relay
       "started": "2026-10-23T01:02:03Z",
       "ended": "2026-10-23T01:31:40Z",
       "image": "ghcr.io/gke-labs/kube-agents/platform-agent:eeb8a95ceb0a9efd66434161f87820b35b65360c",
+      "runner": "537d72b5c0de",
       "values": {
         "clusters": 8,
         "nodes": 2,
@@ -120,7 +121,7 @@ one. `commit` is the commit the agent image's tag pins (the tag itself when it i
 from the install. The key holds the commit's first 8 characters, or the whole tag when the tag is not a commit, so a new build is a new set of keys. A base record has `factor` `base` and `level`
 0; `values` holds every factor's planned value at the point, base records included. `totals` holds
 what the test clusters really had, summed over the fleet; fits use the totals for the factors the totals count (clusters, nodes, objects) and `values` for the rest. `limits` and
-`replicas` are read from the live pods during the run. A metric without `container` belongs to the
+`replicas` are read from the live pods during the run, and `mode` from the install's `PlatformAgent`. `runner` is the measurement runner's own commit, so a change in how a metric is read shows in the data. A metric without `container` belongs to the
 run. `excluded_from` names the fits the record is left out of: `["response_seconds"]` when a prompt
 run saw a provider 429. `errors` lists what made the run differ from its plan: a failed prompt, a
 cluster the event watcher did not watch, a churn batch that failed, a monitoring read that failed.

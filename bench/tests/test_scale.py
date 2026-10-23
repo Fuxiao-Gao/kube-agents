@@ -240,3 +240,82 @@ def test_record_keys_keep_a_non_sha_build_whole():
     assert records.record_key("rc_2610220514_eeb8a95", "next", "base", 0, "fan_out", 1).startswith("rc_2610220514_eeb8a95|")
     assert records.record_key("rc_2610221000_abc1234", "next", "base", 0, "fan_out", 1) != records.record_key(
         "rc_2610220514_eeb8a95", "next", "base", 0, "fan_out", 1)
+
+
+def test_a_rate_limited_failure_is_a_429_not_a_failed_prompt():
+    outcome = operations.OperationResult()
+    operations.fold_answer(outcome, {"seconds": 1.0, "output_chars": 0, "tokens": {},
+                                     "errors": ["KUBE_AGENTS_INFRA_FAILURE: rate_limit: RESOURCE_EXHAUSTED"]})
+    assert outcome.failed_prompts == 0
+    assert outcome.provider_429s == 1
+    assert outcome.response_seconds == []
+
+
+def test_agent_env_clears_the_inject_door(monkeypatch):
+    monkeypatch.setattr(operations.kube, "kubectl", lambda *a, **k: "dG9rZW4=")
+    env = operations.agent_env("ctx", "ns", 12345)
+    assert env["AGENT_TRANSPORT"] == "" and env["AGENT_LOCAL_PORT"] == "12345"
+
+
+def test_triage_lost_counts_every_marker():
+    pattern = collect.LOG_PATTERNS["triage_lost"]
+    text = ("Aborting troubleshooting trigger\nGateway API chat execution failed (status 502)\n"
+            "TRIAGE_NOT_STARTED session=s reason=timeout\nunrelated line\n")
+    assert len(pattern.findall(text)) == 3
+
+
+class _ProfileInstall(collect.Install):
+    def __init__(self, listing):
+        super().__init__("example-project", "ctx", "ns", "host", "us-central1-c")
+        self.listing = listing
+
+    def gateway_pod(self):
+        return {"metadata": {"name": "gw"}}
+
+
+def test_profile_clusters_parses_the_scaffolder_names(monkeypatch):
+    install = _ProfileInstall("")
+    listing = ("cluster-example-project-scale-01-us-central1-c\ncluster-example-project-a-b-c-us-east4\n"
+               "platform\ncluster-other-project-x-us-central1-a\n")
+    monkeypatch.setattr(collect.kube, "kubectl", lambda *a, **k: listing)
+    assert install.profile_clusters() == {"scale-01", "a-b-c"}
+
+
+def test_pending_keys_follow_the_install_build(monkeypatch, tmp_path):
+    plan = load_plan(PHASE1, environ=ENV)
+    path = tmp_path / "data.json"
+    records.merge(path, [records.Record(
+        commit="eeb8a95ceb0a9efd66434161f87820b35b65360c", mode="next", phase="phase1", factor="base",
+        level=0, operation="fan_out", run=1, started="2026-10-23T00:00:00Z", ended="2026-10-23T00:10:00Z")])
+    run = runner.Runner(plan, path)
+
+    class Install:
+        def image(self):
+            return "ghcr.io/x/platform-agent:eeb8a95ceb0a9efd66434161f87820b35b65360c"
+
+        def mode(self):
+            return "next"
+
+    run.install = Install()
+    run.install.context, run.install.namespace = "ctx", "ns"
+    monkeypatch.setattr(runner.operations, "wait_gateway_ready", lambda *a, **k: None)
+    specs = [s for s in plan.matrix() if s.factor == "base" and s.operation.name == "fan_out"]
+    assert [s.run for s in run.pending(specs)] == [2, 3]
+    run.install.image = lambda: "ghcr.io/x/platform-agent:fffffffffffffffffffffffffffffffffffffff0"
+    assert [s.run for s in run.pending(specs)] == [1, 2, 3]
+
+
+def test_record_round_trips_through_its_dict():
+    record = _record()
+    again = records.Record.from_dict(record.to_dict())
+    assert again.key == record.key and again.metrics[1].container == "agent-api-auth"
+
+
+def test_reset_is_refused_without_the_host_label(monkeypatch):
+    plan = load_plan(PHASE1, environ=ENV)
+    run = runner.Runner(plan, Path("/nonexistent/harness-limits.json"))
+    monkeypatch.setattr(runner.kube, "cluster_labels", lambda *a: {})
+    with pytest.raises(kube.CommandError, match="refusing to reset"):
+        run.check_resettable()
+    monkeypatch.setattr(runner.kube, "cluster_labels", lambda *a: {"purpose": "harness-scale"})
+    run.check_resettable()

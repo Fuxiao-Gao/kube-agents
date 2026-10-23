@@ -115,7 +115,7 @@ INFRA_FAILURE_MARKER = "KUBE_AGENTS_INFRA_FAILURE"
 # its own.
 GATEWAY_POD = "platform-agent-gateway"
 POD_CONTAINERS = MappingProxyType(
-    {GATEWAY_POD: ("platform-agent", "agent-api-auth", "hermes-bridge", "fluent-bit")}
+    {GATEWAY_POD: ("platform-agent", "agent-api-auth", "hermes-bridge", "fluent-bit", "platform-agent-dashboard")}
 )
 # The pods that carry a container when a record does not count them.
 DEFAULT_REPLICAS = 1
@@ -137,6 +137,9 @@ RANGE_TOLERANCE = 0.01
 EPSILON = 1e-9
 # A line through two distinct values: Phase 1's design, labelled as such.
 TWO_POINTS = 2
+BASE_LEVEL = "base"
+# Containers that run to completion (the bus provision Job, the agent pod's init containers).
+SHORT_LIVED_CONTAINERS = frozenset({"provision", "prepare-image-trees", "sandbox-credential-cleanup", "sandbox-ssh-key"})
 # The dashed prediction runs to twice the largest measured value, or to the
 # fleet when the fleet is larger.
 CHART_EXTENSION = 2.0
@@ -457,6 +460,9 @@ class Point:
     run: int
     is_base: bool
     excluded: bool
+    # The planned point the run belongs to ("base", or the factor's level). Runs at one planned
+    # point measure slightly different totals, so the x values alone over-count the levels.
+    level: str = ""
 
 
 @dataclass(frozen=True)
@@ -970,8 +976,9 @@ def series_points(
         x = factor_value(record, factor)
         if x is None or y is None:
             continue
+        level = BASE_LEVEL if record.is_base else f"{record.level:g}"
         points.append(
-            Point(x, y, record.key, record.run, record.is_base, record.excluded(metric))
+            Point(x, y, record.key, record.run, record.is_base, record.excluded(metric), level)
         )
     return tuple(sorted(points, key=lambda point: (point.x, point.key)))
 
@@ -979,16 +986,18 @@ def series_points(
 def fit_line(points: Iterable[Point]) -> Fit | None:
     """Least squares over the points a record does not exclude; None below two levels."""
     used = [point for point in points if not point.excluded]
-    levels = {point.x for point in used}
-    if len(levels) < TWO_POINTS:
+    # Distinct planned points, not distinct x values: three runs at one point are one level.
+    levels = {point.level or point.x for point in used}
+    xs = [point.x for point in used]
+    if len(levels) < TWO_POINTS or len(set(xs)) < TWO_POINTS:
         return None
     count = len(used)
-    mean_x = sum(point.x for point in used) / count
+    mean_x = sum(xs) / count
     mean_y = sum(point.y for point in used) / count
-    spread = sum((point.x - mean_x) ** 2 for point in used)
+    spread = sum((x - mean_x) ** 2 for x in xs)
     covariance = sum((point.x - mean_x) * (point.y - mean_y) for point in used)
     slope = covariance / spread
-    return Fit(slope, mean_y - slope * mean_x, len(levels), min(levels), max(levels))
+    return Fit(slope, mean_y - slope * mean_x, len(levels), min(xs), max(xs))
 
 
 def base_records(records: Iterable[Record], operation: str) -> list[Record]:
@@ -1359,6 +1368,9 @@ def node_plan(items: Iterable[Recommendation], replicas: Mapping[str, float]) ->
     grouped: dict[str, list[Recommendation]] = {}
     for item in items:
         if item.memory_bytes is None and item.cpu_cores is None:
+            continue
+        # A Job's or an init container's peak is real but holds no node once it finishes.
+        if item.container in SHORT_LIVED_CONTAINERS:
             continue
         grouped.setdefault(pod_of(item.container), []).append(item)
     return NodePlan(

@@ -50,6 +50,18 @@ HEX_DIGITS = set("0123456789abcdef")
 PREFLIGHT_SHELL = "/bin/sh"
 PREFLIGHT_TIMEOUT_SECONDS = 600
 TERMINATED_EXIT_CODE = 143
+PEAK_METRIC = "memory_peak_bytes"
+
+
+def _runner_revision() -> str:
+    """The runner's own commit, so records written by two runner versions can be told apart."""
+    try:
+        return kube.run(["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "--short=12", "HEAD"]).strip()
+    except (kube.CommandError, OSError):
+        return ""
+
+
+RUNNER_REVISION = _runner_revision()
 
 
 def _now_iso() -> str:
@@ -82,6 +94,8 @@ class Runner:
         self.churner: fixtures.Churner | None = None
         # Problems that make a level differ from its plan; every record of the level carries them.
         self.level_errors: list[str] = []
+        # What the latest watcher check found; replaced at each check, so a record carries only its own.
+        self.watch_errors: list[str] = []
         self.relay_port = 0
 
     # --- the fleet ----------------------------------------------------------------------------
@@ -113,8 +127,7 @@ class Runner:
         # One at a time: gcloud writes the kubeconfig without a lock.
         for name in wanted:
             if not kube.has_context(kube.context_name(self.project, self.zone, name)):
-                kube.run([kube.GCLOUD, "container", "clusters", "get-credentials", name,
-                          f"--zone={self.zone}", f"--project={self.project}"])
+                kube.get_credentials(self.project, self.zone, name)
         self.wait_registered(count)
 
     def _create_cluster(self, name: str) -> None:
@@ -132,12 +145,13 @@ class Runner:
         Whatever is still wrong after that is recorded on every run of the level.
         """
         names = set(self.cluster_names(count))
+        self.watch_errors = []
         timeout = float(self.settings.get("cluster_registration_timeout_seconds", 0))
         deadline = time.monotonic() + timeout
         profiles = self.install.profile_clusters()
         while profiles & names != names:
             if time.monotonic() >= deadline:
-                self.level_errors.append(f"no Cluster Agent profile for {sorted(names - profiles)} after {timeout:.0f}s")
+                self.watch_errors.append(f"no Cluster Agent profile for {sorted(names - profiles)} after {timeout:.0f}s")
                 break
             LOG.info("waiting for Cluster Agent profiles: %s of %s", len(profiles & names), count)
             time.sleep(REGISTRATION_POLL_SECONDS)
@@ -150,7 +164,7 @@ class Runner:
             time.sleep(WATCHER_START_SECONDS)
             test_watched = self.test_clusters(self.install.watched_clusters())
             if test_watched != names:
-                self.level_errors.append(f"event watcher watches {sorted(test_watched)}, test fleet is {sorted(names)}")
+                self.watch_errors.append(f"event watcher watches {sorted(test_watched)}, test fleet is {sorted(names)}")
 
     def ensure_nodes(self, values: dict[str, float]) -> None:
         """Size each test cluster's fixture pool for the level's node count and the Pods it must hold."""
@@ -161,6 +175,8 @@ class Runner:
         for index, name in enumerate(names):
             pods = fixtures.fixture_pods(values, lifetime, first=index == 0)
             sizes[name] = max(int(values["nodes"]), DEFAULT_POOL_NODES + math.ceil(pods / per_node)) - DEFAULT_POOL_NODES
+        if not names:
+            return
         with ThreadPoolExecutor(max_workers=len(names)) as pool:
             jobs = [
                 pool.submit(kube.ensure_node_pool, self.project, self.zone, name, self.settings["fixture_pool"],
@@ -232,6 +248,19 @@ class Runner:
         time.sleep(settle)
         return values
 
+    def check_resettable(self) -> None:
+        """Refuse to reset an install whose host cluster does not carry the plan's label.
+
+        An onboarding run deletes the install's state volumes; the label is the
+        operator's statement that this install exists to be measured.
+        """
+        key, _, value = self.label.partition("=")
+        labels = kube.cluster_labels(self.project, self.plan.target["host_location"], self.plan.target["host_cluster"])
+        if labels.get(key) != value:
+            raise kube.CommandError(
+                f"host cluster {self.plan.target['host_cluster']} does not carry {self.label}; refusing to reset it"
+            )
+
     def stop_churn(self) -> None:
         if self.churner:
             self.churner.stop()
@@ -247,8 +276,11 @@ class Runner:
         limits = self.install.limits()
         replicas = self.install.replicas()
         image = self.install.image()
+        mode = self.install.mode() or self.plan.target["mode"]
+        if mode != self.plan.target["mode"]:
+            self.watch_errors.append(f"install runs mode {mode!r}, plan says {self.plan.target['mode']!r}")
         commit = commit_of(image)
-        errors = list(self.level_errors)
+        errors = list(self.level_errors) + list(self.watch_errors)
         if not commit:
             errors.append(f"image {image!r} is not pinned by commit; the record is keyed by its tag")
             commit = image.rsplit(":", 1)[-1] or "unknown"
@@ -265,6 +297,7 @@ class Runner:
             operations.restart(self.install.context, self.install.namespace)
             outcome = operations.soak(op.window_seconds)
         elif op.kind == "reset_soak":
+            self.check_resettable()
             operations.reset(self.install.context, self.install.namespace)
             outcome = operations.soak(op.window_seconds)
         else:
@@ -293,10 +326,11 @@ class Runner:
         for name, value in outcome.tokens.items():
             metrics.append(records.Metric(f"run_{name}", value))
         errors += outcome.errors + before.errors + after.errors
-        provider_429s = logs["provider_429s"] + outcome.provider_429s
+        # LiteLLM logs every retry of one refusal; the client sees one per prompt. Take the larger.
+        provider_429s = max(logs["provider_429s"], outcome.provider_429s)
         excluded = RESPONSE_FITS if provider_429s and op.kind == "prompt" else []
         return records.Record(
-            commit=commit, mode=self.plan.target["mode"], phase=self.plan.phase,
+            commit=commit, mode=mode, phase=self.plan.phase, runner=RUNNER_REVISION,
             factor=spec.factor, level=spec.level, operation=op.name, run=spec.run,
             started=started_iso, ended=ended_iso, image=image, values=values, totals=totals,
             limits=limits, replicas=replicas, metrics=metrics,
@@ -306,15 +340,19 @@ class Runner:
     def pending(self, specs: list[RunSpec]) -> list[RunSpec]:
         """The runs whose key is not in the data file yet, for the build the install runs now."""
         done = records.existing_keys(self.data_file)
+        operations.wait_gateway_ready(self.install.context, self.install.namespace)
         image = self.install.image()
         commit = commit_of(image) or image.rsplit(":", 1)[-1] or "unknown"
-        mode = self.plan.target["mode"]
+        mode = self.install.mode() or self.plan.target["mode"]
         return [s for s in specs
                 if records.record_key(commit, mode, s.factor, s.level, s.operation.name, s.run) not in done]
 
-    def run(self, specs: list[RunSpec], force: bool) -> None:
+    def run(self, specs: list[RunSpec], force: bool, limit: int = 0) -> None:
+        self.backfill_peaks()
         todo = specs if force else self.pending(specs)
-        LOG.info("%s runs pending of %s", len(todo), len(specs))
+        if limit:
+            todo = todo[:limit]
+        LOG.info("%s runs to do (%s pending of %s)", len(todo), len(self.pending(specs)) if not force else len(specs), len(specs))
         awaiting: list[tuple[float, records.Record]] = []
         relay = operations.Relay(self.install.context, self.install.namespace)
         relay.start()
@@ -365,6 +403,17 @@ class Runner:
             LOG.info("recorded %s", record.key)
         return left
 
+    def backfill_peaks(self) -> None:
+        """Add peaks to records a stopped run merged without them (it stopped inside the wait)."""
+        data = records.load(self.data_file)
+        stale = [r for r in data["records"] if not any(m["name"] == PEAK_METRIC for m in r["metrics"])
+                 and _epoch(r["ended"]) + MONITORING_DELAY_SECONDS < time.time()]
+        for raw in stale:
+            record = records.Record.from_dict(raw)
+            self.add_peaks(record)
+            records.merge(self.data_file, [record])
+            LOG.info("back-filled peaks for %s", record.key)
+
     def add_peaks(self, record: records.Record) -> None:
         try:
             peaks = self.install.container_peaks(_epoch(record.started), _epoch(record.ended))
@@ -413,8 +462,10 @@ def main(argv: list[str] | None = None) -> int:
         if (not args.only_factor or s.factor == args.only_factor)
         and (not args.only_operation or s.operation.name == args.only_operation)
     ]
-    if args.limit:
+    if args.limit and args.command == "plan":
         specs = specs[: args.limit]
+    if args.command == "apply" and args.factor != BASE_FACTOR and not args.level:
+        parser.error("apply needs --level for a factor other than base")
     if args.command == "plan":
         for spec in specs:
             print(f"{spec.factor:18} {spec.level:>8g} {spec.operation.name:18} run {spec.run}")
@@ -423,10 +474,12 @@ def main(argv: list[str] | None = None) -> int:
     data_file = args.config.resolve().parent / plan.target.get("data_file", DEFAULT_DATA_FILE)
     runner = Runner(plan, data_file)
     if args.command == "run":
-        runner.run(specs, args.force)
+        runner.run(specs, args.force, args.limit)
     elif args.command == "apply":
-        runner.apply_level(args.factor, args.level)
-        runner.stop_churn()
+        try:
+            runner.apply_level(args.factor, args.level)
+        finally:
+            runner.stop_churn()
     else:
         runner.teardown(args.delete_fleet)
     return 0

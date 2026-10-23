@@ -46,6 +46,7 @@ RUNNING_PHASE = "Running"
 # The agent's pod, by the label the operator gives it; a name substring would also match the
 # A2A chat gateway (platform-agent-a2a-gateway-*) on installs that run one.
 GATEWAY_SELECTOR = "app=platform-agent-gateway"
+PLATFORM_AGENT_RESOURCE = "platformagents"
 # The agent's data volume: profiles, sessions, the kanban board. The other claims (bus, shell) are not it.
 AGENT_DATA_CLAIM = "platform-agent-data"
 AGENT_CONTAINER = "platform-agent"
@@ -67,7 +68,8 @@ DF_CAPACITY_COLUMN = 1
 DF_USED_COLUMN = 2
 # Log lines that stand in for the two metrics the harness does not export yet.
 LOG_PATTERNS = {
-    "triage_lost": re.compile(r"Aborting troubleshooting trigger"),
+    # A triage whose session or whose turn could not start; TRIAGE_NOT_STARTED is the newer marker.
+    "triage_lost": re.compile(r"Aborting troubleshooting trigger|Gateway API chat execution failed|TRIAGE_NOT_STARTED"),
     "run_slot_refusals": re.compile(r"Too many concurrent runs"),
     "provider_429s": re.compile(r"(?:\b429\b.*(?:RESOURCE_EXHAUSTED|rate.?limit|Too Many Requests))|RateLimitError", re.I),
 }
@@ -173,11 +175,11 @@ def parse_quantity(text: str) -> float:
 class Snapshot:
     """Counter values at one moment, per pod, so a run reports their growth across its window."""
 
-    # (pod, container) -> restartCount
+    # (pod UID, container) -> restartCount
     restarts: dict[tuple[str, str], int] = field(default_factory=dict)
-    # (pod, container) whose last termination was an OOM kill
+    # (pod UID, container) whose last termination was an OOM kill
     oom: set[tuple[str, str]] = field(default_factory=set)
-    # scrape target -> pod -> samples
+    # scrape target -> pod UID -> samples
     scraped: dict[str, dict[str, list[Sample]]] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
 
@@ -202,6 +204,14 @@ class Install:
     def gateway_pod(self) -> dict[str, Any] | None:
         running = [pod for pod in self.pods(GATEWAY_SELECTOR) if pod["status"].get("phase") == RUNNING_PHASE]
         return running[0] if running else None
+
+    def mode(self) -> str:
+        """The PlatformAgent's mode as the operator reports it, else as the spec sets it."""
+        items = kube.kubectl_json(self.context, "get", PLATFORM_AGENT_RESOURCE, "-n", self.namespace)["items"]
+        if not items:
+            return ""
+        agent = items[0]
+        return str(agent.get("status", {}).get("mode") or agent.get("spec", {}).get("mode") or "")
 
     def image(self) -> str:
         """The agent container's image, the build a record describes."""
@@ -242,9 +252,10 @@ class Install:
         snap = Snapshot()
         pods = self.pods()
         for pod in pods:
-            name = pod["metadata"]["name"]
+            # By UID: a StatefulSet re-creates a pod under the same name, and the new one counts from zero.
+            uid = pod["metadata"]["uid"]
             for status in pod["status"].get("containerStatuses", []) + pod["status"].get("initContainerStatuses", []):
-                key = (name, status["name"])
+                key = (uid, status["name"])
                 snap.restarts[key] = int(status.get("restartCount", 0))
                 if status.get("lastState", {}).get("terminated", {}).get("reason") == OOM_REASON:
                     snap.oom.add(key)
@@ -263,7 +274,7 @@ class Install:
                     snap.errors.append(f"no metrics port on {name}/{container}")
                     continue
                 try:
-                    per_pod[name] = scrape(self.context, self.namespace, name, container, port)
+                    per_pod[pod["metadata"]["uid"]] = scrape(self.context, self.namespace, name, container, port)
                 except kube.CommandError as exc:
                     snap.errors.append(f"scrape {name}: {exc}")
             snap.scraped[attr] = per_pod

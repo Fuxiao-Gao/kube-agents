@@ -16,6 +16,8 @@ from typing import Any
 
 import yaml
 
+from kube_agents_bench.scale import kube
+
 BASE_FACTOR = "base"
 ENV_PREFIX = "SCALE_"
 TARGET_KEYS = (
@@ -32,8 +34,7 @@ TARGET_KEYS = (
     "preflight",
 )
 REQUIRED_TARGET_KEYS = ("project_id", "host_cluster", "host_location", "namespace", "zone", "cluster_prefix", "cluster_label")
-# gcloud's kube context name for a cluster.
-HOST_CONTEXT_FORMAT = "gke_{project}_{location}_{cluster}"
+
 DEFAULT_RUNS = 1
 
 
@@ -105,8 +106,7 @@ def load_plan(path: Path, environ: dict[str, str] | None = None, validate_target
         names = ", ".join(ENV_PREFIX + key.upper() for key in missing)
         raise ValueError(f"{path}: target is missing {', '.join(missing)}; set {names}")
     if validate_target:
-        expected = HOST_CONTEXT_FORMAT.format(project=target["project_id"], location=target["host_location"],
-                                              cluster=target["host_cluster"])
+        expected = kube.context_name(target["project_id"], target["host_location"], target["host_cluster"])
         target.setdefault("host_context", expected)
     # The runner resets the install this context reaches; refuse one that is not the host cluster's.
     if validate_target and not target["host_context"].endswith(f"_{target['host_cluster']}"):

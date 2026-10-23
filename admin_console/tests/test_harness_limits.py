@@ -1132,3 +1132,17 @@ class HarnessLimitsPageTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_runs_at_one_planned_point_count_as_one_level():
+    # Three base runs and three runs at one level land at slightly different x values.
+    points = [
+        hl.Point(257.0, 1.0, "b1", 1, True, False, "base"),
+        hl.Point(257.5, 1.1, "b2", 2, True, False, "base"),
+        hl.Point(258.5, 0.9, "b3", 3, True, False, "base"),
+        hl.Point(4186.0, 5.0, "o1", 1, False, False, "4000"),
+        hl.Point(4187.0, 5.2, "o2", 2, False, False, "4000"),
+        hl.Point(4188.0, 4.8, "o3", 3, False, False, "4000"),
+    ]
+    fit = hl.fit_line(points)
+    assert fit is not None and fit.levels == 2 and fit.two_point

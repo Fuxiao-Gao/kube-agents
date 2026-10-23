@@ -23,7 +23,6 @@ from kube_agents_bench.scale import kube
 LOG = logging.getLogger(__name__)
 
 FIXTURE_LABEL = "harness-scale/fixture"
-NAMESPACE_PREFIX = "scale-"
 OBJECTS_NAMESPACE_FORMAT = "scale-obj-{index:04d}"
 LISTING_NAMESPACE = "scale-listing"
 WARNING_NAMESPACE = "scale-warning"
@@ -34,6 +33,8 @@ BROKEN_IMAGE = "registry.k8s.io/pause:harness-scale-missing"
 POD_CPU_REQUEST = "1m"
 POD_MEMORY_REQUEST = "8Mi"
 REPLICAS_PER_DEPLOYMENT = 2
+# Each Deployment brings itself, a Service and an HPA.
+OBJECTS_PER_DEPLOYMENT = 3
 HPA_MAX_REPLICAS = 10
 HPA_CPU_UTILIZATION = 80
 SERVICE_PORT = 80
@@ -61,8 +62,8 @@ class Mix:
 
     @property
     def total(self) -> int:
-        # namespaces + Deployments + Services + HPAs + Pods + ConfigMaps
-        return self.namespaces + self.deployments * 3 + self.pods + self.configmaps
+        # namespaces + Deployments + their Services and HPAs + Pods + ConfigMaps
+        return self.namespaces + self.deployments * OBJECTS_PER_DEPLOYMENT + self.pods + self.configmaps
 
 
 def object_mix(level: int) -> Mix:
@@ -196,7 +197,7 @@ class Churner:
     cluster and deletes the batches older than ``lifetime_seconds``. A rate
     that does not divide into whole Pods per batch carries the remainder to the
     next batch, so 10 per minute over two clusters is 10 per minute, not one
-    per cluster per batch. ``achieved_per_minute`` is what it really created.
+    per cluster per batch. ``created`` counts what it really created.
     """
 
     def __init__(self, contexts: list[str], per_minute: float, lifetime_seconds: int) -> None:
@@ -206,7 +207,6 @@ class Churner:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._carry = 0.0
-        self._started = 0.0
         self.created = 0
         self.errors: list[str] = []
 
@@ -217,15 +217,9 @@ class Churner:
         self._carry = wanted - size
         return size
 
-    @property
-    def achieved_per_minute(self) -> float:
-        elapsed = time.monotonic() - self._started if self._started else 0.0
-        return self.created * SECONDS_PER_MINUTE / elapsed if elapsed > 0 else 0.0
-
     def start(self) -> None:
         for context in self.contexts:
             kube.apply(context, [_namespace(CHURN_NAMESPACE, "churn")])
-        self._started = time.monotonic()
         self._thread = threading.Thread(target=self._loop, name="churner", daemon=True)
         self._thread.start()
 
