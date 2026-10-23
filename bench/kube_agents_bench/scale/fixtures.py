@@ -42,6 +42,7 @@ CONFIGMAP_DATA_KEY = "settings"
 CHURN_BATCH_SECONDS = 10
 BATCH_LABEL = "harness-scale/batch"
 BATCH_ID_LENGTH = 8
+BATCH_ID_PREFIX = "b"
 SECONDS_PER_MINUTE = 60
 # The object mix per level (namespaces, Deployments, ConfigMaps); each Deployment
 # brings 1 Service, 1 HPA and REPLICAS_PER_DEPLOYMENT Pods. Levels not listed
@@ -236,7 +237,8 @@ class Churner:
                 self.errors.append(f"churn cleanup: {exc}")
 
     def _batch(self, size: int) -> list[dict[str, Any]]:
-        batch = uuid.uuid4().hex[:BATCH_ID_LENGTH]
+        # A leading letter: an all-hex id such as 1e100000 reads as a number to kubectl's YAML parser.
+        batch = BATCH_ID_PREFIX + uuid.uuid4().hex[:BATCH_ID_LENGTH]
         return [
             {
                 "apiVersion": "v1",

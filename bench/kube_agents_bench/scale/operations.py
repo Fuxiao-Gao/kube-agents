@@ -41,7 +41,9 @@ RATE_LIMIT_MARKERS = ("RESOURCE_EXHAUSTED", "rate limit", "rate_limit", "Too Man
 # The harness marks a run its transport could not complete; such a run has no response to time.
 INFRA_FAILURE_MARKER = "KUBE_AGENTS_INFRA_FAILURE"
 # The eval lane's inject-door switches; cleared so every prompt takes the agent API.
-INJECT_ENV = ("AGENT_TRANSPORT", "AGENT_INJECT_TOKEN", "AGENT_INJECT_URL", "AGENT_INJECT_SERVICE")
+INJECT_ENV = ("AGENT_INJECT_TOKEN", "AGENT_INJECT_URL", "AGENT_INJECT_SERVICE")
+TRANSPORT_ENV = "AGENT_TRANSPORT"
+API_TRANSPORT = "api"
 PROMPT_FAILED = "prompt failed"
 SPAWN = "spawn"
 NO_DEADLINE_SECONDS = 86400
@@ -75,8 +77,10 @@ def agent_env(context: str, namespace: str, local_port: int) -> dict[str, str]:
     """The environment the harness reads, for the experiment install's agent API on ``local_port``."""
     encoded = kube.kubectl(context, "get", "secret", AGENT_TOKEN_SOURCE_NAME, "-n", namespace,
                            "-o", f"jsonpath={{.data.{AGENT_TOKEN_FIELD}}}")
-    env = {name: "" for name in INJECT_ENV}  # the agent API path, whatever the caller exported
+    # The agent API path, whatever the caller exported: the transport named, the inject door's settings blanked.
+    env = {name: "" for name in INJECT_ENV}
     env.update({
+        TRANSPORT_ENV: API_TRANSPORT,
         "AGENT_CLUSTER_CONTEXT": context,
         "AGENT_NAMESPACE": namespace,
         "AGENT_LOCAL_PORT": str(local_port),
@@ -147,7 +151,10 @@ def fold_answer(outcome: OperationResult, answer: dict[str, Any]) -> None:
     a failed prompt, not a fast one: it is counted and its time is not recorded.
     """
     errors = list(answer.get("errors") or [])
-    failed = any(INFRA_FAILURE_MARKER in error for error in errors) or not answer.get("output_chars")
+    reported_tokens = any(isinstance(v, (int, float)) and v for v in (answer.get("tokens") or {}).values())
+    # Failed: the transport says so, the answer is empty, or the harness erred before any model call.
+    failed = (any(INFRA_FAILURE_MARKER in error for error in errors) or not answer.get("output_chars")
+              or (bool(errors) and not reported_tokens))
     rate_limited = any(marker.lower() in error.lower() for error in errors for marker in RATE_LIMIT_MARKERS)
     if failed and rate_limited:
         # The provider refused, not the harness: a 429, which excludes the run from the response fit.

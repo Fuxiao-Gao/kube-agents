@@ -254,7 +254,7 @@ def test_a_rate_limited_failure_is_a_429_not_a_failed_prompt():
 def test_agent_env_clears_the_inject_door(monkeypatch):
     monkeypatch.setattr(operations.kube, "kubectl", lambda *a, **k: "dG9rZW4=")
     env = operations.agent_env("ctx", "ns", 12345)
-    assert env["AGENT_TRANSPORT"] == "" and env["AGENT_LOCAL_PORT"] == "12345"
+    assert env["AGENT_TRANSPORT"] == "api" and env["AGENT_INJECT_TOKEN"] == "" and env["AGENT_LOCAL_PORT"] == "12345"
 
 
 def test_triage_lost_counts_every_marker():
@@ -319,3 +319,17 @@ def test_reset_is_refused_without_the_host_label(monkeypatch):
         run.check_resettable()
     monkeypatch.setattr(runner.kube, "cluster_labels", lambda *a: {"purpose": "harness-scale"})
     run.check_resettable()
+
+
+def test_a_harness_error_before_any_model_call_is_a_failed_prompt():
+    outcome = operations.OperationResult()
+    operations.fold_answer(outcome, {"seconds": 0.7, "output_chars": 40, "tokens": {},
+                                     "errors": ["AGENT_TRANSPORT must be one of ['api', 'inject'], got ''"]})
+    assert outcome.failed_prompts == 1 and outcome.response_seconds == []
+
+
+def test_churn_batch_ids_never_read_as_numbers():
+    churner = fixtures.Churner(["a"], per_minute=60, lifetime_seconds=30)
+    for _ in range(200):
+        batch = churner._batch(1)[0]["metadata"]["labels"][fixtures.BATCH_LABEL]
+        assert batch[0].isalpha()
