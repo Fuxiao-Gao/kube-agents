@@ -3125,6 +3125,14 @@ unit_cost_hint() {
     upgrades-removed-api-callers-distinguished | upgrades-network-policy-enforcement-stated) echo 900 ;;
     upgrades-stale-client-skew-named | upgrades-multi-process-oom-group-named) echo 900 ;;
     upgrades-cuda-pinned-gpu-job-named) echo 900 ;;
+    # Nightly-only since #3524. One of the five readiness-line cases of that
+    # change, each the same read-only run (three project list reads, the
+    # server config per location, the per-member kubectl reads); unmeasured.
+    # Priced at the knowledge probe's band rather than the 200s default as the
+    # one of the five that launches first, so a full-fleet run that outgrows
+    # the default is cut from this tier rather than from all five; the four
+    # siblings pack at the default until the nightly record prices them.
+    upgrades-audit-control-plane-capacity) echo 600 ;;
     *) echo 200 ;;
   esac
 }
