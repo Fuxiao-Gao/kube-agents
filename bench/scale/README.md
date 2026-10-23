@@ -30,6 +30,11 @@ run resets the state volumes of the install that context reaches. The runner cre
 clusters named `<cluster_prefix>NN` in the target zone that carry the plan's `cluster_label`, and
 touches no other cluster.
 
+`SCALE_PREFLIGHT` names a shell command the runner runs before each level and each run, for a
+project where something outside the install can undo its preconditions: an organization's IAM
+automation that strips service-account bindings, for one. A failing preflight is logged and the run
+goes on.
+
 The runner module takes more than the two targets:
 
 ```bash
