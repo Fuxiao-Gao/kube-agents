@@ -185,6 +185,14 @@ CONVERSATION_FIELD_MAX_CHARS = 512
 # a card needs.
 CONVERSATION_ROUTE_ASK_KEY = "ask"
 CONVERSATION_ASK_TOKEN = re.compile(r"[a-z0-9-]{1,16}")
+# The gateway's salted HMAC pseudonym for the speaker (`authority.requester.principal`)
+# and the conversation's audience kind (`authority.audience.kind`, "dm" or "group").
+# Both are optional. The memory provider reads them to isolate personal memory per
+# user and disable personal memory in group conversations.
+CONVERSATION_ROUTE_USER_KEY = "user_id"
+CONVERSATION_ROUTE_USER_TOKEN = re.compile(r"hmac:[0-9a-f]{32}")
+CONVERSATION_ROUTE_CHAT_TYPE_KEY = "chat_type"
+CONVERSATION_ROUTE_CHAT_TYPES = frozenset({"dm", "group"})
 
 # Hermes' managed scope, the administrator-pinned layer `load_hermes_dotenv`
 # applies LAST with override=True. The operator mounts it at /etc/hermes and
@@ -5358,11 +5366,22 @@ def put_conversation_route(session_id: str, request_data: Dict[str, Any]) -> Dic
     conversation = str(request_data.get("conversation") or "").strip()
     context_id = str(request_data.get("context_id") or "").strip()
     ask = str(request_data.get(CONVERSATION_ROUTE_ASK_KEY) or "").strip()
-    prefix = CONVERSATION_KEY_PREFIXES.get(platform)
-    if prefix is None:
-        raise HTTPException(status_code=400, detail=f"platform {platform!r} is not one the gateway holds")
-    if not conversation.startswith(prefix) or len(conversation) == len(prefix):
-        raise HTTPException(status_code=400, detail=f"conversation is not a {platform} conversation key ({prefix}...)")
+    user_id = str(request_data.get(CONVERSATION_ROUTE_USER_KEY) or "").strip()
+    chat_type = str(request_data.get(CONVERSATION_ROUTE_CHAT_TYPE_KEY) or "").strip().lower()
+    if platform:
+        prefix = CONVERSATION_KEY_PREFIXES.get(platform)
+        if prefix is None:
+            raise HTTPException(status_code=400, detail=f"platform {platform!r} is not one the gateway holds")
+        if not conversation.startswith(prefix) or len(conversation) == len(prefix):
+            raise HTTPException(status_code=400, detail=f"conversation is not a {platform} conversation key ({prefix}...)")
+    else:
+        if not (CONVERSATION_ROUTE_USER_TOKEN.fullmatch(user_id) or chat_type in CONVERSATION_ROUTE_CHAT_TYPES):
+            raise HTTPException(
+                status_code=400,
+                detail="an identity-only route (no platform) needs a user_id of the form hmac:<32-hex> or a chat_type of 'dm' or 'group'",
+            )
+        if not conversation:
+            raise HTTPException(status_code=400, detail="conversation is required")
     if not context_id:
         raise HTTPException(status_code=400, detail="context_id is required")
     if max(len(conversation), len(context_id)) > CONVERSATION_FIELD_MAX_CHARS:
@@ -5389,6 +5408,10 @@ def put_conversation_route(session_id: str, request_data: Dict[str, Any]) -> Dic
             }
             if CONVERSATION_ASK_TOKEN.fullmatch(ask):
                 route[CONVERSATION_ROUTE_ASK_KEY] = ask
+            if CONVERSATION_ROUTE_USER_TOKEN.fullmatch(user_id):
+                route[CONVERSATION_ROUTE_USER_KEY] = user_id
+            if chat_type in CONVERSATION_ROUTE_CHAT_TYPES:
+                route[CONVERSATION_ROUTE_CHAT_TYPE_KEY] = chat_type
             meta[CONVERSATION_ROUTE_KEY] = route
             conn.execute(
                 "INSERT INTO session_metadata (session_id, metadata) VALUES (?, ?) "
