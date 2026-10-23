@@ -237,6 +237,9 @@ needs — a request's own `max_tokens` still wins. `litellm.reasoningEffort`
 (`low`/`medium`/`high`, default empty, meaning none) puts a `reasoning_effort`
 under every alias the same way; LiteLLM maps it to `thinkingLevel` on Gemini 3.x
 ([details](https://gke-labs.github.io/kube-agents/concepts/inference-gateway/#setting-the-reasoning-effort)).
+On a Gemini 2.5 or 3.x model the gateway asks for the model's thoughts with a
+`thinking` key under every alias, which a `reasoningEffort` value replaces
+([why](https://gke-labs.github.io/kube-agents/concepts/inference-gateway/#geminis-thoughts)).
 On a Claude model the gateway
 drops `temperature`, `top_p` and `top_k` from every request
 ([why](https://gke-labs.github.io/kube-agents/concepts/inference-gateway/#setting-the-default-model)),

@@ -306,8 +306,10 @@ litellm:
   # checksum are what they were and the model uses its own default. LiteLLM
   # translates it per provider; on Gemini 3.x it becomes thinkingLevel. What
   # it maps to, and when a request's own value wins, is on the site's
-  # inference-gateway page, "Setting the reasoning effort". Chart-only; the
-  # kustomize dev base carries no such key.
+  # inference-gateway page, "Setting the reasoning effort". On a Gemini 2.5 or
+  # 3.x model a value also replaces the thinking key the chart renders there
+  # to get Gemini's thoughts back ("Gemini's thoughts" on the same page); both
+  # ask for them. Chart-only; the kustomize dev base carries no such key.
   reasoningEffort: ""
   # modelProvider: vertex_ai only. The gateway calls
   # projects/<projectId>/locations/<location> as a GSA reached through Workload
