@@ -45,6 +45,8 @@ FIXTURES = ("objects", "listing", "warning", "churn")
 # The tag of an image pinned by commit is the commit; anything else is recorded as the image only.
 COMMIT_LENGTH = 40
 HEX_DIGITS = set("0123456789abcdef")
+PREFLIGHT_SHELL = "/bin/sh"
+PREFLIGHT_TIMEOUT_SECONDS = 600
 
 
 def _now_iso() -> str:
@@ -188,10 +190,26 @@ class Runner:
         kube.kubectl(context, "wait", "--for=delete", "namespace", "-l", f"{fixtures.FIXTURE_LABEL}={fixture}",
                      f"--timeout={kube.APPLY_TIMEOUT_SECONDS}s", timeout=kube.APPLY_TIMEOUT_SECONDS)
 
+    def preflight(self) -> None:
+        """Run the target's preflight command, if it names one, before a level and before each run.
+
+        A project whose IAM an outside process rewrites (an organization's policy
+        automation, a second operator) can point this at whatever restores the
+        install's preconditions; a failure is logged and the run goes on.
+        """
+        command = self.plan.target.get("preflight")
+        if not command:
+            return
+        try:
+            kube.run([PREFLIGHT_SHELL, "-c", command], timeout=PREFLIGHT_TIMEOUT_SECONDS)
+        except kube.CommandError as exc:
+            LOG.warning("preflight failed: %s", exc)
+
     def apply_level(self, factor: str, level: float) -> dict[str, float]:
         values = self.plan.level_values(factor, level)
         LOG.info("applying %s=%s: %s", factor, level, values)
         self.level_errors = []
+        self.preflight()
         self.stop_churn()
         self.ensure_clusters(int(values["clusters"]))
         self.ensure_nodes(values)
@@ -299,6 +317,7 @@ class Runner:
                     continue
                 for spec in group:
                     try:
+                        self.preflight()
                         if spec.operation.kind != "reset_soak":
                             # A reset (or a restart the agent did itself) leaves the watcher on the host
                             # cluster only; every other operation is measured with the fleet watched.

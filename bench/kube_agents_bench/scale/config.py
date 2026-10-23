@@ -29,6 +29,7 @@ TARGET_KEYS = (
     "cluster_label",
     "mode",
     "data_file",
+    "preflight",
 )
 REQUIRED_TARGET_KEYS = ("project_id", "host_cluster", "host_location", "namespace", "zone", "cluster_prefix", "cluster_label")
 # gcloud's kube context name for a cluster.
