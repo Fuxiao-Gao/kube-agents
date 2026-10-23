@@ -720,6 +720,7 @@ Takes a dict of provider, model, callbacks, maxTokens (optional; 0 or absent
 renders no max_tokens) and reasoningEffort (optional; empty or absent renders
 no reasoning_effort), plus apiBase and sslVerify (optional; absent renders
 neither key), which only openai_compatible passes.
+callbacks is the formatted list of LiteLLM callbacks, built by the caller.
 */}}
 {{- define "kube-agents.litellmConfig" -}}
 {{- /*

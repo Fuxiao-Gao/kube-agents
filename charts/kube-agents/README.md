@@ -284,6 +284,34 @@ pseudonymised identifier is one the agent cannot act on; the site's
 [security and IAM page](../../docs/site/src/content/docs/reference/security-and-iam.md)
 owns what the image redacts in the files on the agent's volume.
 
+`litellm.traceLogEnabled=true` turns on pass-through trajectory logging across
+the gateway: the ConfigMap gains `llm_trace_logger.py` and the shared
+`redactor.py` module, mounted at `/app/llm_trace_logger.py` and
+`/app/redactor.py` beside `config.yaml`, registers
+`llm_trace_logger.proxy_handler_instance` under `litellm_settings.callbacks`, and sets
+`LITELLM_TRACE_LOG_PATH` (`litellm.traceLogPath`, default
+`"/tmp/litellm_traces.jsonl"`, which must be a normalised file path under `/tmp/`,
+with no `.` or `..` component, because the gateway runs with
+`readOnlyRootFilesystem: true`) plus an optional `SESSION_KV_SALT`
+from the credentials Secret. Every model request and response (model alias, custom
+LLM provider, messages, tool definitions, assistant responses, reasoning content,
+token usage, and latency) is redacted through `AuditRedactor` (credentials, Secret
+data blocks, sensitive keys, emails, and IP literals, plus operator rules when
+`litellm.redaction.enabled` is also set) before being appended as one JSONL line to
+the path. IP literals are pseudonymised by default; with `litellm.redaction.enabled`
+set, they follow `litellm.redaction.ip` instead: `"off"` writes them verbatim,
+`mask` masks them, and addresses in `allowCidrs` pass through. The trace file
+rotates at `5 MiB` across `3` backups (`.1`–`.3`) under an `flock` on `<path>.lock`;
+a record over `1 MiB` keeps its metadata and drops `messages`, `tools` and
+`response` behind a `truncated` marker, every caller-chosen string is clipped, and a
+line that would still carry a file past its cap is refused with the once-per-path
+warning, so the trail on the pod's `/tmp` `emptyDir` holds at most `20 MiB`. Each record is serialised, redacted and written on one
+writer thread, off the proxy's event loop and in order.
+Pass-through only: the logger never mutates live request or response payloads, and
+I/O failures log a once-per-path warning to stderr so inference never fails. Off by
+default, and the rendered default ConfigMap and rollout checksum are unchanged while
+it is off.
+
 #### Vertex AI (`litellm.modelProvider=vertex_ai`)
 
 Vertex AI has no API key. The gateway calls
