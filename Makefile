@@ -306,6 +306,10 @@ PYTHON_TEST_RUN_ORDER = $(foreach heavy,$(PYTHON_TEST_HEAVY_FILES),$(filter $(he
 # front spread one to a shard and shard 1 holds the heaviest of each n. The
 # default, 1/1, is the whole sweep, unchanged.
 PYTHON_TEST_SHARD ?= 1/1
+# Kept out of the environment of the tests the sweep runs: make exports a
+# variable set on its command line, and a test that drives the Makefile itself
+# (tests/test_python_test_sweep.py) would otherwise shard its own fixtures.
+unexport PYTHON_TEST_SHARD
 PYTHON_TEST_SHARD_INDEX = $(word 1,$(subst /, ,$(PYTHON_TEST_SHARD)))
 PYTHON_TEST_SHARD_COUNT = $(word 2,$(subst /, ,$(PYTHON_TEST_SHARD)))
 # The files this shard runs, in run order. A malformed PYTHON_TEST_SHARD, or a

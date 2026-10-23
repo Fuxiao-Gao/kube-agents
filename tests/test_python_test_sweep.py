@@ -608,6 +608,24 @@ class ShardTest(unittest.TestCase):
         self.assertNotIn(f"==> {green}", done.stdout)
         self.assertNotIn(f"==> {MISSING_FILE}", done.stdout)
 
+    def test_a_test_the_shard_runs_does_not_inherit_the_shard(self):
+        """make exports a command-line variable into the recipe's environment,
+        so without `unexport` every test that drives the Makefile would shard
+        its own fixtures inside a CI shard (the first live run failed so)."""
+        probe = (
+            "include Makefile\n"
+            "sweep-probe:\n"
+            '\t@$(call sweep_python_test_files,sh -c "env | grep ^PYTHON_TEST_SHARD= ; true" probe)\n'
+        )
+        with fixture_files() as (green, _red):
+            done = _with_wrapper(
+                probe,
+                "sweep-probe",
+                [f"PYTHON_TEST_FILES={green}", "PYTHON_TEST_JOBS=1", "PYTHON_TEST_SHARD=1/1"],
+            )
+        self.assertIn(f"==> {green}", done.stdout, done.stdout + done.stderr)
+        self.assertNotIn("PYTHON_TEST_SHARD=", _block(done.stdout, green))
+
     def test_coverage_merge_refuses_missing_shard_data(self):
         """The join fails closed before coverage.py runs: a shard that left no
         directory, no data or no failing-file list reads as red, not green."""
