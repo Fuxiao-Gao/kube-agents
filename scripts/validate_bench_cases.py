@@ -373,6 +373,13 @@ FIXTURE_NOT_READY = {
         "spec.integration); every CI eval install has a GitHub forge, so no CI tier "
         "can run it; run it by hand against such an install"
     ),
+    "fleet-audit-forge-without-issues-keeps-the-ledger-in-the-store": (
+        "#1154: needs an install whose forge's capabilities declare no issue verbs "
+        "and labels: false (an install whose forge declares no issue tracker, as a "
+        "Bitbucket provider does), and the no-pdb-workload declaration of #2228; "
+        "every CI eval install has a GitHub forge, so no CI tier can run it; run it "
+        "by hand against such an install"
+    ),
     "fleet-audit-ledger-goes-to-the-gitops-repository": (
         "#3536: needs an install whose PlatformAgent declares a second managed "
         "repository beside the gitops one; every CI eval install declares one, and "
