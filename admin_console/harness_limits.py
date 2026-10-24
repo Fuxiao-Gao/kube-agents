@@ -9,8 +9,9 @@ computes.
 
 A run's ``totals`` are sums over its test clusters. A factor counted per
 cluster (nodes, objects) sits on its axis at its total divided by the run's
-cluster count, the unit of its level and of the page's input. A factor that
-the totals do not count sits at the run's planned value, ``values``.
+cluster count, the unit of its level and of the page's input. Churn sits at
+the rate the fixture achieved. Any other factor the totals do not count sits
+at the run's planned value, ``values``.
 
 A chart fits one straight line per operation, factor and metric, over the base
 runs and that factor's runs. A prediction for a fleet starts from the largest
@@ -945,7 +946,7 @@ def factor_value(record: Record, factor: str) -> float | None:
     # Churn sits at the rate the fixture achieved, which can fall short of the plan.
     if factor == CHURN:
         achieved = record.value(CHURN_ACHIEVED)
-        if achieved:
+        if achieved is not None:
             return achieved
     spec = FACTORS.get(factor)
     kinds = (factor,) if factor in record.totals else spec.total_kinds if spec else ()
@@ -1073,12 +1074,18 @@ def base_fleet(records: Sequence[Record]) -> dict[str, float]:
     ]
     fleet = {}
     for factor in FACTORS:
+        # Churn's default is the planned base rate: the achieved rate differs per operation's
+        # runs, and averaging it across operations would move every prediction off its base.
+        planned = [record.values[factor] for record in base if factor in record.values]
+        if factor == CHURN and planned:
+            fleet[factor] = _mean(planned)
+            continue
         values = [
             value
             for record in base
             if (record.is_base or record.factor == factor)
             and (value := factor_value(record, factor)) is not None
-        ] or [record.values[factor] for record in base if factor in record.values]
+        ] or planned
         fleet[factor] = _mean(values) if values else PLAN_BASE_LEVELS[factor]
     return fleet
 

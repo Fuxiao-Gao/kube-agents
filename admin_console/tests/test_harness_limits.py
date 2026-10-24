@@ -562,8 +562,8 @@ class PredictionTest(unittest.TestCase):
         self.assertEqual(fleet[hl.CLUSTERS], 2)
         self.assertEqual(fleet[hl.NODES], 2)
         self.assertEqual(fleet[hl.OBJECTS], 178)
-        # Churn sits at the rate the base runs achieved (9.7 in the sample), not the planned 10.
-        self.assertAlmostEqual(fleet[hl.CHURN], 9.7)
+        # The default fleet keeps the planned churn rate; the charts plot the achieved one.
+        self.assertEqual(fleet[hl.CHURN], 10)
         self.assertEqual(fleet[hl.FAILING_PODS], 1)
         self.assertEqual(fleet[hl.CONCURRENT], 1)
 
@@ -1131,22 +1131,36 @@ class HarnessLimitsPageTest(unittest.TestCase):
         self.assertTrue(any("**2 × n2-standard-16**" in item.value for item in app.success))
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
-def test_runs_at_one_planned_point_count_as_one_level():
-    # Three base runs and three runs at one level land at slightly different x values.
-    points = [
-        hl.Point(257.0, 1.0, "b1", 1, True, False, "base"),
-        hl.Point(257.5, 1.1, "b2", 2, True, False, "base"),
-        hl.Point(258.5, 0.9, "b3", 3, True, False, "base"),
-        hl.Point(4186.0, 5.0, "o1", 1, False, False, "4000"),
-        hl.Point(4187.0, 5.2, "o2", 2, False, False, "4000"),
-        hl.Point(4188.0, 4.8, "o3", 3, False, False, "4000"),
-    ]
-    fit = hl.fit_line(points)
-    assert fit is not None and fit.levels == 2 and fit.two_point
+class LevelCountTest(unittest.TestCase):
+    def test_runs_at_one_planned_point_count_as_one_level(self):
+        # Three base runs and three runs at one level land at slightly different x values.
+        points = [
+            hl.Point(257.0, 1.0, "b1", 1, True, False, "base"),
+            hl.Point(257.5, 1.1, "b2", 2, True, False, "base"),
+            hl.Point(258.5, 0.9, "b3", 3, True, False, "base"),
+            hl.Point(4186.0, 5.0, "o1", 1, False, False, "4000"),
+            hl.Point(4187.0, 5.2, "o2", 2, False, False, "4000"),
+            hl.Point(4188.0, 4.8, "o3", 3, False, False, "4000"),
+        ]
+        fit = hl.fit_line(points)
+        self.assertIsNotNone(fit)
+        self.assertEqual(fit.levels, 2)
+        self.assertTrue(fit.two_point)
+
+
+class NodePlanFilterTest(unittest.TestCase):
+    def test_finished_containers_hold_no_node(self):
+        def prediction(metric, container, value):
+            return hl.Prediction(metric, container, value, "base", ())
+
+        items = [
+            hl.Recommendation(c, prediction(hl.MEMORY_PEAK, c, 2**30), prediction(hl.CPU_PEAK, c, 0.5))
+            for c in ("platform-agent", "provision")
+        ]
+        plan = hl.node_plan(items, {})
+        self.assertEqual([pod.name for pod in plan.pods], [hl.GATEWAY_POD])
 
 
 class ChurnAxisTest(unittest.TestCase):
@@ -1159,3 +1173,7 @@ class ChurnAxisTest(unittest.TestCase):
         }
         (record,) = hl.parse_records({"schema": hl.SCHEMA_VERSION, "records": [raw]}, "test")
         self.assertEqual(hl.factor_value(record, hl.CHURN), 260.0)
+
+
+if __name__ == "__main__":
+    unittest.main()

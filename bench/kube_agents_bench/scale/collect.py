@@ -47,6 +47,8 @@ RUNNING_PHASE = "Running"
 # A2A chat gateway (platform-agent-a2a-gateway-*) on installs that run one.
 GATEWAY_SELECTOR = "app=platform-agent-gateway"
 PLATFORM_AGENT_RESOURCE = "platformagents"
+# The CRD's default for spec.mode.
+DEFAULT_MODE = "today"
 # The agent's data volume: profiles, sessions, the kanban board. The other claims (bus, shell) are not it.
 AGENT_DATA_CLAIM = "platform-agent-data"
 AGENT_CONTAINER = "platform-agent"
@@ -69,7 +71,10 @@ DF_USED_COLUMN = 2
 # Log lines that stand in for the two metrics the harness does not export yet.
 LOG_PATTERNS = {
     # A triage whose session or whose turn could not start; TRIAGE_NOT_STARTED is the newer marker.
-    "triage_lost": re.compile(r"Aborting troubleshooting trigger|Gateway API chat execution failed|TRIAGE_NOT_STARTED"),
+    "triage_lost": re.compile(
+        r"Aborting troubleshooting trigger|Gateway API chat execution failed"
+        r"|Failed to call gateway API chat execution|TRIAGE_NOT_STARTED"
+    ),
     "run_slot_refusals": re.compile(r"Too many concurrent runs"),
     "provider_429s": re.compile(r"(?:\b429\b.*(?:RESOURCE_EXHAUSTED|rate.?limit|Too Many Requests))|RateLimitError", re.I),
 }
@@ -206,12 +211,11 @@ class Install:
         return running[0] if running else None
 
     def mode(self) -> str:
-        """The PlatformAgent's mode as the operator reports it, else as the spec sets it."""
+        """The PlatformAgent's mode: its spec's, or the CRD's default when the spec leaves it unset."""
         items = kube.kubectl_json(self.context, "get", PLATFORM_AGENT_RESOURCE, "-n", self.namespace)["items"]
         if not items:
             return ""
-        agent = items[0]
-        return str(agent.get("status", {}).get("mode") or agent.get("spec", {}).get("mode") or "")
+        return str(items[0].get("spec", {}).get("mode") or DEFAULT_MODE)
 
     def image(self) -> str:
         """The agent container's image, the build a record describes."""

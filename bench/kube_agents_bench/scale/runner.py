@@ -14,7 +14,9 @@ the plan's ``target`` block and ``SCALE_*`` environment variables.
 from __future__ import annotations
 
 import argparse
+import atexit
 import itertools
+import json
 import logging
 import math
 import re
@@ -53,14 +55,31 @@ PREFLIGHT_SHELL = "/bin/sh"
 PREFLIGHT_TIMEOUT_SECONDS = 600
 TERMINATED_EXIT_CODE = 143
 PEAK_METRIC = "memory_peak_bytes"
+PROJECT_PLACEHOLDER = "<project>"
+MONITORING_ERROR = "monitoring:"
+REVISION_LENGTH = 12
+DIRTY_SUFFIX = "-dirty"
+PRIVATE_KUBECONFIG_PREFIX = "harness-scale-runner-"
+KUBECONFIG_SUFFIX = ".kubeconfig"
+# Operations whose answer has to be read to know the operation ran: they can be declined or
+# cancelled (they need a GitOps repository; they honour the scope's exclusions).
+NEEDS_ANSWER_CHECK = ("fleet_audit", "upgrade_readiness")
+UNCHECKED_ANSWER = "no answer recorded (written before answers were kept), so completion cannot be checked"
 
 
 def _runner_revision() -> str:
-    """The runner's own commit, so records written by two runner versions can be told apart."""
+    """The runner's own commit, so records written by two runner versions can be told apart.
+
+    Marked dirty when the runner's directory has uncommitted edits, since then the
+    commit does not describe the code that ran.
+    """
+    here = str(Path(__file__).resolve().parent)
     try:
-        return kube.run(["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "--short=12", "HEAD"]).strip()
+        revision = kube.run(["git", "-C", here, "rev-parse", f"--short={REVISION_LENGTH}", "HEAD"]).strip()
+        dirty = kube.run(["git", "-C", here, "status", "--porcelain", "--", "."]).strip()
     except (kube.CommandError, OSError):
         return ""
+    return revision + DIRTY_SUFFIX if dirty else revision
 
 
 RUNNER_REVISION = _runner_revision()
@@ -261,6 +280,43 @@ class Runner:
         time.sleep(settle)
         return values
 
+    def scrub(self, text: str) -> str:
+        """Replace the target project's ID in recorded text, so the committed data names no project."""
+        return text.replace(self.project, PROJECT_PLACEHOLDER)
+
+    def reclassify(self) -> int:
+        """Apply the current rules to every stored record; returns how many changed.
+
+        The rules for what counts as a failed or unfinished prompt improve over
+        time; a record keeps its answers and errors, so it can be judged again
+        without re-running it. A prompt record without answers was written before
+        answers were kept, and its operation's completion cannot be checked.
+        """
+        data = records.load(self.data_file)
+        changed = []
+        for raw in data["records"]:
+            record = records.Record.from_dict(raw)
+            before = json.dumps(record.to_dict(), sort_keys=True)
+            record.errors = [self.scrub(e) for e in record.errors]
+            record.answers = [self.scrub(a) for a in record.answers]
+            operation = next((o for o in self.plan.operations if o.name == record.operation), None)
+            if operation and operation.kind == "prompt":
+                reasons = [operations.unfinished_reason(answer, record.errors) for answer in record.answers or [""]]
+                if not record.answers and operation.name in NEEDS_ANSWER_CHECK:
+                    reasons.append(UNCHECKED_ANSWER)
+                for reason in filter(None, reasons):
+                    note = f"{operations.PROMPT_UNFINISHED}: {reason}"
+                    if note not in record.errors:
+                        record.errors.append(note)
+                if any(reasons):
+                    for fit in RESPONSE_FITS:
+                        if fit not in record.excluded_from:
+                            record.excluded_from.append(fit)
+            if json.dumps(record.to_dict(), sort_keys=True) != before:
+                changed.append(record)
+        records.merge(self.data_file, changed)
+        return len(changed)
+
     def check_resettable(self) -> None:
         """Refuse to reset an install whose host cluster does not carry the plan's label.
 
@@ -332,6 +388,8 @@ class Runner:
         # The same refusal can reach both the client and the agent's log; count it once.
         metrics.append(records.Metric("run_slot_refusals", float(max(logs["run_slot_refusals"], outcome.run_slot_refusals))))
         metrics.append(records.Metric("failed_prompts", float(outcome.failed_prompts)))
+        if op.kind == "prompt":
+            metrics.append(records.Metric("unfinished_prompts", float(outcome.unfinished_prompts)))
         if outcome.response_seconds:
             metrics.append(records.Metric("response_seconds", max(outcome.response_seconds)))
         # tokens_* (from LiteLLM) count every model call in the window, background jobs included;
@@ -341,13 +399,15 @@ class Runner:
         errors += outcome.errors + before.errors + after.errors
         # LiteLLM logs every retry of one refusal; the client sees one per prompt. Take the larger.
         provider_429s = max(logs["provider_429s"], outcome.provider_429s)
-        excluded = RESPONSE_FITS if provider_429s and op.kind == "prompt" else []
+        excluded = RESPONSE_FITS if op.kind == "prompt" and (provider_429s or outcome.unfinished_prompts) else []
+        errors = [self.scrub(e) for e in errors]
         return records.Record(
             commit=commit, mode=mode, phase=self.plan.phase, runner=RUNNER_REVISION,
             factor=spec.factor, level=spec.level, operation=op.name, run=spec.run,
             started=started_iso, ended=ended_iso, image=image, values=values, totals=totals,
             limits=limits, replicas=replicas, metrics=metrics,
-            provider_429s=provider_429s, answers=list(outcome.previews), excluded_from=list(excluded), errors=errors,
+            provider_429s=provider_429s, answers=[self.scrub(a) for a in outcome.previews],
+            excluded_from=list(excluded), errors=errors,
         )
 
     def pending(self, specs: list[RunSpec]) -> list[RunSpec]:
@@ -362,10 +422,9 @@ class Runner:
 
     def run(self, specs: list[RunSpec], force: bool, limit: int = 0) -> None:
         self.backfill_peaks()
-        todo = specs if force else self.pending(specs)
-        if limit:
-            todo = todo[:limit]
-        LOG.info("%s runs to do (%s pending of %s)", len(todo), len(self.pending(specs)) if not force else len(specs), len(specs))
+        pending = specs if force else self.pending(specs)
+        todo = pending[:limit] if limit else pending
+        LOG.info("%s runs to do (%s pending of %s)", len(todo), len(pending), len(specs))
         awaiting: list[tuple[float, records.Record]] = []
         relay = operations.Relay(self.install.context, self.install.namespace)
         relay.start()
@@ -424,7 +483,9 @@ class Runner:
         filled once Monitoring has its window; ``skip`` names records this run still holds.
         """
         data = records.load(self.data_file)
+        # A record whose Monitoring read already failed keeps its error and is not queried again.
         stale = [r for r in data["records"] if not any(m["name"] == PEAK_METRIC for m in r["metrics"])
+                 and not any(e.startswith(MONITORING_ERROR) for e in r["errors"])
                  and r["key"] not in (skip or set())
                  and _epoch(r["ended"]) + MONITORING_DELAY_SECONDS < time.time()]
         for raw in stale:
@@ -437,7 +498,7 @@ class Runner:
         try:
             peaks = self.install.container_peaks(_epoch(record.started), _epoch(record.ended))
         except Exception as exc:  # a monitoring failure costs this record its peaks, not the campaign
-            record.errors.append(f"monitoring: {type(exc).__name__}: {exc}")
+            record.errors.append(f"{MONITORING_ERROR} {type(exc).__name__}: {exc}")
             return
         for container, values in peaks.items():
             for name, value in values.items():
@@ -447,6 +508,10 @@ class Runner:
         """Remove every fixture and shrink the pools; ``delete_fleet`` deletes the test clusters too."""
         self.stop_churn()
         existing = kube.clusters_with_prefix(self.project, self.zone, self.prefix, self.label)
+        # The runner's kubeconfig is a fresh copy each time; fetch the test clusters' contexts into it.
+        for name in existing:
+            if not kube.has_context(kube.context_name(self.project, self.zone, name)):
+                kube.get_credentials(self.project, self.zone, name)
         if delete_fleet:
             with ThreadPoolExecutor(max_workers=max(1, len(existing))) as pool:
                 for job in [pool.submit(kube.delete_cluster, self.project, self.zone, name) for name in existing]:
@@ -462,7 +527,7 @@ class Runner:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=["plan", "run", "apply", "teardown"])
+    parser.add_argument("command", choices=["plan", "run", "apply", "teardown", "reclassify"])
     parser.add_argument("config", type=Path)
     parser.add_argument("--only-factor")
     parser.add_argument("--only-operation")
@@ -491,10 +556,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{len(specs)} runs")
         return 0
     data_file = args.config.resolve().parent / plan.target.get("data_file", DEFAULT_DATA_FILE)
-    kube.use_private_kubeconfig(Path(tempfile.mkstemp(prefix="harness-scale-runner-", suffix=".kubeconfig")[1]))
+    private = Path(tempfile.mkstemp(prefix=PRIVATE_KUBECONFIG_PREFIX, suffix=KUBECONFIG_SUFFIX)[1])
+    kube.use_private_kubeconfig(private)
+    atexit.register(private.unlink, missing_ok=True)
     runner = Runner(plan, data_file)
     if args.command == "run":
         runner.run(specs, args.force, args.limit)
+    elif args.command == "reclassify":
+        print(f"{runner.reclassify()} records changed")
     elif args.command == "apply":
         try:
             runner.apply_level(args.factor, args.level)

@@ -45,6 +45,18 @@ INJECT_ENV = ("AGENT_INJECT_TOKEN", "AGENT_INJECT_URL", "AGENT_INJECT_SERVICE")
 TRANSPORT_ENV = "AGENT_TRANSPORT"
 API_TRANSPORT = "api"
 PROMPT_FAILED = "prompt failed"
+PROMPT_UNFINISHED = "prompt unfinished"
+# The harness's mark for delegated work that outlived its delegation wait.
+DELEGATION_CEILING_MARKER = "KUBE_AGENTS_DELEGATION_CEILING"
+# Phrases an answer uses when the agent declined or cancelled the operation it was asked for.
+REFUSAL_MARKERS = (
+    "NO_REGISTERED_REPO",
+    "no registered GitOps repository",
+    "explicitly excluded from the audit scope",
+    "audit cancelled",
+    "audit was cancelled",
+    "I couldn't run",
+)
 # How much of each answer a record keeps, enough to see what the agent did without storing reports.
 ANSWER_PREVIEW_CHARS = 240
 SPAWN = "spawn"
@@ -71,6 +83,8 @@ class OperationResult:
     previews: list[str] = field(default_factory=list)
     tokens: dict[str, float] = field(default_factory=dict)
     failed_prompts: int = 0
+    # Answered, but without performing the operation (declined, cancelled, cut off by the delegation wait).
+    unfinished_prompts: int = 0
     provider_429s: int = 0
     run_slot_refusals: int = 0
     errors: list[str] = field(default_factory=list)
@@ -148,6 +162,24 @@ def _prompt_worker(prompt: str, env: dict[str, str]) -> dict[str, Any]:
     }
 
 
+def unfinished_reason(preview: str, errors: list[str]) -> str:
+    """Why an answer that came back did not perform its operation, or '' when it did.
+
+    The agent can decline (an operation that needs a GitOps repository the install
+    does not have), cancel (it judged every cluster out of scope), or leave its
+    delegated work running past the harness's delegation wait, in which case the
+    answer is only the acknowledgement.
+    """
+    for error in errors:
+        if DELEGATION_CEILING_MARKER in error:
+            return "the delegation wait ran out; the answer is the acknowledgement only"
+    lowered = preview.lower()
+    for marker in REFUSAL_MARKERS:
+        if marker.lower() in lowered:
+            return f"the agent did not perform the operation ({marker})"
+    return ""
+
+
 def fold_answer(outcome: OperationResult, answer: dict[str, Any]) -> None:
     """Add one prompt's answer to the run's outcome.
 
@@ -170,6 +202,9 @@ def fold_answer(outcome: OperationResult, answer: dict[str, Any]) -> None:
         outcome.failed_prompts += 1
         reason = "; ".join(errors) or ("empty answer" if not answer.get("output_chars") else "no model call behind the answer")
         outcome.errors.append(f"{PROMPT_FAILED}: {reason}")
+    elif unfinished := unfinished_reason(str(answer.get("preview", "")), errors):
+        outcome.unfinished_prompts += 1
+        outcome.errors.append(f"{PROMPT_UNFINISHED}: {unfinished}")
     else:
         outcome.response_seconds.append(float(answer["seconds"]))
     for metric, bucket in TOKEN_BUCKETS.items():
@@ -189,8 +224,9 @@ def run_prompts(operation: Operation, env: dict[str, str], concurrent: int, firs
     """The operation's prompt, plus ``concurrent - 1`` follow-up questions sent at the same moment.
 
     The whole batch shares one deadline, the operation's timeout. A prompt still
-    running at the deadline is counted as failed, and its worker is terminated so
-    it cannot load the next run.
+    running at the deadline is counted as failed, and its local worker is
+    terminated; the agent may still finish the turn and its delegated cards on
+    the server, so the next run can start with that work in flight.
     """
     prompt = operation.prompt.format(first_cluster=first_cluster)
     follow_up = (operation.follow_up or operation.prompt).format(first_cluster=first_cluster)

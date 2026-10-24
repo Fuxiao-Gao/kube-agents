@@ -46,6 +46,7 @@ STDERR_TAIL_CHARS = 2000
 FIXTURE_DISK_GB = 20
 RELEASE_CHANNEL = "regular"
 NODE_POOL_LABEL = "cloud.google.com/gke-nodepool"
+LABELS_FIELD = "resourceLabels"
 WORKLOAD_POOL_SUFFIX = ".svc.id.goog"
 CONTEXT_FORMAT = "gke_{project}_{location}_{cluster}"
 # Kinds the runner counts in every test cluster; the record's totals use these names.
@@ -176,7 +177,7 @@ def clusters_with_prefix(project: str, zone: str, prefix: str, label: str) -> li
     key, _, value = label.partition("=")
     out = gcloud(
         "container", "clusters", "list", f"--zone={zone}",
-        f"--filter=name~^{re.escape(prefix)}[0-9]+$ AND resourceLabels.{key}={value}",
+        f"--filter=name~^{re.escape(prefix)}[0-9]+$ AND {LABELS_FIELD}.{key}={value}",
         "--format=value(name)", project=project,
     )
     return sorted(line.strip() for line in out.splitlines() if line.strip())
@@ -204,8 +205,8 @@ def get_credentials(project: str, zone: str, cluster: str) -> None:
 
 def cluster_labels(project: str, location: str, cluster: str) -> dict[str, str]:
     out = gcloud("container", "clusters", "describe", cluster, f"--location={location}",
-                 "--format=json(resourceLabels)", project=project)
-    return dict(json.loads(out or "{}").get("resourceLabels") or {})
+                 f"--format=json({LABELS_FIELD})", project=project)
+    return dict(json.loads(out or "{}").get(LABELS_FIELD) or {})
 
 
 def node_pool_size(project: str, zone: str, cluster: str, pool: str) -> int | None:

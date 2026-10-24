@@ -189,16 +189,18 @@ sample. The plan, metrics and thresholds are those of the
 
 For the selected commit and mode, the page plots each metric against one
 factor, one operation at a time. A factor sits at its measured value from the
-run's totals, per cluster for nodes and objects; a factor that the totals do not
-count sits at the run's planned value. Each chart has a straight-line fit and
-its dashed prediction. A line through two distinct values is a two-point
+run's totals, per cluster for nodes and objects; churn sits at the rate the
+fixture achieved; any other factor sits at the run's planned value. Each chart has a straight-line fit and
+its dashed prediction. A line through two distinct planned points is a two-point
 estimate; past the largest measured value it is predicted, not measured. A run
-with a provider 429 or a failed prompt stays out of the response-time fit.
+with a provider 429, a failed prompt or an unfinished one (the record's
+`excluded_from`) stays out of the response-time fit.
 
 For the fleet entered on the page, the page answers the design's two questions:
 are the container limits enough, and which limits, machine type and node count
 does the fleet need. The machine type is the smallest that holds the largest
-pod's recommended requests; the node count holds every pod, replicas included.
+pod's recommended requests; the node count holds every long-running pod,
+replicas included (a Job's or an init container's peak holds no node).
 The raw records, with each run's errors, are in a collapsed section.
 
 ## Chat

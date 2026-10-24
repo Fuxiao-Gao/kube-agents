@@ -138,7 +138,7 @@ def test_target_names_no_project_and_is_validated():
         load_plan(PHASE1, environ={})
     plan = load_plan(PHASE1, environ=ENV)
     assert plan.target["host_context"] == "gke_example-project_us-central1-c_scale-host"
-    with pytest.raises(ValueError, match="does not name host_cluster"):
+    with pytest.raises(ValueError, match="is not the host cluster's context"):
         load_plan(PHASE1, environ={**ENV, "SCALE_HOST_CONTEXT": "gke_example-project_us-central1_platform-agent-host"})
     # plan needs no target at all
     assert load_plan(PHASE1, environ={}, validate_target=False).matrix()
@@ -341,3 +341,38 @@ def test_an_answer_without_a_model_call_is_a_failed_prompt():
                                      "errors": [], "preview": "I ran this audit a minute ago"})
     assert outcome.failed_prompts == 1 and outcome.response_seconds == []
     assert "no model call" in outcome.errors[0] and outcome.previews == ["I ran this audit a minute ago"]
+
+
+def test_counters_follow_a_pod_recreated_under_its_old_name():
+    # A StatefulSet re-creates platform-agent-shell-0 with a new UID; the new pod counts from zero.
+    before = Snapshot(restarts={("uid-old", "shell"): 3})
+    after = Snapshot(restarts={("uid-new", "shell"): 2}, oom={("uid-new", "shell")})
+    metrics = {(m.name, m.container): m.value for m in collect.counter_metrics(before, after)}
+    assert metrics[("restarts", "shell")] == 2 and metrics[("oomkills", "shell")] == 1
+
+
+def test_unfinished_answers_are_recognized():
+    assert operations.unfinished_reason("NO_REGISTERED_REPO: this install has no registered GitOps repository", [])
+    assert operations.unfinished_reason("The fleet audit was cancelled because ... explicitly excluded from the audit scope", [])
+    assert operations.unfinished_reason("checking every cluster.", ["KUBE_AGENTS_DELEGATION_CEILING: delegated tasks did not finish"])
+    assert operations.unfinished_reason("Of the 8 clusters checked, only one is stressed.", []) == ""
+
+
+def test_reclassify_excludes_unfinished_and_unchecked_runs_and_scrubs_the_project(tmp_path):
+    plan = load_plan(PHASE1, environ=ENV)
+    path = tmp_path / "data.json"
+    base = dict(commit="e" * 40, mode="next", phase="phase1", level=0, started="2026-10-24T00:00:00Z",
+                ended="2026-10-24T00:05:00Z")
+    records.merge(path, [
+        records.Record(factor="base", operation="fleet_audit", run=1, **base),                      # no answers
+        records.Record(factor="base", operation="fan_out", run=1, **base),                          # no answers, fine
+        records.Record(factor="clusters", operation="fleet_audit", run=2, answers=["NO_REGISTERED_REPO here"],
+                       errors=["kubectl --context gke_example-project_x"], **{**base, "level": 8}),
+    ])
+    run = runner.Runner(plan, path)
+    assert run.reclassify() == 2
+    by = {r["key"].split("|", 2)[2]: r for r in records.load(path)["records"]}
+    assert by["base|0|fleet_audit|1"]["excluded_from"] == ["response_seconds"]
+    assert by["base|0|fan_out|1"]["excluded_from"] == []
+    assert by["clusters|8|fleet_audit|2"]["excluded_from"] == ["response_seconds"]
+    assert "example-project" not in json.dumps(by["clusters|8|fleet_audit|2"])

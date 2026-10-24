@@ -1,8 +1,7 @@
 """Fixture objects the runner applies to the test clusters, and the pod churner.
 
-Every fixture object carries ``FIXTURE_LABEL``, and every fixture namespace is
-named with ``NAMESPACE_PREFIX``, so a level is applied and removed by label and
-re-applying one is idempotent. Pods run the pause image with a token CPU and
+Every fixture object and namespace carries ``FIXTURE_LABEL``, so a level is
+applied and removed by label and re-applying one is idempotent. Pods run the pause image with a token CPU and
 memory request: the request keeps the HPAs computing (an HPA over a container
 with no CPU request writes a Warning event every sync, which would turn the
 object factor into a Warning-event factor).

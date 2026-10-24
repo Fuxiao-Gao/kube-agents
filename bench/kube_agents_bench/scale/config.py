@@ -105,13 +105,14 @@ def load_plan(path: Path, environ: dict[str, str] | None = None, validate_target
     if missing:
         names = ", ".join(ENV_PREFIX + key.upper() for key in missing)
         raise ValueError(f"{path}: target is missing {', '.join(missing)}; set {names}")
+    expected = ""
     if validate_target:
         expected = kube.context_name(target["project_id"], target["host_location"], target["host_cluster"])
         target.setdefault("host_context", expected)
-    # The runner resets the install this context reaches; refuse one that is not the host cluster's.
-    if validate_target and not target["host_context"].endswith(f"_{target['host_cluster']}"):
-        raise ValueError(f"{path}: host_context {target['host_context']!r} does not name host_cluster "
-                         f"{target['host_cluster']!r}")
+    # The runner resets the install this context reaches; refuse any context but the host cluster's.
+    if validate_target and target["host_context"] != expected:
+        raise ValueError(f"{path}: host_context {target['host_context']!r} is not the host cluster's context "
+                         f"{expected!r}")
     operations = [
         Operation(
             name=name,
