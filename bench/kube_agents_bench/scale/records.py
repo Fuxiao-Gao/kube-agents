@@ -72,6 +72,8 @@ class Record:
     replicas: dict[str, int] = field(default_factory=dict)
     metrics: list[Metric] = field(default_factory=list)
     provider_429s: int = 0
+    # The start of each prompt's answer, so a surprising response time can be checked against what was said.
+    answers: list[str] = field(default_factory=list)
     excluded_from: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 

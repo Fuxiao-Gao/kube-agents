@@ -333,3 +333,11 @@ def test_churn_batch_ids_never_read_as_numbers():
     for _ in range(200):
         batch = churner._batch(1)[0]["metadata"]["labels"][fixtures.BATCH_LABEL]
         assert batch[0].isalpha()
+
+
+def test_an_answer_without_a_model_call_is_a_failed_prompt():
+    outcome = operations.OperationResult()
+    operations.fold_answer(outcome, {"seconds": 9.0, "output_chars": 300, "tokens": {"input": 0, "output": 0},
+                                     "errors": [], "preview": "I ran this audit a minute ago"})
+    assert outcome.failed_prompts == 1 and outcome.response_seconds == []
+    assert "no model call" in outcome.errors[0] and outcome.previews == ["I ran this audit a minute ago"]

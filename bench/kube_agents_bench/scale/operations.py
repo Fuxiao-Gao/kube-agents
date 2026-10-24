@@ -45,6 +45,8 @@ INJECT_ENV = ("AGENT_INJECT_TOKEN", "AGENT_INJECT_URL", "AGENT_INJECT_SERVICE")
 TRANSPORT_ENV = "AGENT_TRANSPORT"
 API_TRANSPORT = "api"
 PROMPT_FAILED = "prompt failed"
+# How much of each answer a record keeps, enough to see what the agent did without storing reports.
+ANSWER_PREVIEW_CHARS = 240
 SPAWN = "spawn"
 NO_DEADLINE_SECONDS = 86400
 # The agent pod runs under gVisor, which kubectl port-forward cannot reach, so the harness rides
@@ -66,6 +68,7 @@ PROVISION_JOB_FRAGMENT = "a2a-provision"
 @dataclass
 class OperationResult:
     response_seconds: list[float] = field(default_factory=list)
+    previews: list[str] = field(default_factory=list)
     tokens: dict[str, float] = field(default_factory=dict)
     failed_prompts: int = 0
     provider_429s: int = 0
@@ -141,6 +144,7 @@ def _prompt_worker(prompt: str, env: dict[str, str]) -> dict[str, Any]:
         "tokens": dict(result.tokens or {}),
         "errors": list(result.errors or []),
         "output_chars": len(result.output or ""),
+        "preview": (result.output or "")[:ANSWER_PREVIEW_CHARS],
     }
 
 
@@ -151,10 +155,12 @@ def fold_answer(outcome: OperationResult, answer: dict[str, Any]) -> None:
     a failed prompt, not a fast one: it is counted and its time is not recorded.
     """
     errors = list(answer.get("errors") or [])
+    outcome.previews.append(str(answer.get("preview", "")))
     reported_tokens = any(isinstance(v, (int, float)) and v for v in (answer.get("tokens") or {}).values())
-    # Failed: the transport says so, the answer is empty, or the harness erred before any model call.
+    # Failed: the transport says so, the answer is empty, or no model call stands behind it (the harness
+    # erred first, or the agent answered from memory of an earlier run), so it did not do the operation.
     failed = (any(INFRA_FAILURE_MARKER in error for error in errors) or not answer.get("output_chars")
-              or (bool(errors) and not reported_tokens))
+              or not reported_tokens)
     rate_limited = any(marker.lower() in error.lower() for error in errors for marker in RATE_LIMIT_MARKERS)
     if failed and rate_limited:
         # The provider refused, not the harness: a 429, which excludes the run from the response fit.
@@ -162,7 +168,8 @@ def fold_answer(outcome: OperationResult, answer: dict[str, Any]) -> None:
         outcome.errors.append("provider rate limit: " + "; ".join(errors))
     elif failed:
         outcome.failed_prompts += 1
-        outcome.errors.append(f"{PROMPT_FAILED}: " + ("; ".join(errors) or "empty answer"))
+        reason = "; ".join(errors) or ("empty answer" if not answer.get("output_chars") else "no model call behind the answer")
+        outcome.errors.append(f"{PROMPT_FAILED}: {reason}")
     else:
         outcome.response_seconds.append(float(answer["seconds"]))
     for metric, bucket in TOKEN_BUCKETS.items():

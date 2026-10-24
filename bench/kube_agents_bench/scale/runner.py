@@ -347,7 +347,7 @@ class Runner:
             factor=spec.factor, level=spec.level, operation=op.name, run=spec.run,
             started=started_iso, ended=ended_iso, image=image, values=values, totals=totals,
             limits=limits, replicas=replicas, metrics=metrics,
-            provider_429s=provider_429s, excluded_from=list(excluded), errors=errors,
+            provider_429s=provider_429s, answers=list(outcome.previews), excluded_from=list(excluded), errors=errors,
         )
 
     def pending(self, specs: list[RunSpec]) -> list[RunSpec]:
