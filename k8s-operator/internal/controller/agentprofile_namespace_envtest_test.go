@@ -138,6 +138,52 @@ func TestTheAgentProfileCRDBoundsAllowedTiers(t *testing.T) {
 	}
 }
 
+// Each tier's bus identity, profile-<name>-<tier>, must fit one 63-character
+// label, so the name bound depends on the tiers: 50, or 44 with unattended.
+// And a named ServiceAccount is one identity, so it can serve one tier only.
+func TestTheAgentProfileCRDBoundsTheNameAndNamedServiceAccountByTier(t *testing.T) {
+	cfg, scheme := startEnvtestConfig(t)
+	c, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	const ns = "agentprofile-tier-bounds"
+	if err := c.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}); err != nil {
+		t.Fatal(err)
+	}
+	both := []string{"read", "unattended"}
+	for _, tc := range []struct {
+		name  string
+		tiers []string
+		sa    string
+		want  string // "" admits; otherwise a substring of the refusal
+	}{
+		{strings.Repeat("a", 50), nil, "", ""},
+		{strings.Repeat("b", 51), nil, "", "too long for its tiers"},
+		{strings.Repeat("c", 50), []string{"read"}, "", ""},
+		{strings.Repeat("d", 44), both, "", ""},
+		{strings.Repeat("e", 45), both, "", "too long for its tiers"},
+		{strings.Repeat("f", 45), []string{"unattended"}, "", "too long for its tiers"},
+		{"named-one", []string{"unattended"}, "mine", ""},
+		{"named-default", nil, "mine", ""},
+		{"named-two", both, "mine", "can serve only one tier"},
+	} {
+		p := testAgentProfile(ns, tc.name, func(p *agentv1alpha1.AgentProfile) {
+			p.Spec.AllowedTiers = tc.tiers
+			p.Spec.Identity.ServiceAccountName = tc.sa
+		})
+		p.ResourceVersion, p.Generation, p.UID = "", 0, ""
+		err := c.Create(ctx, &p)
+		switch {
+		case tc.want == "" && err != nil:
+			t.Errorf("%s (%d chars, tiers %v, serviceAccountName %q) refused: %v", tc.name, len(tc.name), tc.tiers, tc.sa, err)
+		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+			t.Errorf("%s (%d chars, tiers %v, serviceAccountName %q) = %v, want a refusal saying %q", tc.name, len(tc.name), tc.tiers, tc.sa, err, tc.want)
+		}
+	}
+}
+
 // LiteLLM admits the profile namespace only once that namespace's fence is
 // in place, at its own apply site.
 func TestLiteLLMAdmitsProfilePodsOnlyWhenTheyAreFenced(t *testing.T) {
