@@ -37,7 +37,11 @@ re-initializing against that project's bucket and naming the project on the appl
     tofu init -reconfigure \
               -backend-config="bucket=<project>-tf-state" \
               -backend-config="prefix=seeded-fleet"
+    tofu apply -var="project_id=<project>" -target=google_container_cluster.seeded_a
     tofu apply -var="project_id=<project>"
+
+The first apply creates `seeded-a` alone, because the scaled-zero gateway fixture reads the Gateway
+API CRDs that GKE installs with it; on a project that already has it, it changes nothing.
 
 Local validation without credentials: `tofu init -backend=false && tofu validate`.
 

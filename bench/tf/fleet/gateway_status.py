@@ -49,6 +49,9 @@ STATUS_SUFFIX = "/status"
 GATEWAYS = "gateways"
 HTTPROUTES = "httproutes"
 MERGE_PATCH = "application/merge-patch+json"
+AUTHORIZATION_HEADER = "Authorization"
+BEARER_PREFIX = "Bearer "
+CONTENT_TYPE_HEADER = "Content-Type"
 GET = "GET"
 PATCH = "PATCH"
 REQUEST_TIMEOUT_SECONDS = 30
@@ -88,9 +91,9 @@ def conditions(spec: tuple, generation: int, now: str) -> list[dict]:
 def call(host: str, token: str, context: ssl.SSLContext, path: str, body: dict | None = None) -> dict:
     data = None if body is None else json.dumps(body).encode()
     request = urllib.request.Request(f"{host}{path}", data=data, method=GET if body is None else PATCH)
-    request.add_header("Authorization", f"Bearer {token}")
+    request.add_header(AUTHORIZATION_HEADER, BEARER_PREFIX + token)
     if body is not None:
-        request.add_header("Content-Type", MERGE_PATCH)
+        request.add_header(CONTENT_TYPE_HEADER, MERGE_PATCH)
     try:
         with urllib.request.urlopen(request, context=context, timeout=REQUEST_TIMEOUT_SECONDS) as reply:
             return json.loads(reply.read())
