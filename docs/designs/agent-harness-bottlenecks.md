@@ -6,6 +6,8 @@ kube-agents runs the Platform Agent and its supporting components in one GKE clu
 
 This research measures the harness on small fleets. Each experiment increases one stress point. A stress point is one property of the fleet or of its use, for example the number of clusters. The research fits a model to the data and predicts the breaking points for larger fleets. The result is a chart that answers two questions. First: are the current container limits enough for a given fleet? Second: which node size and container limits does a given fleet need?
 
+The first measurement, Phase 1, found no container near its memory limit at 8 clusters. It found that a high event rate makes the event watcher open many sessions. It also found that the credential proxy starts to queue at 8 clusters.
+
 # Context
 
 When kube-agents is installed to large projects, depending on the shape of the fleet and usage pattern, the agent harness is stressed in various ways. This results in slow response time, or even OOMKills.
@@ -161,7 +163,7 @@ Each operation runs against the factors that load it, not against every factor. 
 
 # Phases
 
-The work runs in two phases. Phase 1 takes about 5 days of elapsed time and shows a first result in the admin console. Phase 2 is decided from what Phase 1 shows.
+The work runs in two phases. Phase 1 ran from 2026-10-22 to 2026-10-24; its results are under Phase 1 results below. Phase 2 is decided from what Phase 1 shows.
 
 ## Phase 1: two data points per factor
 
@@ -205,7 +207,7 @@ Steps, in order:
 
 ## Phase 2: decided from the Phase 1 result
 
-Phase 1's chart decides what follows. The candidates:
+Phase 1's chart decides what follows. Its data points at four of the candidates first: event volume, where the session storm grows (more levels between 68 and 1,200 events per minute); the cluster count, where the credential proxy starts to queue (16 and 32 clusters); concurrency around the 10 run slots (10 and 12); and a churn fixture that applies batches in parallel, so the 1,000 per minute level is reached. The candidates:
 
 - The remaining planned levels, for the metrics whose line comes close to a threshold inside realistic fleet sizes.
 - More points near a threshold, to find the knee for the queue metrics.
@@ -220,6 +222,32 @@ Phase 1's chart decides what follows. The candidates:
 - A recurring run: the Phase 1 config on each release candidate, with the page flagging a metric that moved past a set fraction of the previous release.
 
 All planned points at 3 runs each would take about 95–115 h of machine time, 1.5–2 weeks of calendar time with re-runs.
+
+# Phase 1 results
+
+The Phase 1 records are in `bench/scale/harness-limits.json` (46 runs, image `eeb8a95c`, mode `next`, 2 test clusters at the base); the admin console's Harness limits page charts them and answers the two sizing questions. This section states what they show; the page and the file hold every number.
+
+## What the data shows
+
+- **No container reached its limit, and none restarted or was OOM-killed.** The largest peaks were the agent container (`platform-agent`) at about 2.1 GiB of its 8 GiB limit during the 8-cluster onboarding window, and the credential proxy at about 710 MiB of 2 GiB, during that window and when the agent read a namespace of 4,000 Pods. The event watcher's container (`agent-api-auth`) stayed between 125 and 181 MiB of 2 GiB at every point; the two highest were with 15 concurrent questions and at 100 nodes per cluster.
+- **Event volume, not object count, drives the session storm.** At the base the event watcher saw about 68 events per minute and opened no session. At 100 nodes per cluster it saw 580 per minute and opened 163 sessions in an hour; with about 260 Pods created per minute, 1,192 per minute and 1,006 sessions, of which the daily alert ceiling suppressed 1,002 and 4 became triages. Each suppressed event still opened a session ([#3567](https://github.com/gke-labs/kube-agents/issues/3567)). The agent container's memory followed: 556 MiB at the base, 1,348 MiB at the churn level.
+- **The credential proxy starts to queue at 8 clusters.** During the 8-cluster onboarding window the broker's admission wait reached 15 s, against 0.1 s at every other point; its memory rose from about 230 to 710 MiB. A listing of 4,000 Pods raised it to 420–710 MiB without a queue ([#2045](https://github.com/gke-labs/kube-agents/issues/2045), [#2637](https://github.com/gke-labs/kube-agents/issues/2637)).
+- **Every typical question is past the investigate gate already at 2 clusters.** A fan-out question took about 140 s, a fleet audit 70–170 s, the upgrade readiness report about 180 s, against the [#3140](https://github.com/gke-labs/kube-agents/issues/3140) gates (under 30 s OK, over 60 s investigate). At 8 clusters the fleet audit took 120–200 s and used about twice the input tokens (median 259k against 128k), and the upgrade readiness report varied from 95 to 460 s. With 4,000 Pods in one namespace, a fleet audit took about 500 s, and one run hit the 1,800 s delegation ceiling.
+- **Concurrent requests meet the 10 run slots.** With 15 questions sent at once, all 15 were answered in one run; in the other two, 5 were refused with `Too many concurrent runs` ([#3724](https://github.com/gke-labs/kube-agents/issues/3724)).
+- **The onboarding window costs millions of tokens.** LiteLLM counted about 10.4 M input and 0.12 M output tokens over the 2-hour window at 8 clusters.
+
+## Findings filed
+
+- [#3932](https://github.com/gke-labs/kube-agents/issues/3932): the event watcher reads its watch set once, at start. Clusters registered later, every cluster after a reset of the agent's data volume, and clusters removed from scope stay as they were until the gateway pod restarts. The runner restarts the gateway to measure with the fleet watched; the onboarding runs measure the gap as shipped.
+- The measured session storm and run-slot refusals are on [#3567](https://github.com/gke-labs/kube-agents/issues/3567) and [#3724](https://github.com/gke-labs/kube-agents/issues/3724).
+
+## What limits the result
+
+- **Two points per factor.** Each line is a two-point estimate, and the page labels it so; nothing here shows a knee or a curve.
+- **The churn fixture fell short.** It achieved about 260 Pods per minute of the planned 1,000: one `kubectl apply` per batch takes longer than the batch interval. Records carry the achieved rate, and the page plots churn at it.
+- **The project's IAM was rewritten from outside.** An organization IAM automation removed the install's service-account bindings about every 2 hours. Runs that overlapped a removal before the guard existed were deleted and re-run; after it, a guard restored the bindings within 2 minutes, and every record notes any seconds it ran without them.
+- **Soaks and onboarding ran once per point.** Their points have no spread, and the operations' response times varied by up to 4 times between runs of one point.
+- **The runner restarts the gateway** when the watcher does not watch exactly the test fleet ([#3932](https://github.com/gke-labs/kube-agents/issues/3932)), so each such run starts on a fresh agent process.
 
 # Out of scope
 
