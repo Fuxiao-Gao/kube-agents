@@ -24,7 +24,8 @@ FLEET_COLUMNS = 4
 CHART_COLUMNS = 2
 FLEET_STEP = 1.0
 # Shows 2 as "2" and 178.5 as "178.5".
-NUMBER_FORMAT = "%g"
+NUMBER_FORMAT = "%.1f"
+FLEET_DECIMALS = 1
 CHART_CONFIG = {"displayModeBar": False}
 MODEL_CAPTION = (
     "How a prediction combines factors. Each factor has one straight line per "
@@ -151,7 +152,8 @@ for index, (factor, spec) in enumerate(hl.FACTORS.items()):
     fleet[factor] = fleet_columns[index % FLEET_COLUMNS].number_input(
         spec.input_label,
         min_value=0.0,
-        value=float(base[factor]),
+        # One decimal: a measured base (objects per cluster from totals) is rarely a whole number.
+        value=round(float(base[factor]), FLEET_DECIMALS),
         step=FLEET_STEP,
         format=NUMBER_FORMAT,
         help=spec.help or None,
