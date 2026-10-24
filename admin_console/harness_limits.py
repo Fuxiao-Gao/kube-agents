@@ -942,6 +942,11 @@ def factor_value(record: Record, factor: str) -> float | None:
     planned value. A record without planned values falls back to its level,
     or, for a base record, to the plan's base point.
     """
+    # Churn sits at the rate the fixture achieved, which can fall short of the plan.
+    if factor == CHURN:
+        achieved = record.value(CHURN_ACHIEVED)
+        if achieved:
+            return achieved
     spec = FACTORS.get(factor)
     kinds = (factor,) if factor in record.totals else spec.total_kinds if spec else ()
     if kinds and all(kind in record.totals for kind in kinds):

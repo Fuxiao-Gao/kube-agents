@@ -562,7 +562,8 @@ class PredictionTest(unittest.TestCase):
         self.assertEqual(fleet[hl.CLUSTERS], 2)
         self.assertEqual(fleet[hl.NODES], 2)
         self.assertEqual(fleet[hl.OBJECTS], 178)
-        self.assertEqual(fleet[hl.CHURN], 10)
+        # Churn sits at the rate the base runs achieved (9.7 in the sample), not the planned 10.
+        self.assertAlmostEqual(fleet[hl.CHURN], 9.7)
         self.assertEqual(fleet[hl.FAILING_PODS], 1)
         self.assertEqual(fleet[hl.CONCURRENT], 1)
 
@@ -1146,3 +1147,15 @@ def test_runs_at_one_planned_point_count_as_one_level():
     ]
     fit = hl.fit_line(points)
     assert fit is not None and fit.levels == 2 and fit.two_point
+
+
+class ChurnAxisTest(unittest.TestCase):
+    def test_churn_sits_at_the_achieved_rate(self):
+        raw = {
+            "key": "k", "commit": "c" * 40, "mode": "next", "phase": "p", "factor": hl.CHURN, "level": 1000,
+            "operation": "watcher_soak", "run": 1, "started": "2026-10-24T00:00:00Z", "ended": "2026-10-24T01:00:00Z",
+            "values": {hl.CHURN: 1000}, "totals": {}, "limits": {},
+            "metrics": [{"name": hl.CHURN_ACHIEVED, "value": 260.0}],
+        }
+        (record,) = hl.parse_records({"schema": hl.SCHEMA_VERSION, "records": [raw]}, "test")
+        self.assertEqual(hl.factor_value(record, hl.CHURN), 260.0)
