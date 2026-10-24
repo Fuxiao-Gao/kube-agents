@@ -66,6 +66,23 @@ func profileNamespaceName(agent *agentv1alpha1.PlatformAgent) string {
 	return agent.Namespace + profileNamespaceSuffix
 }
 
+// profileNamespaceOf is the profile namespace for a profile: the one beside
+// its own namespace, which is its agent's. It needs no agent, so a profile
+// deleted after its agent still finds its ServiceAccounts.
+func profileNamespaceOf(p *agentv1alpha1.AgentProfile) string {
+	return p.Namespace + profileNamespaceSuffix
+}
+
+// agentNamespaceOfProfileServiceAccount is the namespace whose agent renders
+// a profile ServiceAccount's map entry: the one beside a profile namespace,
+// or the ServiceAccount's own (the legacy agent-namespace one).
+func agentNamespaceOfProfileServiceAccount(ns string) string {
+	if agentNS, ok := strings.CutSuffix(ns, profileNamespaceSuffix); ok && agentNS != "" {
+		return agentNS
+	}
+	return ns
+}
+
 // resolveProfileCeiling is spec.harness.tuning.profiles.ceiling, defaulted.
 func resolveProfileCeiling(agent *agentv1alpha1.PlatformAgent) int {
 	if t := agentTuning(agent); t != nil && t.Profiles != nil && t.Profiles.Ceiling != nil {

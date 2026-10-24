@@ -5649,13 +5649,15 @@ func (r *PlatformAgentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				builder.WithPredicates(predicate.GenerationChangedPredicate{}),
 			).Watches(
 				// Whether a profile gets a map entry also depends on its
-				// operator-created ServiceAccount (a foreign one under that
-				// name keeps it out: agentProfileServiceAccountIsForeign),
-				// and that ServiceAccount is the profile's, not the agent's,
-				// so Owns() above never fires for it.
+				// operator-created ServiceAccounts (a foreign one under
+				// such a name keeps it out: agentProfileServiceAccountIsForeign),
+				// and those are the profile's, not the agent's, so Owns()
+				// above never fires for them. They live in the profile
+				// namespace, which maps to the agent beside it; the legacy
+				// one in the agent's own namespace maps to that.
 				&corev1.ServiceAccount{},
 				handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-					return enqueueAgentsInNamespace(ctx, obj.GetNamespace())
+					return enqueueAgentsInNamespace(ctx, agentNamespaceOfProfileServiceAccount(obj.GetNamespace()))
 				}),
 				builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
 					return strings.HasPrefix(obj.GetName(), agentProfileServiceAccountPrefix)

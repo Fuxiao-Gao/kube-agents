@@ -73,7 +73,9 @@ Deletion waits on the `kubeagents.x-k8s.io/agentprofile-finalizer` finalizer, wh
 kubectl patch agentprofile <name> -n <namespace> --type=merge -p '{"metadata":{"finalizers":null}}'
 ```
 
-A profile may not run as `default`, as a ServiceAccount the operator already uses (for the PlatformAgent or for itself), or as one another `AgentProfile` already holds. Such a profile renders nothing, and its `IdentityReady` condition says why.
+A profile may not name `default`, a ServiceAccount name the operator uses for the PlatformAgent, or one another `AgentProfile` already holds. Such a profile renders nothing, and its `IdentityReady` condition says why.
+
+A `spec.identity.serviceAccountName` is looked up in the profile namespace. A profile written when ServiceAccounts lived in the agent's namespace reports `ServiceAccountNotFound` until that ServiceAccount is created in the profile namespace.
 
 The operator looks for AgentProfiles once, at startup. If the CRD isn't installed, or the operator's ClusterRole predates AgentProfiles (the RBAC self-check reports the missing `agentprofiles` permissions), it skips the AgentProfile controller, renders no profile identities, and keeps running everything else. Restart the operator after installing the CRD or applying the current role.
 

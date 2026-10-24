@@ -61,7 +61,7 @@ func boundAgentProfiles(ctx context.Context, c client.Reader, agent *agentv1alph
 	}
 	var bound []agentv1alpha1.AgentProfile
 	for i := range profiles.Items {
-		foreign, err := agentProfileServiceAccountIsForeign(ctx, c, &profiles.Items[i], profileNamespaceName(agent))
+		foreign, err := agentProfileServiceAccountIsForeign(ctx, c, &profiles.Items[i])
 		if err != nil {
 			return nil, err
 		}
@@ -78,7 +78,8 @@ func boundAgentProfiles(ctx context.Context, c client.Reader, agent *agentv1alph
 // whatever RoleBindings they gave it. The operator neither adopts it nor
 // renders a bus identity for it. It returns the first such name, or "". A
 // ServiceAccount spec.identity names is foreign on purpose and not checked.
-func agentProfileServiceAccountIsForeign(ctx context.Context, c client.Reader, p *agentv1alpha1.AgentProfile, profilesNS string) (string, error) {
+func agentProfileServiceAccountIsForeign(ctx context.Context, c client.Reader, p *agentv1alpha1.AgentProfile) (string, error) {
+	profilesNS := profileNamespaceOf(p)
 	if p.Spec.Identity.ServiceAccountName != "" {
 		return "", nil
 	}

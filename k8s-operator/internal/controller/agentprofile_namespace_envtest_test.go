@@ -579,3 +579,55 @@ func TestLiteLLMWithholdsThePeerOnAProfileReadError(t *testing.T) {
 		}
 	}
 }
+
+// The identity map renders a profile's entries only once the profile
+// namespace, marked as the chart's, exists: its ServiceAccounts live there,
+// and whoever made a namespace of that name must not get them.
+func TestTheIdentityMapRendersProfilesOnlyWithTheProfileNamespace(t *testing.T) {
+	withOperatorBusPrincipal(t)
+	cfg, scheme := startEnvtestConfig(t)
+	c, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	agent := a2aTestAgent()
+	agent.Spec.Harness = &agentv1alpha1.HarnessSpec{
+		ProjectID: envtestHarnessProject, Location: envtestHarnessLocation, ClusterName: envtestHarnessCluster,
+	}
+	if err := c.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: agent.Namespace}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Create(ctx, agent); err != nil {
+		t.Fatal(err)
+	}
+	p := testAgentProfile(agent.Namespace, "auditor")
+	p.ResourceVersion, p.Generation, p.UID = "", 0, ""
+	if err := c.Create(ctx, &p); err != nil {
+		t.Fatal(err)
+	}
+	r := &PlatformAgentReconciler{Client: c, APIReader: c, Scheme: scheme}
+	mapHas := func() bool {
+		t.Helper()
+		_, _ = r.reconcileA2A(ctx, agent)
+		var cm corev1.ConfigMap
+		if err := c.Get(ctx, types.NamespacedName{Namespace: agent.Namespace, Name: a2aAuthMapName(agent)}, &cm); err != nil {
+			t.Fatalf("the identity map was not rendered: %v", err)
+		}
+		for _, v := range cm.Data {
+			if strings.Contains(v, `"profile-auditor-read"`) {
+				return true
+			}
+		}
+		return false
+	}
+	if mapHas() {
+		t.Error("the map renders the profile with no profile namespace")
+	}
+	if err := c.Create(ctx, chartProfileNamespace(agent)); err != nil {
+		t.Fatal(err)
+	}
+	if !mapHas() {
+		t.Error("the map leaves the profile out with the profile namespace in place")
+	}
+}

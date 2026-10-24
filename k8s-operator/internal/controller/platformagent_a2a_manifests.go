@@ -5143,6 +5143,19 @@ func (r *PlatformAgentReconciler) reconcileA2AStack(ctx context.Context, agent *
 			return state, fmt.Errorf("failed to list AgentProfiles: %w", err)
 		}
 	}
+	// A profile's identities are ServiceAccounts in the profile namespace,
+	// so without that namespace (marked as the chart's) there are none to
+	// render: whoever made a namespace of that name must not get them. A
+	// failed read drops them too, under the one profile-namespace rule.
+	if len(profiles) > 0 {
+		ready, err := r.profileNamespaceExists(ctx, agent)
+		if err != nil {
+			r.profileNamespaceFailure(ctx, agent, "read for the identity map", err)
+		}
+		if !ready {
+			profiles = nil
+		}
+	}
 	authMap, authMapVersion, err := buildA2AAuthMapConfigMap(agent, profiles)
 	if err != nil {
 		return state, fmt.Errorf("failed to render the A2A identity map: %w", err)

@@ -184,9 +184,9 @@ func (r *AgentProfileReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 	resolution := resolveAgentProfileIdentities(agent, all.Items)[profile.Name]
-	profilesNS := profileNamespaceName(agent)
+	profilesNS := profileNamespaceOf(&profile)
 	if resolution.refused == nil {
-		foreign, err := agentProfileServiceAccountIsForeign(ctx, r.Client, &profile, profilesNS)
+		foreign, err := agentProfileServiceAccountIsForeign(ctx, r.Client, &profile)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -209,7 +209,7 @@ func (r *AgentProfileReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// The profile namespace is the chart's (agentprofile_namespace.go). Until
 	// it exists, carrying the chart's markers, there is nowhere to render the
 	// ServiceAccounts, so the profile has no identity and no card.
-	ready, err := profileNamespaceReady(ctx, r.nsReader(), agent)
+	ready, err := profileNamespaceReady(ctx, r.apiReader(), agent)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -304,10 +304,10 @@ func (r *AgentProfileReconciler) renderNothing(ctx context.Context, p *agentv1al
 	if err := r.deleteOwnServiceAccount(ctx, p); err != nil {
 		return err
 	}
-	if agent != nil {
-		if err := r.deleteProfileServiceAccounts(ctx, p, profileNamespaceName(agent), nil); err != nil {
-			return err
-		}
+	// With or without a bound agent: a profile deleted after its agent still
+	// has ServiceAccounts in the profile namespace, which outlives the agent.
+	if err := r.deleteProfileServiceAccounts(ctx, p, profileNamespaceOf(p), nil); err != nil {
+		return err
 	}
 	if !p.DeletionTimestamp.IsZero() {
 		if controllerutil.RemoveFinalizer(p, agentProfileFinalizer) {
@@ -335,7 +335,7 @@ func (r *AgentProfileReconciler) finalize(ctx context.Context, p *agentv1alpha1.
 	}
 	// The ServiceAccounts in the profile namespace carry no owner reference,
 	// so the garbage collector won't remove them with the profile.
-	if err := r.deleteProfileServiceAccounts(ctx, p, profileNamespaceName(agent), nil); err != nil {
+	if err := r.deleteProfileServiceAccounts(ctx, p, profileNamespaceOf(p), nil); err != nil {
 		return ctrl.Result{}, err
 	}
 	controllerutil.RemoveFinalizer(p, agentProfileFinalizer)
@@ -431,7 +431,16 @@ func (r *AgentProfileReconciler) ensureServiceAccount(ctx context.Context, p *ag
 	if apierrors.IsNotFound(err) {
 		err = r.Create(ctx, sa)
 		if apierrors.IsAlreadyExists(err) {
-			return errForeignServiceAccount
+			// A cached NotFound can trail this reconciler's own create (the
+			// status write requeues at once), so ask the API server whose
+			// it is before calling it foreign.
+			if err := r.apiReader().Get(ctx, types.NamespacedName{Namespace: ns, Name: id.serviceAccount}, &existing); err != nil {
+				return err
+			}
+			if !agentProfileOwnsServiceAccount(&existing, p) {
+				return errForeignServiceAccount
+			}
+			return nil
 		}
 		return err
 	}
@@ -485,7 +494,7 @@ func profileServiceAccountRequest(obj client.Object) []reconcile.Request {
 	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: agentNS, Name: name}}}
 }
 
-func (r *AgentProfileReconciler) nsReader() client.Reader {
+func (r *AgentProfileReconciler) apiReader() client.Reader {
 	if r.APIReader != nil {
 		return r.APIReader
 	}
