@@ -769,7 +769,7 @@ func TestAnAgentProfileOnATodayInstallRendersNothing(t *testing.T) {
 
 	h.reconcile(agent.Namespace, "auditor")
 
-	if _, ok := h.serviceAccount(agent.Namespace, "agentprofile-auditor"); ok {
+	if _, ok := h.serviceAccount(profileNamespaceName(agent), "agentprofile-auditor-read"); ok {
 		t.Error("a today install created the profile's ServiceAccount")
 	}
 	if len(h.dir.publishes) != 0 {
@@ -895,7 +895,7 @@ func TestANamedServiceAccountIsUsedNotCreated(t *testing.T) {
 	h := newProfileHarness(t, agent, &p)
 	h.reconcile(agent.Namespace, "auditor")
 
-	if _, ok := h.serviceAccount(agent.Namespace, "agentprofile-auditor"); ok {
+	if _, ok := h.serviceAccount(profileNamespaceName(agent), "agentprofile-auditor-read"); ok {
 		t.Error("the operator created a ServiceAccount for a profile that names its own")
 	}
 	got := h.profile(agent.Namespace, "auditor")

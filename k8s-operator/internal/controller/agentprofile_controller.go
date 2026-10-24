@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -487,8 +486,8 @@ func (r *AgentProfileReconciler) deleteProfileServiceAccounts(ctx context.Contex
 // reconcile, which checks ownership by UID.
 func profileServiceAccountRequest(obj client.Object) []reconcile.Request {
 	name := obj.GetLabels()[agentProfileNameLabel]
-	agentNS, ok := strings.CutSuffix(obj.GetNamespace(), profileNamespaceSuffix)
-	if name == "" || !ok || agentNS == "" {
+	agentNS, ok := agentNamespaceOfProfileServiceAccount(obj.GetNamespace())
+	if name == "" || !ok {
 		return nil
 	}
 	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: agentNS, Name: name}}}
