@@ -96,6 +96,7 @@ WATCHER_SUPPRESSED = "watcher_quota_suppressed"
 TRIAGE_LOST = "triage_lost"
 RUN_SLOT_REFUSALS = "run_slot_refusals"
 FAILED_PROMPTS = "failed_prompts"
+UNFINISHED_PROMPTS = "unfinished_prompts"
 RESPONSE = "response_seconds"
 TOKENS_INPUT = "tokens_input"
 TOKENS_OUTPUT = "tokens_output"
@@ -212,8 +213,9 @@ UNFIXABLE = MappingProxyType(
             "A triage start makes one attempt with a 10 s timeout. No setting changes it."
         ),
         FAILED_PROMPTS: (
-            "The agent API gave no answer, an empty answer or a transport failure. "
-            "The errors column of the raw records names the cause."
+            "The agent API gave no answer, an empty answer, a transport failure, or an "
+            "answer with no model call behind it. The errors column of the raw records "
+            "names the cause."
         ),
         RESPONSE: RESPONSE_NOTE,
     }
@@ -301,6 +303,7 @@ METRICS = MappingProxyType(
         TRIAGE_LOST: MetricSpec("Triage starts lost"),
         RUN_SLOT_REFUSALS: MetricSpec("Run-slot refusals"),
         FAILED_PROMPTS: MetricSpec("Failed prompts"),
+        UNFINISHED_PROMPTS: MetricSpec("Prompts answered without the operation"),
         RESPONSE: MetricSpec("Response time", "s"),
         TOKENS_INPUT: MetricSpec("Input tokens, every caller"),
         TOKENS_OUTPUT: MetricSpec("Output tokens, every caller"),
