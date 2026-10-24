@@ -5653,11 +5653,14 @@ func (r *PlatformAgentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				// such a name keeps it out: agentProfileServiceAccountIsForeign),
 				// and those are the profile's, not the agent's, so Owns()
 				// above never fires for them. They live in the profile
-				// namespace, which maps to the agent beside it; the legacy
-				// one in the agent's own namespace maps to that.
+				// namespace, which maps to the agent beside it.
 				&corev1.ServiceAccount{},
 				handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-					return enqueueAgentsInNamespace(ctx, agentNamespaceOfProfileServiceAccount(obj.GetNamespace()))
+					agentNS, ok := agentNamespaceOfProfileServiceAccount(obj.GetNamespace())
+					if !ok {
+						return nil
+					}
+					return enqueueAgentsInNamespace(ctx, agentNS)
 				}),
 				builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
 					return strings.HasPrefix(obj.GetName(), agentProfileServiceAccountPrefix)

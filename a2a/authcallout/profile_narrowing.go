@@ -66,7 +66,8 @@ var topicStreams = []string{lib.StreamTopicsState, lib.StreamTopicsJournal}
 
 // profileTiers are the tiers a profile entry may name, the AgentProfile
 // CRD's allowedTiers values. Duplicated here because the modules cannot
-// import each other; the fixture contract test holds the spellings equal.
+// import each other, and kept equal by hand: the rendered fixture the
+// contract test reads carries only read.
 var profileTiers = map[string]bool{"read": true, "unattended": true}
 
 // topicPrefix is how a profile's topic grant becomes a subject.

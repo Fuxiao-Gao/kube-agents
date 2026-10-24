@@ -1587,13 +1587,13 @@ func TestAProfileNameTooLongForUnattendedDropsOut(t *testing.T) {
 // agent beside it, so a foreign ServiceAccount appearing there re-renders the
 // map without waiting for the periodic requeue.
 func TestAProfileServiceAccountChangeWakesTheAgentBesideIt(t *testing.T) {
-	for ns, want := range map[string]string{
-		"kubeagents-system-profiles": "kubeagents-system",
-		"kubeagents-system":          "kubeagents-system",
-		"-profiles":                  "-profiles",
-	} {
-		if got := agentNamespaceOfProfileServiceAccount(ns); got != want {
-			t.Errorf("%s maps to %s, want %s", ns, got, want)
+	if got, ok := agentNamespaceOfProfileServiceAccount("kubeagents-system-profiles"); !ok || got != "kubeagents-system" {
+		t.Errorf("kubeagents-system-profiles maps to %q, %v; want kubeagents-system", got, ok)
+	}
+	// Nothing else maps, and never to "", which would enqueue every agent.
+	for _, ns := range []string{"kubeagents-system", "-profiles"} {
+		if got, ok := agentNamespaceOfProfileServiceAccount(ns); ok {
+			t.Errorf("%s maps to %q, want nothing", ns, got)
 		}
 	}
 }

@@ -5146,11 +5146,15 @@ func (r *PlatformAgentReconciler) reconcileA2AStack(ctx context.Context, agent *
 	// A profile's identities are ServiceAccounts in the profile namespace,
 	// so without that namespace (marked as the chart's) there are none to
 	// render: whoever made a namespace of that name must not get them. A
-	// failed read drops them too, under the one profile-namespace rule.
+	// failed read returns, as a failed list does above, and leaves the
+	// applied map as it is. Dropping the entries instead would revoke every
+	// profile's identity on an API-server blip, and the map lives in the
+	// agent's namespace, so the profile-namespace rule (skip and carry on)
+	// doesn't apply to it.
 	if len(profiles) > 0 {
 		ready, err := r.profileNamespaceExists(ctx, agent)
 		if err != nil {
-			r.profileNamespaceFailure(ctx, agent, "read for the identity map", err)
+			return state, fmt.Errorf("failed to read the profile namespace for the identity map: %w", err)
 		}
 		if !ready {
 			profiles = nil

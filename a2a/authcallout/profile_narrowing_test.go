@@ -567,7 +567,7 @@ func TestAWorkersDispatchAndLeaseGrantsAreItsOwn(t *testing.T) {
 func TestAProfileEntrysTierIsCheckedAtParse(t *testing.T) {
 	for name, entry := range map[string]string{
 		"an unknown tier":          `{"serviceAccount":"system:serviceaccount:ns:p","user":"profile-p","account":"APP","narrowing":"profile","profile":"p","tier":"admin","grants":{"publish":[],"subscribe":[]}}`,
-		"a tier on a static entry": `{"serviceAccount":"system:serviceaccount:ns:s","user":"s","account":"APP","tier":"read","grants":{"publish":["x"],"subscribe":[]}}`,
+		"a tier on a static entry": `{"serviceAccount":"system:serviceaccount:ns:s","user":"s","account":"APP","tier":"read","grants":{"publish":["x"],"subscribe":["y"]}}`,
 	} {
 		if _, err := ParseIdentityMap([]byte(`{"version":"v","identities":[` + entry + `]}`)); err == nil {
 			t.Errorf("%s was accepted", name)

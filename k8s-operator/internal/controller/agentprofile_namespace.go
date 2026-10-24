@@ -74,13 +74,11 @@ func profileNamespaceOf(p *agentv1alpha1.AgentProfile) string {
 }
 
 // agentNamespaceOfProfileServiceAccount is the namespace whose agent renders
-// a profile ServiceAccount's map entry: the one beside a profile namespace,
-// or the ServiceAccount's own (the legacy agent-namespace one).
-func agentNamespaceOfProfileServiceAccount(ns string) string {
-	if agentNS, ok := strings.CutSuffix(ns, profileNamespaceSuffix); ok && agentNS != "" {
-		return agentNS
-	}
-	return ns
+// a profile ServiceAccount's map entry, the one beside a profile namespace.
+// Any other namespace holds no ServiceAccount the map reads.
+func agentNamespaceOfProfileServiceAccount(ns string) (string, bool) {
+	agentNS, ok := strings.CutSuffix(ns, profileNamespaceSuffix)
+	return agentNS, ok && agentNS != ""
 }
 
 // resolveProfileCeiling is spec.harness.tuning.profiles.ceiling, defaulted.
@@ -216,14 +214,13 @@ func profileNamespacePeer(agent *agentv1alpha1.PlatformAgent) networkingv1.Netwo
 	}
 }
 
-// profileNamespaceExists reads the profile namespace. A namespace that
-// doesn't exist is an install the chart didn't make it for (a CR applied by
-// hand, or a chart from before #3655): profile work renders nothing there,
-// and the operator never creates it.
+// profileNamespaceReady reads the profile namespace through reader, which
+// both callers pass uncached: Namespace is a kind neither controller
+// watches, and a cached Get would start a cluster-wide informer for it on
+// every install. A namespace that doesn't exist is an install the chart
+// didn't make it for (a CR applied by hand, or a chart from before #3655):
+// profile work renders nothing there, and the operator never creates it.
 func profileNamespaceReady(ctx context.Context, reader client.Reader, agent *agentv1alpha1.PlatformAgent) (bool, error) {
-	// Through a2aReader: Namespace is a kind this controller doesn't
-	// otherwise watch, and a cached Get would start a cluster-wide informer
-	// for it on every install.
 	var ns corev1.Namespace
 	if err := reader.Get(ctx, types.NamespacedName{Name: profileNamespaceName(agent)}, &ns); err != nil {
 		if apierrors.IsNotFound(err) {
