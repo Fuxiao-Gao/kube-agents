@@ -205,7 +205,9 @@ elif warning:
 else:
     st.success(f"All {len(evaluated)} checks pass for this fleet.")
 first = hl.first_limit(checks)
-if first is not None:
+if first is not None and not first.reached:
+    st.markdown(f"**First limit reached:** {first.label}, already at the base point of the data.")
+elif first is not None:
     st.markdown(
         f"**First limit reached:** {first.label}, at {hl.percent(first.reached)} of "
         "this fleet's growth from the base point."

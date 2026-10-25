@@ -139,6 +139,11 @@ RANGE_TOLERANCE = 0.01
 EPSILON = 1e-9
 # A line through two distinct values: Phase 1's design, labelled as such.
 TWO_POINTS = 2
+# Growth below this share of a threshold counts as none: input rounding, not a larger fleet.
+NEGLIGIBLE_GROWTH = 1e-3
+# A threshold that this fleet would reach only past 10 times its growth is shown as such.
+REACHED_DISPLAY_CAP = 10.0
+BEYOND_CAP_TEXT = "beyond 10× this growth"
 BASE_LEVEL = "base"
 # Containers that run to completion (the bus provision Job, the agent pod's init containers).
 SHORT_LIVED_CONTAINERS = frozenset({"provision", "prepare-image-trees", "sandbox-credential-cleanup", "sandbox-ssh-key"})
@@ -1212,10 +1217,14 @@ def evaluate(value: float, lines: Sequence[Line]) -> tuple[str, Line | None]:
 
 
 def reached_at(prediction: Prediction, threshold: float) -> float | None:
-    """The share of the growth from the base at which the prediction passes the threshold."""
+    """The share of the growth from the base at which the prediction passes the threshold.
+
+    Growth too small to matter (a fleet that differs from the base only by the
+    rounding of its inputs) reaches nothing, rather than a share in the millions.
+    """
     if prediction.base > threshold + EPSILON:
         return 0.0
-    if prediction.growth <= EPSILON:
+    if prediction.growth <= max(EPSILON, abs(threshold) * NEGLIGIBLE_GROWTH):
         return None
     return max(0.0, (threshold - prediction.base) / prediction.growth)
 
@@ -1462,7 +1471,11 @@ def format_value(metric: str, value: float | None) -> str:
 
 
 def percent(share: float | None) -> str:
-    return NO_VALUE if share is None else f"{share:.0%}"
+    if share is None:
+        return NO_VALUE
+    if share > REACHED_DISPLAY_CAP:
+        return BEYOND_CAP_TEXT
+    return f"{share:.0%}"
 
 
 def resource_rows(checks: Iterable[Check]) -> list[dict[str, str]]:

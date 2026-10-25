@@ -1163,6 +1163,16 @@ class NodePlanFilterTest(unittest.TestCase):
         self.assertEqual([pod.name for pod in plan.pods], [hl.GATEWAY_POD])
 
 
+class ReachedAtTest(unittest.TestCase):
+    def test_negligible_growth_reaches_nothing_and_large_shares_are_capped(self):
+        fields = hl.Contribution.__dataclass_fields__
+        contribution = hl.Contribution(**{name: (0.001 if name == "delta" else None) for name in fields})
+        tiny = hl.Prediction(hl.MEMORY_PEAK, "c", 100.0, "base", (contribution,))
+        self.assertIsNone(hl.reached_at(tiny, 8192.0))
+        self.assertEqual(hl.percent(56770.56), hl.BEYOND_CAP_TEXT)
+        self.assertEqual(hl.percent(0.5), "50%")
+
+
 class ChurnAxisTest(unittest.TestCase):
     def test_churn_sits_at_the_achieved_rate(self):
         raw = {
