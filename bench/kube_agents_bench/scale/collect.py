@@ -35,6 +35,7 @@ MEMORY_METRIC = "kubernetes.io/container/memory/used_bytes"
 MEMORY_TYPE = "non-evictable"
 CPU_METRIC = "kubernetes.io/container/cpu/core_usage_time"
 ALIGNMENT_SECONDS = 60
+MIN_WINDOW_SECONDS = 1
 QUOTA_PROJECT_HEADER = "x-goog-user-project"
 HTTP_TIMEOUT_SECONDS = 60
 RFC3339_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -361,7 +362,12 @@ class Install:
         return counts
 
     def container_peaks(self, start: float, end: float) -> dict[str, dict[str, float]]:
-        """Per container, the highest memory and CPU over [start, end], from Cloud Monitoring."""
+        """Per container, the highest memory and CPU over [start, end], from Cloud Monitoring.
+
+        Monitoring refuses an interval whose end is not after its start, so a
+        window shorter than a second is widened to one second.
+        """
+        end = max(end, start + MIN_WINDOW_SECONDS)
         peaks: dict[str, dict[str, float]] = {}
         base = (
             f'resource.type="k8s_container" AND resource.labels.project_id="{self.project}" '
@@ -437,11 +443,22 @@ def _rfc3339(epoch: float) -> str:
     return time.strftime(RFC3339_FORMAT, time.gmtime(epoch))
 
 
+def counter_increase(before: float, after: float) -> float:
+    """How much a counter grew, Prometheus ``increase()`` style.
+
+    A counter that went down was reset (its process restarted in place, which
+    keeps the pod's UID): it is counted from zero, so a restart in the window
+    can never make a count negative.
+    """
+    return after - before if after >= before else after
+
+
 def _growth(before: Snapshot, after: Snapshot, target: str, family: str) -> float:
-    """A counter family's growth, pod by pod; a pod new since ``before`` counts from zero."""
+    """A counter family's growth, pod by pod; a new pod or a reset counter counts from zero."""
     total = 0.0
     for pod, samples in after.scraped.get(target, {}).items():
-        total += family_sum(samples, family) - family_sum(before.scraped.get(target, {}).get(pod, []), family)
+        earlier = family_sum(before.scraped.get(target, {}).get(pod, []), family)
+        total += counter_increase(earlier, family_sum(samples, family))
     return total
 
 
@@ -467,8 +484,11 @@ def counter_metrics(before: Snapshot, after: Snapshot) -> list[Metric]:
         metrics.append(Metric("proxy_refusals", _growth(before, after, "proxy", PROXY_REFUSALS)))
         delta: dict[float, float] = {}
         for pod, samples in after.scraped["proxy"].items():
-            grown = bucket_delta(histogram_buckets(before.scraped.get("proxy", {}).get(pod, []), PROXY_WAIT),
-                                 histogram_buckets(samples, PROXY_WAIT))
+            earlier = histogram_buckets(before.scraped.get("proxy", {}).get(pod, []), PROXY_WAIT)
+            now = histogram_buckets(samples, PROXY_WAIT)
+            # A histogram whose counts went down was reset: its current counts are the window's.
+            reset = any(now.get(bound, 0.0) < count for bound, count in earlier.items())
+            grown = now if reset else bucket_delta(earlier, now)
             for bound, value in grown.items():
                 delta[bound] = delta.get(bound, 0.0) + value
         for name, quantile in PROXY_WAIT_QUANTILES:

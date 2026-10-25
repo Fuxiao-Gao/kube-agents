@@ -70,6 +70,8 @@ RELAY_REMOTE_PORT = 8643
 LOCALHOST = "127.0.0.1"
 RELAY_START_SECONDS = 15
 KUBECONFIG_MODE = 0o600
+RELAY_KUBECONFIG_PREFIX = "harness-scale-"
+KUBECONFIG_SUFFIX = ".kubeconfig"
 # What a new install starts without: the agent's data and session metadata, the shell's data, the bus's data.
 RESET_CLAIMS = ("platform-agent-data", "system-metadata", "data-platform-agent-shell-0", "data-platform-agent-a2a-nats-0")
 RESET_STATEFUL_PODS = ("platform-agent-shell-0", "platform-agent-a2a-nats-0")
@@ -119,7 +121,9 @@ class Relay:
         self.namespace = namespace
         self.port = 0
         self.proc: subprocess.Popen[bytes] | None = None
-        self.kubeconfig = Path(tempfile.mkstemp(prefix="harness-scale-", suffix=".kubeconfig")[1])
+        handle, name = tempfile.mkstemp(prefix=RELAY_KUBECONFIG_PREFIX, suffix=KUBECONFIG_SUFFIX)
+        os.close(handle)
+        self.kubeconfig = Path(name)
 
     def start(self) -> None:
         self.kubeconfig.write_text(kube.kubectl(self.context, "config", "view", "--minify", "--flatten",
@@ -137,6 +141,7 @@ class Relay:
         )
         time.sleep(RELAY_START_SECONDS)
         if self.proc.poll() is not None:
+            self.stop()  # removes the kubeconfig copy, which holds the host cluster's credentials
             raise kube.CommandError("the agent API relay exited at start")
 
     def stop(self) -> None:
@@ -305,14 +310,29 @@ def reset(context: str, namespace: str) -> None:
         return
     # An empty bus has none of its JetStream buckets; the install creates them with a provision Job,
     # which the operator renders again once the completed one is deleted.
-    kube.kubectl(context, "wait", "-n", namespace, "--for=condition=Ready", f"pod/{NATS_POD}",
-                 f"--timeout={RESET_TIMEOUT_SECONDS}s", timeout=RESET_TIMEOUT_SECONDS)
+    _wait_pod_ready(context, namespace, NATS_POD)
     jobs = kube.kubectl(context, "get", "jobs", "-n", namespace, "--no-headers", "-o", "name")
     for job in (line.strip() for line in jobs.splitlines()):
         if PROVISION_JOB_FRAGMENT in job:
             kube.kubectl(context, "delete", "-n", namespace, job, "--wait=true", timeout=RESET_TIMEOUT_SECONDS)
     _wait_provisioned(context, namespace)
     restart(context, namespace)
+
+
+def _wait_pod_ready(context: str, namespace: str, pod: str) -> None:
+    """Wait for a pod a StatefulSet re-creates: until it exists, then until it is Ready.
+
+    ``kubectl wait`` on a name fails at once with NotFound in the moment between
+    the old pod's deletion and the controller creating the new one.
+    """
+    deadline = time.monotonic() + RESET_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            kube.kubectl(context, "wait", "-n", namespace, "--for=condition=Ready", f"pod/{pod}", READY_WAIT_ARG)
+            return
+        except kube.CommandError:
+            time.sleep(READY_POLL_SECONDS)
+    raise kube.CommandError(f"{pod} did not become Ready after the reset")
 
 
 def _wait_provisioned(context: str, namespace: str) -> None:

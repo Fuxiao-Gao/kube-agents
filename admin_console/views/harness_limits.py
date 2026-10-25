@@ -82,8 +82,10 @@ MARGIN_NOTE = (
 )
 CHART_CAPTION = (
     "Filled points are runs. Open points are runs left out of the fit: a response "
-    "time from a run that saw a provider 429 or a failed prompt. The solid line is "
-    "the fit over the measured range; with two distinct values it is a two-point "
+    "time from a run that saw a provider 429, a failed prompt, or a prompt answered "
+    "without performing its operation (declined, cancelled, cut off, or recorded "
+    "before answers were kept). The solid line is the fit over the measured range; "
+    "with two distinct planned points it is a two-point "
     "estimate. The dashed line is predicted, not measured. Dotted lines are "
     "thresholds: a container's limit in its colour, the fixed thresholds in the "
     "warning and failure colours."

@@ -19,6 +19,7 @@ import itertools
 import json
 import logging
 import math
+import os
 import re
 import signal
 import sys
@@ -64,6 +65,7 @@ KUBECONFIG_SUFFIX = ".kubeconfig"
 # Operations whose answer has to be read to know the operation ran: they can be declined or
 # cancelled (they need a GitOps repository; they honour the scope's exclusions).
 NEEDS_ANSWER_CHECK = ("fleet_audit", "upgrade_readiness")
+UNFINISHED_METRIC = "unfinished_prompts"
 UNCHECKED_ANSWER = "no answer recorded (written before answers were kept), so completion cannot be checked"
 
 
@@ -302,7 +304,13 @@ class Runner:
             operation = next((o for o in self.plan.operations if o.name == record.operation), None)
             if operation and operation.kind == "prompt":
                 reasons = [operations.unfinished_reason(answer, record.errors) for answer in record.answers or [""]]
-                if not record.answers and operation.name in NEEDS_ANSWER_CHECK:
+                failed = any(e.startswith(operations.PROMPT_FAILED) for e in record.errors)
+                if record.answers or failed:
+                    # The count of prompts answered without their operation, from the kept answers.
+                    record.metrics = [m for m in record.metrics if m.name != UNFINISHED_METRIC]
+                    record.metrics.append(records.Metric(UNFINISHED_METRIC, float(sum(1 for r in reasons if r))))
+                elif operation.name in NEEDS_ANSWER_CHECK:
+                    # Written before answers were kept: whether the operation ran is unknown.
                     reasons.append(UNCHECKED_ANSWER)
                 for reason in filter(None, reasons):
                     note = f"{operations.PROMPT_UNFINISHED}: {reason}"
@@ -392,8 +400,9 @@ class Runner:
             metrics.append(records.Metric("unfinished_prompts", float(outcome.unfinished_prompts)))
         if outcome.response_seconds:
             metrics.append(records.Metric("response_seconds", max(outcome.response_seconds)))
-        # tokens_* (from LiteLLM) count every model call in the window, background jobs included;
-        # run_tokens_* (from the harness) count the sessions this run's prompts opened.
+        # tokens_* (from LiteLLM) count every model call in the window, background jobs included, and
+        # their input counts the whole prompt; run_tokens_* (from the harness) count the sessions this
+        # run's prompts opened, and their input is the non-cached part alone.
         for name, value in outcome.tokens.items():
             metrics.append(records.Metric(f"run_{name}", value))
         errors += outcome.errors + before.errors + after.errors
@@ -427,9 +436,9 @@ class Runner:
         LOG.info("%s runs to do (%s pending of %s)", len(todo), len(pending), len(specs))
         awaiting: list[tuple[float, records.Record]] = []
         relay = operations.Relay(self.install.context, self.install.namespace)
-        relay.start()
-        self.relay_port = relay.port
         try:
+            relay.start()
+            self.relay_port = relay.port
             for (factor, level), group in itertools.groupby(todo, key=lambda s: (s.factor, s.level)):
                 try:
                     values = self.apply_level(factor, level)
@@ -500,6 +509,11 @@ class Runner:
         except Exception as exc:  # a monitoring failure costs this record its peaks, not the campaign
             record.errors.append(f"{MONITORING_ERROR} {type(exc).__name__}: {exc}")
             return
+        if not peaks:
+            # No series at all (system metrics off, or not ingested yet): say so, and stop asking.
+            record.errors.append(f"{MONITORING_ERROR} no container series for {self.install.cluster}/"
+                                 f"{self.install.namespace} in [{record.started}, {record.ended}]")
+            return
         for container, values in peaks.items():
             for name, value in values.items():
                 record.metrics.append(records.Metric(name, value, container))
@@ -556,7 +570,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{len(specs)} runs")
         return 0
     data_file = args.config.resolve().parent / plan.target.get("data_file", DEFAULT_DATA_FILE)
-    private = Path(tempfile.mkstemp(prefix=PRIVATE_KUBECONFIG_PREFIX, suffix=KUBECONFIG_SUFFIX)[1])
+    handle, name = tempfile.mkstemp(prefix=PRIVATE_KUBECONFIG_PREFIX, suffix=KUBECONFIG_SUFFIX)
+    os.close(handle)
+    private = Path(name)
     kube.use_private_kubeconfig(private)
     atexit.register(private.unlink, missing_ok=True)
     runner = Runner(plan, data_file)

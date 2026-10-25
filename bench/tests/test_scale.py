@@ -376,3 +376,104 @@ def test_reclassify_excludes_unfinished_and_unchecked_runs_and_scrubs_the_projec
     assert by["base|0|fan_out|1"]["excluded_from"] == []
     assert by["clusters|8|fleet_audit|2"]["excluded_from"] == ["response_seconds"]
     assert "example-project" not in json.dumps(by["clusters|8|fleet_audit|2"])
+
+
+def test_a_counter_reset_in_place_counts_from_zero():
+    # An OOMKill restarts agent-api-auth in place: same pod UID, counters back to zero.
+    before = Snapshot(scraped={"watcher": {"uid": collect.parse_prometheus("k8s_event_watcher_events_seen_total 900\n")},
+                               "proxy": {"uid": collect.parse_prometheus(
+                                   'kubeagents_credential_proxy_admission_refusals_total 7\n'
+                                   'kubeagents_credential_proxy_admission_wait_seconds_bucket{le="1"} 50\n'
+                                   'kubeagents_credential_proxy_admission_wait_seconds_bucket{le="+Inf"} 60\n')}})
+    after = Snapshot(scraped={"watcher": {"uid": collect.parse_prometheus("k8s_event_watcher_events_seen_total 40\n")},
+                              "proxy": {"uid": collect.parse_prometheus(
+                                  'kubeagents_credential_proxy_admission_refusals_total 2\n'
+                                  'kubeagents_credential_proxy_admission_wait_seconds_bucket{le="1"} 3\n'
+                                  'kubeagents_credential_proxy_admission_wait_seconds_bucket{le="+Inf"} 4\n')}})
+    metrics = {m.name: m.value for m in collect.counter_metrics(before, after) if m.container is None}
+    assert metrics["watcher_events_seen"] == 40
+    assert metrics["proxy_refusals"] == 2
+    assert metrics["proxy_wait_p50_seconds"] == 1.0
+
+
+def test_a_timeout_is_raised_at_once(monkeypatch):
+    calls = []
+
+    def hang(*args, **kwargs):
+        calls.append(1)
+        raise kube.subprocess.TimeoutExpired(args[0], 1)
+
+    monkeypatch.setattr(kube.subprocess, "run", hang)
+    monkeypatch.setattr(kube.time, "sleep", lambda s: None)
+    with pytest.raises(kube.CommandError, match="timed out"):
+        kube.run(["gcloud", "container", "clusters", "create", "x"])
+    assert len(calls) == 1
+
+
+class _EmptyInstall:
+    cluster, namespace = "host", "ns"
+
+    def container_peaks(self, start, end):
+        return {}
+
+
+def test_an_empty_monitoring_answer_is_an_error_and_not_retried(tmp_path):
+    plan = load_plan(PHASE1, environ=ENV)
+    path = tmp_path / "data.json"
+    run = runner.Runner(plan, path)
+    run.install = _EmptyInstall()
+    record = _record()
+    run.add_peaks(record)
+    assert record.errors and record.errors[0].startswith("monitoring: no container series")
+    records.merge(path, [record])
+    run.install = _FailingInstall()  # would raise if queried again
+    run.backfill_peaks()
+    assert records.load(path)["records"][0]["errors"] == record.errors
+
+
+def test_reclassify_counts_unfinished_prompts_and_trusts_failed_ones(tmp_path):
+    plan = load_plan(PHASE1, environ=ENV)
+    path = tmp_path / "data.json"
+    base = dict(commit="e" * 40, mode="next", phase="phase1", factor="clusters", level=8,
+                started="2026-10-24T00:00:00Z", ended="2026-10-24T00:05:00Z", operation="fleet_audit")
+    records.merge(path, [
+        records.Record(run=1, answers=["Audit cancelled as all 8 managed clusters are explicitly excluded"], **base),
+        records.Record(run=2, answers=["Checked 8 clusters; 3 findings"], **base),
+        records.Record(run=3, errors=["prompt failed: no answer within 3600s"], **base),
+    ])
+    runner.Runner(plan, path).reclassify()
+    by = {r["run"]: r for r in records.load(path)["records"]}
+    metric = {run: next(m["value"] for m in by[run]["metrics"] if m["name"] == "unfinished_prompts") for run in by}
+    assert metric == {1: 1.0, 2: 0.0, 3: 0.0}
+    assert not any("written before answers were kept" in e for e in by[3]["errors"])
+
+
+def test_a_relay_that_dies_at_start_removes_its_kubeconfig(monkeypatch):
+    monkeypatch.setattr(operations.kube, "kubectl", lambda *a, **k: "apiVersion: v1\n")
+    monkeypatch.setattr(operations.time, "sleep", lambda s: None)
+
+    class Dead:
+        def poll(self):
+            return 1
+
+    monkeypatch.setattr(operations.subprocess, "Popen", lambda *a, **k: Dead())
+    relay = operations.Relay("ctx", "ns")
+    with pytest.raises(kube.CommandError):
+        relay.start()
+    assert not relay.kubeconfig.exists()
+
+
+def test_the_nats_wait_survives_the_moment_the_pod_does_not_exist(monkeypatch):
+    replies = [kube.CommandError('pods "platform-agent-a2a-nats-0" not found'),
+               kube.CommandError('pods "platform-agent-a2a-nats-0" not found'), "condition met"]
+
+    def kubectl(*args, **kwargs):
+        reply = replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    monkeypatch.setattr(operations.kube, "kubectl", kubectl)
+    monkeypatch.setattr(operations.time, "sleep", lambda s: None)
+    operations._wait_pod_ready("ctx", "ns", operations.NATS_POD)
+    assert replies == []

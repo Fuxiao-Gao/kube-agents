@@ -9944,6 +9944,10 @@
           "name": "cpu_peak_cores",
           "value": 0.017159396454508168,
           "container": "shell"
+        },
+        {
+          "name": "unfinished_prompts",
+          "value": 1.0
         }
       ],
       "provider_429s": 0,
@@ -10420,6 +10424,10 @@
           "name": "cpu_peak_cores",
           "value": 0.01733762283250447,
           "container": "shell"
+        },
+        {
+          "name": "unfinished_prompts",
+          "value": 1.0
         }
       ],
       "provider_429s": 0,
@@ -10896,6 +10904,10 @@
           "name": "cpu_peak_cores",
           "value": 0.018608141728369294,
           "container": "shell"
+        },
+        {
+          "name": "unfinished_prompts",
+          "value": 1.0
         }
       ],
       "provider_429s": 0,
@@ -11380,6 +11392,10 @@
           "name": "cpu_peak_cores",
           "value": 0.030641913111351945,
           "container": "shell"
+        },
+        {
+          "name": "unfinished_prompts",
+          "value": 0.0
         }
       ],
       "provider_429s": 0,
@@ -11862,6 +11878,10 @@
           "name": "cpu_peak_cores",
           "value": 0.11565305959713139,
           "container": "shell"
+        },
+        {
+          "name": "unfinished_prompts",
+          "value": 0.0
         }
       ],
       "provider_429s": 0,
@@ -12344,6 +12364,10 @@
           "name": "cpu_peak_cores",
           "value": 0.8945292005845393,
           "container": "shell"
+        },
+        {
+          "name": "unfinished_prompts",
+          "value": 0.0
         }
       ],
       "provider_429s": 0,
@@ -12826,6 +12850,10 @@
           "name": "cpu_peak_cores",
           "value": 0.7983701614640722,
           "container": "shell"
+        },
+        {
+          "name": "unfinished_prompts",
+          "value": 0.0
         }
       ],
       "provider_429s": 4,
@@ -13308,6 +13336,10 @@
           "name": "cpu_peak_cores",
           "value": 0.08407216568700733,
           "container": "shell"
+        },
+        {
+          "name": "unfinished_prompts",
+          "value": 1.0
         }
       ],
       "provider_429s": 0,
@@ -13792,6 +13824,10 @@
           "name": "cpu_peak_cores",
           "value": 0.642050515137483,
           "container": "shell"
+        },
+        {
+          "name": "unfinished_prompts",
+          "value": 0.0
         }
       ],
       "provider_429s": 0,
@@ -14274,6 +14310,10 @@
           "name": "cpu_peak_cores",
           "value": 0.03206613372054411,
           "container": "shell"
+        },
+        {
+          "name": "unfinished_prompts",
+          "value": 0.0
         }
       ],
       "provider_429s": 0,
@@ -16614,6 +16654,10 @@
           "name": "cpu_peak_cores",
           "value": 0.029206657397632323,
           "container": "shell"
+        },
+        {
+          "name": "unfinished_prompts",
+          "value": 0.0
         }
       ],
       "provider_429s": 0,
@@ -17110,6 +17154,10 @@
           "name": "cpu_peak_cores",
           "value": 0.039449968567843524,
           "container": "shell"
+        },
+        {
+          "name": "unfinished_prompts",
+          "value": 0.0
         }
       ],
       "provider_429s": 0,
@@ -17612,6 +17660,10 @@
           "name": "cpu_peak_cores",
           "value": 0.1861775104167691,
           "container": "shell"
+        },
+        {
+          "name": "unfinished_prompts",
+          "value": 0.0
         }
       ],
       "provider_429s": 0,
@@ -18114,6 +18166,10 @@
           "name": "cpu_peak_cores",
           "value": 0.6609843634897364,
           "container": "shell"
+        },
+        {
+          "name": "unfinished_prompts",
+          "value": 0.0
         }
       ],
       "provider_429s": 0,
@@ -18596,6 +18652,10 @@
           "name": "cpu_peak_cores",
           "value": 0.33543458910079,
           "container": "shell"
+        },
+        {
+          "name": "unfinished_prompts",
+          "value": 0.0
         }
       ],
       "provider_429s": 0,
@@ -19078,6 +19138,10 @@
           "name": "cpu_peak_cores",
           "value": 0.7177523569396574,
           "container": "shell"
+        },
+        {
+          "name": "unfinished_prompts",
+          "value": 1.0
         }
       ],
       "provider_429s": 0,
@@ -19561,6 +19625,10 @@
           "name": "cpu_peak_cores",
           "value": 0.0663300967690399,
           "container": "shell"
+        },
+        {
+          "name": "unfinished_prompts",
+          "value": 0.0
         }
       ],
       "provider_429s": 0,
@@ -20043,6 +20111,10 @@
           "name": "cpu_peak_cores",
           "value": 0.06829246775907147,
           "container": "shell"
+        },
+        {
+          "name": "unfinished_prompts",
+          "value": 0.0
         }
       ],
       "provider_429s": 0,
@@ -20525,6 +20597,10 @@
           "name": "cpu_peak_cores",
           "value": 0.5136975253434836,
           "container": "shell"
+        },
+        {
+          "name": "unfinished_prompts",
+          "value": 0.0
         }
       ],
       "provider_429s": 0,
@@ -21937,6 +22013,10 @@
           "name": "cpu_peak_cores",
           "value": 0.14332727317960234,
           "container": "shell"
+        },
+        {
+          "name": "unfinished_prompts",
+          "value": 0.0
         }
       ],
       "provider_429s": 0,

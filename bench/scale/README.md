@@ -137,6 +137,8 @@ Metric names:
 - the agent: `triage_lost`, `run_slot_refusals`, `failed_prompts`, `unfinished_prompts`,
   `response_seconds` (the slowest prompt that completed its operation);
 - tokens: `tokens_input`, `tokens_output`, `tokens_cached` (LiteLLM's counters over the run's window,
-  every caller included) and `run_tokens_input`, `run_tokens_output`, `run_tokens_cached` (the run's
-  own prompts, as the harness reports them);
+  every caller included; `tokens_input` counts the whole prompt, cached tokens included) and
+  `run_tokens_input`, `run_tokens_output`, `run_tokens_cached` (the run's own prompts, as the harness
+  reports them; `run_tokens_input` is the non-cached part of the prompt, so the run's share of the
+  window is `run_tokens_input + run_tokens_cached` against `tokens_input`);
 - the fixtures: `churn_achieved_per_minute`.

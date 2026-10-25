@@ -71,7 +71,9 @@ def run(args: list[str], *, stdin: str | None = None, timeout: float = DEFAULT_T
     """Run a command; retry it with backoff when it fails for a reason that passes.
 
     A day-long campaign meets expired tokens, a dropped network and API-server
-    blips. Those are retried; any other failure is raised at once.
+    blips. Those are retried; any other failure, and a command that outlives its
+    timeout, is raised at once: re-running a create that was about to finish, or
+    a read that hangs, costs more than it saves.
     """
     shown = " ".join(args[:ARGS_SHOWN])
     delay = RETRY_FIRST_DELAY_SECONDS
@@ -79,14 +81,13 @@ def run(args: list[str], *, stdin: str | None = None, timeout: float = DEFAULT_T
         LOG.debug("run: %s", " ".join(args))
         try:
             proc = subprocess.run(args, input=stdin, capture_output=True, text=True, timeout=timeout, check=False)
-        except subprocess.TimeoutExpired:
-            error = f"{shown}... timed out after {timeout}s"
-        else:
-            if proc.returncode == 0:
-                return proc.stdout
-            error = f"{shown}... exited {proc.returncode}: {proc.stderr.strip()[-STDERR_TAIL_CHARS:]}"
-            if not TRANSIENT_RE.search(proc.stderr):
-                raise CommandError(error)
+        except subprocess.TimeoutExpired as exc:
+            raise CommandError(f"{shown}... timed out after {timeout}s") from exc
+        if proc.returncode == 0:
+            return proc.stdout
+        error = f"{shown}... exited {proc.returncode}: {proc.stderr.strip()[-STDERR_TAIL_CHARS:]}"
+        if not TRANSIENT_RE.search(proc.stderr):
+            raise CommandError(error)
         if attempt == RETRY_ATTEMPTS:
             raise CommandError(error)
         LOG.warning("transient failure (attempt %s of %s), retrying in %ss: %s", attempt, RETRY_ATTEMPTS, delay, error[:300])
