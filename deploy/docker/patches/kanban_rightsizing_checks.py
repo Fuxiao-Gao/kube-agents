@@ -31,10 +31,12 @@ What it does
 - **A Platform card whose request asks to cut requests or limits**
   (:data:`CUT_REQUEST`, read in its title and in the body above the
   report-format stanza)
-  must end with entries, its own or its descendants'. Without them it is
-  refused once, so a Platform Agent that checked the cluster itself, or
-  skipped the Cluster Agent card, passes the field or delegates. A wrong
-  match costs one refusal; a missed one leaves the card as it was.
+  and that created no card is refused once when it passed no entries, so a
+  Platform Agent that checked the cluster itself passes the field or
+  delegates. A card that delegated is not refused: its cards' entries, if
+  any, are rendered, and a where-is fan-out that found the workload nowhere
+  is a complete answer. A wrong match costs one refusal; a missed one
+  leaves the card as it was.
 - **Any card** gets the accepted entries of its own and of its settled
   descendants (``kanban_verified_claims.descendant_card_ids``) rendered in
   ``result``, before the evidence section (:func:`render`), so a summary
@@ -98,6 +100,9 @@ CHECK_KEYS = {
 #: The kind that needs no checks: the workload is not on this card's cluster.
 NO_CHECKS_KIND = "not_on_cluster"
 
+#: The kinds a cut past :data:`MAX_SHOWN` drops first, last listed first.
+DROP_FIRST = ("none", "not_on_cluster")
+
 #: Limits on the entries. One entry renders at most seven fields of 200
 #: characters plus its labels, about 1,550 characters, so twelve shown entries
 #: stay under 19,000 of ``kanban_notifier.RESULT_LIMIT``'s 30,000. The rule runs
@@ -124,7 +129,12 @@ FORMAT_MARKER = "## Report format"
 #: never on an answer. No "right-sizing": the front door writes it into plain
 #: fleet cost questions too.
 CUT_VERB = r"(?:lower|reduc|cut|shrink|decreas|downsiz|trim)\w*"
-CUT_OBJECT = r"(?:requests?|limits?|machine[- ]types?|node[- ]counts?|pool sizes?)"
+#: "requests" and "limits" count only after a resource word, so a pull
+#: request, request traffic or an API rate limit does not.
+CUT_OBJECT = (
+    r"(?:(?:cpu|memory|resource|container)\s+(?:and\s+(?:cpu|memory)\s+)?(?:requests?|limits?)"
+    r"|machine[- ]types?|node[- ]counts?|pool sizes?)"
+)
 CUT_REQUEST = re.compile(
     rf"\b{CUT_VERB}\b[^.\n]{{0,60}}?\b{CUT_OBJECT}\b|\b{CUT_OBJECT}\b[^.\n]{{0,30}}?\b{CUT_VERB}\b",
     re.IGNORECASE,
@@ -206,15 +216,24 @@ def _line(entry: dict, card: bool = True) -> str:
     )
 
 
-def render(entries: list[dict]) -> str:
-    """The section added to ``result``: one line per workload, its checks under it."""
+def render(entries: list[dict], hidden: int = 0) -> str:
+    """The section added to ``result``: one line per workload, its checks under it, and a count of any not shown."""
     parts = [HEADING]
     for entry in entries:
         parts.append(_line(entry))
         for key, label in CHECK_KEYS.items():
             if key in entry.get("checks", {}):
                 parts.append(f"  - {label}: {entry['checks'][key]}")
+    if hidden:
+        parts.append(f"- {hidden} more entries not shown; the cards below this one hold them.")
     return "\n".join(parts)
+
+
+def _cap(entries: list[dict]) -> list[dict]:
+    """At most :data:`MAX_SHOWN` entries, in their order, dropping ``not_on_cluster`` and then ``none`` first."""
+    rank = {kind: index + 1 for index, kind in enumerate(DROP_FIRST)}
+    keep = sorted(range(len(entries)), key=lambda i: (rank.get(entries[i]["dependency_kind"], 0), i))[:MAX_SHOWN]
+    return [entries[i] for i in sorted(keep)]
 
 
 def descendant_entries(conn, task_id: object) -> list[dict]:
@@ -247,12 +266,12 @@ def asks_for_cut(title: str, body: str) -> bool:
 
 
 def _read_board(connect, task_id: str) -> tuple[bool, bool, list[dict]]:
-    """Whether the card's body names the skill, whether it is a Platform card asking for a cut, and its descendants' entries."""
+    """Whether the card's body names the skill, whether it is a Platform card that asks for a cut and created no card, and its descendants' entries."""
     conn = connect()
     try:
         row = conn.execute(CARD_SQL, (task_id,)).fetchone()
         title, body, assignee = (str(row[0]), str(row[1]), str(row[2]).strip().lower()) if row else ("", "", "")
-        cut = assignee == PLATFORM_PROFILE and asks_for_cut(title, body)
+        cut = assignee == PLATFORM_PROFILE and asks_for_cut(title, body) and not gate.descendant_card_ids(conn, task_id)
         return SKILL_NAME in body, cut, descendant_entries(conn, task_id)
     finally:
         conn.close()
@@ -287,16 +306,17 @@ def rightsizing_rule(
             reasons.append(f"{PARAM}[{index}]: {reason}")
         else:
             accepted.append(entry)
-    if triggered and not accepted and not reasons:
+    if triggered and not accepted and not reasons and not inherited:
         reasons.append(
             f"this card names {SKILL_NAME}: pass `{PARAM}` with one entry per workload "
             "(workload, dependency_kind, dependency, and the five checks)"
         )
-    elif cut and not accepted and not reasons and not inherited:
+    elif cut and not accepted and not reasons:
         reasons.append(
-            f"this request asks to cut requests or limits, and no card reported the checks: send it to "
-            f"the cluster's Cluster Agent card with {SKILL_NAME} in the body and wait for it, or pass "
-            f"`{PARAM}` from the five checks you ran yourself"
+            f"this request asks to cut requests or limits, and you created no card: send it to the "
+            f"cluster's Cluster Agent card with {SKILL_NAME} in the body and wait for it, or pass "
+            f"`{PARAM}` from the five checks you ran yourself (`not_on_cluster` for a cluster that does "
+            "not run the workload)"
         )
     if reasons and not retry:
         return reasons, result, metadata
@@ -319,9 +339,10 @@ def rightsizing_rule(
             continue
         seen.add(plain)
         shown.append(entry)
-    if len(shown) > MAX_SHOWN:
-        logger.warning("[kanban] card %s: %d rightsizing entries not shown past %d", task_id, len(shown) - MAX_SHOWN, MAX_SHOWN)
-        shown = shown[:MAX_SHOWN]
+    hidden = max(0, len(shown) - MAX_SHOWN)
+    if hidden:
+        logger.warning("[kanban] card %s: %d rightsizing entries not shown past %d", task_id, hidden, MAX_SHOWN)
+        shown = _cap(shown)
     if stored:
         if metadata is not None and not isinstance(metadata, dict):
             # Upstream's _require_dict_metadata refuses this next; nothing to add to.
@@ -329,7 +350,7 @@ def rightsizing_rule(
         metadata = {**(metadata or {}), METADATA_KEY: stored}
     if not shown:
         return [], result, metadata
-    section = render(shown)
+    section = render(shown, hidden)
     return [], (f"{body}\n\n{section}" if body else section), metadata
 
 

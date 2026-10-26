@@ -1,6 +1,6 @@
 """Unit tests for the rightsizing rule in the kanban_complete gate.
 
-Run: python3 -m unittest discover -s deploy/docker/patches -p 'test_kanban_rightsizing_checks.py' -t deploy/docker/patches
+Run: python3 -m unittest discover -s deploy/docker/patches -p 'test_*.py' -t deploy/docker/patches
 """
 
 import copy
@@ -237,6 +237,18 @@ class InheritedEntriesTest(RuleTestCase):
         self.assertIn("- `api-server`: dependency: HPA.", result)
         self.assertIn(f"- `queue-worker` (card {CHILD})", result)
 
+    def test_the_cap_drops_not_on_cluster_and_none_first_and_says_so(self):
+        gone = {"workload": "x", "dependency_kind": "not_on_cluster", "dependency": "Not here."}
+        legs = [{**gone, "workload": f"gone{i}"} for i in range(krc.MAX_SHOWN)]
+        self.card("t_aaaa", body=SKILL_BODY, creator=PARENT, stored=legs)
+        self.card("t_zzzz", body=SKILL_BODY, creator=PARENT, stored=[{**HPA_ENTRY, "workload": "late-hpa"}])
+        with self.assertLogs(krc.logger, "WARNING"):
+            result = self.rule(PARENT)[1]
+        self.assertIn("`late-hpa` (card t_zzzz): dependency: HPA.", result)
+        self.assertIn("`queue-worker`", result)
+        self.assertEqual(result.count(": dependency: "), krc.MAX_SHOWN)
+        self.assertIn("- 3 more entries not shown;", result)
+
     def test_the_shown_entries_are_capped(self):
         many = [{**HPA_ENTRY, "workload": f"w{i}"} for i in range(krc.MAX_SHOWN + 2)]
         self.card("t_many", body=SKILL_BODY, creator=PARENT, stored=many)
@@ -279,6 +291,10 @@ class PlatformCutRequestTest(RuleTestCase):
             "Raise the memory limit of payments-api; it is OOMKilled.",
             "Why is checkout throttled? Its CPU limit looks too low.",
             "Reduce cost where you can.",
+            "Cut a pull request that bumps the chart.",
+            "Investigate why checkout sees reduced requests since Monday.",
+            "We are hitting reduced API limits on the ingress.",
+            "Lower the request latency of checkout.",
             f"Why is payments-api crashlooping?\n\n{krc.FORMAT_MARKER}\n\nLower the requests if needed.",
             "A report of cost opportunities (e.g., underutilized nodes, right-sizing recommendations, idle resources).",
         ):
@@ -288,6 +304,7 @@ class PlatformCutRequestTest(RuleTestCase):
         self.card(PARENT, body=CUT_ASK, assignee="platform")
         [reason] = self.rule(PARENT, result="**No cut is safe.**")[0]
         self.assertIn("asks to cut requests or limits", reason)
+        self.assertIn("not_on_cluster", reason)
         with self.assertLogs(krc.logger, "WARNING"):
             self.assertEqual(self.rule(PARENT, result="**No cut is safe.**", retry=True)[0], [])
 
@@ -301,6 +318,18 @@ class PlatformCutRequestTest(RuleTestCase):
         self.card(PARENT, body=CUT_ASK, assignee="Platform")
         self.card(CHILD, body=SKILL_BODY, creator=PARENT, stored=[HPA_ENTRY])
         self.assertEqual(self.rule(PARENT)[0], [])
+
+    def test_a_platform_card_that_delegated_is_not_refused_without_entries(self):
+        self.card(PARENT, body=CUT_ASK, assignee="platform")
+        self.card("t_whereis", body="Is inference-server on this cluster?", creator=PARENT, stored=[])
+        self.assertEqual(self.rule(PARENT, result="**inference-server runs on no cluster.**")[0], [])
+
+    def test_a_card_naming_the_skill_with_a_childs_entries_is_not_refused(self):
+        self.card(PARENT, body=f"Run {krc.SKILL_NAME} on api-server.", assignee="platform")
+        self.card(CHILD, body=SKILL_BODY, creator=PARENT, stored=[HPA_ENTRY])
+        reasons, result, _ = self.rule(PARENT)
+        self.assertEqual(reasons, [])
+        self.assertIn(f"- `api-server` (card {CHILD}): dependency: HPA.", result)
 
     def test_a_cluster_card_with_the_same_words_is_not_refused(self):
         self.card(CHILD, body=CUT_ASK)

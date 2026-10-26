@@ -1098,8 +1098,8 @@ RUN /opt/hermes/.venv/bin/python3 /tmp/kanban-worker-tools/apply_kanban_worker_t
 #     takes `rightsizing`, one entry per workload with its dependency kind and
 #     the five checks, required on a card whose body names the
 #     gke-rightsizing-checks skill and refused once when missing or invalid.
-#     A Platform card whose request asks to cut requests or limits is refused
-#     once when neither it nor a card below it passed entries.
+#     A Platform card whose request asks to cut requests or limits, and that
+#     created no card, is refused once when it passed no entries.
 #     The gate renders a card's entries, and its settled descendants', in
 #     `result` before any evidence section, so a summary cannot drop one.
 # Getting that answer into the chat message is the other half of the fix and
