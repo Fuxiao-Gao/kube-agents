@@ -4,6 +4,7 @@
     python -m kube_agents_bench.scale.runner run <plan.yaml> [--only-factor F] [--only-operation O] [--limit N] [--force]
     python -m kube_agents_bench.scale.runner apply <plan.yaml> --factor F --level L
     python -m kube_agents_bench.scale.runner teardown <plan.yaml> [--delete-fleet]
+    python -m kube_agents_bench.scale.runner reclassify <plan.yaml>
 
 ``run`` skips every run whose key is already in the data file, so an
 interrupted run resumes where it stopped; ``--force`` re-runs and replaces.
@@ -66,6 +67,9 @@ KUBECONFIG_SUFFIX = ".kubeconfig"
 # cancelled (they need a GitOps repository; they honour the scope's exclusions).
 NEEDS_ANSWER_CHECK = ("fleet_audit", "upgrade_readiness")
 UNFINISHED_METRIC = "unfinished_prompts"
+PROFILES_METRIC = "profiles"
+CLUSTERS_TOTAL = "clusters"
+STALE_PROFILES_NOTE = "profiles of deleted test clusters still present"
 UNCHECKED_ANSWER = "no answer recorded (written before answers were kept), so completion cannot be checked"
 
 
@@ -115,8 +119,6 @@ class Runner:
         )
         self.settings = plan.settings
         self.churner: fixtures.Churner | None = None
-        # Problems that make a level differ from its plan; every record of the level carries them.
-        self.level_errors: list[str] = []
         # What the latest watcher check found; replaced at each check, so a record carries only its own.
         self.watch_errors: list[str] = []
         self.relay_port = 0
@@ -183,6 +185,10 @@ class Runner:
         timeout = float(self.settings.get("cluster_registration_timeout_seconds", 0))
         deadline = time.monotonic() + timeout
         profiles = self.install.profile_clusters()
+        stale = self.test_clusters(profiles) - names
+        if stale:
+            # A deleted test cluster's profile stays until the reconcile prunes it; the run says so.
+            self.watch_errors.append(f"{STALE_PROFILES_NOTE}: {sorted(stale)}")
         while profiles & names != names:
             if time.monotonic() >= deadline:
                 self.watch_errors.append(f"no Cluster Agent profile for {sorted(names - profiles)} after {timeout:.0f}s")
@@ -268,7 +274,6 @@ class Runner:
     def apply_level(self, factor: str, level: float) -> dict[str, float]:
         values = self.plan.level_values(factor, level)
         LOG.info("applying %s=%s: %s", factor, level, values)
-        self.level_errors = []
         self.preflight()
         self.stop_churn()
         self.ensure_clusters(int(values["clusters"]))
@@ -301,9 +306,20 @@ class Runner:
             before = json.dumps(record.to_dict(), sort_keys=True)
             record.errors = [self.scrub(e) for e in record.errors]
             record.answers = [self.scrub(a) for a in record.answers]
+            profiles = next((m.value for m in record.metrics if m.name == PROFILES_METRIC), None)
+            clusters = record.totals.get(CLUSTERS_TOTAL)
+            if profiles is not None and clusters and profiles > clusters:
+                # More Cluster Agent profiles than test clusters: a larger level's profiles were still there.
+                note = f"{STALE_PROFILES_NOTE}: {profiles:.0f} profiles for {clusters} test clusters"
+                if note not in record.errors:
+                    record.errors.append(note)
             operation = next((o for o in self.plan.operations if o.name == record.operation), None)
             if operation and operation.kind == "prompt":
-                reasons = [operations.unfinished_reason(answer, record.errors) for answer in record.answers or [""]]
+                # Each answer is judged on its own text; a delegation-wait marker in the run's errors
+                # counts once, not once per answer.
+                reasons = [operations.unfinished_reason(answer, []) for answer in record.answers or [""]]
+                reasons += [operations.unfinished_reason("", [error]) for error in record.errors
+                            if operations.DELEGATION_CEILING_MARKER in error]
                 failed = any(e.startswith(operations.PROMPT_FAILED) for e in record.errors)
                 if record.answers or failed:
                     # The count of prompts answered without their operation, from the kept answers.
@@ -357,7 +373,7 @@ class Runner:
         if mode != self.plan.target["mode"]:
             self.watch_errors.append(f"install runs mode {mode!r}, plan says {self.plan.target['mode']!r}")
         commit = commit_of(image)
-        errors = list(self.level_errors) + list(self.watch_errors)
+        errors = list(self.watch_errors)
         if not commit:
             errors.append(f"image {image!r} is not pinned by commit; the record is keyed by its tag")
             commit = image.rsplit(":", 1)[-1] or "unknown"
@@ -535,8 +551,10 @@ class Runner:
             context = kube.context_name(self.project, self.zone, name)
             for fixture in FIXTURES:
                 fixtures.delete_fixture(context, fixture)
-            kube.ensure_node_pool(self.project, self.zone, name, self.settings["fixture_pool"],
-                                  self.settings["fixture_machine_type"], 0)
+            # Shrink a fixture pool that exists; never create one just to leave it empty.
+            if kube.node_pool_size(self.project, self.zone, name, self.settings["fixture_pool"]) is not None:
+                kube.ensure_node_pool(self.project, self.zone, name, self.settings["fixture_pool"],
+                                      self.settings["fixture_machine_type"], 0)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -14321,7 +14321,9 @@
         "checking all 8 clusters.\n\nThe fleet audit task (`t_3639c891`) has finished. Here is the full result from the platform agent:\n\n**Checked 2 clusters out of the 10 in scope (8 explicitly excluded): `scale-01` is stressed with Pending pods and "
       ],
       "excluded_from": [],
-      "errors": []
+      "errors": [
+        "profiles of deleted test clusters still present: 8 profiles for 2 test clusters"
+      ]
     },
     {
       "key": "eeb8a95c|next|failing_pods|100|watcher_soak|1",

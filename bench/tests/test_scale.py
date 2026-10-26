@@ -477,3 +477,24 @@ def test_the_nats_wait_survives_the_moment_the_pod_does_not_exist(monkeypatch):
     monkeypatch.setattr(operations.time, "sleep", lambda s: None)
     operations._wait_pod_ready("ctx", "ns", operations.NATS_POD)
     assert replies == []
+
+
+def test_reclassify_counts_a_delegation_wait_once_per_marker(tmp_path):
+    plan = load_plan(PHASE1, environ=ENV)
+    path = tmp_path / "data.json"
+    records.merge(path, [records.Record(
+        commit="e" * 40, mode="next", phase="phase1", factor="concurrent", level=15, operation="fan_out", run=1,
+        started="2026-10-24T00:00:00Z", ended="2026-10-24T00:40:00Z",
+        answers=["checking all 2 clusters.", "I monitor scale-01 and scale-02.", ""],
+        errors=["KUBE_AGENTS_DELEGATION_CEILING: delegated tasks did not finish within 1800s"])])
+    runner.Runner(plan, path).reclassify()
+    record = records.load(path)["records"][0]
+    assert next(m["value"] for m in record["metrics"] if m["name"] == "unfinished_prompts") == 1.0
+
+
+def test_a_plan_without_mode_is_refused_at_load(tmp_path):
+    text = PHASE1.read_text().replace("  mode: next\n", "")
+    trimmed = tmp_path / "plan.yaml"
+    trimmed.write_text(text)
+    with pytest.raises(ValueError, match="SCALE_MODE"):
+        load_plan(trimmed, environ=ENV)

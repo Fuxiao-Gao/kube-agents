@@ -207,7 +207,7 @@ elif warning:
 else:
     st.success(f"All {len(evaluated)} checks pass for this fleet.")
 first = hl.first_limit(checks)
-if first is not None and not first.reached:
+if first is not None and hl.past_at_base(first):
     st.markdown(f"**First limit reached:** {first.label}, already at the base point of the data.")
 elif first is not None:
     st.markdown(

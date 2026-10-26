@@ -33,7 +33,7 @@ TARGET_KEYS = (
     "data_file",
     "preflight",
 )
-REQUIRED_TARGET_KEYS = ("project_id", "host_cluster", "host_location", "namespace", "zone", "cluster_prefix", "cluster_label")
+REQUIRED_TARGET_KEYS = ("project_id", "host_cluster", "host_location", "namespace", "zone", "cluster_prefix", "cluster_label", "mode")
 
 DEFAULT_RUNS = 1
 

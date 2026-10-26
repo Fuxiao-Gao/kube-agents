@@ -1173,6 +1173,18 @@ class ReachedAtTest(unittest.TestCase):
         self.assertEqual(hl.percent(0.5), "50%")
 
 
+class PastAtBaseTest(unittest.TestCase):
+    def test_a_count_at_zero_is_not_past_at_the_base(self):
+        fields = hl.Contribution.__dataclass_fields__
+        grows = hl.Contribution(**{name: (5.0 if name == "delta" else None) for name in fields})
+        at_zero = hl.Prediction(hl.RUN_SLOT_REFUSALS, None, 0.0, "fan_out", (grows,))
+        over = hl.Prediction(hl.RESPONSE, None, 144.0, "fan_out", ())
+        lines = hl.threshold_lines((), hl.RUN_SLOT_REFUSALS)
+        self.assertFalse(hl.past_at_base(hl.Check(hl.RUN_SLOT_REFUSALS, None, lines, at_zero, hl.FAIL, None, 0.0)))
+        response_lines = hl.threshold_lines((), hl.RESPONSE)
+        self.assertTrue(hl.past_at_base(hl.Check(hl.RESPONSE, None, response_lines, over, hl.FAIL, None, 0.0)))
+
+
 class ChurnAxisTest(unittest.TestCase):
     def test_churn_sits_at_the_achieved_rate(self):
         raw = {

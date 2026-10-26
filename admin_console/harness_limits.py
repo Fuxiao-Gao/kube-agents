@@ -215,7 +215,8 @@ UNFIXABLE = MappingProxyType(
             "The agent runs at most 10 turns at once. No PlatformAgent field changes it."
         ),
         TRIAGE_LOST: (
-            "A triage start makes one attempt with a 10 s timeout. No setting changes it."
+            "A triage start makes up to 6 answered attempts within a 300 s budget, "
+            "with a 25 s session-create timeout. No setting changes it."
         ),
         FAILED_PROMPTS: (
             "The agent API gave no answer, an empty answer, a transport failure, or an "
@@ -1326,6 +1327,18 @@ def threshold_checks(
                 prediction = predict(records, metric, owner, fleet, only=gated)
                 checks.append(_check(metric, owner, lines, prediction))
     return checks
+
+
+def past_at_base(check: Check) -> bool:
+    """Whether the base point itself is past the check's threshold.
+
+    ``reached == 0`` cannot tell this apart: a count that is exactly at its
+    threshold at the base (0 against "above 0") also reaches it at once when
+    the fleet grows, yet passes at the base.
+    """
+    if check.prediction is None or not check.lines:
+        return False
+    return evaluate(check.prediction.base, check.lines)[0] != PASS
 
 
 def first_limit(checks: Iterable[Check]) -> Check | None:
