@@ -286,6 +286,17 @@ FIXTURE_NOT_READY = {
         "project (the postsubmit reconcile); no pool project has the seeded-scaled-zero "
         "namespace or its Gateway"
     ),
+    # Needs Config Sync's RootSync CRD and one root-sync object reporting
+    # Stalled=True on a seeded cluster. No pool project enables the GKE Hub
+    # API, so Config Sync is installed nowhere, and the seeded fleet plants no
+    # custom resource. The CRD alone is enough (no operator): apply the
+    # upstream CRD, create the object, write its status with
+    # `kubectl patch --subresource=status`. #2580's "Fixture & Eval" section
+    # specifies the object.
+    "compliance-configsync-stalled": (
+        "#2580: needs the Config Sync RootSync CRD and a Stalled root-sync object "
+        "on a seeded cluster; no pool project runs Config Sync"
+    ),
     # Needs a GitOps repository that declares the namespace under a path a
     # reconciler syncs; no pool project's repository has one. Run by hand on
     # the GitOps-wired dev lane (gitops-target-1, sackheads/kage-fleet-dev).
