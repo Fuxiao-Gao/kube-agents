@@ -3182,12 +3182,19 @@ unit_cost_hint() {
     # autoops-warning-event-triage, the same plant-then-card shape, so it
     # launches early in its round rather than last at the default.
     autoops-warning-event-no-action-triage) echo 900 ;;
-    # The nightly-only full audits: 600-1300s a repetition on 2026-08-26,
-    # planted-pdb's 962s the one clean measurement. Priced with the 900 band
-    # so a nightly run launches them first. fleet-cost-idle-pool joined the
-    # nightly 2026-09-15 unmeasured; same SOP-faithful audit shape, same band.
+    # The full audits: 600-1300s a repetition on 2026-08-26, planted-pdb's
+    # 962s the one clean measurement. Priced with the 900 band so a nightly
+    # run launches them first. fleet-cost-idle-pool joined the nightly
+    # 2026-09-15 unmeasured; same SOP-faithful audit shape, same band.
     obtainability-planted-pdb | stockout-pinned-pool) echo 900 ;;
-    upgrade-readiness-lagging-cluster | consistency-drift-outlier) echo 900 ;;
+    upgrade-readiness-lagging-cluster) echo 900 ;;
+    # On the blocking roster since 2026-10-26. Measured on the claude-opus-5-5
+    # main nightlies 2026-10-20 to 10-26: median 198s, 165-397s over 14
+    # repetitions. Priced at 600s, the floor scripts/test_ci_eval_nightly.py's
+    # audit-band test allows, rather than 900: the hint still launches it early
+    # in each round, and the presubmit wall estimate in
+    # scripts/eval_rosters.py (#3987) is priced from these hints.
+    consistency-drift-outlier) echo 600 ;;
     consistency-no-environment-label) echo 900 ;;
     # Not measured yet: the same stream as the case above, plus a stack that
     # opens the ledger, so it takes that case's hint until its record says
