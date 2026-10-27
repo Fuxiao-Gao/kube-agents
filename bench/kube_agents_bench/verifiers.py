@@ -3657,7 +3657,7 @@ def _squeezed(text: str) -> str:
     """``text`` with ``\\uXXXX`` escapes undone, addresses masked, whitespace collapsed, and none around ``,:{}[]``.
 
     The pod re-serialises a JSON output with ``", "`` and ``": "`` separators
-    (``worker_trajectory.supplement``), so compact JSON the worker saw and
+    (the in-pod script's ``scrub``, through ``worker_transcript``), so compact JSON the worker saw and
     copied differs from the stored text in those spaces and in escapes. Other
     whitespace is kept as one space, so a word edge still reads as one.
     """
