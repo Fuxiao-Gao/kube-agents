@@ -469,13 +469,26 @@ RUN /opt/hermes/.venv/bin/python3 /tmp/cron-tirith-scan/apply_cron_tirith_scan.p
 # records <hermes home>/cron/runs/<job>_<execution> as the run's tool-layer cwd;
 # the session cwd, and so context-file loading, is unchanged, and script jobs
 # keep their cwd. kanban_workspace_gc.py prunes old run directories.
+#
+# Shares the block: per-job turn budget (gke-labs/kube-agents#1947). The
+# scheduler read a run's iteration cap from the profile's agent.max_turns alone,
+# so the 250 the fleet audits need reached every kanban worker spawned under the
+# platform profile. The patch reads a roster entry's own `max_turns` first
+# (mirroring NousResearch/hermes-agent#134059); the audits carry 250 and the
+# profile default drops to 150. Same staging directory, one COPY and one RUN,
+# for the layer budget at the top of this file.
 COPY deploy/docker/patches/apply_cron_run_workdir.py \
      deploy/docker/patches/verify_cron_run_workdir.py \
+     deploy/docker/patches/apply_cron_job_max_turns.py \
+     deploy/docker/patches/verify_cron_job_max_turns.py \
      deploy/docker/patches/patchlib.py \
      /tmp/cron-run-workdir/
 RUN /opt/hermes/.venv/bin/python3 /tmp/cron-run-workdir/apply_cron_run_workdir.py /opt/hermes && \
     grep -q "kube-agents patch: cron run workdir" /opt/hermes/cron/scheduler.py && \
     cd /opt/hermes && /opt/hermes/.venv/bin/python3 /tmp/cron-run-workdir/verify_cron_run_workdir.py /opt/hermes && \
+    /opt/hermes/.venv/bin/python3 /tmp/cron-run-workdir/apply_cron_job_max_turns.py /opt/hermes && \
+    grep -q "kube-agents patch: per-job turn budget" /opt/hermes/cron/scheduler.py && \
+    /opt/hermes/.venv/bin/python3 /tmp/cron-run-workdir/verify_cron_job_max_turns.py /opt/hermes && \
     rm -rf /tmp/cron-run-workdir
 
 # Security: cron risk gate, execute_code refuse, and content checks (THREAT-002).
@@ -874,6 +887,14 @@ RUN cp /tmp/channel-directory/channel_directory_threads.py /opt/hermes/gateway/c
 # edit_message; the steer and auth failure replies are replaced where they
 # are built, so no exception text reaches Slack). See
 # deploy/docker/patches/slack_boilerplate.py.
+# Slack, flag or not: a message_changed that is not an edit (no `edited`, or
+# the same `edited.ts` as previous_message, since Slack keeps it once set) is
+# dropped instead of being read as a new message. Slack sends one for a thread's
+# parent whenever a reply in the thread changes, and after a restart empties the
+# adapter's processed-ts map that change re-ran the thread's opening @mention.
+# A real edit carries a new `edited`, so an @mention edited in still gets its turn.
+# Applied first, against upstream's text. See the module docstring in
+# deploy/docker/patches/apply_slack_unedited_change.py.
 # Slack thread context, whatever the flag: a thread root the bot posted itself is
 # labelled "[thread parent, posted by you earlier]" instead of reading as a
 # person's message, and every context block says it is conversation, not observed
@@ -921,10 +942,14 @@ COPY deploy/docker/patches/apply_slack_code_emphasis.py \
      deploy/docker/patches/patchlib.py \
      deploy/docker/patches/apply_slack_agent_view.py \
      deploy/docker/patches/verify_slack_agent_view.py \
+     deploy/docker/patches/apply_slack_unedited_change.py \
+     deploy/docker/patches/verify_slack_unedited_change.py \
      deploy/docker/patches/apply_slack_thread_provenance.py \
      deploy/docker/patches/verify_slack_thread_provenance.py \
      /tmp/message-surface/
-RUN /opt/hermes/.venv/bin/python3 /tmp/message-surface/apply_slack_code_emphasis.py /opt/hermes && \
+RUN /opt/hermes/.venv/bin/python3 /tmp/message-surface/apply_slack_unedited_change.py /opt/hermes && \
+    grep -qF "kube-agents patch: slack_unedited_change" /opt/hermes/plugins/platforms/slack/adapter.py && \
+    /opt/hermes/.venv/bin/python3 /tmp/message-surface/apply_slack_code_emphasis.py /opt/hermes && \
     grep -q "_CODE_SENTINEL_RE" /opt/hermes/plugins/platforms/slack/block_kit.py && \
     ! grep -q "inline code is opaque" /opt/hermes/plugins/platforms/slack/block_kit.py && \
     /opt/hermes/.venv/bin/python3 /tmp/message-surface/apply_google_chat_attachment_notice.py /opt/hermes && \
@@ -981,6 +1006,7 @@ RUN /opt/hermes/.venv/bin/python3 /tmp/message-surface/apply_slack_code_emphasis
     /opt/hermes/.venv/bin/python3 /tmp/message-surface/verify_slack_ux_failure.py && \
     /opt/hermes/.venv/bin/python3 /tmp/message-surface/verify_kanban_progress_lines.py && \
     /opt/hermes/.venv/bin/python3 /tmp/message-surface/verify_slack_boilerplate.py && \
+    /opt/hermes/.venv/bin/python3 /tmp/message-surface/verify_slack_unedited_change.py && \
     /opt/hermes/.venv/bin/python3 /tmp/message-surface/verify_slack_thread_provenance.py /opt/hermes && \
     rm -rf /tmp/message-surface
 
@@ -1470,9 +1496,25 @@ RUN install -m 0644 /tmp/kanban-scheduling/kanban_priority.py /opt/hermes/hermes
 # (or extract_reasoning) under agent/ or in run_agent.py, so a Hermes bump
 # that adds a fourth such site gets read. See the module
 # docstring in deploy/docker/patches/apply_reasoning_not_reply.py.
+#
+# unstructured_reasoning_replay rides it too (#3206): Gemini through LiteLLM
+# sometimes writes its reasoning as plain assistant content under a first line
+# `thought` or `thought:`, with reasoning_content empty, and once a session's
+# history holds one such reply the model imitates it on later calls. One call
+# is inserted in each place the main loop builds a model call's messages,
+# agent/turn_context.py's build_api_messages (every turn) and
+# agent/chat_completion_helpers.py's _iteration_summary_api_messages (the
+# iteration-limit summary), and sends such a reply to the model as a fixed
+# placeholder, its tool_calls kept so each still pairs with its result;
+# state.db keeps the original. The rule is hermes_cli/unstructured_reasoning.py,
+# copied in below. The Hermes bridge withholds such a reply from the user when
+# it is the answer (a2a/hermes-bridge/reasoning_leak.go). See the module
+# docstrings in deploy/docker/patches/apply_unstructured_reasoning_replay.py
+# and deploy/docker/patches/unstructured_reasoning.py.
 COPY --chmod=0644 deploy/docker/patches/kanban_guardrail_exit.py \
      deploy/docker/patches/rate_limit_retry_delay.py \
      deploy/docker/patches/permission_refusal_stop.py \
+     deploy/docker/patches/unstructured_reasoning.py \
      /opt/hermes/hermes_cli/
 COPY deploy/docker/patches/apply_kanban_guardrail_exit.py \
      deploy/docker/patches/verify_kanban_guardrail_exit.py \
@@ -1497,6 +1539,8 @@ COPY deploy/docker/patches/apply_kanban_guardrail_exit.py \
      deploy/docker/patches/verify_permission_refusal_stop.py \
      deploy/docker/patches/apply_reasoning_not_reply.py \
      deploy/docker/patches/verify_reasoning_not_reply.py \
+     deploy/docker/patches/apply_unstructured_reasoning_replay.py \
+     deploy/docker/patches/verify_unstructured_reasoning_replay.py \
      deploy/docker/patches/patchlib.py \
      /tmp/kanban-guardrail-exit/
 RUN /opt/hermes/.venv/bin/python3 /tmp/kanban-guardrail-exit/apply_state_db_synchronous_full.py /opt/hermes && \
@@ -1510,6 +1554,7 @@ RUN /opt/hermes/.venv/bin/python3 /tmp/kanban-guardrail-exit/apply_state_db_sync
     /opt/hermes/.venv/bin/python3 /tmp/kanban-guardrail-exit/apply_cgroup_memory_sample.py /opt/hermes && \
     /opt/hermes/.venv/bin/python3 /tmp/kanban-guardrail-exit/apply_permission_refusal_stop.py /opt/hermes && \
     /opt/hermes/.venv/bin/python3 /tmp/kanban-guardrail-exit/apply_reasoning_not_reply.py /opt/hermes && \
+    /opt/hermes/.venv/bin/python3 /tmp/kanban-guardrail-exit/apply_unstructured_reasoning_replay.py /opt/hermes && \
     grep -q 'if sys.platform == "linux":  # kube-agents patch: state-db-synchronous-full' /opt/hermes/hermes_state_wal.py && \
     grep -q "if _kanban_halt_nudge:" /opt/hermes/agent/turn_tool_round.py && \
     grep -q "_kube_observe_refusal(" /opt/hermes/agent/tool_guardrails.py && \
@@ -1528,6 +1573,8 @@ RUN /opt/hermes/.venv/bin/python3 /tmp/kanban-guardrail-exit/apply_state_db_sync
     grep -q 'kube-agents patch: cluster-dns-not-local' /opt/hermes/agent/model_metadata.py && \
     grep -q 'kube-agents patch: cgroup-memory-sample' /opt/hermes/gateway/lifecycle_ledger.py && \
     grep -q 'kube-agents patch: reasoning_not_reply' /opt/hermes/agent/turn_final_response.py && \
+    grep -q 'kube-agents patch: unstructured_reasoning_replay' /opt/hermes/agent/turn_context.py && \
+    grep -q 'kube-agents patch: unstructured_reasoning_replay' /opt/hermes/agent/chat_completion_helpers.py && \
     cd /opt/hermes && /opt/hermes/.venv/bin/python3 /tmp/kanban-guardrail-exit/verify_state_db_synchronous_full.py && \
     /opt/hermes/.venv/bin/python3 /tmp/kanban-guardrail-exit/verify_kanban_guardrail_exit.py && \
     /opt/hermes/.venv/bin/python3 /tmp/kanban-guardrail-exit/verify_rate_limit_retry_delay.py && \
@@ -1540,6 +1587,7 @@ RUN /opt/hermes/.venv/bin/python3 /tmp/kanban-guardrail-exit/apply_state_db_sync
     /opt/hermes/.venv/bin/python3 /tmp/kanban-guardrail-exit/verify_policy_refusal_hint.py && \
     /opt/hermes/.venv/bin/python3 /tmp/kanban-guardrail-exit/verify_permission_refusal_stop.py && \
     /opt/hermes/.venv/bin/python3 /tmp/kanban-guardrail-exit/verify_reasoning_not_reply.py && \
+    /opt/hermes/.venv/bin/python3 /tmp/kanban-guardrail-exit/verify_unstructured_reasoning_replay.py && \
     rm -rf /tmp/kanban-guardrail-exit
 
 # Perf: let a board mutation wake the kanban watchers instead of waiting out a
@@ -2352,7 +2400,7 @@ cfg = load_config_readonly(); \
 caps = ToolCallGuardrailConfig.from_mapping(cfg.get('tool_loop_guardrails', {})).loop_caps; \
 assert caps.max_web_searches == 200, 'per-card web_search budget lost: %r' % caps.max_web_searches; \
 assert caps.max_subagents == 50, 'overlay clobbered max_subagents: %r' % caps.max_subagents; \
-assert cfg.get('agent', {}).get('max_turns') == 250, 'iteration budget lost: %r' % cfg.get('agent', {}).get('max_turns')" && \
+assert cfg.get('agent', {}).get('max_turns') == 150, 'worker iteration budget lost: %r' % cfg.get('agent', {}).get('max_turns')" && \
     cd /opt/hermes && PYTHONPATH=/opt/defaults/scripts /opt/hermes/.venv/bin/python3 /tmp/platform-config/verify_slack_relay_registry_contract.py && \
     cd /opt/hermes && PYTHONPATH=/opt/defaults/scripts /opt/hermes/.venv/bin/python3 /tmp/platform-config/verify_card_stop.py && \
     cd /opt/hermes && /opt/hermes/.venv/bin/python3 /tmp/platform-config/check_skill_commands.py \

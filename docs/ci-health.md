@@ -27,16 +27,24 @@ are refused a project and one when they stop ([below](#a-backed-up-pool)),
 plus, for the watched Prow
 periodics, one when a run fails or a job stops and one when it passes again
 ([below](#the-watched-periodics)).
-The digest also carries one line on last night's run of the nightly tier
-(`--data`, the `data.json` the tick collected): the cases recorded, how many
-passed all reps, partial and failed, what is newly failing against the night
-before, the opening chat turn's p50 and p95 as advice beside the p95 < 10 s
-target ([SCHEMA.md](../scripts/eval_dashboard/SCHEMA.md); empty since the nightly grades
-`spec.mode: next`, because the harness times the opening turn on the agent API only), and the wall clock, with a link to the dashboard's Nightly report
-(`nightly.html`); a night Prow cut short, one still running, or no night
-since the day before yesterday, says so instead of numbers.
-`scripts/eval_dashboard/nightly.py` derives the line and the report from the
-same nightly runs.
+The digest also carries a section on last night's run of the nightly tier
+(`--data`, the `data.json` the tick collected), built by
+`scripts/eval_dashboard/nightly_digest.py`; [The nightly section](#the-nightly-section)
+describes it. When the section cannot be built, the digest carries one line on
+the night instead (the cases recorded, how many passed all reps, partial and
+failed, what is newly failing against the night before, the opening chat
+turn's p50 and p95 as advice beside the p95 < 10 s target
+([SCHEMA.md](../scripts/eval_dashboard/SCHEMA.md); empty since the nightly grades
+`spec.mode: next`, because the harness times the opening turn on the agent API only),
+and the wall clock, or that the night was cut short, still running or missing),
+a link to the dashboard's Nightly report (`nightly.html`), and a line saying why
+the section was skipped. A night can be the builds of up to three periodics
+(the main job, the main-b job when the main part runs as two halves, and the
+writers job), reported as one night: the line names a part that is missing,
+still running or cut short, the night counts as cut short when its main or
+main-b part is, and a night without its main or main-b part gives no verdict on
+what is newly failing. `scripts/eval_dashboard/nightly.py` derives that line
+and the report from the same nightly runs.
 The same tick reads the eval evidence store (`gs://kube-agents-evals-bench/evidence`,
 the records the nightly appends; `scripts/eval_dashboard/store.py`, best-effort
 and incremental) and renders the dashboard's Trend page (`trend.html`,
@@ -64,7 +72,9 @@ OUTAGE lacks or the one a build-cluster node loss, a seeded-fixture drift or a
 pool-project drift owes its owner (`gate_issue.py`), files a bug for a case
 the nightly fails on every run three nights in a row, and an infra bug when
 the nightly or a case is kept from running, dry run until armed
-([Nightly bugs](#nightly-bugs)), and appends `health.json` to a history feed. A second job in the same workflow, on its own hourly cron,
+([Nightly bugs](#nightly-bugs)), renders the weekly health email beside
+`data.json` ([The weekly health email](#the-weekly-health-email)), and appends
+`health.json` to a history feed. A second job in the same workflow, on its own hourly cron,
 scans every CI pool project's seeded fleet for fixtures out of their designed
 state and then every project's shape against the onboarding verifier,
 publishing `fixture-state.json` and `pool-state.json` beside `health.json`
@@ -163,8 +173,9 @@ jobs are progressing; for a delegation-ceiling wave, once workers are
 finishing again (the gateway log in a run's artifacts says whether the
 dispatcher stalled); for fixture drift, once the daily reconcile has re-applied
 the stack (for `default-pool-headroom`, once seeded-a's default pool has CPU to
-spare again) — a red on a case that depends on the drifted fixture, from a run
-that leased one of those projects, is the fixture's, not the change's; for pool
+spare again) — a case whose grade depends on the drifted fixture is recorded as
+infrastructure on a run whose own lease-time scan saw the drift, and a red on such a
+case from a run whose scan could not read the role is the fixture's, not the change's; for pool
 drift, once the pool owner has run the repair the issue carries. Who the
 fleet owner, the pool owner and the person who owns the gate are is recorded
 in [`docs/ownership.md`](ownership.md).
@@ -638,22 +649,45 @@ comments instead.
 ## The tracking issue
 
 When the state becomes OUTAGE and no issue tracks it — `case-notes.yaml` names
-none for the failing cases, and no open issue labelled `presubmit-gate` names
+none for the failing cases, and no open issue, whatever its labels, names
 every failing case in its title or body — the poster files one, labelled
 `presubmit-gate`: `Smoke gate outage: 3 cases failing on every PR since Sun
 7:30 AM ET`, with the cases, the window, the class, the incident brief link,
 and the line "Filed automatically by the smoke health bot; edit freely. Fix
 PRs: reference this issue." A human's issue that already names the cases is
-adopted instead. The Chat message then reads `Tracking #NNN`, the issue rides
+adopted instead and labelled `presubmit-gate`. One rule for a title: any open
+issue. One rule for a body: a `presubmit-gate` issue, or an unlabelled one
+whose body also carries a word the condition's own evidence uses ("drift" or
+"pending" beside a fixture role, "NotReady" or "lost" beside a node), so an
+issue that mentions a role or node in passing is not the tracker; case names
+never match an unlabelled body, since a roster tracker lists them all. The
+bot's own `nightly-red` issues are never adopted. The Chat message then reads `Tracking #NNN`, the issue rides
 in `health-state.json` and in `health.json`'s `issue` field (`{number, url, condition}`,
 `null` outside an incident; `health.py` reads it back through
 `--posted-state`), and the recovery comments on it: "Healthy again after Xh;
-bot will not close it." `issue` is the current condition's; every issue the
-incident filed or adopted stays in `health-state.json`'s `issues` list until
-GREEN, so an outage that gives way to a storm or to lost pods before it clears
-still gets its recovery comment, and the recovery message names them all. The
-bot never closes an issue. A GitHub failure leaves
-the message at "no issue yet — file one with the presubmit-gate label" and the
+closing" on an issue the bot filed, which it closes, or "bot will not close it"
+on an adopted one. `issue` is the current condition's; every issue the
+incident filed or adopted rides in `health-state.json`'s `issues` list until
+the recovery or until the bot settles it below, so an outage that gives way
+to a storm or to lost pods before it clears still gets its recovery comment,
+and the recovery message names the ones still carried. A recovery comment or
+close that did not land, or an issue the bot could not read that tick, rides
+on past GREEN and is retried each tick until it does.
+
+Each tick re-reads every carried issue. One a human closed is dropped rather
+than cited; if its condition still fires (`health.json`'s `open_conditions`,
+every condition whose rule fires or whose scan could not read the whole pool,
+plus lost pods and deadline kills until 3 runs have landed after the last
+loss or kill, the gate's own exit for them, whatever condition the gate
+reports) on evidence newer than the close — a
+full, fresh scan after it for a scan condition, a loss or kill after it for
+lost pods and deadline kills — the adopt-or-file path runs again at once; a shared break's
+re-file waits for its next change message. A bot-filed issue for one of the
+four infrastructure shapes whose own condition has left `open_conditions`
+while the gate reports another is commented on ("The fixture drift cleared at
+…; closing") and closed; a bot-filed outage issue waits for the recovery; an
+adopted one gets the comment and stays open. A GitHub failure leaves the
+message at "no issue yet — file one with the presubmit-gate label" and the
 next change asks again.
 
 A new `lost_pods` condition files one the same way, for the cluster owner:
@@ -663,8 +697,8 @@ to their shared prefix; past GitHub's 256-character title limit they become a
 count), with the nodes and how many runs each lost, the window, the affected
 pull requests, the evidence, the advice for authors, and the line "Filed
 automatically by the smoke health bot; the cluster owner should check the node
-events and autorepair; the bot will not close it." An open `presubmit-gate`
-issue that already names every lost node is adopted instead. The Chat message
+events and autorepair; the bot closes it when the condition clears." An open issue that already
+names every lost node is adopted instead. The Chat message
 reads `Tracking #NNN`; the issue rides in the state the same way and is filed
 once per event. Each issue records the condition it was filed for (`{number,
 url, condition}`): an outage's issue is never cited as the lost pods' tracking,
@@ -678,10 +712,13 @@ requests, the deadline evidence lines (not the per-case ones: a body naming
 cases would be adopted as a later break's tracker), the advice for authors
 (don't retest until the space reports the gate healthy), where to look (each killed run's `build-log.txt`
 and the eval project's Cloud Logging), and the recovery bar of 3 runs with a
-verdict. An open `presubmit-gate` issue whose **title** carries "deadline" and
-"smoke" is adopted instead — the title only, because every bot-filed body
+verdict. An open `presubmit-gate` issue whose **title** carries "deadline"
+and "kill" is adopted instead — the title only, because every bot-filed body
 names the job and quotes the evidence, which mentions deadline kills whenever
-one sits in the window. The Chat message reads `Tracking #NNN`, the issue
+one sits in the window; "kill" rather than "smoke" so a feature request about
+the gate's deadline is not; and the label, because the pair has no identifier
+and a bug report about the `deadline-kill` classifier would otherwise be the
+tracker. The Chat message reads `Tracking #NNN`, the issue
 rides in the state the same way, and the recovery comments on it.
 
 The four infrastructure shapes (`lost_pods`, `fixture_drift`, `pool_drift`,
@@ -698,8 +735,10 @@ write (a timeout, a 5xx, a 403) files nothing that tick.
 
 `scripts/eval_dashboard/nightly_bugs.py` files an issue for a case that failed
 every graded repetition on its last 3 graded nightly nights, and comments on it
-once when the case passes every repetition again. It runs every tick after the
-post, on the same `data.json`.
+once when the case passes every repetition again. It runs every tick before the
+post, on the same `data.json`, so the digest's nightly section sees the issues
+it filed that tick; the step is capped at 3 minutes so a slow GitHub cannot
+hold the post past the job's timeout.
 
 A graded night, for one case, is a night where the part that ran the case (main
 or writers) was not cut off at the job deadline and at least one of the case's
@@ -807,6 +846,134 @@ Setting the repository variable `NIGHTLY_BUGS_LIVE=true` arms it;
 `python3 scripts/eval_dashboard/nightly_bugs.py --data data.json` is a dry run
 against any `data.json`; `--live` writes.
 
+## The nightly section
+
+The 9 AM digest's nightly section lists what last night changed, from
+`data.json` and the open `nightly-red` issues, by the rules [Nightly
+bugs](#nightly-bugs) files by: a case's verdict for a night is the bug filer's
+(a part cut off at the deadline, a case with no graded repetition, and a night
+where nearly every case failed give none), and cases marked `expected_fail`,
+off the nightly matrix, or with no `task.yaml` on the checkout are left out. An
+issue tracks a case as the filer reads it: an open `nightly-red` issue naming
+it, or a closed one that still tracks the streak (closed after its newest
+night, or handed off as not planned). The issue listings are cross-checked
+against GraphQL and read again exactly as the filer reads them. The lists follow the filer's classifier,
+which drops repetitions it reads as infrastructure even when the collector
+recorded them as failures; the header's counts do not, so they match the
+Nightly report's.
+
+- The header: the night's date, how many of the recorded scenarios passed every
+  graded repetition, how many were not graded (lost to infrastructure, or on the
+  matrix with no line), the wall clock, and links to the run and the Nightly
+  report. The numbers are the Nightly report's "Passed all reps" and "Cases".
+- **🔴 New bugs filed:** red on 3 or more graded nights in a row, and its open
+  issue was opened after last night's run finished. A case kept from running
+  last night whose streak was filed only now is listed too. Domain name, issue,
+  assignee and the domain's backup.
+- **🔴 Owed a bug, not filed yet:** red on 3 or more graded nights in a row and
+  no issue tracks it (the filer is in dry run, or its filing failed). Night
+  count, owner and backup.
+- **🟠 Still red, already tracked:** red last night with any other issue that
+  tracks it, marked "(closed)" for a closed one. Night count, issue and owner
+  (the issue's assignee, else the owner the filer would assign).
+- **🆕 Red last night, no bug yet:** red on fewer than 3 nights in a row, with no
+  issue, and which night of the run it is.
+- **✅ Recovered:** every repetition passed last night after red nights, when the
+  case has an open issue or its red run reached 3 nights.
+- **⚙️ Infra:** each part of the nightly lost last night, with its run and issue,
+  and each case kept from running last night that has an open infra issue or a
+  3-night streak (`nightly_infra.py`); "none last night" otherwise.
+- A footer asking owners to reply in the thread.
+
+Each list shows at most 5 lines; the rest are one line linking to the Nightly
+report. A night with no new bug, no case owed a bug for the first time, no
+case red for the first night (a tracked case red again after a green night
+counts), no recovery, no infra item and no part cut off, missing or still running is
+one line instead: the date, the pass count and how many were not graded, "no
+new reds, nothing recovered", and how many are still red. A night whose main part was cut
+off at the deadline, or a run-level event, is labelled so, none of its cases are
+counted, and only the infra list follows; a writers part cut off, missing or still running is named in
+the header; a cut-off part's cases stay in the pass count, as on the Nightly page, but its reds are not listed.
+
+Domain names, owners and backups come from
+[`docs/designs/domains.yaml`](designs/domains.yaml) and the case's `task.yaml`
+(`scripts/case_owner.py`). An owner is a Chat mention, `<users/{id}>`, when the
+repository secret `CI_HEALTH_CHAT_MENTIONS` maps their GitHub login to a Chat
+user id: a JSON object, `{"login": "123456789012345678901"}` (the numeric id,
+with or without `users/`). The ids are internal, so the map lives only in the
+secret; without it, or for a login it does not hold, the login is printed as
+plain text. A mentioned person must be a member of the space.
+
+The section is skipped, and the digest carries its one-line nightly summary
+plus the reason, when it cannot be built truthfully: `data.json` unreadable, no
+night started in the last 36 hours, last night's run or either main half
+(main or main-b) still running or missing, no GitHub token, the issues unreadable or their
+listing not trusted (GraphQL disagreed on every read, as for the filer), pyyaml missing, a count that does not
+add up, or a link that is not a well-formed `https` URL (an issue link must
+point into this repository). Links are checked for form, not fetched: the
+dashboard's links sit behind a Google login a fetch from the job cannot pass.
+It never posts partial numbers.
+
+## The weekly health email
+
+`scripts/eval_dashboard/weekly_email.py` renders a one-page summary of the
+nightly tier for leadership and the team. Its step runs after the bug filer, so
+a bug filed that tick counts, and publishes it as `health-email.html` beside
+`data.json`. Nothing sends it yet: the mail route,
+the sending account and the chat line that links to it are still to be decided.
+
+The week is the seven nightly dates ending on the Sunday before the tick
+(`--week-end` overrides it), compared with the seven before. A night counts
+when none of its parts was cut off at the job deadline, it has a main part, and
+it is not a night on which nearly every graded case failed; two counted nights
+on one date are one night, each case's newer verdict standing. A pass rate is passes over graded repetitions
+(infrastructure repetitions are never graded), over the scenarios graded in both
+weeks; a scenario graded in only one week is left out and counted in the
+closing note.
+
+The page carries the robot from the docs site, a one-paragraph intro, three
+tiles (pass rate and its change, scenarios compared, the median `agent_s` of
+the compared scenarios' graded repetitions), a "Needs attention" box, one row per area with
+its `meaning:` from [`docs/designs/domains.yaml`](designs/domains.yaml) (no
+owners), how failures become bugs, and a footer naming the dates and the model
+the evidence store records for the counted nights' builds (`store.json`).
+
+The page is written only when every check passes; otherwise the script prints
+each reason and exits 1, the step logs a warning, and the last published copy
+stays. The checks:
+
+- **Same cases.** Both weeks' numbers are over one set of scenarios, and the
+  counts shown add up to it.
+- **Truncated nights.** No counted night was cut off.
+- **Not enough data.** With fewer than 4 counted nights in either week, the
+  intro says so and nothing is called up, down or steady.
+- **Few scenarios.** An area with fewer than 3 scenarios is marked "few
+  scenarios" and gets no trend.
+- **Claims.** Every sentence comes from a template with a rule: "in great
+  shape" needs 85% or more and not down; "less than half the time" needs below
+  50%; "down N pts" needs a drop of 3 points or more over 3 or more scenarios.
+  A change under 3 points is "steady".
+- **Needs attention.** Exactly the areas below 65% or down 5 points or more.
+  Each links to its open `nightly-red` + `domain:<slug>` issues with the count.
+- **Bugs exist.** The `nightly-red` issues are read from GitHub (GraphQL,
+  checked against its total count). A case the bug filer files for right now
+  (failing every graded repetition on its last 3 graded nights, on the nightly
+  matrix, not `expected_fail`) with no issue tracking it blocks the render: no
+  open issue names it, and no closed one still tracks it by the filer's rule
+  ([Nightly bugs](#nightly-bugs)). While the filer runs in dry run, every such
+  case blocks.
+- **Links.** Every `href` and `src` is a well-formed https URL. They are not
+  fetched: the dashboard link answers a login redirect, not a 200.
+- **Domains.** Every domain in the data is a row in `domains.yaml`, and every
+  row has nightly data that week unless it carries `new: true`.
+- **Footer.** Every counted night has a model in the evidence store, and the
+  footer names those models and the two weeks' dates; a week that changed model
+  says so in the intro.
+
+Locally,
+`python3 scripts/eval_dashboard/weekly_email.py --data data.json --store store.json --out health-email.html`
+renders against any downloaded pair (it reads the issues with `gh`).
+
 ## The seeded-fleet scan
 
 Presence probes passed on 2026-09-07 while every slot-a fixture sat Pending on
@@ -879,10 +1046,11 @@ crashloop fixture lagged the node repair by about 40 minutes on one project (it
 needs its first restart before OOMKilled evidence exists), and one hourly scan
 can land inside that window. Three projects at once is the fleet-wide shape
 (#1278 was all 30) and waits for nothing. It is DEGRADED, ranked below every
-run-based condition (nothing in the presubmit runs this check or acts on a
-drift, so a drifted fixture reds only the cases that depend on it, on the runs that
-lease those projects; the run-based conditions see that red as it happens, and
-this one names the cause and its owner), and it ends the hour a scan that could
+run-based condition (the presubmit runs the same check on its own lease and
+records the cases that need a drifted role as infrastructure under
+`fixture-drift:<role>` rather than running them, so a fixture the lease's own
+scan saw drifted reds no pull request; this condition names the cause and its
+owner), and it ends the hour a scan that could
 read the incident's roles on the incident's projects no longer shows it — three
 green runs could all have leased healthy projects and say nothing about the
 fixture, and a scan that is missing, stale, blind, or that could not read one of
@@ -922,9 +1090,9 @@ same exception beside the re-apply paragraph, since a re-apply of a stack that i
 applied changes nothing) — and the
 line "Filed automatically by the smoke health bot; the daily reconcile re-applies
 the stack in the projects named, and the bot comments here when a scan reads
-them healthy; the bot will not close it." An open
-`presubmit-gate` issue that already names every drifted role is adopted
-instead. The recovery comments on it as on any other.
+them healthy; the bot closes it when the condition clears." An open issue that already names
+every drifted role is adopted instead. The recovery comments on it as on any
+other.
 The daily `ci-kube-agents-fleet-reconcile-daily` run re-applies the stack in
 the projects the scan names (`docs/ci-pool-projects.md` §6.2) at 08:30 UTC, and the
 recovery comment follows the first scan after that apply. No recovery by then
@@ -1054,7 +1222,7 @@ After `health.json` is uploaded, the same object is appended as one line to
 record per tick, oldest first, nothing trimmed). Each record is the
 `health.json` document verbatim — `schema_version`, `state`, `condition`,
 `since`, `cause`, `failing_cases`, `tracking_issues`, `issue`, `incident`,
-`evidence`, `advice`, `recovering`, `stale`, `slow`, `pool`, `fixture_state`,
+`evidence`, `advice`, `recovering`, `open_conditions`, `stale`, `slow`, `pool`, `fixture_state`,
 `pool_state`, `periodics`, `periodics_read`, `periodics_runs`, `periodics_streaks`,
 `periodics_since`, `metrics`, `dashboard_url`,
 `generated_at` — plus `tick`, the ISO 8601 UTC time the line
@@ -1112,6 +1280,9 @@ sent stays sent. The dashboard is unaffected — the pool episode's start rides
 in `health.json`, which is written every tick, not in the state file.
 An incoming-webhook URL in Secret Manager
 (`ci-health-chat-webhook`, `kube-agents-prow`) is the optional alternative.
+The repository secret `CI_HEALTH_CHAT_MENTIONS` (optional) maps GitHub logins
+to Chat user ids for the digest's mentions ([The nightly
+section](#the-nightly-section)).
 
 `post_health.py --dry-run` prints the messages instead of posting them.
 

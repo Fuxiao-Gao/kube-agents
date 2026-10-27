@@ -345,7 +345,7 @@ calls and become properties of the stream:
 | `message/send` (new task)        | Publish `kind: message` to `a2a.tasks.{addressee}.{taskId}.in`, or for a profile to `a2a.tasks.{profile}.{tier}.{kind}.{taskId}.submit` (10/22). The publisher mints `taskId` - a deviation from HTTP A2A, where the server mints it, but the subject has to exist before anyone can answer on it.                                                                                                                              |
 | `message/stream`                 | The same publish, plus subscribe to BOTH the `events` and `supervisor` subjects - which a session pod cannot do today under its derived grants; see spec-chatops-gateway.md. Streaming is not an optional capability here; it is how the bus works. A subscriber to `events` alone is not wrong about anything it sees, but it never sees the terminal a supervisor declares, so it waits out a task the bus has already ended. |
 | `tasks/get`                      | Replay the `events` and `supervisor` subjects from sequence 1, in stream order, and fold them into a `Task`. No live executor required - this is the durability payoff. The two subjects share the stream sequence, so the fold needs no merge; whichever terminal the stream holds first is the task's, and the other is a post-final drop.                                                                                    |
-| `tasks/cancel`                   | Publish `kind: cancel` to the `in` subject. The executor emits a terminal `canceled`. A task racing to completion may emit `completed` first; both orders are legal and the terminal event wins.                                                                                                                                                                                                                                |
+| `tasks/cancel`                   | Publish `kind: cancel` to the `in` subject. The executor emits a terminal `canceled`. A task racing to completion may emit `completed` first (or `failed` with `reason: hermes-unstructured-reasoning` when the bridge withholds the answer, assertion 13); both orders are legal and the terminal event wins.                                                                                                                  |
 | `tasks/resubscribe`              | JetStream consumer resume from the last delivered sequence. Comes with the transport.                                                                                                                                                                                                                                                                                                                                           |
 | push notification config methods | Not mapped. The bus is push; the library reports these as unsupported.                                                                                                                                                                                                                                                                                                                                                          |
 
@@ -434,7 +434,7 @@ artifact, and nine names are reserved so renderers and audit tooling can rely on
 | `thinking` | Reasoning deltas. Debug views only                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `activity` | Tool-call trace, one entry per invocation. Always in the audit replay                                                                                                                                                                                                                                                                                                                                                                                             |
 | `progress` | Agent-authored milestones, renderable to chat at zero model cost. Stage 1 derives these from model narration; the subagent framework spec records the deviation. May carry a chat message (Chat messages, below), the live message's whole state, so `progress` is text plus at most one chat message DataPart per chunk; assertion 18's validator takes a data part there only when it is a chat message                                                         |
-| `delegate` | The session's request to the gateway to mint a child task: one `data` part `{"addressee", "text"}` on the session's own task events. Consumed by the gateway's relay, never rendered to chat; reserved 10/5, used from the delegation primitive onward                                                                                                                                                                                                            |
+| `delegate` | The session's request to the gateway to mint a child task: one `data` part `{"addressee", "text", "parameters"?}` on the session's own task events (`parameters`: the child's task parameters, below). Consumed by the gateway's relay, never rendered to chat; reserved 10/5, used from the delegation primitive onward                                                                                                                                          |
 | `turn`     | One finished turn's answer on a task with more turns queued (an executor that queues follow-ups). Chunked like `result`, posted by renderers as it completes, never the deliverable; the last turn's answer is the `result`.                                                                                                                                                                                                                                      |
 | `notice`   | A message the task posts on its own, beside its live message and its answer (a PR it opened, say): a TextPart, optionally with a chat message. Each `notice` artifact posts once and is never edited. Not the gateway's own notices. A gateway older than 10/8 drops it, so a fact that matters is in the result too; reserved 10/8                                                                                                                               |
 | `handoff`  | The task handed work to kanban cards, which report into its conversation themselves: one TextPart, `cards`. The Hermes bridge's API executor publishes it ahead of the terminal of such a task whenever the conversation route was recorded (Slack or Google Chat). Never rendered; a delegated child's wake reads it as the cards-pending signal beside the terminal's mark, which the bridge sets only on Slack with `KAGE_SLACK_UX` on (#3258). Reserved 10/16 |
@@ -721,6 +721,47 @@ and only its `mark` is validated. When the newest task ends with no mark on its 
 `canceled` completing a stop the requester sent), the `ask` comes off, a `blocked` settle lifts, and `failed` sets
 `settle: failed`. Any other message without `mark` changes nothing.
 
+### Task parameters and child results
+
+Reserved 10/22 for the profile dispatcher (`spec-subagent-profiles.md`), and used from the gateway's
+delegation to profiles onward; nothing writes them yet. Until a gateway reads a `delegate` request's `parameters`, the
+worker adapter refuses a request carrying any, rather than publish one whose child would be minted
+without its target. Both are `data` parts, and only the gateway
+writes them: the gateway strips any a client or a task supplies, and a reader refuses a message carrying two
+`taskParameters` parts.
+
+**Task parameters.** A profile task's submission carries
+`{"taskParameters": {"parameters": {"<name>": "<value>", …}}}`: the parameters its persona
+declares, such as the cluster persona's `project`, `location` and `cluster`. The gateway sets them
+from what the client or the parent task asked. They never ride the authority block. The dispatcher
+builds the verifier's resource from them (`project/<p>/location/<l>/cluster/<c>`) and passes each
+to the worker as `PROFILE_TASK_<NAME>`. The verifier refuses a target outside the grant's scope,
+and that check is what makes these message fields authoritative.
+
+- A name is a lower-case identifier of at most 63 characters, the persona loader's own rule (`lib.TaskParameterNameRE`). A value is one token of at most 128
+  characters, starting with a letter or digit and then letters, digits and `. _ : -`, so it is never
+  `.`, `..` or a flag.
+- A value can't contain `/` or a space, because the dispatcher joins values into a resource path.
+- A set has at most 16 parameters.
+- A reader that finds the part and it breaks these bounds, or carries no parameters object, refuses
+  the task rather than running it without parameters (`lib.TaskParametersOf`). The dispatcher also
+  checks that every parameter the persona declares is present before it builds the resource.
+- A child result that is malformed (no task id, a non-terminal state, text past the cap) is
+  skipped: it is no event, where a malformed parameter set would change what runs.
+
+**Child results.** When a child task ends, the gateway publishes a `message` on its parent's `…in`
+carrying `{"childResult": {"childTaskId", "addressee", "state", "text"?}}`. The parent's per-task
+reader takes it as a new turn. `state` is the child's terminal state. `text` is its deliverable
+when it completed and its reason otherwise, at most 64 KiB and cut by the gateway; the child's own
+`result` artifact keeps it whole. Only a top-level task's end goes to its conversation.
+
+This is the rule for a parent that waits by staying open: a profile task under the dispatcher. A
+profile parent that has already ended gets no child result; the gateway drops it and logs it. A
+chat session's turn ends when it delegates, so a session parent keeps the chatops wake instead
+(`spec-chatops-gateway.md`, the delegation primitive). On its child's end the gateway starts a new
+turn on the session that carries the child's result, and it doesn't deliver a `childResult` to the
+finished turn's `…in`.
+
 ### Card work after the task ends
 
 **A stopgap.** This retires when delegated work runs as bus tasks (cards as child tasks
@@ -796,8 +837,12 @@ matches a key that adds a `-` suffix to it. The alert is a
 home-channel post and its triage a reply in its thread, so the edit asks the gateway to
 keep `update` keys for a home-channel thread as it does for a conversation. The plan
 carries the `mark` when it changes: `ask` while a card runs, `ask` with `settle: blocked`
-while one waits on the user, and `settle: done` or `failed` once all have settled. The
-notifier has not seen the ask, so the bridge records its kind on the conversation route
+while one waits on the user, and `settle: done` or `failed` once all have settled. A
+completed card's report, or a hard-wall block's reason, whose settle finished the ask's plan goes
+out with `--answer-to <plan key>` (`answer_to` on the request): it is that ask's answer, the one
+post the gateway draws rating controls on, under the ask the plan's key is bound to
+(spec-chatops-gateway.md, "Answer feedback"). A fan-out's children fold into their rows and post
+nothing, so a fan-out flags its creator's completion alone. The notifier has not seen the ask, so the bridge records its kind on the conversation route
 (`PUT /v1/sessions/{id}/route`, `ask`) for the notifier to read back. Not yet ported: a
 typed answer read back onto the question it answers, which needs the backend's own
 history. Until the gateway reads `chat` and `update` (`lib.NotifyRequest` says where it
@@ -841,7 +886,9 @@ counts are what it could not promise: `failed` cards it could not archive, `pend
 archives still running when it ran out of time, and `unresolved` cards claimed just before
 the stop, for which a worker may still start. `truncated` says more cards were open than one
 stop takes, `deadline` that the stop ran out of time, and `listsCut` only that a list was
-cut to fit the part. A stop that failed carries no part and ends `failed` with
+cut to fit the part. An optional list rides beside them for the Slack Stop button's reply
+(spec-chatops-gateway, the Slack adapter): `notStopped`, the cards the three counts count, by id
+and title. An executor that sends none leaves it out, which reads as none named. A stop that failed carries no part and ends `failed` with
 `reason: card-stop-unavailable` (`card-stop-unsupported` from the `cli` executor). If the
 bus refuses the result with the part, the text goes alone, so a `completed` control can
 arrive with no part. The bridge side is in `a2a/docs/hermes-bridge.md`.
@@ -1018,7 +1065,10 @@ Lifecycle:
     next status event is `working`. A follow-up during `working` is delivered to the
     executor and does not by itself change task state.
 13. A cancel always results in a terminal event - `canceled`, or `completed` if the race
-    was lost - never a silent stop.
+    was lost - never a silent stop. Amended 10/22: when the answer that won the race opens
+    with the model's own reasoning (#3206), the Hermes bridge withholds it and the
+    terminal is `failed` with `reason: hermes-unstructured-reasoning` instead of
+    `completed`.
 
 Correlation:
 

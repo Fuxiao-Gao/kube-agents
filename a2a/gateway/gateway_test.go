@@ -201,6 +201,20 @@ type fakeAdapter struct {
 	reactions []string
 	// verified records InboundVerified calls (verifiedCalls).
 	verified []string
+	// feedbacks records every PostMessage's feedback mark, when it has one,
+	// and markedTexts the text each marked post carried.
+	feedbacks   []string
+	markedTexts []string
+	// takesTerminals makes PostTerminal record the terminal in terminals, as
+	// the console adapter publishes a terminal frame; without it the fake
+	// answers errNoTerminalFrames, as a chat backend would.
+	takesTerminals bool
+	terminals      []fakeTerminal
+}
+
+type fakeTerminal struct {
+	Conversation string
+	ConsoleTerminal
 }
 
 func newFakeAdapter() *fakeAdapter {
@@ -246,6 +260,12 @@ func (a *fakeAdapter) Edit(conversation, messageID, text string) error {
 }
 
 func (a *fakeAdapter) PostMessage(conversation string, m OutMessage) (string, error) {
+	if m.Feedback != "" {
+		a.mu.Lock()
+		a.feedbacks = append(a.feedbacks, m.Feedback)
+		a.markedTexts = append(a.markedTexts, m.Text)
+		a.mu.Unlock()
+	}
 	if m.Chat == nil {
 		return a.Post(conversation, m.Text)
 	}
@@ -335,6 +355,28 @@ func (a *fakeAdapter) reactionCalls() []string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return append([]string(nil), a.reactions...)
+}
+
+func (a *fakeAdapter) PostTerminal(conversation string, t ConsoleTerminal) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.takesTerminals {
+		return errNoTerminalFrames
+	}
+	a.terminals = append(a.terminals, fakeTerminal{conversation, t})
+	return nil
+}
+
+func (a *fakeAdapter) setTakesTerminals() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.takesTerminals = true
+}
+
+func (a *fakeAdapter) terminalPosts() []fakeTerminal {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]fakeTerminal(nil), a.terminals...)
 }
 
 func (a *fakeAdapter) postTexts() []string {

@@ -459,7 +459,8 @@ line each while they fit and, when it omits any, lists every filed id in a hidde
 `audit-findings-all` block.
 `every_finding_named: true` fails when a filed id is neither a finding heading nor a code span in
 the body a person reads. Collector-held ids, which the held span records in its own comment, are
-not graded. Above the block's 12,000-character cap the block is left out; the check then
+not graded. Nor are the ids under _Not re-checked this run_, which the held span records in a
+second comment, `<!-- audit-not-rechecked-ids: [...] -->`. Above the block's 12,000-character cap the block is left out; the check then
 fails on the renderer's omission notice instead.
 
 **`scope: finding_ids`.** Reach for it whenever the phrase is a **cluster** name. The rendered
@@ -467,16 +468,20 @@ body's Scope table enumerates every audited cluster on every run, so requiring `
 body would pass a run that swept the fleet and faulted nobody. The hidden
 `<!-- audit-findings: [...] -->` block carries the ids `audit_report.py` derived as
 `<check>.<cluster>.<namespace>.<object>`, so a name appears there only when a finding was actually
-filed against it. The same argument applies to any planted _object_ name that a clean inventory
+filed against it, by this run or a previous one: the block also lists the collector-held ids and,
+over a coverage gap, the ids of previous findings on a target the run did not check. The same argument applies to any planted _object_ name that a clean inventory
 table would also mention. On a body truncated for size the delta block lists only the findings the body names (in full or on one line), and the scope
 reads the `<!-- audit-findings-all: [...] -->` block the script adds there instead, so a filed
 finding that sorted last still counts. The script leaves that block out when it would exceed
 `ALL_FINDINGS_BLOCK_CAP` in `audit_report.py` (12,000 characters, roughly 160 ids of 70
-characters); past that only the named findings and the collector-held ids count, so a case
+characters); past that only the named findings, the collector-held ids and the not-re-checked
+ids count, so a case
 graded this way needs a fleet whose findings stay under it.
 
 **Credential.** A GitHub token in the verifier process's environment: `BENCH_GITHUB_TOKEN`
-preferred, `GITHUB_TOKEN` as a fallback. It needs `issues: read` on the eval GitOps repositories —
+preferred, `GITHUB_TOKEN` as a fallback, both outranked by a non-empty file that
+`BENCH_GITHUB_TOKEN_FILE` names, which CI renews while a unit runs
+([`docs/ci-pool-projects.md`](../docs/ci-pool-projects.md) 5.4). It needs `issues: read` on the eval GitOps repositories —
 private, ours, and throwaway, which is what makes reading them from CI acceptable — and
 `pull_requests: read` for the clauses that say so; the CI grading mint asks for both. Deliberately **not** the agent's own credential: the in-cluster `github-token-minter`
 mints a write-scoped installation token held by the credential-proxy sidecar, and reaching into the
@@ -630,12 +635,17 @@ file whether it lands beside the workload's declaration or over it, and only the
 the Deployment it was meant to protect. The clause lists `/pulls/{n}/files`, counts a rename under
 both names, and needs `pull_requests: read`; an answer it cannot read is an error, not a pass.
 
+`changed_paths_only` lists the full allowlist of repository paths, as non-empty `fnmatch` globs,
+the pull request is permitted to change: every changed file (and both names of any rename) in
+`/pulls/{n}/files` must match at least one listed glob. It reads the same listing as
+`unchanged_paths`, with the same permission and the same error on an unreadable or truncated answer.
+
 `removed_paths` lists repository paths, as `fnmatch` globs, the pull request must delete: each glob
 must match a file `/pulls/{n}/files` lists as `removed`. A delete reaches review as the removal of
 the manifest that declares the object, and a pull request that adds a "delete" marker or annotates
 the manifest in place changes a file while keeping the declaration, so merging it keeps the object.
 A rename moves the declaration rather than deleting it and does not count. It reads the same
-listing as `unchanged_paths`, with the same permission and the same error on an unreadable answer. GitLab has no such listing here, so on GitLab the clause leaves the check unevaluated (an error), as `content` does.
+listing as `unchanged_paths` and `changed_paths_only`, with the same permission and the same error on an unreadable answer. GitLab has no such listing here, so on GitLab `unchanged_paths`, `changed_paths_only` and `removed_paths` leave the check unevaluated (an error), as `content` does.
 
 `content` lists assertions over what the pull request writes, for a case whose answer is an object
 with particular fields rather than any change at all: the `ContainerCluster` a provisioning request
@@ -667,7 +677,7 @@ and a `quantifier` of `all` (the default) or `any` over the documents kept.
   file GitHub left no patch for (large or binary), makes the check an error naming it: reading that
   file needs `contents: read`, which the grading mint does not grant. A case asserting over an edit
   to an existing file (a node pool resize in Terraform, say) needs that permission added first.
-- GitHub only: on a GitLab merge request a check with `content` or `removed_paths` is an error, not a pass.
+- GitHub only: on a GitLab merge request a check with `content`, `unchanged_paths`, `changed_paths_only` or `removed_paths` is an error, not a pass.
 
 ```yaml
 - name: the-new-cluster-turns-on-both-beta-apis
