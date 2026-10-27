@@ -669,6 +669,12 @@ and nothing that needs to be co-resident.
 the same sandbox, and a route that demanded nothing would be the one gap in a
 table whose point is that every route names what it requires.
 
+It admits one other caller: the A2A MCP server's pod, under the `mcp` role,
+which `ROLE_VCS_VERBS` holds to `proposal-view`, a read, with that verb's
+managed-repository check still applying. `CREDENTIAL_PROXY_MCP_CALLERS` binds
+the role to the MCP pod's own ServiceAccount.
+[`agent-shell-sandboxing.md`](agent-shell-sandboxing.md) owns that caller.
+
 ### No shallow clones
 
 There is no `depth`. This is a property of the transport rather than an
@@ -3321,6 +3327,11 @@ claim about what else the sandbox can reach —
 [`../credential-isolation-design.md`](../credential-isolation-design.md) owns
 that question.
 
+The MCP pod is the second caller, and its requests come from outside the
+cluster, through the pod. What bounds it is narrower than the `shell` role:
+`ROLE_VCS_VERBS` holds the `mcp` role to `proposal-view`, which writes nothing,
+and only on a repository the install manages.
+
 `clone` pulls a whole branch's history, which is the wrong shape for a one-off
 read of a large upstream repository, and there is no shallow option to make it
 cheaper.
@@ -3336,7 +3347,7 @@ been added to it, so until they are, an install approaching its token quota is
 visible in the broker's logs and, by status code alone, as `429`s under
 `endpoint="/v1/vcs"` in `kubeagents_credential_proxy_requests_total`, the route
 family every forge verb travels (`/v1/forge` reaches only the credential
-refresh, which spends no quota). The per-verb `kubeagents_vcs_requests_total{verb,status}` names the failing verb, not the cause: a `429` lands as `status="error"` under its verb. The refusal is also thinner than it could
+refresh, which spends no quota). The per-verb `kubeagents_vcs_requests_total{verb,status,provider}` names the failing verb and forge, not the cause: a `429` lands as `status="error"` under its verb. The refusal is also thinner than it could
 be: `FORGE_UNAVAILABLE` tells a caller the same call may work later without
 telling it when, and the `Retry-After` and `RateLimit-*` values both forges
 return are read to classify the failure and then dropped rather than carried
