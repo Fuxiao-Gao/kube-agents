@@ -191,7 +191,7 @@ Job, which reaches the CR as `Degraded`/`A2AProvisionFailed`.
 
 W is TBD - see Open questions. It is not just a cost knob; see the audit section.
 
-Four KV buckets ride the same JetStream deployment:
+Five KV buckets ride the same JetStream deployment:
 
 - `runtime-state` - which agents are alive, what is in flight. Runtime state does not
   belong in git, and this is where it goes instead.
@@ -233,6 +233,15 @@ Four KV buckets ride the same JetStream deployment:
   and the session-state deliver-subject residue above applies to `$KV.feedback.>` the
   same way. The gateway keeps nothing in a bucket without a max age. The chatops gateway
   design owns what a record holds ("Answer feedback").
+- `PROFILE_LEASES` - each AgentProfile task's liveness lease, keyed
+  `<profile>.<tier>.<pod>.<task>` (#3655). The dispatcher is its only writer, by grant.
+  Workers renew by publishing on their own `a2a.dispatch.<profile>.<tier>.<pod>.lease`
+  subject and hold nothing on the bucket, because a put on a KV bucket can carry
+  `Nats-Rollup: all`, which purges every key, so any worker with a put grant could wipe
+  every lease. No max age: the dispatcher reads expiry from each record, so a restarted
+  dispatcher can still read every lease it has to re-adopt or fail. Provision and seed
+  hold CREATE and INFO on it for the info-then-add guard. The dispatcher design owns
+  what a record holds (`lib.LeaseRecord`).
 
 ## Accounts and connection-time authorization
 
@@ -269,7 +278,13 @@ Status (amended 9/4, the callout armed; amended 9/8, sessions moved; amended 9/1
 `worker` retired; amended 9/9, the verifier added): the render now carries the
 `auth_callout` block, and a principal authenticates one of two ways. **Through the
 callout**, by presenting a projected ServiceAccount token: the bus provisioning Job,
-every spawned session pod, the platform agent container, and the capability verifier. **Statically**, from `nats.conf` and listed in `auth_users`:
+every spawned session pod, the platform agent container, the capability verifier, and
+(amended 10/28, #3655) the AgentProfile dispatcher when the operator has its image.
+The dispatcher's grants name each profile durable it reads and each profile it
+dispatches for, because a NATS wildcard matches a whole token and `TASKS.*` would reach
+every session's consumers; it reconnects when its config adds one. With a dispatcher the
+operator principal also creates and deletes those durables, create held by its subject
+to submit filters. **Statically**, from `nats.conf` and listed in `auth_users`:
 the callout itself, which cannot authenticate through the thing it is; the chatops
 gateway, purely as sequencing, since it has a ServiceAccount and its client program
 lands separately from this render; `web` and `console`, because a browser never can;
@@ -537,7 +552,8 @@ Layout:
   Amended 8/31: the pod network is fenced too. The operator renders an ingress
   NetworkPolicy on the NATS pod granting **4222 to exactly the enumerated bus clients**
   (the auth callout, the agent pod - whose sidecars, the Hermes bridge included, share
-  its labels - the A2A gateway, the capability verifier, session pods by the spawner's
+  its labels - the A2A gateway, the capability verifier, the AgentProfile dispatcher (when
+  rendered), session pods by the spawner's
   labels, the provision Job,
   and the hand-applied seed Job; **amended 10/6:** and the operator's own pod, by the
   `kubeagents.x-k8s.io/a2a-bus-client: operator` label from the operator's namespace,

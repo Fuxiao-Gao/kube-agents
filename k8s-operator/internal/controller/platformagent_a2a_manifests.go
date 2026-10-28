@@ -1627,6 +1627,7 @@ var a2aWildcardListenHosts = map[string]bool{"": true, "0.0.0.0": true, "::": tr
 var a2aProvisionedStreams = []string{
 	"TASKS", "DIRECTORY", "TOPICS-STATE", "TOPICS-JOURNAL",
 	"KV_runtime-state", "KV_session-state", "KV_cap", "KV_feedback",
+	"KV_PROFILE_LEASES",
 }
 
 // a2aSeedJetStreamGrants is seed's publish allow-list for the JetStream API,
@@ -2746,6 +2747,10 @@ func buildA2ANATSNetworkPolicy(agent *agentv1alpha1.PlatformAgent) *networkingv1
 					{PodSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
 						"app": a2aVerifierName(agent),
 					}}},
+					// The dispatcher, rendered only when the operator has its
+					// image; a peer that selects no pod admits nothing, so it
+					// is here either way.
+					{PodSelector: &metav1.LabelSelector{MatchLabels: a2aDispatcherPodSelector(agent)}},
 					// Session pods, by the spawner's labels (see
 					// a2aSessionComponent above).
 					{PodSelector: &metav1.LabelSelector{MatchLabels: a2aSessionPodSelector()}},
@@ -2805,7 +2810,7 @@ func a2aOperatorNATSPeers() []networkingv1.NetworkPolicyPeer {
 	}}
 }
 
-// a2aProvisionScript is the provisioning payload: the four streams, four KV
+// a2aProvisionScript is the provisioning payload: the four streams, five KV
 // buckets, and four starter topics from the deployment spec, created
 // idempotently with the nats CLI. Topics are provisioned-only (payload spec):
 // which topics exist is exactly the subject lists rendered here.
@@ -3116,6 +3121,11 @@ $NATS kv info cap           >/dev/null 2>&1 || $NATS kv add cap --history=1 --re
 # at their caps (ask, answer and note, about 22KB) and more at a typical
 # size; past it the write is refused, and the rating is counted but not kept.
 $NATS kv info feedback      >/dev/null 2>&1 || $NATS kv add feedback --history=1 --replicas=1 --storage=file --max-bucket-size=67108864 --ttl=720h
+# PROFILE_LEASES: each profile task's liveness lease, written only by the
+# dispatcher (lib.ProfileLeaseBucket; contract on #3655). No TTL: the
+# dispatcher reads expiry from each record, so a restarted one can still read
+# every lease it has to re-adopt or fail.
+$NATS kv info PROFILE_LEASES >/dev/null 2>&1 || $NATS kv add PROFILE_LEASES --history=1 --replicas=1 --storage=file --max-bucket-size=67108864
 
 # TASKS older than this render: the limits the create above could not apply.
 #
@@ -4052,9 +4062,35 @@ func a2aTasksConsumerBudget(agent *agentv1alpha1.PlatformAgent) int {
 	return resolveA2AMaxSessions(agent)*a2aSessionConsumersPerSession + a2aTasksReserve(agent)
 }
 
+// a2aProfileDurablesAllowed is the AgentProfile durables the TASKS budget
+// carries once there is a dispatcher to read them (#3655): one per (profile,
+// tier, kind), so 16 profiles with both tiers. Profiles are not bounded by
+// the CRD, so this is an allowance, not a count: a profile past it gets no
+// durables (the create is refused at the stream's cap) and its CardPublished
+// condition says why. A sizing knob replaces it when the budget work lands.
+//
+// It sizes a TASKS stream at creation only, and is not part of the budget the
+// provision script holds an existing stream to: a stream's max_consumers
+// can't be raised in place, so holding a live stream to it would refuse every
+// existing next install the day the dispatcher is turned on, with deleting
+// TASKS (and its audit history) as the only way out. On a stream created
+// before the dispatcher the durables take spare slots instead, and a profile
+// they don't fit says so (ensureDurable).
+const a2aProfileDurablesAllowed = 16 * 2 * 2
+
+// a2aProfileDurableAllowance is a2aProfileDurablesAllowed when this operator
+// renders a dispatcher, and nothing otherwise, so an install without one
+// sizes TASKS exactly as before.
+func a2aProfileDurableAllowance() int {
+	if a2aDispatcherEnabled() {
+		return a2aProfileDurablesAllowed
+	}
+	return 0
+}
+
 // a2aTasksMaxConsumers is what a fresh TASKS stream is created with.
 func a2aTasksMaxConsumers(agent *agentv1alpha1.PlatformAgent) int {
-	if budget := a2aTasksConsumerBudget(agent); budget > a2aTasksMaxConsumersFloor {
+	if budget := a2aTasksConsumerBudget(agent) + a2aProfileDurableAllowance(); budget > a2aTasksMaxConsumersFloor {
 		return budget
 	}
 	return a2aTasksMaxConsumersFloor
@@ -5392,6 +5428,15 @@ func (r *PlatformAgentReconciler) reconcileA2AStack(ctx context.Context, agent *
 		*profileErr = goerrors.Join(*profileErr, err)
 	}
 
+	// The dispatcher (platformagent_a2a_dispatcher.go), when this operator
+	// has an image for it. Its pod-read Role lives in the profile namespace,
+	// and a failure there follows the same rule as the quota's.
+	if dispatcherProfileErr, err := r.reconcileA2ADispatcher(ctx, agent, profiles, profileFenced); err != nil {
+		return state, err
+	} else if dispatcherProfileErr != nil {
+		*profileErr = goerrors.Join(*profileErr, dispatcherProfileErr)
+	}
+
 	// Jobs are immutable, so the provision Job is create-if-absent under its
 	// spec-digested name; a changed render — script or pod spec — is a new
 	// name and a fresh run. The superseded generation is swept below rather
@@ -6183,6 +6228,16 @@ func (r *PlatformAgentReconciler) a2aPreBusTeardown(agent *agentv1alpha1.Platfor
 		// budget), so the read is cached.
 		{&policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: a2aVerifierName(agent), Namespace: agent.Namespace}}, r.Client},
 		{&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: a2aVerifierName(agent), Namespace: agent.Namespace}}, r.Client},
+		// The dispatcher (platformagent_a2a_dispatcher.go), Deployment first so
+		// nothing is running when its identity goes, as with the verifier: a
+		// ServiceAccount left behind is a mintable bus identity that writes
+		// leases and fails tasks. Its pod-read Role in the profile namespace
+		// goes with the profile quota, below.
+		{&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: a2aDispatcherName(agent), Namespace: agent.Namespace}}, r.Client},
+		{&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: a2aDispatchConfigName(agent), Namespace: agent.Namespace}}, r.a2aReader()},
+		{&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: a2aDispatcherName(agent), Namespace: agent.Namespace}}, r.a2aReader()},
+		{&rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: a2aDispatcherName(agent), Namespace: agent.Namespace}}, r.a2aReader()},
+		{&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: a2aDispatcherName(agent), Namespace: agent.Namespace}}, r.Client},
 		{&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: a2aCalloutName(agent), Namespace: agent.Namespace}}, r.a2aReader()},
 		{&rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: a2aCalloutName(agent), Namespace: agent.Namespace}}, r.a2aReader()},
 		{&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: a2aCalloutName(agent), Namespace: agent.Namespace}}, r.Client},
@@ -6455,6 +6510,11 @@ func (r *PlatformAgentReconciler) cleanupA2A(ctx context.Context, agent *agentv1
 	profileQuotaErr := r.deleteProfileQuota(ctx, agent)
 	if profileQuotaErr != nil {
 		r.profileNamespaceFailure(ctx, agent, "delete the quota on the flip to today", profileQuotaErr)
+	}
+	// And the dispatcher's pod-read Role and binding there, likewise
+	// unowned, likewise not worth stopping the flip for.
+	if err := r.deleteDispatcherPodsRBAC(ctx, agent); err != nil {
+		r.profileNamespaceFailure(ctx, agent, "delete the dispatcher's pod-read Role on the flip to today", err)
 	}
 
 	// 2. The callout's ClusterRoleBinding. Cluster-scoped, so it carries no

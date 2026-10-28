@@ -291,7 +291,11 @@ paths:
   sets the effective value, which never exceeds `spec.concurrency`. An install-wide ceiling on
   the PlatformAgent caps the total across profiles, and reserves `max(1, ceil(ceiling / 3))`
   slots for interactive tiers, so unattended work cannot starve users. Caps must be dynamic,
-  from 10 clusters to 10,000.
+  from 10 clusters to 10,000. Amended 10/28 (#3655): a child reserve keeps waiting parents
+  from holding every slot; the reserves are disjoint, filled child first, and leave at least
+  one slot for top-level unattended work, so at a ceiling that can't fit both (1, 2 and 4
+  with the default reserves) not every reserve is honoured in full, and the PlatformAgent
+  carries a `ProfileReservesShort` warning saying which and the smallest ceiling that does.
 - Each durable counts against the TASKS consumer budget (#2077), so that formula includes them.
 
 ### Execution

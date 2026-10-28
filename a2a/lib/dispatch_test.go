@@ -1,10 +1,14 @@
 package lib
 
 import (
+	"bytes"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // The dispatcher's names line up with the subjects they read: a durable's
@@ -57,14 +61,14 @@ func validOffer() DispatchMessage {
 		Type: DispatchOffer, TaskID: "t1", Kind: SubmitKindTop,
 		Envelope:     json.RawMessage(`{"taskId":"t1"}`),
 		Deadline:     time.Date(2026, 10, 28, 18, 0, 0, 0, time.UTC),
-		LeaseSeconds: 90, RenewSeconds: 20,
+		LeaseSeconds: 90, RenewSeconds: 20, AcceptSeconds: 10,
 	}
 }
 
 // An offer and an abandon survive the wire, and each malformed one is
 // refused with a reason that names what is wrong.
 func TestADispatchMessageIsCheckedBothWays(t *testing.T) {
-	for _, m := range []DispatchMessage{validOffer(), {Type: DispatchAbandon, TaskID: "t1", Reason: "stopped by the conversation"}} {
+	for _, m := range []DispatchMessage{validOffer(), {Type: DispatchConfirm, TaskID: "t1"}, {Type: DispatchAbandon, TaskID: "t1", Reason: "stopped by the conversation"}} {
 		raw, err := json.Marshal(m)
 		if err != nil {
 			t.Fatal(err)
@@ -88,6 +92,7 @@ func TestADispatchMessageIsCheckedBothWays(t *testing.T) {
 		"no deadline":        {func(m *DispatchMessage) { m.Deadline = time.Time{} }, "deadline"},
 		"no renewal":         {func(m *DispatchMessage) { m.RenewSeconds = 0 }, "renewals"},
 		"lease too short":    {func(m *DispatchMessage) { m.LeaseSeconds = 59 }, "renewals"},
+		"no accept window":   {func(m *DispatchMessage) { m.AcceptSeconds = 0 }, "accept window"},
 		"abandon no reason":  {func(m *DispatchMessage) { *m = DispatchMessage{Type: DispatchAbandon, TaskID: "t1"} }, "reason"},
 	} {
 		m := validOffer()
@@ -114,6 +119,13 @@ func TestAnAcceptAndARenewalAreChecked(t *testing.T) {
 	}
 	if err := (LeaseRenewal{TaskID: "t1"}).Validate(); err != nil {
 		t.Errorf("renewal: %v", err)
+	}
+	var final LeaseRenewal
+	if err := json.Unmarshal([]byte(`{"taskId":"t1","final":true}`), &final); err != nil || !final.Final || final.Validate() != nil {
+		t.Errorf("a final renewal = %+v, %v", final, err)
+	}
+	if raw, _ := json.Marshal(LeaseRenewal{TaskID: "t1"}); strings.Contains(string(raw), "final") {
+		t.Errorf("an ordinary renewal carries final: %s", raw)
 	}
 	if err := (LeaseRenewal{TaskID: ""}).Validate(); err == nil {
 		t.Error("a renewal naming no task was accepted")
@@ -158,5 +170,146 @@ func TestAProfileCardCarriesItsRoutingFields(t *testing.T) {
 		if err := validatePayload(KindAgentCard, "", json.RawMessage(payload)); err != nil {
 			t.Errorf("%s: %v", payload, err)
 		}
+	}
+}
+
+func validDispatchConfig() DispatchConfig {
+	return DispatchConfig{
+		Version: "v1", Namespace: "kubeagents-system", ProfileNamespace: "kubeagents-system-profiles",
+		Ceiling: 6, InteractiveReserve: 2, ChildReserve: 2,
+		LeaseSeconds: 90, RenewSeconds: 20, RestartGraceSeconds: 60, AcceptTimeoutSeconds: 10,
+		Profiles: []DispatchProfile{{
+			Name: "tse", Tiers: []string{"read"}, Concurrency: 2, QueueTimeoutSeconds: 3600, ActiveDeadlineSeconds: 1800,
+			Parameters: []ProfileParameter{{Name: "cluster", Required: true}},
+			Durables: []DispatchDurable{
+				{Tier: "read", Kind: SubmitKindTop, Name: ProfileDurableName("tse", "read", SubmitKindTop)},
+				{Tier: "read", Kind: SubmitKindChild, Name: ProfileDurableName("tse", "read", SubmitKindChild)},
+			},
+		}},
+	}
+}
+
+// The dispatcher refuses a config it can't run on, and each refusal names
+// the field.
+func TestADispatchConfigIsChecked(t *testing.T) {
+	if err := validDispatchConfig().Validate(); err != nil {
+		t.Fatalf("a good config: %v", err)
+	}
+	one := validDispatchConfig()
+	one.Ceiling, one.ChildReserve, one.InteractiveReserve = 1, 0, 0
+	if err := one.Validate(); err != nil {
+		t.Errorf("a ceiling of 1 with no child reserve: %v", err)
+	}
+	for name, tc := range map[string]struct {
+		edit func(*DispatchConfig)
+		want string
+	}{
+		"no namespace":              {func(c *DispatchConfig) { c.Namespace = "" }, "namespace"},
+		"no ceiling":                {func(c *DispatchConfig) { c.Ceiling = 0 }, "ceiling"},
+		"reserve at ceiling":        {func(c *DispatchConfig) { c.ChildReserve = 6 }, "childReserve"},
+		"reserve of a 1 ceiling":    {func(c *DispatchConfig) { c.Ceiling, c.ChildReserve, c.InteractiveReserve = 1, 0, 1 }, "interactiveReserve"},
+		"reserves fill the ceiling": {func(c *DispatchConfig) { c.Ceiling, c.ChildReserve, c.InteractiveReserve = 4, 2, 2 }, "reserved for neither"},
+		"short lease":               {func(c *DispatchConfig) { c.LeaseSeconds = 59 }, "three renewals"},
+		"short grace":               {func(c *DispatchConfig) { c.RestartGraceSeconds = 39 }, "two renewals"},
+		"no accept timeout":         {func(c *DispatchConfig) { c.AcceptTimeoutSeconds = 0 }, "acceptTimeoutSeconds"},
+		"duplicate profile":         {func(c *DispatchConfig) { c.Profiles = append(c.Profiles, c.Profiles[0]) }, "twice"},
+		"no concurrency":            {func(c *DispatchConfig) { c.Profiles[0].Concurrency = 0 }, "concurrency"},
+		"misnamed durable":          {func(c *DispatchConfig) { c.Profiles[0].Durables[0].Name = "other" }, "durable"},
+	} {
+		c := validDispatchConfig()
+		c.Profiles = append([]DispatchProfile(nil), c.Profiles...)
+		c.Profiles[0].Durables = append([]DispatchDurable(nil), c.Profiles[0].Durables...)
+		tc.edit(&c)
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: Validate = %v, want an error saying %q", name, err, tc.want)
+		}
+	}
+}
+
+// The pool selector names the worker component, the profile and the tier, so
+// it can't pick up a ServiceAccount's labels or another tier's pods.
+func TestThePoolSelectorNamesTheWorkerComponentProfileAndTier(t *testing.T) {
+	want := "kubeagents.x-k8s.io/a2a-component=agentprofile-worker,kubeagents.x-k8s.io/agentprofile=tse,kubeagents.x-k8s.io/agentprofile-tier=read"
+	if got := ProfilePoolSelector("tse", "read"); got != want {
+		t.Errorf("selector = %q, want %q", got, want)
+	}
+}
+
+// The dispatch config the operator renders (its fixture, written by the
+// operator's tests) decodes into DispatchConfig and passes the dispatcher's
+// own checks: the operator module can't import this one, so this is what
+// holds the two sets of JSON names equal.
+func TestTheOperatorsDispatchConfigDecodesAndValidates(t *testing.T) {
+	raw, err := os.ReadFile("testdata/rendered-dispatch-config.json")
+	if err != nil {
+		t.Fatalf("%v\nRegenerate with: go test ./internal/controller/ -run 'Fixture' -update (in k8s-operator)", err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var cfg DispatchConfig
+	if err := dec.Decode(&cfg); err != nil {
+		t.Fatalf("the operator's dispatch config does not decode strictly: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("the operator's dispatch config fails the dispatcher's checks: %v", err)
+	}
+	if len(cfg.Profiles) != 1 || cfg.Profiles[0].Name != "tse" || len(cfg.Profiles[0].Parameters) != 3 || len(cfg.Profiles[0].Durables) != 2 {
+		t.Errorf("profiles = %+v", cfg.Profiles)
+	}
+	if cfg.Version == "" || cfg.Namespace == "" || cfg.ProfileNamespace != cfg.Namespace+"-profiles" {
+		t.Errorf("version %q, namespace %q, profile namespace %q", cfg.Version, cfg.Namespace, cfg.ProfileNamespace)
+	}
+}
+
+// The durable the operator makes and the pool labels it renders (its
+// fixture, written by the operator's tests) agree with this package's
+// constants, and the durable passes SubscribeHeld's checks: the operator
+// can't import lib, so this is what holds its copies of the held mark, the
+// AckWait, the tamper list and the labels equal to these.
+func TestTheOperatorsHeldDurableIsOneSubscribeHeldBinds(t *testing.T) {
+	raw, err := os.ReadFile("testdata/rendered-held-durable.json")
+	if err != nil {
+		t.Fatalf("%v\nRegenerate with: go test ./internal/controller/ -run 'Fixture' -update (in k8s-operator)", err)
+	}
+	var doc struct {
+		Durable       string            `json:"durable"`
+		Filter        string            `json:"filter"`
+		AckPolicy     string            `json:"ackPolicy"`
+		AckWait       string            `json:"ackWait"`
+		MaxAckPending int               `json:"maxAckPending"`
+		Metadata      map[string]string `json:"metadata"`
+		PoolLabels    map[string]string `json:"poolLabels"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Durable != ProfileDurableName("tse", "read", SubmitKindTop) || doc.Filter != ProfileDurableFilter("tse", "read", SubmitKindTop) {
+		t.Errorf("durable %q filter %q, want lib's names", doc.Durable, doc.Filter)
+	}
+	ackWait, err := time.ParseDuration(doc.AckWait)
+	if err != nil || ackWait != DefaultHeldAckWait {
+		t.Errorf("the operator's AckWait %q is not DefaultHeldAckWait %v", doc.AckWait, DefaultHeldAckWait)
+	}
+	if doc.Metadata[heldMarkerKey] != heldMarkerValue || len(doc.Metadata) != 1 {
+		t.Errorf("the operator's mark %v is not %s=%s", doc.Metadata, heldMarkerKey, heldMarkerValue)
+	}
+	cc := jetstream.ConsumerConfig{
+		Durable: doc.Durable, FilterSubject: doc.Filter, AckPolicy: jetstream.AckExplicitPolicy,
+		MaxAckPending: doc.MaxAckPending, AckWait: ackWait, Metadata: doc.Metadata,
+		DeliverPolicy: jetstream.DeliverAllPolicy, ReplayPolicy: jetstream.ReplayInstantPolicy,
+	}
+	if doc.AckPolicy != "explicit" || cc.MaxAckPending < 1 || heldConfigTampered(cc) != "" {
+		t.Errorf("the operator's durable fails SubscribeHeld's checks: ack %q, cap %d, tampered %q", doc.AckPolicy, cc.MaxAckPending, heldConfigTampered(cc))
+	}
+	want := map[string]string{ProfileComponentLabel: ProfileWorkerComponent, ProfileNameLabel: "tse", ProfileTierLabel: "read"}
+	for k, v := range want {
+		if doc.PoolLabels[k] != v {
+			t.Errorf("pool label %s = %q, want %q (lib.ProfilePoolSelector selects on it)", k, doc.PoolLabels[k], v)
+		}
+	}
+	if len(doc.PoolLabels) != len(want) {
+		t.Errorf("pool labels %v, want exactly %v", doc.PoolLabels, want)
 	}
 }
