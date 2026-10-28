@@ -149,7 +149,9 @@ other unit, because a scope edit rolls the gateway and the Cluster Agent reconci
 excluded cluster's profile. Before them it adds each slot's cluster, read from the fleet's
 `.fleet-context`, to the PlatformAgent's `spec.scope.exclude.clusters`, waits until the pod
 reads the new scope, and runs the reconcile once. After them it puts the scope back and runs the
-reconcile again to re-create the profiles. The scope it replaced is saved on the CR
+reconcile again to re-create the profiles. A CR that had no scope block first gets a block that
+excludes nothing, and loses it only after a reconcile has run under that block: the reconcile
+reads a missing block as "keep the last exclusions". The scope it replaced is saved on the CR
 (`bench/kube_agents_bench/scope_exclude.py`), so the EXIT trap and the next lease can restore it
 after a run that died first. A repetition whose exclusion did not take effect is recorded as
 infrastructure. The validator refuses a slot the catalogue does not declare and a list that

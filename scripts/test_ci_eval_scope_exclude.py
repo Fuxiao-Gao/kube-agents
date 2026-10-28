@@ -19,6 +19,7 @@ from test_ci_eval_fanout import SCRIPT, lifted
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 ANNOTATION = "bench.kubeagents.x-k8s.io/scope-before-exclude"
+ANNOTATION_PATH = "/metadata/annotations/bench.kubeagents.x-k8s.io~1scope-before-exclude"
 SEEDED_B = {"projectId": "pool-1", "location": "us-central1-b", "clusterName": "seeded-b"}
 
 # The globals the functions read, as the script sets them before the fan-out.
@@ -52,18 +53,32 @@ def run_bash(body: str, cwd: str) -> subprocess.CompletedProcess:
     )
 
 
+# Applies a JSON patch's add and remove ops to cr.json, as the API server would.
+APPLY = (
+    "import json,sys; d=json.load(open('cr.json'))\n"
+    "for op in json.loads(sys.argv[1]):\n"
+    "    *ps, last = [p.replace('~1','/') for p in op['path'].split('/')[1:]]\n"
+    "    n = d\n"
+    "    for p in ps: n = n[p]\n"
+    "    n.pop(last) if op['op'] == 'remove' else n.__setitem__(last, op['value'])\n"
+    "json.dump(d, open('cr.json','w'))"
+)
+
+
 def kubectl_stub(cr: dict) -> str:
-    """kubectl that serves `cr` for a get and logs each patch's ops to ./patches."""
+    """kubectl that serves cr.json for a get, logs each patch's ops to ./patches
+    and applies them to cr.json, so a second step reads the first one's result."""
     return textwrap.dedent(
         f"""\
+        printf '%s' '{json.dumps(cr)}' > cr.json
         kubectl() {{
           case " $* " in
-            *" get platformagent "*) printf '%s' '{json.dumps(cr)}' ;;
-            *" patch platformagent "*) shift $(( $# - 1 )); printf '%s\\n' "$1" >> patches ;;
+            *" get platformagent "*) cat cr.json ;;
+            *" patch platformagent "*) shift $(( $# - 1 )); printf '%s\\n' "$1" >> patches; python3 -c "{APPLY}" "$1" ;;
             *) echo "unexpected kubectl $*" >&2; return 1 ;;
           esac
         }}
-        scope_exclude_settle() {{ echo "SETTLED $1"; }}
+        scope_exclude_settle() {{ echo "SETTLED $1" >> settles; echo "SETTLED $1"; }}
         """
     )
 
@@ -134,14 +149,34 @@ class ApplyRestoreTest(unittest.TestCase):
         self.assertIn("rc=1", result.stdout)
         self.assertEqual(ops, [])
 
-    def test_restore_puts_the_saved_scope_back_and_settles_only_when_asked(self):
+    def test_restore_of_a_cr_that_had_no_block_settles_before_and_after_each_step(self):
         cr = {"metadata": {"annotations": {ANNOTATION: "null"}}, "spec": {"scope": {"exclude": {"clusters": [SEEDED_B]}}}}
-        for call, settled in (("scope_exclude_restore exit", False), ("scope_exclude_restore lease settle", True)):
-            with self.subTest(call=call):
-                result, ops = self.run_functions(cr, call + "; echo rc=$?")
-                self.assertIn("rc=0", result.stdout, result.stderr)
-                self.assertEqual(ops, [[{"op": "remove", "path": "/spec/scope"}, {"op": "remove", "path": "/metadata/annotations/bench.kubeagents.x-k8s.io~1scope-before-exclude"}]])
-                self.assertEqual("SETTLED" in result.stdout, settled)
+        result, ops = self.run_functions(cr, "scope_exclude_restore lease settle; echo rc=$?")
+        self.assertIn("rc=0", result.stdout, result.stderr)
+        self.assertEqual(
+            ops,
+            [
+                [{"op": "add", "path": "/spec/scope", "value": {"exclude": {"clusters": []}}}],
+                [{"op": "remove", "path": "/spec/scope"}, {"op": "remove", "path": ANNOTATION_PATH}],
+            ],
+        )
+        # One reconcile under the CR as it stood, then one after each step.
+        self.assertEqual(result.stdout.count("SETTLED lease"), 3)
+
+    def test_restore_from_the_exit_trap_takes_only_the_first_step_and_does_not_wait(self):
+        cr = {"metadata": {"annotations": {ANNOTATION: "null"}}, "spec": {"scope": {"exclude": {"clusters": [SEEDED_B]}}}}
+        result, ops = self.run_functions(cr, "scope_exclude_restore exit; echo rc=$?")
+        self.assertIn("rc=0", result.stdout, result.stderr)
+        self.assertEqual(ops, [[{"op": "add", "path": "/spec/scope", "value": {"exclude": {"clusters": []}}}]])
+        self.assertNotIn("SETTLED", result.stdout)
+
+    def test_restore_of_a_declared_scope_is_one_step(self):
+        scope = {"projects": ["pool-2"], "exclude": {"clusters": []}}
+        cr = {"metadata": {"annotations": {ANNOTATION: json.dumps(scope)}}, "spec": {"scope": {"projects": ["pool-2"], "exclude": {"clusters": [SEEDED_B]}}}}
+        result, ops = self.run_functions(cr, "scope_exclude_restore case-x settle; echo rc=$?")
+        self.assertIn("rc=0", result.stdout, result.stderr)
+        self.assertEqual(ops, [[{"op": "add", "path": "/spec/scope", "value": scope}, {"op": "remove", "path": ANNOTATION_PATH}]])
+        self.assertEqual(result.stdout.count("SETTLED case-x"), 2)
 
     def test_restore_with_nothing_saved_is_a_no_op(self):
         result, ops = self.run_functions({"metadata": {}, "spec": {}}, "scope_exclude_restore lease settle; echo rc=$?")

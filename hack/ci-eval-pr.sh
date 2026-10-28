@@ -2138,23 +2138,34 @@ scope_exclude_apply() { # <case> <slot>...
   scope_exclude_settle "${name}"
 }
 
-# Put back the scope a patch saved, when one is saved. With `settle`, wait as the
-# apply does, so the excluded clusters' profiles are re-created before anything
-# else runs; the EXIT trap passes nothing and leaves that to the hourly reconcile.
+# Put back the scope a patch saved, when one is saved. A CR that had no scope
+# block takes two steps (restore_ops in the helper says why): exclusions emptied,
+# then the block removed, with a reconcile under the emptied block in between.
+# With `settle`, a reconcile runs under the CR as it stands before the first
+# step too, so a run that died between the steps is finished safely, and each
+# step waits as the apply does, so the profiles are back before anything else
+# runs. Without it (the EXIT trap) only the first step is taken; the hourly
+# reconcile and the next lease's preflight do the rest.
 scope_exclude_restore() { # <label> [settle]
-  local label="$1" settle="${2:-}" ops
+  local label="$1" settle="${2:-}" ops step
   scope_exclude_target "${label}" 2>/dev/null || return 0
-  if ! ops="$(scope_exclude_kubectl get platformagent "${AGENT_SERVICE_NAME}" -o json | scope_exclude_helper restore)"; then
-    echo "WARNING: Scope exclusion (${label}): could not read platformagent/${AGENT_SERVICE_NAME} to restore its scope" >&2
-    return 1
-  fi
-  [ -n "${ops}" ] || return 0
-  if ! scope_exclude_kubectl patch platformagent "${AGENT_SERVICE_NAME}" --type json -p "${ops}" >/dev/null; then
-    echo "WARNING: Scope exclusion (${label}): could not restore the scope of platformagent/${AGENT_SERVICE_NAME}; the next lease's preflight tries again" >&2
-    return 1
-  fi
-  echo "Scope exclusion (${label}): restored the scope platformagent/${AGENT_SERVICE_NAME} had before an exclusion"
-  [ -z "${settle}" ] || scope_exclude_settle "${label}"
+  for step in 1 2; do
+    if ! ops="$(scope_exclude_kubectl get platformagent "${AGENT_SERVICE_NAME}" -o json | scope_exclude_helper restore)"; then
+      echo "WARNING: Scope exclusion (${label}): could not read platformagent/${AGENT_SERVICE_NAME} to restore its scope" >&2
+      return 1
+    fi
+    [ -n "${ops}" ] || return 0
+    if [ -n "${settle}" ] && [ "${step}" = 1 ]; then
+      scope_exclude_settle "${label}" || return 1
+    fi
+    if ! scope_exclude_kubectl patch platformagent "${AGENT_SERVICE_NAME}" --type json -p "${ops}" >/dev/null; then
+      echo "WARNING: Scope exclusion (${label}): could not restore the scope of platformagent/${AGENT_SERVICE_NAME}; the next lease's preflight tries again" >&2
+      return 1
+    fi
+    echo "Scope exclusion (${label}): a restore step applied to platformagent/${AGENT_SERVICE_NAME}: ${ops}"
+    [ -n "${settle}" ] || return 0
+    scope_exclude_settle "${label}" || return 1
+  done
 }
 
 if [ "${EVAL_FORGE_KIND}" = "gitlab" ]; then

@@ -34,7 +34,9 @@ Subcommands, each printing to stdout and exiting 1 with the reason on stderr:
 ``patch --fleet-context <file> --slots <slot>...`` (the CR as JSON on stdin)
     The JSON patch that excludes the slots' clusters and saves the scope.
 ``restore`` (the CR as JSON on stdin)
-    The JSON patch that puts the saved scope back, or nothing when none is saved.
+    The JSON patch for the next step back to the saved scope, or nothing when
+    none is saved. A CR that had no scope block takes two steps, with a
+    reconcile between them (restore_ops says why).
 ``clusters`` (a CR, or the operator's rendered scope file, as JSON on stdin)
     The excluded clusters, sorted, as one line of JSON, so the runner can tell
     when the pod reads the scope the CR declares.
@@ -57,6 +59,9 @@ SLOTS_KEY = "slots"
 SLOT = re.compile(r"\A[a-z]\Z")
 # The scope the patch replaced, as JSON (`null` for a CR with no scope block).
 ANNOTATION = "bench.kubeagents.x-k8s.io/scope-before-exclude"
+# The first restore step for a CR that had no scope block: a block that excludes
+# nothing, which the reconcile reads as a declaration (restore_ops says why).
+CLEARED_SCOPE: dict[str, Any] = {"exclude": {"clusters": []}}
 # `.fleet-context` keys, as hack/fleet-kubeconfigs.sh writes them.
 CONTEXT_PROJECT = "project"
 CONTEXT_CLUSTER = "cluster.{slot}"
@@ -153,17 +158,27 @@ def patch_ops(cr: dict[str, Any], clusters: list[dict[str, str]]) -> list[dict[s
 
 
 def restore_ops(cr: dict[str, Any]) -> list[dict[str, Any]]:
-    """Put the saved scope back and drop the annotation; empty when none is saved."""
+    """The next step back to the saved scope; empty when none is saved.
+
+    One step when the CR had a scope block: put it back and drop the annotation.
+    Two when it had none, because the Cluster Agent reconcile reads an absent
+    block as "keep the last declaration's exclusions": removing the block while
+    it still excludes would leave the clusters excluded for good. So the first
+    step empties the exclusions and keeps the annotation, and only once a
+    reconcile has run under that does the second remove the block.
+    """
     saved, base = _saved_scope(cr)
     if not saved:
         return []
-    ops: list[dict[str, Any]] = []
+    remove_annotation = {"op": "remove", "path": _annotation_path()}
     if base is not None:
-        ops.append({"op": "add", "path": "/spec/scope", "value": base})
-    elif "scope" in (cr.get("spec") or {}):
-        ops.append({"op": "remove", "path": "/spec/scope"})
-    ops.append({"op": "remove", "path": _annotation_path()})
-    return ops
+        return [{"op": "add", "path": "/spec/scope", "value": base}, remove_annotation]
+    scope = (cr.get("spec") or {}).get("scope")
+    if scope is None:
+        return [remove_annotation]
+    if scope_clusters({"spec": {"scope": scope}}):
+        return [{"op": "add", "path": "/spec/scope", "value": copy.deepcopy(CLEARED_SCOPE)}]
+    return [{"op": "remove", "path": "/spec/scope"}, remove_annotation]
 
 
 def scope_clusters(doc: dict[str, Any]) -> list[dict[str, str]]:

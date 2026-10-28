@@ -99,15 +99,27 @@ def test_a_slot_the_context_does_not_resolve_is_an_error(tmp_path, text):
         scope_exclude.excluded_clusters(_context(tmp_path, text), ["b"])
 
 
-def test_a_cr_without_scope_gets_the_exclusion_and_comes_back_without_one():
+def test_a_cr_without_scope_comes_back_without_one_in_two_steps():
     cr = {"metadata": {"name": "platform-agent"}, "spec": {"mode": "next"}}
     patched = _apply(cr, scope_exclude.patch_ops(cr, [SEEDED_B]))
     assert patched["spec"]["scope"] == {"exclude": {"clusters": [SEEDED_B]}}
     assert patched["metadata"]["annotations"][scope_exclude.ANNOTATION] == "null"
-    assert _apply(patched, scope_exclude.restore_ops(patched)) == {
+    # The reconcile reads an absent block as "keep the last exclusions", so the
+    # block is first emptied, with the annotation kept for the second step.
+    cleared = _apply(patched, scope_exclude.restore_ops(patched))
+    assert cleared["spec"]["scope"] == {"exclude": {"clusters": []}}
+    assert scope_exclude.ANNOTATION in cleared["metadata"]["annotations"]
+    # The API server defaults maxProjects into the block it stores; still cleared.
+    cleared["spec"]["scope"]["maxProjects"] = 100
+    assert _apply(cleared, scope_exclude.restore_ops(cleared)) == {
         "metadata": {"name": "platform-agent", "annotations": {}},
         "spec": {"mode": "next"},
     }
+
+
+def test_a_saved_null_with_no_block_left_only_drops_the_annotation():
+    cr = {"metadata": {"annotations": {scope_exclude.ANNOTATION: "null"}}, "spec": {}}
+    assert scope_exclude.restore_ops(cr) == [{"op": "remove", "path": ANNOTATION_PATH}]
 
 
 def test_a_declared_scope_keeps_its_own_exclusions_and_comes_back_as_it_was():
@@ -128,7 +140,7 @@ def test_a_patch_over_a_leftover_starts_from_the_saved_scope():
     # The leftover's seeded-d is not carried into the next case's exclusion.
     assert second["spec"]["scope"] == {"exclude": {"clusters": [SEEDED_B]}}
     assert second["metadata"]["annotations"][scope_exclude.ANNOTATION] == "null"
-    assert "scope" not in _apply(second, scope_exclude.restore_ops(second))["spec"]
+    assert _apply(second, scope_exclude.restore_ops(second))["spec"]["scope"] == {"exclude": {"clusters": []}}
 
 
 def test_nothing_saved_means_nothing_to_restore(capsys, monkeypatch):
