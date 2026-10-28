@@ -191,7 +191,7 @@ Job, which reaches the CR as `Degraded`/`A2AProvisionFailed`.
 
 W is TBD - see Open questions. It is not just a cost knob; see the audit section.
 
-Three KV buckets ride the same JetStream deployment:
+Four KV buckets ride the same JetStream deployment:
 
 - `runtime-state` - which agents are alive, what is in flight. Runtime state does not
   belong in git, and this is where it goes instead.
@@ -223,6 +223,16 @@ Three KV buckets ride the same JetStream deployment:
   it is a denial it has to be enumerated over every principal on the bus rather than
   asserted of one. 09 §3 owns the entry shape; the permissions are asserted in
   `a2a/authcallout` against the config the operator renders.
+- `feedback` - the 👍 and 👎 ratings chat users gave the gateway's answers, each with the
+  exchange it rated: user content that can hold cluster data. The one bucket with a max
+  age (`--ttl=720h`), which is its retention, and capped at 64MiB, which 👍 and 👎 share:
+  past it a new rating is refused until older ones expire. The gateway's user is
+  the only reader and writer of its records by grant, with the registry's four verbs on
+  `KV_feedback`; provision and seed hold STREAM.INFO on it, which can list its keys (task
+  id and rater),
+  and the session-state deliver-subject residue above applies to `$KV.feedback.>` the
+  same way. The gateway keeps nothing in a bucket without a max age. The chatops gateway
+  design owns what a record holds ("Answer feedback").
 
 ## Accounts and connection-time authorization
 
@@ -609,9 +619,10 @@ Layout:
 - **The notify route.** The agent's proactive posts to the chat home channel under `next`, and a
   kanban card's report back to the gateway conversation it was filed in
   (spec-chatops-gateway.md, "Proactive posts: the chat.notify route"). The `agent` user gains
-  publish on `chat.notify.gchat` and `chat.notify.slack` (one subject per backend the gateway can
-  hold) and subscribe on `chat.notify.reply.agent.>`; the gateway user gains the matching grants
-  (subscribe on the two request subjects, publish on the reply namespace). No other
+  publish on `chat.notify.gchat`, `chat.notify.slack` and `chat.notify.console` (one subject per
+  backend the gateway can hold, and the console's) and subscribe on `chat.notify.reply.agent.>`;
+  the gateway user gains the matching grants (subscribe on the three request subjects, publish on
+  the reply namespace). No other
   principal holds either subject. The reply namespace is its own rather than the agent's
   `_INBOX`, so the gateway cannot publish into the inbox where the agent reads its JetStream
   replies. Core NATS, like the console subjects: the provision Job is untouched.
