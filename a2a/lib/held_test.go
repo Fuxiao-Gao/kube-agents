@@ -953,6 +953,10 @@ func TestSubscribeHeldRefusesADurableWithAForgedMark(t *testing.T) {
 		"paused":             {func(c *jetstream.ConsumerConfig) { u := time.Now().Add(time.Hour); c.PauseUntil = &u }, "paused"},
 		"pull limits":        {func(c *jetstream.ConsumerConfig) { c.MaxRequestBatch = 1 }, "limits pull requests"},
 		"memory":             {func(c *jetstream.ConsumerConfig) { c.MemoryStorage = true }, "in memory"},
+		"priority group": {func(c *jetstream.ConsumerConfig) {
+			c.PriorityPolicy = jetstream.PriorityPolicyOverflow
+			c.PriorityGroups = []string{"g"}
+		}, "priority group"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h, worker := newHeldHarness(t, "forged")
