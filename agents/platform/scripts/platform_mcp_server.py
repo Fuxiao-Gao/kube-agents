@@ -1280,8 +1280,12 @@ def update_finding(
     undecided finding with the same check, project and cluster (one line in
     the nudge's message) takes it too, and their ids come back in
     `item_rows_decided`. So one call per item the user decided is enough. A
-    finding that no longer reproduces is not set here: that is a verification
-    outcome.
+    finding in state 'surfaced' was shown to the user in the nudge as one line
+    with every finding of its item, so a decision on its id is the user's
+    decision for that line: apply it, then say in the reply which other
+    findings it covered. Ask first only when the finding is not 'surfaced',
+    because the user has not seen its line. A finding that no longer
+    reproduces is not set here: that is a verification outcome.
 
     Args:
         finding_id: The finding's id.

@@ -1545,6 +1545,14 @@ class TestFindingsQueueTools(unittest.TestCase):
         platform_mcp_server.findings_publication("nudge", "chat", content_hash="h1")
         self.assertEqual(self.captured[-1][2], {"target_kind": "chat", "content_hash": "h1"})
 
+    def test_a_decision_on_a_surfaced_finding_covers_its_line_without_asking(self):
+        # The model reads this docstring as the tool's description: without
+        # the rule, a careful model asks before a permanent decision that also
+        # covers rows the user did not name (findings-decision-covers-item).
+        doc = " ".join(platform_mcp_server.update_finding.__doc__.split())
+        self.assertIn("a decision on its id is the user's decision for that line: apply it", doc)
+        self.assertIn("Ask first only when the finding is not 'surfaced'", doc)
+
     def test_a_finding_id_cannot_reroute_the_call(self):
         platform_mcp_server.update_finding("../../v1/sessions", state="accepted")
         self.assertEqual(self.captured[-1][1], "/v1/findings/..%2F..%2Fv1%2Fsessions")
