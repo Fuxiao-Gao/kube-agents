@@ -674,9 +674,22 @@ type fakeDirectory struct {
 	// forgets records each namespace whose connection the reconciler
 	// dropped, as forgetBus would on the NATS publisher.
 	forgets []string
+	// durables is each profile's last SyncDurables.
+	durables map[string][]profileDurable
 }
 
 func (f *fakeDirectory) forget(namespace string) { f.forgets = append(f.forgets, namespace) }
+
+func (f *fakeDirectory) SyncDurables(_ context.Context, _ *agentv1alpha1.PlatformAgent, profile string, want []profileDurable) error {
+	if f.down {
+		return errors.New("bus down")
+	}
+	if f.durables == nil {
+		f.durables = map[string][]profileDurable{}
+	}
+	f.durables[profile] = want
+	return nil
+}
 
 func newFakeDirectory() *fakeDirectory { return &fakeDirectory{entries: map[string]directoryEntry{}} }
 

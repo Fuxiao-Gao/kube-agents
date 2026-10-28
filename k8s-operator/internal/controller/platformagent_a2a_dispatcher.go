@@ -110,23 +110,28 @@ func a2aDispatcherPodSelector(agent *agentv1alpha1.PlatformAgent) map[string]str
 //     read accepts and lease renewals on .accept and .lease beneath them. The
 //     pod token in those subjects is the only identity it trusts.
 //   - terminal failures on a task's .events (decided under #3660's
-//     delegation): a refusal at admission, an expired lease, a deadline. The
-//     executor stays the only other writer, and TASKS refuses rollup headers,
-//     so this publisher can't purge the stream.
+//     delegation): a refusal at admission, an expired lease, a deadline.
+//     Named per profile it dispatches for, a2a.tasks.<profile>.*.events, so
+//     it can't write a session's or the bridge's task events. The executor
+//     stays the only other writer, and TASKS refuses rollup headers, so this
+//     publisher can't purge the stream.
 //   - the verifier, for CheckProfileRun, on its own caller subject, with
 //     answers in its own reply namespace.
 //
 // No subscribe on a2a.tasks.>: it reads submissions only through its
 // durables, and never a task's .in or .events.
-func dispatcherIdentity(agent *agentv1alpha1.PlatformAgent, ns string, durables []string) a2aIdentity {
+func dispatcherIdentity(agent *agentv1alpha1.PlatformAgent, ns string, profiles, durables []string) a2aIdentity {
 	const leases = "KV_PROFILE_LEASES"
-	var durableGrants []string
+	var perProfile []string
 	for _, d := range durables {
-		durableGrants = append(durableGrants,
+		perProfile = append(perProfile,
 			"$JS.API.CONSUMER.INFO.TASKS."+d,
 			"$JS.API.CONSUMER.MSG.NEXT.TASKS."+d,
 			"$JS.ACK.TASKS."+d+".>",
 		)
+	}
+	for _, p := range profiles {
+		perProfile = append(perProfile, "a2a.tasks."+p+".*.events")
 	}
 	return a2aIdentity{
 		user:    a2aDispatcherUser,
@@ -135,14 +140,13 @@ func dispatcherIdentity(agent *agentv1alpha1.PlatformAgent, ns string, durables 
 			"hands tasks to workers, and fails a task it can't run (#3655)",
 		auth:           a2aAuthCallout,
 		serviceAccount: a2aServiceAccountName(ns, a2aDispatcherName(agent)),
-		publish: append(durableGrants,
+		publish: append(perProfile,
 			"$KV.PROFILE_LEASES.>",
 			"$JS.API.STREAM.INFO."+leases,
 			"$JS.API.DIRECT.GET."+leases+".>",
 			"$JS.API.CONSUMER.CREATE."+leases+".>",
 			"$JS.API.CONSUMER.DELETE."+leases+".*",
 			"a2a.dispatch.*.*.*",
-			"a2a.tasks.*.*.events",
 			"a2a.cap.verify."+a2aDispatcherUser,
 			"_INBOX."+a2aDispatcherUser+".>",
 		),
@@ -289,20 +293,21 @@ func buildA2ADispatcherPodsRoleBinding(agent *agentv1alpha1.PlatformAgent) *rbac
 	}
 }
 
-// dispatcherDurables is every durable the dispatch config lists, in its
-// order: the names the dispatcher's grants enumerate.
-func dispatcherDurables(agent *agentv1alpha1.PlatformAgent, profiles []agentv1alpha1.AgentProfile) []string {
+// dispatcherGrantNames are the profiles the dispatch config lists and every
+// durable under them, in its order: the names the dispatcher's grants
+// enumerate.
+func dispatcherGrantNames(agent *agentv1alpha1.PlatformAgent, profiles []agentv1alpha1.AgentProfile) (names, durables []string) {
 	cfg, err := desiredDispatchConfig(agent, profiles)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
-	var names []string
 	for _, p := range cfg.Profiles {
+		names = append(names, p.Name)
 		for _, d := range p.Durables {
-			names = append(names, d.Name)
+			durables = append(durables, d.Name)
 		}
 	}
-	return names
+	return names, durables
 }
 
 // a2aDispatchConfig is lib.DispatchConfig as this module renders it; the

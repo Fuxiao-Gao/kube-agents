@@ -362,11 +362,17 @@ func (r *AgentProfileReconciler) publishCard(ctx context.Context, agent *agentv1
 	if err != nil {
 		return reasonAgentProfileBusError, err.Error(), err
 	}
-	if entry.current(want) {
-		return reasonAgentProfilePublished, "the agent card is on " + agentCardSubject(p.Name), nil
+	if !entry.current(want) {
+		if err := r.cards().Publish(ctx, agent, p.Name, &want); err != nil {
+			return reasonAgentProfileBusError, err.Error(), err
+		}
 	}
-	if err := r.cards().Publish(ctx, agent, p.Name, &want); err != nil {
-		return reasonAgentProfileBusError, err.Error(), err
+	// The profile's durables, once the dispatcher that reads them exists:
+	// one per (allowed tier, kind), and a dropped tier's deleted.
+	if a2aDispatcherEnabled() {
+		if err := r.cards().SyncDurables(ctx, agent, p.Name, desiredProfileDurables(p)); err != nil {
+			return reasonAgentProfileBusError, "the agent card is published, but its durables are not: " + err.Error(), err
+		}
 	}
 	return reasonAgentProfilePublished, "the agent card is on " + agentCardSubject(p.Name), nil
 }
@@ -390,6 +396,13 @@ func (r *AgentProfileReconciler) withdrawCard(ctx context.Context, agent *agentv
 	if entry.present && entry.kind != a2aKindAgentClosed {
 		if err := r.cards().Publish(ctx, agent, p.Name, nil); err != nil {
 			return reasonAgentProfileBusError, err.Error(), err
+		}
+	}
+	// A profile with no identity has no queue: its durables go with its
+	// card, held submissions and all. Only the ones this operator made.
+	if a2aDispatcherEnabled() {
+		if err := r.cards().SyncDurables(ctx, agent, p.Name, nil); err != nil {
+			return reasonAgentProfileBusError, "the card is withdrawn, but the durables are not deleted: " + err.Error(), err
 		}
 	}
 	return reasonAgentProfileIdentityMissing, "no card is published while the profile's identity is not rendered", nil

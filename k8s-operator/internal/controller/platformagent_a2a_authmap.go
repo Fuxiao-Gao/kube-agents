@@ -163,7 +163,8 @@ func renderA2AAuthMap(agent *agentv1alpha1.PlatformAgent, profiles []agentv1alph
 	// name each durable the operator creates, so it is built here, from the
 	// same profiles (platformagent_a2a_dispatcher.go).
 	if a2aDispatcherEnabled() {
-		id := dispatcherIdentity(agent, agent.Namespace, dispatcherDurables(agent, profiles))
+		names, durables := dispatcherGrantNames(agent, profiles)
+		id := dispatcherIdentity(agent, agent.Namespace, names, durables)
 		identities = append(identities, a2aAuthMapIdentity{
 			ServiceAccount: id.serviceAccount,
 			User:           id.user,

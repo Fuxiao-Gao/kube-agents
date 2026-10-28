@@ -208,6 +208,9 @@ type cardPublisher interface {
 	Read(ctx context.Context, agent *agentv1alpha1.PlatformAgent, profile string) (directoryEntry, error)
 	// Publish writes a card (card != nil) or a tombstone.
 	Publish(ctx context.Context, agent *agentv1alpha1.PlatformAgent, profile string, card *a2aAgentCard) error
+	// SyncDurables makes the profile's shared durables exactly want, and
+	// deletes the rest this operator made (agentprofile_durables.go).
+	SyncDurables(ctx context.Context, agent *agentv1alpha1.PlatformAgent, profile string, want []profileDurable) error
 }
 
 // natsCardPublisher holds one bus connection per PlatformAgent, opened on first

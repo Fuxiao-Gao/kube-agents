@@ -1,8 +1,12 @@
 package authcallout
 
 import (
+	"context"
 	"os"
 	"testing"
+	"time"
+
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/gke-labs/kube-agents/a2a/lib"
 )
@@ -73,6 +77,8 @@ func TestTheRenderedDispatcherReachesItsContractAndNothingNear(t *testing.T) {
 		"$KV.session-state.x":    true,
 		"a2a.cap.verify.gateway": true,
 		"a2a.agents.tse":         true,
+		// Task events of something it doesn't dispatch for: a session's.
+		lib.TaskEventsSubject("session-abc", "t1"): true,
 	})
 	for subject, wantRefused := range map[string]bool{
 		lib.DispatchAcceptSubject("tse", "read", pod): false,
@@ -85,5 +91,45 @@ func TestTheRenderedDispatcherReachesItsContractAndNothingNear(t *testing.T) {
 		if got := subscribeRefused(t, nc, violations, subject); got != wantRefused {
 			t.Errorf("subscribe %s refused=%v, want %v", subject, got, wantRefused)
 		}
+	}
+}
+
+// With a dispatcher, the rendered operator makes the profiles' durables: a
+// consumer whose filter is a submit subject, and nothing else on TASKS. A
+// create carries its filter in the subject, which is what holds it there.
+func TestTheRenderedOperatorMakesOnlySubmitDurables(t *testing.T) {
+	h := startHarness(t, renderedDispatcherMap(t), map[string]Attested{
+		tokenRenderedOperator: {ServiceAccount: renderedOperatorSA},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	seed, _ := connectStatic(t, h, "seed", renderedSeedPassword)
+	seedJS, err := jetstream.New(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seedJS.CreateStream(ctx, jetstream.StreamConfig{Name: "TASKS", Subjects: []string{"a2a.tasks.>"}}); err != nil {
+		t.Fatalf("creating TASKS as seed: %v", err)
+	}
+	op, _ := h.connectAs(t, "operator", tokenRenderedOperator)
+	js, err := jetstream.New(op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	durable := lib.ProfileDurableName("tse", "read", "top")
+	if _, err := js.CreateOrUpdateConsumer(ctx, "TASKS", jetstream.ConsumerConfig{
+		Durable: durable, FilterSubject: lib.ProfileDurableFilter("tse", "read", "top"), AckPolicy: jetstream.AckExplicitPolicy,
+	}); err != nil {
+		t.Fatalf("the operator could not make a submit durable: %v", err)
+	}
+	if err := js.DeleteConsumer(ctx, "TASKS", durable); err != nil {
+		t.Fatalf("the operator could not delete it: %v", err)
+	}
+	short, cancelShort := context.WithTimeout(ctx, 3*time.Second)
+	defer cancelShort()
+	if _, err := js.CreateOrUpdateConsumer(short, "TASKS", jetstream.ConsumerConfig{
+		Durable: "profile-tse-read-top", FilterSubject: lib.TaskInSubject("tse", "*"), AckPolicy: jetstream.AckExplicitPolicy,
+	}); err == nil {
+		t.Error("the operator made a durable over a task's .in")
 	}
 }

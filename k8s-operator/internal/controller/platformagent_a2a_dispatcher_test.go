@@ -60,7 +60,7 @@ func TestNoDispatcherImageRendersNoDispatcher(t *testing.T) {
 // reads no task subject and creates no consumer on TASKS.
 func TestTheDispatcherIdentityHoldsOnlyItsContractGrants(t *testing.T) {
 	agent := a2aTestAgent()
-	id := dispatcherIdentity(agent, agent.Namespace, []string{"profile-tse-read-top", "profile-tse-read-child"})
+	id := dispatcherIdentity(agent, agent.Namespace, []string{"tse"}, []string{"profile-tse-read-top", "profile-tse-read-child"})
 	if id.serviceAccount != "system:serviceaccount:test-ns:test-agent-a2a-dispatcher" || id.auth != a2aAuthCallout {
 		t.Errorf("serviceAccount %q, auth %v", id.serviceAccount, id.auth)
 	}
@@ -80,7 +80,10 @@ func TestTheDispatcherIdentityHoldsOnlyItsContractGrants(t *testing.T) {
 			t.Errorf("the dispatcher's grant %s is a wildcard over consumers: a token wildcard reaches every session's consumer", p)
 		}
 	}
-	for _, want := range []string{"$KV.PROFILE_LEASES.>", "a2a.dispatch.*.*.*", "a2a.tasks.*.*.events", "a2a.cap.verify.dispatcher",
+	if slices.Contains(id.publish, "a2a.tasks.*.*.events") {
+		t.Error("the dispatcher may write any task's events; it should name the profiles it dispatches for")
+	}
+	for _, want := range []string{"$KV.PROFILE_LEASES.>", "a2a.dispatch.*.*.*", "a2a.tasks.tse.*.events", "a2a.cap.verify.dispatcher",
 		"$JS.API.CONSUMER.MSG.NEXT.TASKS.profile-tse-read-top", "$JS.ACK.TASKS.profile-tse-read-child.>"} {
 		if !slices.Contains(id.publish, want) {
 			t.Errorf("the dispatcher can't publish %s", want)
@@ -160,6 +163,8 @@ func TestTheDispatchConfigIsResolvedAndListsTheDurables(t *testing.T) {
 // config, which lib decodes and validates.
 func TestRenderedDispatcherFixtures(t *testing.T) {
 	withDispatcher(t)
+	// With the operator, whose durable grants come with the dispatcher.
+	withOperatorBusPrincipal(t)
 	agent := authMapTestAgent()
 	tse := testAgentProfile(agent.Namespace, "tse", func(p *agentv1alpha1.AgentProfile) {
 		p.Spec.Parameters = []agentv1alpha1.AgentProfileParameter{{Name: "project", Required: true}, {Name: "location", Required: true}, {Name: "cluster", Required: true}}

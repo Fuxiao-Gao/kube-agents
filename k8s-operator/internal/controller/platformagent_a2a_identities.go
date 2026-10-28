@@ -333,6 +333,22 @@ func operatorIdentity() (a2aIdentity, bool) {
 		},
 		subscribe: []string{"_INBOX." + a2aOperatorBusUser + ".>"},
 	}
+	// With a dispatcher, the operator also makes and removes the profiles'
+	// shared durables on TASKS (agentprofile_durables.go). Create carries the
+	// durable's filter in its subject, so it is held to submit subjects:
+	// a2a.tasks.<profile>.<tier>.<kind>.<task>.submit, never a task's .in or
+	// .events. INFO and DELETE carry only the name, and a NATS wildcard
+	// matches a whole token, so they reach every consumer on TASKS; the
+	// operator deletes only consumers carrying its held-delivery mark, and
+	// the principal is the operator, which already holds far more than this
+	// in the cluster.
+	if a2aDispatcherEnabled() {
+		id.publish = append(id.publish,
+			"$JS.API.CONSUMER.CREATE."+a2aTasksStream+".*.a2a.tasks.*.*.*.*.submit",
+			"$JS.API.CONSUMER.INFO."+a2aTasksStream+".*",
+			"$JS.API.CONSUMER.DELETE."+a2aTasksStream+".*",
+		)
+	}
 	return id, ok
 }
 

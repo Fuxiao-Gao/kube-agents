@@ -1,5 +1,5 @@
 {
-  "version": "38be897e6232021d",
+  "version": "23de8e042c7a16a6",
   "identities": [
     {
       "serviceAccount": "system:serviceaccount:kubeagents-system:agent-a2a-provision",
@@ -95,6 +95,23 @@
       }
     },
     {
+      "serviceAccount": "system:serviceaccount:kubeagents-operator:kubeagents-controller-manager",
+      "user": "operator",
+      "account": "APP",
+      "grants": {
+        "publish": [
+          "a2a.agents.*",
+          "$JS.API.DIRECT.GET.DIRECTORY.a2a.agents.*",
+          "$JS.API.CONSUMER.CREATE.TASKS.*.a2a.tasks.*.*.*.*.submit",
+          "$JS.API.CONSUMER.INFO.TASKS.*",
+          "$JS.API.CONSUMER.DELETE.TASKS.*"
+        ],
+        "subscribe": [
+          "_INBOX.operator.>"
+        ]
+      }
+    },
+    {
       "serviceAccount": "system:serviceaccount:kubeagents-system-profiles:agentprofile-tse-read",
       "user": "profile-tse-read",
       "account": "APP",
@@ -118,13 +135,13 @@
           "$JS.API.CONSUMER.INFO.TASKS.profile-tse-read-child",
           "$JS.API.CONSUMER.MSG.NEXT.TASKS.profile-tse-read-child",
           "$JS.ACK.TASKS.profile-tse-read-child.>",
+          "a2a.tasks.tse.*.events",
           "$KV.PROFILE_LEASES.>",
           "$JS.API.STREAM.INFO.KV_PROFILE_LEASES",
           "$JS.API.DIRECT.GET.KV_PROFILE_LEASES.>",
           "$JS.API.CONSUMER.CREATE.KV_PROFILE_LEASES.>",
           "$JS.API.CONSUMER.DELETE.KV_PROFILE_LEASES.*",
           "a2a.dispatch.*.*.*",
-          "a2a.tasks.*.*.events",
           "a2a.cap.verify.dispatcher",
           "_INBOX.dispatcher.>"
         ],
