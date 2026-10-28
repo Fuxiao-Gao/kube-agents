@@ -115,6 +115,13 @@ func TestAnAcceptAndARenewalAreChecked(t *testing.T) {
 	if err := (LeaseRenewal{TaskID: "t1"}).Validate(); err != nil {
 		t.Errorf("renewal: %v", err)
 	}
+	var final LeaseRenewal
+	if err := json.Unmarshal([]byte(`{"taskId":"t1","final":true}`), &final); err != nil || !final.Final || final.Validate() != nil {
+		t.Errorf("a final renewal = %+v, %v", final, err)
+	}
+	if raw, _ := json.Marshal(LeaseRenewal{TaskID: "t1"}); strings.Contains(string(raw), "final") {
+		t.Errorf("an ordinary renewal carries final: %s", raw)
+	}
 	if err := (LeaseRenewal{TaskID: ""}).Validate(); err == nil {
 		t.Error("a renewal naming no task was accepted")
 	}

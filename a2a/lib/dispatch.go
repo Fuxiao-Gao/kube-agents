@@ -155,9 +155,17 @@ func (a DispatchAccept) Validate() error {
 
 // LeaseRenewal is a worker renewing one task's lease, on
 // DispatchLeaseSubject, every DispatchMessage.RenewSeconds from acceptance
-// until it publishes the task's terminal.
+// until it publishes the task's terminal, and then once more with Final.
 type LeaseRenewal struct {
 	TaskID string `json:"taskId"`
+	// Final says the worker has published the task's terminal on .events.
+	// The dispatcher has no read on .events, so this is how it learns the
+	// task ended: it releases the slot, acks the submission and deletes the
+	// lease at once, rather than holding the slot for a lease and then
+	// failing a task that finished. (A worker that dies between the two
+	// still gets a lease-expired terminal, which the fold drops as a write
+	// after the final event.)
+	Final bool `json:"final,omitempty"`
 }
 
 // Validate reports whether r names a task.
