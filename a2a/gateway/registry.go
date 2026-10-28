@@ -516,14 +516,16 @@ func (rec *SessionRecord) TaskRefFor(taskID string) (TaskRef, bool) {
 // one task to them, its root (TaskRef.RootTaskID): a child is never named,
 // and neither is a turn that delegated, whose end is not the chain's. Every
 // other turn's end is its root's - a human turn is its own root, and a
-// wake that did not delegate ends the chain it continues. An id the record
-// does not hold is passed through as it is.
+// wake that did not delegate ends the chain it continues. A turn addressed
+// to an AgentProfile ends its chain even when it delegated: it waits open
+// for its children and ends after them. An id the record does not hold is
+// passed through as it is.
 func (rec *SessionRecord) observedAs(taskID string) (id string, ends bool) {
 	ref, ok := rec.TaskRefFor(taskID)
 	if !ok {
 		return taskID, true
 	}
-	return ref.rootID(), ref.Role != taskRoleChild && len(ref.Children) == 0
+	return ref.rootID(), ref.Role != taskRoleChild && (len(ref.Children) == 0 || ref.Tier != "")
 }
 
 // delegationHandled reports whether the task's history entry shows a

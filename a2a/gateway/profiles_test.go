@@ -54,6 +54,8 @@ func TestResolveProfile(t *testing.T) {
 		{name: "pinned addressed for another cluster", addressee: "prod-east", params: targetParams("p1", "us-east1", "dev"),
 			wantRefusal: "works only on cluster p1/us-east1/prod, not p1/us-east1/dev"},
 		{name: "generic with no target", addressee: "cluster", wantRefusal: "needs a target cluster"},
+		{name: "pinned with half a target", addressee: "prod-east", params: map[string]string{"cluster": "dev"},
+			wantRefusal: "needs a target cluster"},
 		{name: "generic with half a target", addressee: "cluster", params: map[string]string{"project": "p1"},
 			wantRefusal: "needs a target cluster"},
 		{name: "a profile that takes no target, given one", addressee: "chat", params: targetParams("p1", "us-east1", "dev"),

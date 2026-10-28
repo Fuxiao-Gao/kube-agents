@@ -23,6 +23,11 @@ const (
 	// operator that hasn't granted the read) keeps running with no profiles,
 	// so a task addressed to one is refused as unknown until a read lands.
 	directoryRetryInterval = 30 * time.Second
+	// directoryResyncInterval spaces the re-reads after the first. The live
+	// subscription is core NATS, so a card or tombstone published while the
+	// connection was down never arrives; a re-read bounds how long the
+	// gateway routes on a stale card to this.
+	directoryResyncInterval = 5 * time.Minute
 )
 
 // agentsWildcard is every profile's card subject: profile names are one
@@ -60,24 +65,25 @@ func (f *directoryFeed) apply(subject string, raw []byte, fromLive bool) bool {
 		f.log.Warn("directory message refused", "subject", subject, "err", err)
 		return false
 	}
+	var card *lib.AgentCard
+	if env.Kind != lib.KindAgentClosed {
+		card = &lib.AgentCard{}
+		if err := json.Unmarshal(env.Payload, card); err != nil || card.Name != profile {
+			f.log.Warn("profile card refused", "subject", subject, "name", card.Name, "err", err)
+			return false
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	// The live feed speaks for a profile only with a card or tombstone it
+	// applied: a refused one leaves the read free to fill it in.
 	if !fromLive && f.live[profile] {
 		return true
 	}
 	if fromLive {
 		f.live[profile] = true
 	}
-	if env.Kind == lib.KindAgentClosed {
-		f.dir.put(profile, nil)
-		return true
-	}
-	var card lib.AgentCard
-	if err := json.Unmarshal(env.Payload, &card); err != nil || card.Name != profile {
-		f.log.Warn("profile card refused", "subject", subject, "name", card.Name, "err", err)
-		return false
-	}
-	f.dir.put(profile, &card)
+	f.dir.put(profile, card)
 	return true
 }
 
@@ -94,18 +100,17 @@ func (g *Gateway) startProfileDirectory(ctx context.Context) {
 	go func() {
 		defer sub.Stop()
 		for {
-			err := g.readDirectory(ctx, f)
-			if err == nil {
-				break
+			wait := directoryResyncInterval
+			if err := g.readDirectory(ctx, f); err != nil {
+				g.log.Warn("profile directory read failed; retrying", "err", err, "in", directoryRetryInterval)
+				wait = directoryRetryInterval
 			}
-			g.log.Warn("profile directory read failed; retrying", "err", err, "in", directoryRetryInterval)
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(directoryRetryInterval):
+			case <-time.After(wait):
 			}
 		}
-		<-ctx.Done()
 	}()
 }
 
@@ -121,8 +126,15 @@ func (g *Gateway) readDirectory(ctx context.Context, f *directoryFeed) error {
 	if err != nil {
 		return err
 	}
+	// A read speaks for every profile the live feed hasn't since it began;
+	// one the read no longer finds is gone (its tombstone was missed).
+	f.beginRead()
 	n := 0
+	seen := map[string]bool{}
 	for subject := range info.State.Subjects {
+		if profile, ok := strings.CutPrefix(subject, lib.AgentSubject("")); ok {
+			seen[profile] = true
+		}
 		msg, err := stream.GetLastMsgForSubject(ctx, subject)
 		if errors.Is(err, jetstream.ErrMsgNotFound) {
 			continue
@@ -134,6 +146,27 @@ func (g *Gateway) readDirectory(ctx context.Context, f *directoryFeed) error {
 			n++
 		}
 	}
+	f.endRead(seen)
 	g.log.Info("profile directory read", "cards", n)
 	return nil
+}
+
+// beginRead starts a read: the live feed's claims so far are settled, so
+// the read may speak for every profile again until the feed claims it.
+func (f *directoryFeed) beginRead() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.live = map[string]bool{}
+}
+
+// endRead forgets every profile the read didn't find on DIRECTORY, unless
+// the live feed spoke for it during the read.
+func (f *directoryFeed) endRead(seen map[string]bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, name := range f.dir.names() {
+		if !seen[name] && !f.live[name] {
+			f.dir.put(name, nil)
+		}
+	}
 }

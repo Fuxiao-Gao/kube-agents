@@ -478,7 +478,8 @@ func gatewayIdentity(agent *agentv1alpha1.PlatformAgent, ns string) a2aIdentity 
 			"answer ratings. So no STREAM.DELETE, PURGE,\n" +
 			"UPDATE or MSG.DELETE on any stream - one STREAM.DELETE.TASKS here\n" +
 			"used to destroy every task's history and the five consumers on it -\n" +
-			"no CONSUMER.DELETE on TASKS, and nothing at all on DIRECTORY, the\n" +
+			"no CONSUMER.DELETE on TASKS, nothing on DIRECTORY but its subject list\n" +
+			"and a direct get on the card subjects, and nothing at all on the\n" +
 			"topic streams or the other two buckets.",
 		auth:     a2aAuthStatic,
 		credsKey: a2aGatewayPasswordKey,

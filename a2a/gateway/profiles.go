@@ -26,6 +26,14 @@ const (
 	paramCluster  = "cluster"
 )
 
+// The kinds a target's verifier resource names, in its order:
+// project/P/location/L/cluster/C (capability.Scope's profile form).
+const (
+	scopeKindProject  = "project"
+	scopeKindLocation = "location"
+	scopeKindCluster  = "cluster"
+)
+
 // The refusals resolveProfile and checkTargetScope give, as reasons a caller
 // prefixes for the room (refusalNotice). Each names what was asked, since the
 // asker may not know the install's profiles or scope.
@@ -42,15 +50,25 @@ const (
 	noticeTargetParamsInvalid = "the task's parameters aren't valid: %v"
 	noticeProfileNoIdentity   = "an agent profile runs a task only for an identified requester"
 	noticeProfileRouteFailed  = "the task couldn't be routed to its agent profile"
+	// noticeProfileParentToPlatform refuses a profile task's delegation to
+	// platform, whose child would be minted wider than its parent.
+	noticeProfileParentToPlatform = "an agent profile's task delegates only to another agent profile"
+	// noticeProfileWhileRunning refuses a turn naming a profile while the
+	// conversation has a task running, which would otherwise be steered
+	// into that task with the profile dropped.
+	noticeProfileWhileRunning = "a task is still running here; stop it or wait for it before asking an agent profile"
+	// noticeProfileNoCapability refuses a profile task whose grant couldn't
+	// be minted: its grant carries the tier and target the dispatcher checks.
+	noticeProfileNoCapability = "⚠️ not started: could not mint this task's capability"
 )
 
-// childNeverStarted is a child's end when it never reached an executor.
 // The prefixes a profile refusal is posted under.
 const (
 	noticeTurnNotStarted       = "⚠️ not started: "
 	noticeDelegationRefusedFor = "⚠️ delegation refused: "
 )
 
+// childNeverStarted is a child's end when it never reached an executor.
 const childNeverStarted = "the delegated task never started"
 
 // childResultCutNote ends a child result cut to lib.ChildResultTextCap.
@@ -119,7 +137,7 @@ type clusterTarget struct {
 }
 
 func (t clusterTarget) String() string {
-	return t.Project + "/" + t.Location + "/" + t.Cluster
+	return strings.Join([]string{t.Project, t.Location, t.Cluster}, "/")
 }
 
 func (t clusterTarget) matches(r *lib.ClusterRef) bool {
@@ -128,7 +146,7 @@ func (t clusterTarget) matches(r *lib.ClusterRef) bool {
 
 // scope is the target as the verifier's resource: project/P/location/L/cluster/C.
 func (t clusterTarget) scope() capability.Scope {
-	return capability.Scope("project/" + t.Project + "/location/" + t.Location + "/cluster/" + t.Cluster)
+	return capability.Scope(strings.Join([]string{scopeKindProject, t.Project, scopeKindLocation, t.Location, scopeKindCluster, t.Cluster}, "/"))
 }
 
 // targetOf reads a cluster target out of task parameters. ok is false when
@@ -176,6 +194,17 @@ func (d *profileDirectory) lookup(name string) (lib.AgentCard, bool) {
 	defer d.mu.RUnlock()
 	c, ok := d.cards[name]
 	return c, ok
+}
+
+// names is every profile the directory holds.
+func (d *profileDirectory) names() []string {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	out := make([]string, 0, len(d.cards))
+	for name := range d.cards {
+		out = append(out, name)
+	}
+	return out
 }
 
 // pinnedTo is every profile pinned to t, in name order.
@@ -245,6 +274,11 @@ func resolveProfile(dir *profileDirectory, addressee string, params map[string]s
 	target, hasTarget, partial := targetOf(params)
 	switch {
 	case card.ClusterRef != nil:
+		if partial {
+			// Half a target names no cluster, and filling the rest from
+			// the pin would run the task somewhere the asker didn't say.
+			return "", nil, refused(noticeProfileNoTarget, addressee)
+		}
 		if !hasTarget {
 			// A pinned profile's target is its own cluster.
 			t := clusterTarget{Project: card.ClusterRef.ProjectID, Location: card.ClusterRef.Location, Cluster: card.ClusterRef.Cluster}
@@ -315,7 +349,7 @@ func loadScope(path string) (*scopeDeclaration, error) {
 // (spec-profiles-dispatch.md, "Addressing", step 2). An exclusion always
 // refuses. A declared project list admits only its projects. Past that, a
 // folder or organization scope can't be confirmed without resolving
-// membership, which the gateway can't do yet (#4119), so it refuses: "not
+// membership, which the gateway can't do yet, so it refuses: "not
 // excluded" isn't "in scope". An install that declares no scope draws no
 // boundary, as the platform agent reads it, so only exclusions apply. A nil
 // declaration (no file rendered, or one that didn't parse) refuses every
@@ -434,6 +468,13 @@ func (g *Gateway) deliverChildResult(ctx context.Context, rec *SessionRecord, ch
 		return false
 	}
 	g.log.Info("child result delivered", "child", child.ID, "parent", parent.ID, "state", state)
+	// The parent is running again: it holds the conversation, so a stop
+	// reaches it, a steer goes to it, and a new ask waits behind it.
+	if rec.ActiveTask == nil || rec.ActiveTask.TaskID == child.ID {
+		rec.ActiveTask = &ActiveTask{TaskID: parent.ID, CorrelationID: parent.CorrelationID,
+			Capability: parent.Capability, SubmittedAt: parent.StartedAt, Ask: truncateRunes(parent.Request, askCap)}
+		rec.Addressee = parent.Addressee
+	}
 	return true
 }
 
@@ -446,4 +487,34 @@ func truncateBytes(s string, n int) string {
 		n--
 	}
 	return s[:n]
+}
+
+// cancelWaitingProfileParents cancels the AgentProfile tasks waiting open on
+// taskID, parent by parent up the chain, so a stop cancels the task tree
+// (spec-profiles-dispatch.md, "Results and stop") and not only the child that
+// held the conversation. A session parent's turn has already ended, so the
+// walk stops at the first parent that isn't a profile task. Each cancel rides
+// the parent's own chain and grant, and is recorded on its history entry.
+func (g *Gateway) cancelWaitingProfileParents(ctx context.Context, rec *SessionRecord, taskID string, authority Authority) {
+	ref, ok := rec.TaskRefFor(taskID)
+	for steps := 0; ok && ref.ParentTaskID != "" && steps <= taskHistoryCap; steps++ {
+		parent, held := rec.TaskRefFor(ref.ParentTaskID)
+		if !held || parent.Tier == "" {
+			return
+		}
+		if !parent.Canceled && parent.CorrelationID != "" {
+			env, err := lib.NewCancelEnvelope(gatewayParty, parent.ID, rec.ContextID, parent.CorrelationID,
+				lib.WithTo(lib.Party{Session: parent.Addressee}),
+				lib.WithAuthority(authority.Render(parent.Capability)))
+			if err == nil {
+				err = g.client.Publish(ctx, lib.TaskInSubject(parent.Addressee, parent.ID), env)
+			}
+			if err != nil {
+				g.log.Error("cancel of a waiting profile parent failed", "taskId", parent.ID, "child", ref.ID, "err", err)
+				return
+			}
+			rec.MarkCanceled(parent.ID)
+		}
+		ref, ok = parent, true
+	}
 }

@@ -649,7 +649,7 @@ leaves the record as it was:
 2. **Scope.** The target is checked against the install's `spec.scope`, from the `scope.json`
    the operator mounts into the gateway pod (`A2A_SCOPE_FILE`), read per task. An exclusion
    refuses. A declared project list admits only its projects. Under a folder or organization
-   scope the gateway can't resolve membership yet (#4119), so a target whose project the list
+   scope the gateway can't resolve membership yet, so a target whose project the list
    doesn't name is refused: "not excluded" isn't "in scope". An install that declares no scope
    (`present: false`) draws no boundary, as the platform agent reads it, so only exclusions
    apply; a missing or unreadable file refuses every target.
@@ -658,18 +658,26 @@ leaves the record as it was:
    the dispatcher as its delegate, because the dispatcher is the one verifier caller for a
    profile task. Until the PlatformAgent's membership mapping exists, every person at any door
    is `read`, and a requester with no identity is refused; no trigger submits through the
-   gateway yet, so nothing is minted `unattended`. A delegated child runs at its parent's tier
-   when the parent is a profile task, and at its requester's otherwise.
+   gateway yet, so nothing is minted `unattended`. A delegated profile child runs at its
+   parent's tier when the parent is a profile task, and at its requester's otherwise. A profile
+   task can't delegate to `platform`, whose child would be minted at the install's tier and
+   scope.
 4. **Submit.** The submission goes on `a2a.tasks.<profile>.<tier>.<kind>.<task>.submit`, `top`
    for a client's turn and `child` for a delegation, with the parameters as a `taskParameters`
    part. The gateway is the subject's one writer. Steers, a stop and follow-ups go to the task's
    own `a2a.tasks.<profile>.<task>.in`.
 
 A refusal at any step posts its reason (a turn's "not started", a delegation's "delegation
-refused") and submits nothing. A profile task may delegate in turn, under the same checks as a
-session turn except the incarnation's author set, since a warm worker is reset between tasks.
-A child's end reaches a profile parent as a `childResult` message on the parent's `.in`, which
-the parent reads while it waits open; a session parent is woken as before. The delegate tool
+refused") and submits nothing. A turn naming a profile while the conversation has a task running is refused rather than
+steered into that task. A profile task may delegate in turn, under the same checks as a session
+turn except the incarnation's author set, since a warm worker is reset between tasks. A child's
+end reaches a profile parent as a `childResult` message on the parent's `.in`, which the parent
+reads while it waits open, and the parent holds the conversation again, so a stop or a steer
+reaches it. A session parent is woken as before. A top-level profile task's own end is its
+chain's end, delegated or not. A stop while the child runs cancels the child and every profile
+task waiting open above it. The cards are re-read every five minutes, so a card or tombstone
+published while the gateway's connection was down is picked up, and a profile no longer on
+`DIRECTORY` is forgotten. The delegate tool
 the worker adapter serves still offers no `parameters`, so a session can delegate to a pinned
 profile or one that takes no target; offering the field is text the model reads and lands with
 its own eval case.

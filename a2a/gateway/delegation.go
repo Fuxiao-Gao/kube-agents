@@ -201,6 +201,12 @@ func (g *Gateway) handleDelegateRequest(ctx context.Context, rec *SessionRecord,
 	// against the scope, and minted at the parent's tier, which for a
 	// session parent is its requester's (profileRouteFor).
 	var route *profileRoute
+	// A profile task delegates only to another profile: a platform child is
+	// minted at the install's tier and scope, wider than the parent's.
+	if profileParent && addressee == targetPlatform {
+		refuse(ruleDelegationTarget, noticeDelegationRefusedFor+noticeProfileParentToPlatform)
+		return
+	}
 	if addressee != targetPlatform {
 		tier := capability.Tier(parent.Tier)
 		if !profileParent {
@@ -214,14 +220,20 @@ func (g *Gateway) handleDelegateRequest(ctx context.Context, rec *SessionRecord,
 			return
 		}
 	}
+	// The lists are the target's: the profile the address resolved to, so a
+	// list on a pinned profile can't be stepped round by addressing another.
+	target := addressee
+	if route != nil {
+		target = route.Profile
+	}
 	// The A2A door's callers delegate only under a list of their own,
 	// which nothing renders yet (gke-labs#2478): an absent list there is
 	// nobody, where on a chat backend it is everyone the ingress admits.
-	if g.doorUnlisted(addressee, parent.Requester.Backend) {
+	if g.doorUnlisted(target, parent.Requester.Backend) {
 		refuse(ruleDelegationDoorUnlisted, noticeDelegationNotAllowed)
 		return
 	}
-	if !g.targetAllows(addressee, parent.Requester.Backend, parent.Requester.Subject) {
+	if !g.targetAllows(target, parent.Requester.Backend, parent.Requester.Subject) {
 		refuse(ruleDelegationAllowedUsers, noticeDelegationNotAllowed)
 		return
 	}
@@ -233,7 +245,7 @@ func (g *Gateway) handleDelegateRequest(ctx context.Context, rec *SessionRecord,
 		return
 	}
 	for _, a := range parent.SteerAuthors {
-		if rule := g.authorRefusal(addressee, a, ruleDelegationSteerAuthor); rule != "" {
+		if rule := g.authorRefusal(target, a, ruleDelegationSteerAuthor); rule != "" {
 			refuse(rule, noticeDelegationNotAllowed, "steerBackend", a.Backend, "steerAuthor", a.Subject)
 			return
 		}
@@ -252,12 +264,12 @@ func (g *Gateway) handleDelegateRequest(ctx context.Context, rec *SessionRecord,
 		return
 	}
 	for _, a := range sessionAuthors {
-		if rule := g.authorRefusal(addressee, a, ruleDelegationSessionAuthor); rule != "" {
+		if rule := g.authorRefusal(target, a, ruleDelegationSessionAuthor); rule != "" {
 			refuse(rule, noticeDelegationNotAllowed, "sessionBackend", a.Backend, "sessionAuthor", a.Subject)
 			return
 		}
 	}
-	authority.Via = &AuthorityVia{TaskID: taskID, Session: rec.BusSession}
+	authority.Via = &AuthorityVia{TaskID: taskID, Session: session}
 
 	// The child is a fixed-route task: addressed to platform so steers and a
 	// stop reach it, with BusSession left in place for the wake turn.

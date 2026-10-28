@@ -1074,6 +1074,11 @@ func (g *Gateway) routeTurn(ctx context.Context, msg InboundMessage, backend, pr
 		default:
 			g.post(rec.Key, nothingRunningNotice)
 		}
+	case active != nil && !active.Detached && msg.Profile != "":
+		// A turn naming an AgentProfile is a new task for it, never a
+		// follow-up to whatever runs here; steering it in would drop the
+		// profile and its parameters without a word.
+		g.post(rec.Key, noticeTurnNotStarted+noticeProfileWhileRunning)
 	case active != nil && !active.Detached:
 		// The one routing decision with no other log line: a new task logs
 		// "ingress", a heal logs itself, but a steer used to be silent, and
@@ -1084,7 +1089,7 @@ func (g *Gateway) routeTurn(ctx context.Context, msg InboundMessage, backend, pr
 		g.steerTask(ctx, rec, msg, backend, authority)
 	default:
 		// A turn a client addressed to an AgentProfile (the console's frame
-		// and the A2A door name one) is resolved, scoped and minted for it
+		// can name one) is resolved, scoped and minted for it
 		// before anything about the conversation's route moves, so a refusal
 		// leaves the record as it was.
 		var route *profileRoute
@@ -2452,6 +2457,13 @@ func (g *Gateway) startTaskWith(ctx context.Context, rec *SessionRecord, ts task
 	capRef, err := g.mintTaskCapability(ctx, taskID, rec.Addressee, ts.Route)
 	if err != nil {
 		g.log.Error("capability mint failed", "taskId", taskID, "addressee", rec.Addressee, "err", err)
+		// A profile task never goes without its grant, whatever the switch
+		// says: the grant carries the tier and the target the dispatcher
+		// admits it on.
+		if ts.Route != nil {
+			g.post(rec.Key, noticeProfileNoCapability)
+			return "", false
+		}
 		if !g.cfg.CapabilityOptional {
 			g.post(rec.Key, "⚠️ not started: could not mint this task's capability")
 			return "", false
@@ -2812,6 +2824,7 @@ func (g *Gateway) cancelTaskVoiced(ctx context.Context, rec *SessionRecord, auth
 		g.post(rec.Key, "🛑 cancel sent — the task ends when the executor confirms")
 	}
 	g.observeCancel(rec, active.TaskID)
+	g.cancelWaitingProfileParents(ctx, rec, active.TaskID, authority)
 	return true
 }
 
