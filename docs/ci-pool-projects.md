@@ -484,7 +484,7 @@ kubectl -n kubeagents-system get platformagent platform-agent -o json \
 kubectl -n kubeagents-system patch platformagent platform-agent --type json -p '<the printed patch>'
 ```
 
-A CR that had no scope block takes two steps. Between them, wait for the gateway to roll and run the Cluster Agent reconcile once in its `platform-agent` container (`/opt/data/scripts/cluster_agent_reconcile.py`): the reconcile reads a missing block as keeping the last exclusions, so the block must be emptied, and read once, before it is removed.
+The restore takes two steps, and the annotation goes only in the second. Between them, wait for the gateway to roll and run the Cluster Agent reconcile once in its `platform-agent` container (`/opt/data/scripts/cluster_agent_reconcile.py`), so the excluded clusters' profiles are re-created; for a CR that had no scope block the reconcile also has to read the emptied block before the block is removed, because it reads a missing block as keeping the last exclusions. If the helper names the annotation itself as the problem (not a scope object or null), delete the annotation by hand.
 
 ## 7. Pre-flight verification
 

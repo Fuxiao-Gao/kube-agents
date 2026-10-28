@@ -2178,9 +2178,11 @@ scope_exclude_apply() { # <case> <slot>...
   scope_exclude_settle "${name}"
 }
 
-# Put back the scope a patch saved, when one is saved. A CR that had no scope
-# block takes two steps (restore_ops in the helper says why): exclusions emptied,
-# then the block removed, with a reconcile under the emptied block in between.
+# Put back the scope a patch saved, when one is saved, in two steps
+# (restore_ops in the helper says why): the scope back, or for a CR that had no
+# block the exclusions emptied; then the annotation removed, with the block when
+# there was none. A reconcile runs between them, so the annotation, the marker
+# the next lease repairs from, outlasts a settle that fails after the first.
 # With `settle` (after a case) each step waits as the apply does, so the
 # profiles are back before anything else runs. `repair` (the lease preflight)
 # does the same and first runs a reconcile under the CR as it stands, since an
@@ -2213,7 +2215,14 @@ scope_exclude_restore() { # <label> [settle|repair]
     fi
     echo "Scope exclusion (${label}): a restore step applied to platformagent/${AGENT_SERVICE_NAME}: ${ops}"
     [ -n "${settle}" ] || return 0
-    scope_exclude_settle "${label}" || return 1
+    if ! scope_exclude_settle "${label}"; then
+      # After the last step the CR is restored and the settle only re-checks it.
+      if cr="$(scope_exclude_cr)" && [ -z "$(printf '%s' "${cr}" | scope_exclude_helper restore 2>/dev/null)" ]; then
+        echo "WARNING: Scope exclusion (${label}): the settle after the last restore step failed; the scope is restored, so the run goes on" >&2
+        return 0
+      fi
+      return 1
+    fi
   done
 }
 

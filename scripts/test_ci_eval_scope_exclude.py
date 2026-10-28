@@ -195,13 +195,14 @@ class ApplyRestoreTest(unittest.TestCase):
         self.assertIn("nothing restored", result.stderr)
         self.assertEqual(ops, [])
 
-    def test_restore_of_a_declared_scope_is_one_step(self):
+    def test_restore_of_a_declared_scope_is_two_steps(self):
         scope = {"projects": ["pool-2"], "exclude": {"clusters": []}}
         cr = {"metadata": {"annotations": {ANNOTATION: json.dumps(scope)}}, "spec": {"scope": {"projects": ["pool-2"], "exclude": {"clusters": [SEEDED_B]}}}}
         result, ops = self.run_functions(cr, "scope_exclude_restore case-x settle; echo rc=$?")
         self.assertIn("rc=0", result.stdout, result.stderr)
-        self.assertEqual(ops, [[{"op": "add", "path": "/spec/scope", "value": scope}, {"op": "remove", "path": ANNOTATION_PATH}]])
-        self.assertEqual(result.stdout.count("SETTLED case-x"), 1)
+        # The annotation goes only after a settle under the restored scope.
+        self.assertEqual(ops, [[{"op": "add", "path": "/spec/scope", "value": scope}], [{"op": "remove", "path": ANNOTATION_PATH}]])
+        self.assertEqual(result.stdout.count("SETTLED case-x"), 2)
 
     def test_the_exit_trap_on_a_declared_scope_keeps_the_annotation_for_the_lease(self):
         scope = {"projects": ["pool-2"], "exclude": {"clusters": []}}
@@ -213,11 +214,30 @@ class ApplyRestoreTest(unittest.TestCase):
             ops,
             [
                 [{"op": "add", "path": "/spec/scope", "value": scope}],
-                [{"op": "add", "path": "/spec/scope", "value": scope}, {"op": "remove", "path": ANNOTATION_PATH}],
+                [{"op": "remove", "path": ANNOTATION_PATH}],
             ],
         )
         # The lease still reconciles under the restored scope, re-creating the profiles.
         self.assertEqual(result.stdout.count("SETTLED lease"), 2)
+
+    def test_a_failed_settle_after_the_last_step_does_not_fail_the_lease(self):
+        # The settle fails once the annotation is gone: the scope is restored.
+        cr = {"metadata": {"annotations": {ANNOTATION: "null"}}, "spec": {"scope": {"exclude": {"clusters": [SEEDED_B]}}}}
+        fail_late = (
+            "scope_exclude_settle() { grep -q scope-before-exclude cr.json || { echo FAILED >&2; return 1; }; "
+            'echo "SETTLED $1"; }'
+        )
+        result, ops = self.run_functions(cr, fail_late + "; scope_exclude_restore lease repair; echo rc=$?")
+        self.assertIn("rc=0", result.stdout, result.stderr)
+        self.assertEqual(len(ops), 2)
+        self.assertIn("the scope is restored, so the run goes on", result.stderr)
+
+    def test_a_failed_settle_before_the_last_step_fails_the_lease(self):
+        cr = {"metadata": {"annotations": {ANNOTATION: "null"}}, "spec": {"scope": {"exclude": {"clusters": [SEEDED_B]}}}}
+        fail_mid = "scope_exclude_settle() { grep -q '\"clusters\": \\[\\]' cr.json && return 1; echo \"SETTLED $1\"; }"
+        result, ops = self.run_functions(cr, fail_mid + "; scope_exclude_restore lease repair; echo rc=$?")
+        self.assertIn("rc=1", result.stdout, result.stderr)
+        self.assertEqual(len(ops), 1)
 
     def test_restore_with_nothing_saved_is_a_no_op(self):
         result, ops = self.run_functions({"metadata": {}, "spec": {}}, "scope_exclude_restore lease settle; echo rc=$?")

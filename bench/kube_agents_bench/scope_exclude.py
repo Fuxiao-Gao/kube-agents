@@ -36,10 +36,9 @@ Subcommands, each printing to stdout and exiting 1 with the reason on stderr:
     The JSON patch that excludes the slots' clusters and saves the scope.
 ``restore [--first-step-only]`` (the CR as JSON on stdin)
     The JSON patch for the next step back to the saved scope, or nothing when
-    none is saved. A CR that had no scope block takes two steps, with a
-    reconcile between them (restore_ops says why); with the flag, for a caller
-    that cannot run a reconcile, nothing that removes the block or the
-    annotation is printed.
+    none is saved. Two steps, with a reconcile between them (restore_ops says
+    why); with the flag, for a caller that cannot run a reconcile, only the
+    first.
 ``clusters`` (a CR, or the operator's rendered scope file, as JSON on stdin)
     The excluded clusters, sorted, as one line of JSON, so the runner can tell
     when the pod reads the scope the CR declares.
@@ -134,9 +133,16 @@ def _saved_scope(cr: dict[str, Any]) -> tuple[bool, Any]:
     if ANNOTATION not in annotations:
         return False, None
     try:
-        return True, json.loads(annotations[ANNOTATION])
+        saved = json.loads(annotations[ANNOTATION])
     except ValueError as exc:
         raise ScopeExcludeError(f"annotation {ANNOTATION} is not JSON: {exc}") from exc
+    # Only the runner writes it, as an object or null; anything else would make a
+    # patch the API server refuses, on every restore, so name it instead.
+    if saved is not None and not isinstance(saved, dict):
+        raise ScopeExcludeError(
+            f"annotation {ANNOTATION} holds {saved!r}, not a scope object or null; delete it by hand"
+        )
+    return True, saved
 
 
 def patch_ops(cr: dict[str, Any], clusters: list[dict[str, str]]) -> list[dict[str, Any]]:
@@ -160,25 +166,26 @@ def patch_ops(cr: dict[str, Any], clusters: list[dict[str, str]]) -> list[dict[s
 def restore_ops(cr: dict[str, Any], first_step_only: bool = False) -> list[dict[str, Any]]:
     """The next step back to the saved scope; empty when none is saved.
 
-    One step when the CR had a scope block: put it back and drop the annotation.
-    Two when it had none, because the Cluster Agent reconcile reads an absent
-    block as "keep the last declaration's exclusions": removing the block while
-    it still excludes would leave the clusters excluded for good. So the first
-    step empties the exclusions and keeps the annotation, and only once a
-    reconcile has run under that does the second remove the block. A caller that
-    cannot run the reconcile passes `first_step_only`: it gets no second step, and
-    on a declared scope the scope back without the annotation's removal, so the
-    next settled restore still finds the annotation and re-creates the profiles.
+    Always two steps, with a reconcile between them, and the annotation goes only
+    in the second: it is the one marker the next lease repairs from, so it must
+    outlast a settle that fails after the first. When the CR had a scope block,
+    the first puts it back, and the CR's exclusions matching the saved ones mark
+    it done (exclusions, not the whole block, which the API server defaults).
+    When it had none, the first empties the exclusions rather than removing the
+    block, because the Cluster Agent reconcile reads an absent block as "keep the
+    last declaration's exclusions"; the second then removes the block too. A
+    caller that cannot run the reconcile passes `first_step_only` and never gets
+    the second step.
     """
     saved, base = _saved_scope(cr)
     if not saved:
         return []
     remove_annotation = {"op": "remove", "path": _annotation_path()}
-    if base is not None:
-        if first_step_only:
-            return [{"op": "add", "path": SCOPE_PATH, "value": base}]
-        return [{"op": "add", "path": SCOPE_PATH, "value": base}, remove_annotation]
     scope = (cr.get("spec") or {}).get("scope")
+    if base is not None:
+        if scope is None or scope_clusters({"spec": {"scope": scope}}) != scope_clusters(base):
+            return [{"op": "add", "path": SCOPE_PATH, "value": base}]
+        return [] if first_step_only else [remove_annotation]
     if scope is None:
         return [remove_annotation]
     if scope_clusters({"spec": {"scope": scope}}):
