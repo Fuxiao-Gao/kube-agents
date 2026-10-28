@@ -1068,6 +1068,34 @@ class A3TheTaskPlaneSubjectSaysWhoWroteIt(unittest.TestCase):
             "have the record read as infrastructure",
         )
 
+    SUBMIT_PROBE = "a2a.tasks.cluster.read.top.task-0001.submit"
+
+    def test_A3_the_submit_subject_has_exactly_one_writer(self) -> None:
+        """A profile task's `…submit` is written by the gateway and nobody else.
+
+        The submission is where a profile task's grant enters the task plane:
+        the gateway mints it against the profile it resolved, with the
+        requester's tier and the target in scope, and the dispatcher admits
+        what arrives there. A second writer could submit a task under a grant
+        it didn't mint, or fill a profile's queue with work nobody asked for.
+        The dispatcher reads the subject through its durables and holds no
+        publish on it; no session or profile worker derives one.
+        """
+        writers = sorted(
+            builder
+            for builder, grants in self._rendered_publish_grants().items()
+            if any(self._subject_matches(g, self.SUBMIT_PROBE) for g in grants)
+        )
+        self.assertEqual(["gateway"], writers)
+        derivation = self._session_publish_derivation()
+        for spelling in ("TaskSubmitSubject", ".submit"):
+            self.assertNotIn(
+                spelling,
+                derivation,
+                "the callout derives an executor a publish grant on a profile's submit "
+                "subject; a worker that can write there can start tasks of its own",
+            )
+
     NOTIFY_PROBE = "chat.notify.gchat"
     NOTIFY_SLACK_PROBE = "chat.notify.slack"
     NOTIFY_CONSOLE_PROBE = "chat.notify.console"
