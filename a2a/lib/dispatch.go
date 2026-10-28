@@ -13,8 +13,9 @@ import (
 // and hands it to one worker on that worker's own subject, and the worker
 // answers on a subject only it may publish, so the dispatcher can take the
 // subject's pod token as the answer's identity and never a name in the
-// payload. A worker renews the liveness lease for each task it runs by
-// publishing on its own lease subject (DispatchLeaseSubject), and the
+// payload. A worker runs one task at a time (it is reset between tasks) and
+// renews that task's liveness lease by publishing on its own lease subject
+// (DispatchLeaseSubject), and the
 // dispatcher, the bucket's only writer, persists it under a key that starts
 // with that (profile, tier, pod). Workers hold no grant on the bucket at all:
 // a KV bucket allows rollup headers, so a put grant on any key would let a
@@ -35,8 +36,8 @@ func DispatchAcceptSubject(profile, tier, pod string) string {
 	return DispatchSubject(profile, tier, pod) + ".accept"
 }
 
-// DispatchLeaseSubject is where that worker renews the leases of the tasks
-// it runs, task id in the payload.
+// DispatchLeaseSubject is where that worker renews the lease of the task it
+// runs, task id in the payload.
 func DispatchLeaseSubject(profile, tier, pod string) string {
 	return DispatchSubject(profile, tier, pod) + ".lease"
 }
@@ -194,4 +195,97 @@ type LeaseRecord struct {
 // restarted dispatcher re-adopts).
 func (l LeaseRecord) Expired(now time.Time, grace time.Duration) bool {
 	return now.After(l.ExpiresAt.Add(grace))
+}
+
+// DispatchConfigKey is the key in the operator-rendered dispatch ConfigMap
+// (<agent>-a2a-dispatch) that holds a DispatchConfig as JSON. The dispatcher
+// watches that one ConfigMap, the way the callout watches the identity map,
+// so a tuning or profile change applies without a restart.
+const DispatchConfigKey = "dispatch.json"
+
+// DispatchConfig is everything the dispatcher reads about the install's
+// profiles: the shared caps and intervals and each bound profile's own
+// limits. The operator writes it; the dispatcher never reads an AgentProfile.
+//
+// Every value is resolved: defaults applied, the ceiling already
+// maxInProgress's value when spec.harness.tuning.profiles.ceiling is unset,
+// the reserves already derived. The dispatcher uses the numbers as they stand
+// and never re-derives one.
+//
+// A change applies to new offers only. A task already handed out keeps the
+// LeaseSeconds and RenewSeconds its offer carried, which is what its worker
+// renews on, so a live tuning change never expires a lease the worker is
+// keeping on the old interval.
+type DispatchConfig struct {
+	// Version changes whenever anything below does.
+	Version string `json:"version"`
+	// Ceiling caps running profile tasks of every kind, install-wide, with
+	// InteractiveReserve kept for interactive tiers and ChildReserve for
+	// child tasks.
+	Ceiling            int `json:"ceiling"`
+	InteractiveReserve int `json:"interactiveReserve"`
+	ChildReserve       int `json:"childReserve"`
+	// The intervals; see DispatchMessage and LeaseRecord.
+	LeaseSeconds         int `json:"leaseSeconds"`
+	RenewSeconds         int `json:"renewSeconds"`
+	RestartGraceSeconds  int `json:"restartGraceSeconds"`
+	AcceptTimeoutSeconds int `json:"acceptTimeoutSeconds"`
+	// Profiles are the profiles bound to this install with a rendered
+	// identity. A profile absent here has no durables to read.
+	Profiles []DispatchProfile `json:"profiles"`
+}
+
+// DispatchProfile is one profile's limits, from its AgentProfile.
+type DispatchProfile struct {
+	Name  string   `json:"name"`
+	Tiers []string `json:"tiers"`
+	// Concurrency is the profile's own ceiling (spec.concurrency).
+	Concurrency           int                `json:"concurrency"`
+	QueueTimeoutSeconds   int                `json:"queueTimeoutSeconds"`
+	ActiveDeadlineSeconds int                `json:"activeDeadlineSeconds"`
+	Parameters            []ProfileParameter `json:"parameters,omitempty"`
+	// Durables are the shared durables the operator created for it, one
+	// per (tier, kind).
+	Durables []DispatchDurable `json:"durables"`
+}
+
+// DispatchDurable names one shared durable on TASKS.
+type DispatchDurable struct {
+	Tier string `json:"tier"`
+	Kind string `json:"kind"`
+	Name string `json:"name"`
+}
+
+// Validate reports the first way c can't be dispatched on, or nil. The
+// operator renders only configs that pass; the dispatcher checks again and
+// keeps its last good config rather than run on a broken one.
+func (c DispatchConfig) Validate() error {
+	switch {
+	case c.Ceiling < 1:
+		return fmt.Errorf("dispatch config: ceiling %d", c.Ceiling)
+	case c.ChildReserve < 0 || (c.ChildReserve > 0 && c.ChildReserve >= c.Ceiling):
+		return fmt.Errorf("dispatch config: childReserve %d against ceiling %d", c.ChildReserve, c.Ceiling)
+	case c.RenewSeconds <= 0 || c.LeaseSeconds < 3*c.RenewSeconds:
+		return fmt.Errorf("dispatch config: lease %ds must be at least three renewals of %ds", c.LeaseSeconds, c.RenewSeconds)
+	case c.RestartGraceSeconds < 2*c.RenewSeconds:
+		return fmt.Errorf("dispatch config: restart grace %ds must be at least two renewals of %ds", c.RestartGraceSeconds, c.RenewSeconds)
+	case c.AcceptTimeoutSeconds <= 0:
+		return fmt.Errorf("dispatch config: acceptTimeoutSeconds %d", c.AcceptTimeoutSeconds)
+	}
+	seen := map[string]bool{}
+	for _, p := range c.Profiles {
+		if !ValidSubjectToken(p.Name) || seen[p.Name] {
+			return fmt.Errorf("dispatch config: profile %q is not a subject token, or is listed twice", p.Name)
+		}
+		seen[p.Name] = true
+		if p.Concurrency < 1 || len(p.Tiers) == 0 || len(p.Durables) == 0 {
+			return fmt.Errorf("dispatch config: profile %s needs a concurrency, a tier and a durable", p.Name)
+		}
+		for _, d := range p.Durables {
+			if d.Name != ProfileDurableName(p.Name, d.Tier, d.Kind) {
+				return fmt.Errorf("dispatch config: profile %s durable %q is not %s", p.Name, d.Name, ProfileDurableName(p.Name, d.Tier, d.Kind))
+			}
+		}
+	}
+	return nil
 }

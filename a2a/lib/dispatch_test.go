@@ -167,3 +167,53 @@ func TestAProfileCardCarriesItsRoutingFields(t *testing.T) {
 		}
 	}
 }
+
+func validDispatchConfig() DispatchConfig {
+	return DispatchConfig{
+		Version: "v1", Ceiling: 6, InteractiveReserve: 2, ChildReserve: 2,
+		LeaseSeconds: 90, RenewSeconds: 20, RestartGraceSeconds: 60, AcceptTimeoutSeconds: 10,
+		Profiles: []DispatchProfile{{
+			Name: "tse", Tiers: []string{"read"}, Concurrency: 2, QueueTimeoutSeconds: 3600, ActiveDeadlineSeconds: 1800,
+			Parameters: []ProfileParameter{{Name: "cluster", Required: true}},
+			Durables: []DispatchDurable{
+				{Tier: "read", Kind: SubmitKindTop, Name: ProfileDurableName("tse", "read", SubmitKindTop)},
+				{Tier: "read", Kind: SubmitKindChild, Name: ProfileDurableName("tse", "read", SubmitKindChild)},
+			},
+		}},
+	}
+}
+
+// The dispatcher refuses a config it can't run on, and each refusal names
+// the field.
+func TestADispatchConfigIsChecked(t *testing.T) {
+	if err := validDispatchConfig().Validate(); err != nil {
+		t.Fatalf("a good config: %v", err)
+	}
+	one := validDispatchConfig()
+	one.Ceiling, one.ChildReserve, one.InteractiveReserve = 1, 0, 1
+	if err := one.Validate(); err != nil {
+		t.Errorf("a ceiling of 1 with no child reserve: %v", err)
+	}
+	for name, tc := range map[string]struct {
+		edit func(*DispatchConfig)
+		want string
+	}{
+		"no ceiling":             {func(c *DispatchConfig) { c.Ceiling = 0 }, "ceiling"},
+		"reserve at ceiling":     {func(c *DispatchConfig) { c.ChildReserve = 6 }, "childReserve"},
+		"reserve of a 1 ceiling": {func(c *DispatchConfig) { c.Ceiling, c.ChildReserve, c.InteractiveReserve = 1, 1, 1 }, "childReserve"},
+		"short lease":            {func(c *DispatchConfig) { c.LeaseSeconds = 59 }, "three renewals"},
+		"short grace":            {func(c *DispatchConfig) { c.RestartGraceSeconds = 39 }, "two renewals"},
+		"no accept timeout":      {func(c *DispatchConfig) { c.AcceptTimeoutSeconds = 0 }, "acceptTimeoutSeconds"},
+		"duplicate profile":      {func(c *DispatchConfig) { c.Profiles = append(c.Profiles, c.Profiles[0]) }, "twice"},
+		"no concurrency":         {func(c *DispatchConfig) { c.Profiles[0].Concurrency = 0 }, "concurrency"},
+		"misnamed durable":       {func(c *DispatchConfig) { c.Profiles[0].Durables[0].Name = "other" }, "durable"},
+	} {
+		c := validDispatchConfig()
+		c.Profiles = append([]DispatchProfile(nil), c.Profiles...)
+		c.Profiles[0].Durables = append([]DispatchDurable(nil), c.Profiles[0].Durables...)
+		tc.edit(&c)
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: Validate = %v, want an error saying %q", name, err, tc.want)
+		}
+	}
+}
