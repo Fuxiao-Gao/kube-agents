@@ -37,9 +37,9 @@ def _task(tmp_path: Path, case: str, body: str) -> Path:
 
 
 def _context(tmp_path: Path, text: str = CONTEXT) -> Path:
-    path = tmp_path / ".fleet-context"
-    path.write_text(text, encoding="utf-8")
-    return path
+    """A fleet directory holding the runner's context file."""
+    (tmp_path / ".fleet-context").write_text(text, encoding="utf-8")
+    return tmp_path
 
 
 def _apply(cr: dict, ops: list[dict]) -> dict:
@@ -93,7 +93,9 @@ def test_each_slot_resolves_through_the_fleet_context(tmp_path):
     assert scope_exclude.excluded_clusters(_context(tmp_path), ["b", "d"]) == [SEEDED_B, SEEDED_D]
 
 
-@pytest.mark.parametrize("text", [CONTEXT.replace("location.b=us-central1-b\n", ""), CONTEXT.replace("project=pool-1\n", "")])
+@pytest.mark.parametrize(
+    "text", [CONTEXT.replace("location.b=us-central1-b\n", ""), CONTEXT.replace("project=pool-1\n", ""), ""]
+)
 def test_a_slot_the_context_does_not_resolve_is_an_error(tmp_path, text):
     with pytest.raises(scope_exclude.ScopeExcludeError):
         scope_exclude.excluded_clusters(_context(tmp_path, text), ["b"])
@@ -115,6 +117,17 @@ def test_a_cr_without_scope_comes_back_without_one_in_two_steps():
         "metadata": {"name": "platform-agent", "annotations": {}},
         "spec": {"mode": "next"},
     }
+
+
+def test_first_step_only_never_removes_the_block():
+    excluded = {"metadata": {"annotations": {scope_exclude.ANNOTATION: "null"}}, "spec": {"scope": {"exclude": {"clusters": [SEEDED_B]}}}}
+    assert scope_exclude.restore_ops(excluded, first_step_only=True) == [
+        {"op": "add", "path": "/spec/scope", "value": {"exclude": {"clusters": []}}}
+    ]
+    # The emptied block waits for a caller that runs the reconcile first.
+    cleared = _apply(excluded, scope_exclude.restore_ops(excluded))
+    assert scope_exclude.restore_ops(cleared, first_step_only=True) == []
+    assert scope_exclude.restore_ops(cleared)[0] == {"op": "remove", "path": "/spec/scope"}
 
 
 def test_a_saved_null_with_no_block_left_only_drops_the_annotation():
@@ -180,6 +193,6 @@ def test_the_cr_and_the_rendered_file_compare_equal_when_they_agree(capsys, monk
 
 def test_patch_cli_prints_the_ops(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"metadata": {}, "spec": {}})))
-    assert scope_exclude.main(["patch", "--fleet-context", str(_context(tmp_path)), "--slots", "b"]) == 0
+    assert scope_exclude.main(["patch", "--fleet-dir", str(_context(tmp_path)), "--slots", "b"]) == 0
     ops = json.loads(capsys.readouterr().out)
     assert ops[-1] == {"op": "add", "path": "/spec/scope", "value": {"exclude": {"clusters": [SEEDED_B]}}}

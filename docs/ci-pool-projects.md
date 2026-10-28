@@ -474,6 +474,18 @@ The plan is inspected before it is applied. Creates and in-place updates are app
 
 A fixture pull request follows from this. It merges with its case parked in `FIXTURE_NOT_READY` (`docs/designs/bench-case-format.md`, "Registration"); the postsubmit plants the fixture; the un-park pull request cites a reconcile report that visited every mapped project with none failed, and a scan that reads the role healthy on every project with zero project-level errors and none absent. A fixture whose resource type needs a role the reconciler does not hold is the two-step case in section 3: the role in the same pull request, the grant on every project before the merge. The one exception to "from `main` only" is proving a branch on a real project: one leased pool project (`--project <id>` from the branch's checkout, which the script leases through Boskos; `--no-lease` is for a dev project Boskos does not hold). That project stays at the branch until the merge, when the postsubmit finds it converged; until then every run from `main` plans deletes of the branch's additions on that one project and refuses it, so the daily and the postsubmit are red on it. A branch that will not merge is taken back off by hand, from a checkout that drops its resources and lists their deletes in `reconcile-allow.json` locally; `main`'s run refuses those deletes by design. A project that keeps failing reds the daily, whose Chat note names it each time; it stays in the pool, since one project out of `free` stalls presubmits. A half-applied project (an apply that failed after creating a cluster, before the fixtures) is released with a consistent state; the next run applies what is missing, and a presubmit that leases it in between is unaffected while the dependent cases are parked.
 
+### 6.3 A scope exclusion a run left behind
+
+A case that declares `scope_exclude:` ([`bench-case-format.md`](designs/bench-case-format.md)) adds seeded clusters to the install's `spec.scope.exclude.clusters` for its repetitions and saves the scope it replaced in the PlatformAgent's `bench.kubeagents.x-k8s.io/scope-before-exclude` annotation. The run restores it after the case, and the EXIT trap takes a first step of the restore. A run killed past its grace can still leave the annotation, and with it an excluded cluster whose Cluster Agent profile is gone. The next run on that project restores the scope before anything is graded and stops as infrastructure when that restore does not take effect, with `Scope exclusion (lease): an earlier run's exclusion could not be undone`. To repair by hand, with the project's kubeconfig, print the next restore step and apply it, then repeat until it prints nothing:
+
+```bash
+kubectl -n kubeagents-system get platformagent platform-agent -o json \
+  | PYTHONPATH=bench python3 -m kube_agents_bench.scope_exclude restore
+kubectl -n kubeagents-system patch platformagent platform-agent --type json -p '<the printed patch>'
+```
+
+A CR that had no scope block takes two steps. Between them, wait for the gateway to roll and run the Cluster Agent reconcile once in its `platform-agent` container (`/opt/data/scripts/cluster_agent_reconcile.py`): the reconcile reads a missing block as keeping the last exclusions, so the block must be emptied, and read once, before it is removed.
+
 ## 7. Pre-flight verification
 
 `scripts/verify_ci_pool_project.py` checks the live project against the sections above. Run it before section 8.

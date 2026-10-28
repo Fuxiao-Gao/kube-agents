@@ -41,10 +41,11 @@ ENV = textwrap.dedent(
     EVAL_SCOPE_RECONCILE_BUSY_EXIT=4
     EVAL_SCOPE_POLL_SECONDS=0
     EVAL_PAUSE_AUDITS_POD_WAIT_SECONDS=1
+    EVAL_SCOPE_READ_ATTEMPTS=2
     """
 )
 
-FUNCTIONS = ["scope_exclude_target", "scope_exclude_helper", "scope_exclude_kubectl", "scope_exclude_apply", "scope_exclude_restore"]
+FUNCTIONS = ["scope_exclude_target", "scope_exclude_helper", "scope_exclude_kubectl", "scope_exclude_cr", "scope_exclude_apply", "scope_exclude_restore"]
 
 
 def run_bash(body: str, cwd: str) -> subprocess.CompletedProcess:
@@ -170,6 +171,22 @@ class ApplyRestoreTest(unittest.TestCase):
         self.assertEqual(ops, [[{"op": "add", "path": "/spec/scope", "value": {"exclude": {"clusters": []}}}]])
         self.assertNotIn("SETTLED", result.stdout)
 
+    def test_the_exit_trap_does_not_remove_a_block_no_reconcile_has_run_under(self):
+        # A run that died after the emptying step: the trap must leave the block
+        # and the annotation for the lease's restore, which reconciles first.
+        cr = {"metadata": {"annotations": {ANNOTATION: "null"}}, "spec": {"scope": {"exclude": {"clusters": []}, "maxProjects": 100}}}
+        result, ops = self.run_functions(cr, "scope_exclude_restore exit; echo rc=$?")
+        self.assertIn("rc=0", result.stdout, result.stderr)
+        self.assertEqual(ops, [])
+
+    def test_a_cr_that_cannot_be_read_warns_and_does_not_fail_the_lease(self):
+        body_cr = {"metadata": {}, "spec": {}}
+        call = 'kubectl() { echo "the server is unavailable" >&2; return 1; }; scope_exclude_restore lease settle; echo rc=$?'
+        result, ops = self.run_functions(body_cr, call)
+        self.assertIn("rc=0", result.stdout, result.stderr)
+        self.assertIn("nothing restored", result.stderr)
+        self.assertEqual(ops, [])
+
     def test_restore_of_a_declared_scope_is_one_step(self):
         scope = {"projects": ["pool-2"], "exclude": {"clusters": []}}
         cr = {"metadata": {"annotations": {ANNOTATION: json.dumps(scope)}}, "spec": {"scope": {"projects": ["pool-2"], "exclude": {"clusters": [SEEDED_B]}}}}
@@ -200,7 +217,9 @@ class SettleTest(unittest.TestCase):
                 *" jsonpath="*) printf '3 3' ;;
                 *" get platformagent "*) printf '%s' '{json.dumps(cr)}' ;;
                 *" get deployment/"*) echo deployment/platform-agent-gateway ;;
-                *" rollout status "*) echo rolled ;;
+                *" get statefulset/platform-agent-shell "*) echo statefulset/platform-agent-shell ;;
+                *" get statefulset/"*) return 1 ;;
+                *" rollout status "*) echo "$*" >> rollouts; echo rolled ;;
                 *" cat /etc/kube-agents/scope.json"*) printf '%s' '{json.dumps(rendered)}' ;;
                 *" --require-create-pass"*)
                   echo "$*" >> reconciles
@@ -220,12 +239,19 @@ class SettleTest(unittest.TestCase):
             )
             result = run_bash(body, tmp)
             reconciles = pathlib.Path(tmp) / "reconciles"
+            rollouts = pathlib.Path(tmp) / "rollouts"
+            self.rollouts = rollouts.read_text() if rollouts.exists() else ""
             return result, reconciles.read_text() if reconciles.exists() else ""
 
     def test_a_matching_file_runs_the_reconcile_and_waits_out_a_busy_lock(self):
-        result, reconciles = self.settle([SEEDED_B], "4 0")
+        # More busy answers than EVAL_SCOPE_RECONCILE_ATTEMPTS: a held lock is
+        # waited out inside the settle's bound, not counted as a failure.
+        result, reconciles = self.settle([SEEDED_B], "4 4 4 4 0")
         self.assertIn("rc=0", result.stdout, result.stderr)
-        self.assertEqual(len(reconciles.splitlines()), 2)
+        self.assertEqual(len(reconciles.splitlines()), 5)
+        # The shell sandbox rolls too when the scope block comes or goes.
+        self.assertIn("rollout status deployment/platform-agent-gateway", self.rollouts)
+        self.assertIn("rollout status statefulset/platform-agent-shell", self.rollouts)
         self.assertIn("env HERMES_HOME=/opt/data python3 /opt/data/scripts/cluster_agent_reconcile.py", reconciles)
 
     def test_a_file_that_never_matches_fails_without_a_reconcile(self):
@@ -253,6 +279,18 @@ class WiringTest(unittest.TestCase):
     def test_the_exit_trap_restores_without_waiting(self):
         trap = lifted("profile_and_dump_on_exit")
         self.assertIn('declare -F scope_exclude_restore >/dev/null && scope_exclude_restore "exit"\n', trap)
+
+    def test_the_gateway_log_is_taken_before_the_first_scope_edit_replaces_the_pod(self):
+        capture = self.src.index('[ "${#SCOPE_EXCLUDE_LINES[@]}" -eq 0 ] || collect_gateway_log')
+        loop = re.search(r'^for SCOPE_LINE in ', self.src, re.MULTILINE)
+        self.assertLess(capture, loop.start())
+
+    def test_a_scope_case_that_writes_keeps_the_per_repetition_repository_reset(self):
+        unit = lifted("run_one_unit")
+        reset = unit.index('reset_agent_pulls "${name} rep ${rep}"')
+        gate = unit.rindex("\n  if ", 0, reset)
+        self.assertIn('${INJECT_LANE_REQUESTING:-},${STOPPED_ASK_CASES:-}', unit[gate:reset])
+        self.assertNotIn("unit_phase", unit[gate:reset])
 
     def test_phase_2_runs_after_the_writers_one_case_at_a_time_between_apply_and_restore(self):
         writers = self.src.index('launch_units "${UNIT_QUEUE_WRITERS}"')

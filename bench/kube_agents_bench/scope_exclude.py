@@ -20,7 +20,8 @@ alone, after every other unit: it adds each slot's cluster to the PlatformAgent'
 ``spec.scope.exclude.clusters`` for the case's repetitions, then puts the scope
 back. Slots, not cluster names, because a case runs unchanged on every pool
 project; the cluster behind a slot comes from the ``.fleet-context`` file
-``hack/fleet-kubeconfigs.sh`` writes, the one place a seeded cluster is resolved.
+``hack/fleet-kubeconfigs.sh`` writes, the one place a seeded cluster is resolved,
+read through :mod:`kube_agents_bench.fleet`.
 
 The scope the patch replaced is saved on the CR itself, in ANNOTATION, so the
 restore needs nothing from the run that patched it: the EXIT trap and the next
@@ -31,12 +32,14 @@ Subcommands, each printing to stdout and exiting 1 with the reason on stderr:
 
 ``cases <task.yaml>...``
     ``<case> <slot>...`` for each task that declares the key, in the order given.
-``patch --fleet-context <file> --slots <slot>...`` (the CR as JSON on stdin)
+``patch --fleet-dir <dir> --slots <slot>...`` (the CR as JSON on stdin)
     The JSON patch that excludes the slots' clusters and saves the scope.
-``restore`` (the CR as JSON on stdin)
+``restore [--first-step-only]`` (the CR as JSON on stdin)
     The JSON patch for the next step back to the saved scope, or nothing when
     none is saved. A CR that had no scope block takes two steps, with a
-    reconcile between them (restore_ops says why).
+    reconcile between them (restore_ops says why); with the flag, the step that
+    removes the block is never printed, for a caller that cannot run the
+    reconcile it needs first.
 ``clusters`` (a CR, or the operator's rendered scope file, as JSON on stdin)
     The excluded clusters, sorted, as one line of JSON, so the runner can tell
     when the pod reads the scope the CR declares.
@@ -62,10 +65,9 @@ ANNOTATION = "bench.kubeagents.x-k8s.io/scope-before-exclude"
 # The first restore step for a CR that had no scope block: a block that excludes
 # nothing, which the reconcile reads as a declaration (restore_ops says why).
 CLEARED_SCOPE: dict[str, Any] = {"exclude": {"clusters": []}}
-# `.fleet-context` keys, as hack/fleet-kubeconfigs.sh writes them.
-CONTEXT_PROJECT = "project"
-CONTEXT_CLUSTER = "cluster.{slot}"
-CONTEXT_LOCATION = "location.{slot}"
+# The JSON pointers the patches write.
+SCOPE_PATH = "/spec/scope"
+ANNOTATIONS_PATH = "/metadata/annotations"
 
 
 class ScopeExcludeError(Exception):
@@ -75,7 +77,7 @@ class ScopeExcludeError(Exception):
 def declared_slots(task_yaml: Path) -> list[str]:
     """The slots a task excludes; empty when it declares none."""
     # Imported here: `patch`, `restore` and `clusters` run under a bare python3 in
-    # the EXIT trap and the lease preflight, before the bench virtualenv exists.
+    # the EXIT trap and the lease preflight, where PyYAML may not be installed.
     import yaml
 
     try:
@@ -100,33 +102,31 @@ def declared_slots(task_yaml: Path) -> list[str]:
     return slots
 
 
-def _fleet_context(path: Path) -> dict[str, str]:
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
-        raise ScopeExcludeError(f"{path}: {exc}") from exc
-    return dict(line.split("=", 1) for line in lines if "=" in line)
-
-
-def excluded_clusters(context_path: Path, slots: list[str]) -> list[dict[str, str]]:
+def excluded_clusters(fleet_dir: Path, slots: list[str]) -> list[dict[str, str]]:
     """Each slot's cluster as the triple `spec.scope.exclude.clusters` takes."""
-    context = _fleet_context(context_path)
-    project = context.get(CONTEXT_PROJECT)
+    # Imported here: scripts/validate_bench_cases.py loads this file by path for
+    # declared_slots, with no kube_agents_bench package on its path.
+    from kube_agents_bench import fleet
+
+    project = fleet.provisioned_project(fleet_dir)
     if not project:
-        raise ScopeExcludeError(f"{context_path}: records no '{CONTEXT_PROJECT}='")
+        raise ScopeExcludeError(f"{fleet_dir}: the runner recorded no project for the seeded fleet")
+    try:
+        recorded = fleet.recorded_clusters(fleet_dir)
+    except fleet.FleetRoleUnresolved as exc:
+        raise ScopeExcludeError(str(exc)) from exc
     clusters = []
     for slot in slots:
-        name = context.get(CONTEXT_CLUSTER.format(slot=slot))
-        location = context.get(CONTEXT_LOCATION.format(slot=slot))
+        name, location = recorded.get(slot, ("", ""))
         if not name or not location:
-            raise ScopeExcludeError(f"{context_path}: slot '{slot}' has no resolved cluster and location")
+            raise ScopeExcludeError(f"{fleet_dir}: slot '{slot}' has no resolved cluster and location")
         clusters.append({"projectId": project, "location": location, "clusterName": name})
     return clusters
 
 
 def _annotation_path() -> str:
     # RFC 6901: `~` and `/` in a key are escaped as `~0` and `~1`.
-    return "/metadata/annotations/" + ANNOTATION.replace("~", "~0").replace("/", "~1")
+    return ANNOTATIONS_PATH + "/" + ANNOTATION.replace("~", "~0").replace("/", "~1")
 
 
 def _saved_scope(cr: dict[str, Any]) -> tuple[bool, Any]:
@@ -151,13 +151,13 @@ def patch_ops(cr: dict[str, Any], clusters: list[dict[str, str]]) -> list[dict[s
     scope["exclude"] = {**exclude, "clusters": merged}
     ops: list[dict[str, Any]] = []
     if not (cr.get("metadata") or {}).get("annotations"):
-        ops.append({"op": "add", "path": "/metadata/annotations", "value": {}})
+        ops.append({"op": "add", "path": ANNOTATIONS_PATH, "value": {}})
     ops.append({"op": "add", "path": _annotation_path(), "value": json.dumps(base)})
-    ops.append({"op": "add", "path": "/spec/scope", "value": scope})
+    ops.append({"op": "add", "path": SCOPE_PATH, "value": scope})
     return ops
 
 
-def restore_ops(cr: dict[str, Any]) -> list[dict[str, Any]]:
+def restore_ops(cr: dict[str, Any], first_step_only: bool = False) -> list[dict[str, Any]]:
     """The next step back to the saved scope; empty when none is saved.
 
     One step when the CR had a scope block: put it back and drop the annotation.
@@ -165,20 +165,23 @@ def restore_ops(cr: dict[str, Any]) -> list[dict[str, Any]]:
     block as "keep the last declaration's exclusions": removing the block while
     it still excludes would leave the clusters excluded for good. So the first
     step empties the exclusions and keeps the annotation, and only once a
-    reconcile has run under that does the second remove the block.
+    reconcile has run under that does the second remove the block. A caller that
+    cannot run that reconcile passes `first_step_only` and gets no second step.
     """
     saved, base = _saved_scope(cr)
     if not saved:
         return []
     remove_annotation = {"op": "remove", "path": _annotation_path()}
     if base is not None:
-        return [{"op": "add", "path": "/spec/scope", "value": base}, remove_annotation]
+        return [{"op": "add", "path": SCOPE_PATH, "value": base}, remove_annotation]
     scope = (cr.get("spec") or {}).get("scope")
     if scope is None:
         return [remove_annotation]
     if scope_clusters({"spec": {"scope": scope}}):
-        return [{"op": "add", "path": "/spec/scope", "value": copy.deepcopy(CLEARED_SCOPE)}]
-    return [{"op": "remove", "path": "/spec/scope"}, remove_annotation]
+        return [{"op": "add", "path": SCOPE_PATH, "value": copy.deepcopy(CLEARED_SCOPE)}]
+    if first_step_only:
+        return []
+    return [{"op": "remove", "path": SCOPE_PATH}, remove_annotation]
 
 
 def scope_clusters(doc: dict[str, Any]) -> list[dict[str, str]]:
@@ -204,9 +207,10 @@ def main(argv: list[str] | None = None) -> int:
     cases = sub.add_parser("cases")
     cases.add_argument("tasks", nargs="*")
     patch = sub.add_parser("patch")
-    patch.add_argument("--fleet-context", required=True, type=Path)
+    patch.add_argument("--fleet-dir", required=True, type=Path)
     patch.add_argument("--slots", required=True, nargs="+")
-    sub.add_parser("restore")
+    restore = sub.add_parser("restore")
+    restore.add_argument("--first-step-only", action="store_true")
     sub.add_parser("clusters")
     args = parser.parse_args(argv)
     try:
@@ -216,9 +220,9 @@ def main(argv: list[str] | None = None) -> int:
                 if slots:
                     print(" ".join([Path(task).parent.name, *slots]))
         elif args.command == "patch":
-            print(json.dumps(patch_ops(_stdin_json(), excluded_clusters(args.fleet_context, args.slots))))
+            print(json.dumps(patch_ops(_stdin_json(), excluded_clusters(args.fleet_dir, args.slots))))
         elif args.command == "restore":
-            ops = restore_ops(_stdin_json())
+            ops = restore_ops(_stdin_json(), first_step_only=args.first_step_only)
             if ops:
                 print(json.dumps(ops))
         else:
