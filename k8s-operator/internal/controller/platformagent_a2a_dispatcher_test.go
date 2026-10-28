@@ -384,3 +384,53 @@ func TestATaskDeadlinePastTheCapIsClampedAndWarned(t *testing.T) {
 		t.Errorf("lowered to 900s: the clamp gives %ds and the callout %s; they must be the same bound", cfg.Profiles[0].ActiveDeadlineSeconds, lifetime)
 	}
 }
+
+// With no dispatcher image, a next install renders exactly what it did
+// before the dispatcher existed: no dispatcher principal, no durable grants
+// on the operator, TASKS sized for sessions alone, no dispatcher objects,
+// and no durable syncs from the AgentProfile controller.
+func TestDefaultOffRendersNoDispatcherAndNoGrantsForIt(t *testing.T) {
+	t.Setenv(a2aDispatcherImageEnvVar, "")
+	withOperatorBusPrincipal(t)
+	agent := a2aTestAgent()
+	doc, err := renderA2AAuthMap(agent, []agentv1alpha1.AgentProfile{testAgentProfile(agent.Namespace, "tse")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range doc.Identities {
+		if id.User == a2aDispatcherUser {
+			t.Error("the identity map has a dispatcher with the dispatcher off")
+		}
+		if id.User == a2aOperatorBusUser {
+			for _, p := range id.Grants.Publish {
+				if strings.Contains(p, "CONSUMER") {
+					t.Errorf("the operator holds %s with the dispatcher off", p)
+				}
+			}
+		}
+	}
+	if got, want := a2aTasksMaxConsumers(agent), max(a2aTasksConsumerBudget(agent), a2aTasksMaxConsumersFloor); got != want {
+		t.Errorf("a fresh TASKS gets max_consumers %d with the dispatcher off, want %d", got, want)
+	}
+	scheme := setupScheme()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent, chartProfileNamespace(agent)).WithInterceptorFuncs(fakeServerSideApplyInterceptors()).Build()
+	r := &PlatformAgentReconciler{Client: c, Scheme: scheme}
+	if _, err := r.reconcileA2ADispatcher(context.Background(), agent, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, obj := range []client.Object{&appsv1.Deployment{}, &corev1.ServiceAccount{}, &corev1.ConfigMap{}} {
+		name := a2aDispatcherName(agent)
+		if _, isCM := obj.(*corev1.ConfigMap); isCM {
+			name = a2aDispatchConfigName(agent)
+		}
+		if err := c.Get(context.Background(), types.NamespacedName{Namespace: agent.Namespace, Name: name}, obj); !apierrors.IsNotFound(err) {
+			t.Errorf("%T rendered with the dispatcher off: %v", obj, err)
+		}
+	}
+	p := testAgentProfile(agent.Namespace, "tse")
+	h := newProfileHarness(t, agent, &p)
+	h.reconcile(agent.Namespace, "tse")
+	if len(h.dir.durables) != 0 {
+		t.Errorf("durables synced with the dispatcher off: %+v", h.dir.durables)
+	}
+}
