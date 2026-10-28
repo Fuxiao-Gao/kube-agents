@@ -191,7 +191,7 @@ Job, which reaches the CR as `Degraded`/`A2AProvisionFailed`.
 
 W is TBD - see Open questions. It is not just a cost knob; see the audit section.
 
-Four KV buckets ride the same JetStream deployment:
+Five KV buckets ride the same JetStream deployment:
 
 - `runtime-state` - which agents are alive, what is in flight. Runtime state does not
   belong in git, and this is where it goes instead.
@@ -233,6 +233,15 @@ Four KV buckets ride the same JetStream deployment:
   and the session-state deliver-subject residue above applies to `$KV.feedback.>` the
   same way. The gateway keeps nothing in a bucket without a max age. The chatops gateway
   design owns what a record holds ("Answer feedback").
+- `PROFILE_LEASES` - each AgentProfile task's liveness lease, keyed
+  `<profile>.<tier>.<pod>.<task>` (#3655). The dispatcher is its only writer, by grant.
+  Workers renew by publishing on their own `a2a.dispatch.<profile>.<tier>.<pod>.lease`
+  subject and hold nothing on the bucket, because a put on a KV bucket can carry
+  `Nats-Rollup: all`, which purges every key, so any worker with a put grant could wipe
+  every lease. No max age: the dispatcher reads expiry from each record, so a restarted
+  dispatcher can still read every lease it has to re-adopt or fail. Provision and seed
+  hold CREATE and INFO on it for the info-then-add guard. The dispatcher design owns
+  what a record holds (`lib.LeaseRecord`).
 
 ## Accounts and connection-time authorization
 

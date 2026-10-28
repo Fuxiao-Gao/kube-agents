@@ -1627,6 +1627,7 @@ var a2aWildcardListenHosts = map[string]bool{"": true, "0.0.0.0": true, "::": tr
 var a2aProvisionedStreams = []string{
 	"TASKS", "DIRECTORY", "TOPICS-STATE", "TOPICS-JOURNAL",
 	"KV_runtime-state", "KV_session-state", "KV_cap", "KV_feedback",
+	"KV_PROFILE_LEASES",
 }
 
 // a2aSeedJetStreamGrants is seed's publish allow-list for the JetStream API,
@@ -3116,6 +3117,11 @@ $NATS kv info cap           >/dev/null 2>&1 || $NATS kv add cap --history=1 --re
 # at their caps (ask, answer and note, about 22KB) and more at a typical
 # size; past it the write is refused, and the rating is counted but not kept.
 $NATS kv info feedback      >/dev/null 2>&1 || $NATS kv add feedback --history=1 --replicas=1 --storage=file --max-bucket-size=67108864 --ttl=720h
+# PROFILE_LEASES: each profile task's liveness lease, written only by the
+# dispatcher (lib.ProfileLeaseBucket; contract on #3655). No TTL: the
+# dispatcher reads expiry from each record, so a restarted one can still read
+# every lease it has to re-adopt or fail.
+$NATS kv info PROFILE_LEASES >/dev/null 2>&1 || $NATS kv add PROFILE_LEASES --history=1 --replicas=1 --storage=file --max-bucket-size=67108864
 
 # TASKS older than this render: the limits the create above could not apply.
 #

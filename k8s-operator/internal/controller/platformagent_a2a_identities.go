@@ -555,7 +555,7 @@ func provisionIdentity(agent *agentv1alpha1.PlatformAgent, ns string) a2aIdentit
 		// principal create a
 		// consumer that delivers TASKS into its own inbox, and delete any
 		// stream on the bus. It provisions - it creates the four streams
-		// and four buckets, idempotently, with an info-then-add - so it
+		// and five buckets, idempotently, with an info-then-add - so it
 		// needs CREATE and INFO on exactly those and nothing else. A KV
 		// bucket is a stream named KV_<bucket>, which is why those appear
 		// in stream form.
@@ -588,6 +588,7 @@ func provisionIdentity(agent *agentv1alpha1.PlatformAgent, ns string) a2aIdentit
 			"$JS.API.STREAM.CREATE.KV_session-state",
 			"$JS.API.STREAM.CREATE.KV_cap",
 			"$JS.API.STREAM.CREATE.KV_feedback",
+			"$JS.API.STREAM.CREATE.KV_PROFILE_LEASES",
 			"$JS.API.STREAM.INFO.TASKS",
 			"$JS.API.STREAM.INFO.DIRECTORY",
 			"$JS.API.STREAM.INFO.TOPICS-STATE",
@@ -596,6 +597,7 @@ func provisionIdentity(agent *agentv1alpha1.PlatformAgent, ns string) a2aIdentit
 			"$JS.API.STREAM.INFO.KV_session-state",
 			"$JS.API.STREAM.INFO.KV_cap",
 			"$JS.API.STREAM.INFO.KV_feedback",
+			"$JS.API.STREAM.INFO.KV_PROFILE_LEASES",
 			"_INBOX.provision.>",
 		},
 		subscribe: []string{
