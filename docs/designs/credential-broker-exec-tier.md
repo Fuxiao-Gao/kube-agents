@@ -133,12 +133,22 @@ Source: `bench/scale/harness-limits.json` on #3935, 46 runs, `spec.mode: next`, 
 
 Phases 2 and 3 (#4107) measured the same install on 2 to 22
 test clusters, with the broker's limits raised to 4 CPU and 4 GiB at 2 and 16 clusters. As that
-pull request reports them [measured, #4107]: the broker is the first bottleneck; with the
-first-run audits running together it reaches its 1-core limit at every fleet size; at 16 clusters
-it needs about 2.5 cores; and its memory line reaches the 2 GiB limit at about 15 clusters. It
-also found that the sandbox caps the brokered command path at about 1.5 commands per second
-(#4027), on the caller side, before the broker. §8 uses #4107's runner features
-(`proxy_load`, raised limits).
+pull request reports them [measured, #4107]:
+
+- **CPU.** The broker is the first bottleneck. With the four first-run audits running together it
+  sits at its 1-core limit at every fleet size. With the limit raised it needed 1.6 cores at 2
+  clusters and 2.5 at 16.
+- **Waits.** Commands waited 30 to 60 s at 16 clusters (audits together) and at 22 clusters
+  (onboarding), next to the 60 s refusal bound. No command was refused yet.
+- **Memory.** 1.5 GiB at 16 clusters and 1.8 GiB at 22, against the 2 GiB limit.
+- **The command path.** With no model call, workers in the sandbox ran
+  `kubectl get pods --all-namespaces` through the shim. Throughput stopped at about 1.5 commands
+  per second from 4 workers, with the sandbox shell at its 2 cores and the broker near 0.8 cores
+  with a median wait of 0.1 s. Each command cost 0.8 to 1 s of shell CPU in the shim's Python
+  client (#4027). So past a few commands at once, the caller side limits the path before the
+  broker does.
+
+§8 uses #4107's runner features (`proxy_load`, raised limits).
 
 So the single-pod doc's reopen condition (§6 there: reopen when either criterion holds) is met:
 one pod's CPU saturates at 8 test clusters. The other criterion, a median wait over 10 s with
@@ -223,6 +233,66 @@ one replica answers. With N replicas it must report the tier, or the sweeps unde
 operator sets `CREDENTIAL_PROXY_EXEC_REPLICAS`, and the route reports
 `admitted × replicas` with the per-replica numbers beside it. It is a target, not a promise: a
 replica that is not ready lowers the real number until the rollout ends.
+
+### 3.6 Relation to the k8s-api-proxy (#3760)
+
+#3760 adds a separate Kubernetes API proxy (its design: `docs/designs/kube-proxy.md` on that
+branch). If it merges, the split of the load changes:
+
+```
+  sandbox kubectl (every profile) ──► k8s-api-proxy  × 1 pod   (#3760)
+  sandbox gcloud                  ──► exec tier      × N pods  (this design)
+  session pods' /v1/exec          ──► exec tier      × N pods  (unless #3760 extends to them)
+  relays, workspace, vcs/forge,   ──► stateful broker × 1 pod
+  Cloud API relay
+```
+
+What moves, as #3760 is written [code, #3760 head]:
+
+- **All `kubectl` from the sandbox pod.** The sandbox image drops the `kubectl` wrapper and ships
+  the real binary. `gcloud container clusters get-credentials` still runs on the broker, and the
+  shim rewrites the kubeconfig it returns to point at the k8s-api-proxy. So the fleet-audit
+  collectors, the watches and the reconcile, which all run in the sandbox, move their `kubectl`
+  too. The default kubeconfig is set for the root and `platform` profiles; a cluster profile uses
+  its own pinned kubeconfig.
+- **Not the session pods.** The k8s-api-proxy's NetworkPolicy admits port 8443 from the sandbox
+  pod only, and the session pods keep `CREDENTIAL_PROXY_URL`. How their `kubectl` works after the
+  wrapper is gone is open question 7.
+
+What stays on the exec tier: `gcloud` (cluster lists, `describe`, `get-credentials`), and the
+session pods' commands. The Cloud API relay stays on the stateful broker. The budget doc measured a
+`gcloud` child at 101 to 102 MiB, and a `kubectl` read at 45 to 48 MiB plus 71 MiB for the GKE auth
+plugin under it [doc, `credential-proxy-child-memory-budget.md` §1]. So `kubectl` leaving frees
+about 116 MiB of child memory per command, and the exec tier keeps the `gcloud` children. How much
+of the CPU and slot load is `kubectl` and how much is `gcloud` is not measured. §8.1 adds that
+split.
+
+How the k8s-api-proxy runs [code, #3760 head, `kube_proxy_manifests.go`]:
+
+- One replica, `Recreate`, requests 100m CPU / 256 MiB, limits 1 CPU / 512 MiB.
+- The same KSA as the broker, so the same Workload Identity GSA, plus `system:auth-delegator`
+  for TokenReview and the cluster-reader role.
+- State: a TokenReview cache (up to 60 s), a per-cluster endpoint and transport cache (5 minutes),
+  and the operator's TLS Secret, which every pod mounts. Nothing crosses calls.
+- No admission cap and no queue: it counts in-flight requests in a gauge only. It streams
+  responses, but it buffers a `Secret` response up to 64 MiB to scrub it.
+
+**Can it scale out by itself?** By its state, yes: it has no relays and no workspace, so N
+replicas behind its Service with `RollingUpdate` look possible without the split this design
+needs for the broker. Two things it does not have yet are in this design: priority between
+interactive and background work (§4), and a bound on concurrent work. Without a bound, many
+buffered `Secret` responses at once can reach the 512 MiB limit [predicted: 8 × 64 MiB = 512 MiB].
+
+What this means for this design:
+
+- The exec tier is still needed for `gcloud` and the session pods, and the stateful/exec split
+  does not change.
+- The class header (§4.1) and the reserve rule (§4.2) should apply to both proxies, so a sweep
+  cannot fill either one ahead of interactive work.
+- The footprint (§8.4) has two terms: exec replicas for `gcloud`, and k8s-api-proxy replicas for
+  `kubectl`.
+- #3760 also removes the shim's Python client from every `kubectl`, which is the caller-side cost
+  #4107 measured (#4027). The 1.5 commands per second ceiling then holds for `gcloud` only.
 
 ## 4. Priority admission
 
@@ -332,6 +402,8 @@ The #3935 runner is the tool. The tiger team owns it, so the plan is a new plan 
 | Traffic mix: requests and slot-seconds by caller (sweep, reconcile, stall watch, interactive, session) | Audit lines with the class and a caller name from the shim                            | New                                               |
 | CPU throttling                                                                                         | cAdvisor CFS throttled periods through GMP                                            | New in the runner                                 |
 | Per-replica balance                                                                                    | The same metrics per pod                                                              | New in the runner                                 |
+| Requests and slot-seconds by tool (`kubectl`, `gcloud`, other)                                         | The broker's `tool_execution_audit` lines                                             | New in the runner; splits the load §3.6 moves     |
+| k8s-api-proxy CPU, memory and in-flight requests                                                       | Cloud Monitoring; its `in_flight_requests` gauge (#3760)                              | New in the runner, on a #3760 build               |
 
 ### 8.2 Points
 
@@ -343,6 +415,7 @@ The #3935 runner is the tool. The tiger team owns it, so the plan is a new plan 
 | Autopilot         | One point at the 1 GiB clamp (budget admits 4)                        | The worst default                                           |
 | Mode              | One baseline point in `spec.mode: today`                              | Phase 1 covered `next` only                                 |
 | Exec tier         | 1, 2 and 3 replicas at 16 and 32 clusters                             | #4082 "Done when": the chosen shape at two or more sizes    |
+| `kubectl` split   | The baseline points again on a #3760 build                            | What leaves the broker, and the k8s-api-proxy's own load    |
 
 Each point runs 3 times. The planned points are only a few times the Phase 1 run time [predicted],
 because most points reuse the fan-out and audit operations.
@@ -422,10 +495,15 @@ To revert, set replicas to 0. The shim falls back to `CREDENTIAL_PROXY_URL`.
 5. Kubeconfig without `gcloud` (§3.4): worth it at 2,500 clusters?
 6. Who owns `bench/scale/broker.yaml`: the tiger team, as part of Phase 2, with this doc as its
    requirements? To agree with them before §8 starts.
-7. #3760 (open) adds a k8s-api-proxy and routes the sandbox's `kubectl` through it for the root
-   and `platform` profiles, off `/v1/exec`. If it merges, the exec tier carries `gcloud` and the
-   remaining `kubectl`, and the k8s-api-proxy (one pod, `Recreate`) is a second path that must
-   scale. Does this design cover both, or does the k8s-api-proxy get its own?
+7. For dshnayder, on #3760 (§3.6):
+   - How do the session pods run `kubectl` once the sandbox image has no wrapper? Do they move to
+     the k8s-api-proxy, or keep `/v1/exec`?
+   - Is there a reason for one replica and `Recreate`, or can the k8s-api-proxy run N replicas
+     with `RollingUpdate`?
+   - Should it take the same class header and reserve rule as the exec tier, and a bound on
+     concurrent requests for the buffered `Secret` responses?
+   - Did the concurrency and memory benchmark in its design ("16 parallel multi-cluster listing
+     passes") run, and with what numbers?
 8. #4027 caps the command path at about 1.5 commands per second in the sandbox. Until it is fixed,
    a measurement can show the caller's limit and not the broker's. §8 needs it fixed, or its
-   effect recorded.
+   effect recorded. On a #3760 build this holds for `gcloud` only (§3.6).
