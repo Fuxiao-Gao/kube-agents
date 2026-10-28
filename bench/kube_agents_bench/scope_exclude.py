@@ -37,9 +37,9 @@ Subcommands, each printing to stdout and exiting 1 with the reason on stderr:
 ``restore [--first-step-only]`` (the CR as JSON on stdin)
     The JSON patch for the next step back to the saved scope, or nothing when
     none is saved. A CR that had no scope block takes two steps, with a
-    reconcile between them (restore_ops says why); with the flag, the step that
-    removes the block is never printed, for a caller that cannot run the
-    reconcile it needs first.
+    reconcile between them (restore_ops says why); with the flag, for a caller
+    that cannot run a reconcile, nothing that removes the block or the
+    annotation is printed.
 ``clusters`` (a CR, or the operator's rendered scope file, as JSON on stdin)
     The excluded clusters, sorted, as one line of JSON, so the runner can tell
     when the pod reads the scope the CR declares.
@@ -166,13 +166,17 @@ def restore_ops(cr: dict[str, Any], first_step_only: bool = False) -> list[dict[
     it still excludes would leave the clusters excluded for good. So the first
     step empties the exclusions and keeps the annotation, and only once a
     reconcile has run under that does the second remove the block. A caller that
-    cannot run that reconcile passes `first_step_only` and gets no second step.
+    cannot run the reconcile passes `first_step_only`: it gets no second step, and
+    on a declared scope the scope back without the annotation's removal, so the
+    next settled restore still finds the annotation and re-creates the profiles.
     """
     saved, base = _saved_scope(cr)
     if not saved:
         return []
     remove_annotation = {"op": "remove", "path": _annotation_path()}
     if base is not None:
+        if first_step_only:
+            return [{"op": "add", "path": SCOPE_PATH, "value": base}]
         return [{"op": "add", "path": SCOPE_PATH, "value": base}, remove_annotation]
     scope = (cr.get("spec") or {}).get("scope")
     if scope is None:

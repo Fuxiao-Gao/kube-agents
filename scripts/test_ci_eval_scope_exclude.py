@@ -150,9 +150,17 @@ class ApplyRestoreTest(unittest.TestCase):
         self.assertIn("rc=1", result.stdout)
         self.assertEqual(ops, [])
 
-    def test_restore_of_a_cr_that_had_no_block_settles_before_and_after_each_step(self):
+    def test_restore_of_a_cr_that_had_no_block_settles_after_each_step(self):
         cr = {"metadata": {"annotations": {ANNOTATION: "null"}}, "spec": {"scope": {"exclude": {"clusters": [SEEDED_B]}}}}
-        result, ops = self.run_functions(cr, "scope_exclude_restore lease settle; echo rc=$?")
+        result, ops = self.run_functions(cr, "scope_exclude_restore case-x settle; echo rc=$?")
+        self.assertIn("rc=0", result.stdout, result.stderr)
+        self.assertEqual(len(ops), 2)
+        # After a case the apply's own settle already reconciled: one per step.
+        self.assertEqual(result.stdout.count("SETTLED case-x"), 2)
+
+    def test_the_lease_repair_reconciles_first_then_after_each_step(self):
+        cr = {"metadata": {"annotations": {ANNOTATION: "null"}}, "spec": {"scope": {"exclude": {"clusters": [SEEDED_B]}}}}
+        result, ops = self.run_functions(cr, "scope_exclude_restore lease repair; echo rc=$?")
         self.assertIn("rc=0", result.stdout, result.stderr)
         self.assertEqual(
             ops,
@@ -193,7 +201,23 @@ class ApplyRestoreTest(unittest.TestCase):
         result, ops = self.run_functions(cr, "scope_exclude_restore case-x settle; echo rc=$?")
         self.assertIn("rc=0", result.stdout, result.stderr)
         self.assertEqual(ops, [[{"op": "add", "path": "/spec/scope", "value": scope}, {"op": "remove", "path": ANNOTATION_PATH}]])
-        self.assertEqual(result.stdout.count("SETTLED case-x"), 2)
+        self.assertEqual(result.stdout.count("SETTLED case-x"), 1)
+
+    def test_the_exit_trap_on_a_declared_scope_keeps_the_annotation_for_the_lease(self):
+        scope = {"projects": ["pool-2"], "exclude": {"clusters": []}}
+        cr = {"metadata": {"annotations": {ANNOTATION: json.dumps(scope)}}, "spec": {"scope": {"projects": ["pool-2"], "exclude": {"clusters": [SEEDED_B]}}}}
+        call = "scope_exclude_restore exit; echo rc=$?; scope_exclude_restore lease repair; echo rc=$?"
+        result, ops = self.run_functions(cr, call)
+        self.assertEqual(result.stdout.count("rc=0"), 2, result.stderr)
+        self.assertEqual(
+            ops,
+            [
+                [{"op": "add", "path": "/spec/scope", "value": scope}],
+                [{"op": "add", "path": "/spec/scope", "value": scope}, {"op": "remove", "path": ANNOTATION_PATH}],
+            ],
+        )
+        # The lease still reconciles under the restored scope, re-creating the profiles.
+        self.assertEqual(result.stdout.count("SETTLED lease"), 2)
 
     def test_restore_with_nothing_saved_is_a_no_op(self):
         result, ops = self.run_functions({"metadata": {}, "spec": {}}, "scope_exclude_restore lease settle; echo rc=$?")
@@ -206,7 +230,7 @@ class SettleTest(unittest.TestCase):
     """scope_exclude_settle waits for the operator, the rollout and the mounted
     file, then runs one reconcile and waits out a run that holds its lock."""
 
-    def settle(self, file_clusters: list, reconcile_rcs: str, seconds: int = 5) -> tuple[subprocess.CompletedProcess, str]:
+    def settle(self, file_clusters: list, reconcile_rcs: str, seconds: int = 5, failure_pause: int = 0) -> tuple[subprocess.CompletedProcess, str]:
         cr = {"metadata": {"generation": 3}, "status": {"observedGeneration": 3}, "spec": {"scope": {"exclude": {"clusters": [SEEDED_B]}}}}
         rendered = {"present": True, "exclude": {"projects": [], "clusters": file_clusters}}
         stub = textwrap.dedent(
@@ -224,6 +248,7 @@ class SettleTest(unittest.TestCase):
                 *" --require-create-pass"*)
                   echo "$*" >> reconciles
                   read -r rc rest < rcs; echo "$rest" > rcs
+                  [ "$rc" = 0 ] || sleep {failure_pause}
                   echo "Done: created=0 pruned=1"; return "$rc" ;;
                 *) echo "unexpected kubectl $*" >&2; return 1 ;;
               esac
@@ -260,6 +285,12 @@ class SettleTest(unittest.TestCase):
         self.assertIn("still reads []", result.stderr)
         self.assertEqual(reconciles, "")
 
+    def test_reconcile_retries_stop_at_the_settle_bound(self):
+        result, reconciles = self.settle([SEEDED_B], "3 3 3", seconds=1, failure_pause=2)
+        self.assertIn("rc=1", result.stdout)
+        self.assertIn("settle bound", result.stderr)
+        self.assertEqual(len(reconciles.splitlines()), 1)
+
     def test_a_reconcile_that_keeps_failing_fails_the_settle(self):
         result, reconciles = self.settle([SEEDED_B], "3 3 3")
         self.assertIn("rc=1", result.stdout)
@@ -272,7 +303,7 @@ class WiringTest(unittest.TestCase):
     src = SCRIPT.read_text(encoding="utf-8")
 
     def test_the_lease_repairs_a_leftover_before_the_audits_pause_and_stops_when_it_cannot(self):
-        restore = self.src.index('scope_exclude_restore "lease" settle || {')
+        restore = self.src.index('scope_exclude_restore "lease" repair || {')
         self.assertLess(restore, self.src.index('scheduled_audits pause "lease"'))
         self.assertIn("exit 1", self.src[restore : restore + 300])
 
@@ -295,6 +326,10 @@ class WiringTest(unittest.TestCase):
         self.assertLess(apply, launch)
         self.assertLess(launch, restore)
         self.assertIn('1 "${SCOPE_PAUSE}"', body)
+        # The case's own gateway log is taken after its repetitions, before the restore replaces the pod.
+        log = body.index('"${ARTIFACT_DIR}/platform-agent-gateway-${SCOPE_CASE}.log"')
+        self.assertLess(launch, log)
+        self.assertLess(log, restore)
         # A scope edit that did not take effect records each repetition as infrastructure.
         self.assertIn('"scope-exclude: slot(s) ${SCOPE_SLOTS} could not be excluded', body)
 

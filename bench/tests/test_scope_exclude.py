@@ -130,6 +130,15 @@ def test_first_step_only_never_removes_the_block():
     assert scope_exclude.restore_ops(cleared)[0] == {"op": "remove", "path": "/spec/scope"}
 
 
+def test_first_step_only_on_a_declared_scope_keeps_the_annotation():
+    scope = {"projects": ["pool-2"], "exclude": {"clusters": []}}
+    cr = {"metadata": {"annotations": {scope_exclude.ANNOTATION: json.dumps(scope)}}, "spec": {"scope": {"exclude": {"clusters": [SEEDED_B]}}}}
+    assert scope_exclude.restore_ops(cr, first_step_only=True) == [{"op": "add", "path": "/spec/scope", "value": scope}]
+    restored = _apply(cr, scope_exclude.restore_ops(cr, first_step_only=True))
+    # The settled restore still has the annotation to act on.
+    assert scope_exclude.restore_ops(restored)[-1] == {"op": "remove", "path": ANNOTATION_PATH}
+
+
 def test_a_saved_null_with_no_block_left_only_drops_the_annotation():
     cr = {"metadata": {"annotations": {scope_exclude.ANNOTATION: "null"}}, "spec": {}}
     assert scope_exclude.restore_ops(cr) == [{"op": "remove", "path": ANNOTATION_PATH}]

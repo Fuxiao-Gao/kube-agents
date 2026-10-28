@@ -2147,6 +2147,11 @@ scope_exclude_settle() { # <label>
     else
       attempt=$((attempt + 1))
       echo "WARNING: Scope exclusion (${label}): reconcile attempt ${attempt} exited ${rc}: $(printf '%s\n' "${out}" | tail -1)" >&2
+      # The settle's bound holds the retries too: at most one attempt runs past it.
+      if [ "${SECONDS}" -ge "${deadline}" ]; then
+        echo "WARNING: Scope exclusion (${label}): stopped retrying the reconcile at the ${EVAL_SCOPE_SETTLE_SECONDS}s settle bound" >&2
+        return 1
+      fi
       pod="$(ready_gateway_pod "${AGENT_CLUSTER_CONTEXT}" "${TARGET_NAMESPACE}" "${EVAL_PAUSE_AUDITS_POD_WAIT_SECONDS}")" || pod=""
     fi
     sleep "${EVAL_SCOPE_POLL_SECONDS}"
@@ -2176,15 +2181,16 @@ scope_exclude_apply() { # <case> <slot>...
 # Put back the scope a patch saved, when one is saved. A CR that had no scope
 # block takes two steps (restore_ops in the helper says why): exclusions emptied,
 # then the block removed, with a reconcile under the emptied block in between.
-# With `settle`, a reconcile runs under the CR as it stands before the first
-# step too, so a run that died between the steps is finished safely, and each
-# step waits as the apply does, so the profiles are back before anything else
-# runs. Without it (the EXIT trap) only a step that keeps the block is taken,
-# never the one that removes it: no reconcile has run under the emptied block
-# yet. The hourly reconcile and the next lease's preflight do the rest. A CR
+# With `settle` (after a case) each step waits as the apply does, so the
+# profiles are back before anything else runs. `repair` (the lease preflight)
+# does the same and first runs a reconcile under the CR as it stands, since an
+# earlier run may have died between the steps or after the EXIT trap's step.
+# Without either (the EXIT trap) nothing that removes the block or the
+# annotation is applied: no reconcile has run under the restored scope yet.
+# The hourly reconcile and the next lease's preflight do the rest. A CR
 # that cannot be read is a warning, not a failure: there is nothing known to
 # restore, and a lease that stopped on it would stop every run for a read.
-scope_exclude_restore() { # <label> [settle]
+scope_exclude_restore() { # <label> [settle|repair]
   local label="$1" settle="${2:-}" ops step cr args=(--first-step-only)
   scope_exclude_target "${label}" 2>/dev/null || return 0
   [ -z "${settle}" ] || args=()
@@ -2198,7 +2204,7 @@ scope_exclude_restore() { # <label> [settle]
       return 1
     fi
     [ -n "${ops}" ] || return 0
-    if [ -n "${settle}" ] && [ "${step}" = 1 ]; then
+    if [ "${settle}" = repair ] && [ "${step}" = 1 ]; then
       scope_exclude_settle "${label}" || return 1
     fi
     if ! scope_exclude_kubectl patch platformagent "${AGENT_SERVICE_NAME}" --type json -p "${ops}" >/dev/null; then
@@ -2222,7 +2228,7 @@ probe_gitlab_ledger_path "lease" || exit 1
 # A scope a killed run left excluded (scope_exclude_restore, above), put back
 # before anything is graded. A restore that does not settle stops the run: every
 # case on the excluded slots would grade an install without their Cluster Agent.
-scope_exclude_restore "lease" settle || {
+scope_exclude_restore "lease" repair || {
   echo "ERROR: Scope exclusion (lease): an earlier run's exclusion could not be undone; stopping the run (infrastructure, not a case result)" >&2
   exit 1
 }
@@ -4721,6 +4727,11 @@ for SCOPE_LINE in ${SCOPE_EXCLUDE_LINES[@]+"${SCOPE_EXCLUDE_LINES[@]}"}; do
   if scope_exclude_apply "${SCOPE_CASE}" ${SCOPE_SLOTS}; then
     launch_units "$(for REP in $(seq 1 "${EVAL_REPETITIONS}"); do printf '%s 0 %s\n' "${REP}" "${SCOPE_IDX}"; done)" 1 "${SCOPE_PAUSE}"
     wait
+    # This case's own gateway log, before the restore replaces the pod that
+    # served it: collect_gateway_log runs once, and took the earlier pod.
+    kubectl --context "${AGENT_CLUSTER_CONTEXT}" -n "${TARGET_NAMESPACE}" logs "deployment/${AGENT_SERVICE_NAME}-gateway" \
+      --tail="${GATEWAY_LOG_TAIL_LINES}" 2>&1 \
+      | last_bytes "${GATEWAY_LOG_MAX_BYTES}" "${ARTIFACT_DIR}/platform-agent-gateway-${SCOPE_CASE}.log" || true
   else
     for REP in $(seq 1 "${EVAL_REPETITIONS}"); do
       skip_unit "${TASKS[SCOPE_IDX]}" "${SCOPE_CASE}" "${REP}" "" "" "not run: its scope exclusion did not take effect" \
