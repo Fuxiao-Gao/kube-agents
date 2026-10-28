@@ -893,8 +893,8 @@ Nightly report's.
 - **⏱ Latency:** last night's opening chat turn (p50 and p95, beside the
   p95 < 10 s target) and agent time (the median of the cases' agent p50),
   each against its typical: the median of the same number over the last 7
-  earlier nights that carry it and were not cut short, with at least 3 of
-  them. A number at 1.5× its typical or more gets a 🐢 mark. Under it,
+  earlier whole nights that carry it (not cut short, no part missing or still
+  running), with at least 3 of them. A number at 1.5× its typical or more gets a 🐢 mark. Under it,
   **🐢 Slow cases**: a case whose agent p50 is at least 2× its own typical
   (its last 7 earlier nights with timing, at least 3) and at least 60 s more,
   largest ratio first, with its owner; "sustained N nights" when it was slow
@@ -902,8 +902,9 @@ Nightly report's.
   did not run in does not break the streak). A slowdown that lasts about four
   nights becomes the case's typical, and the case drops off the list. When more than a quarter of the cases
   with timing and a typical are slow, and more than 5, one "broad slowdown" line replaces the
-  list: a shift that wide has one cause. A night cut off at the deadline
-  carries the block too, over the cases it ran. It is advisory and moves no
+  list: a shift that wide has one cause. A night cut off at the deadline,
+  or with a part missing or still running, carries the block too, labelled as
+  covering only the cases or parts on record. It is advisory and moves no
   state, verdict or gate. `scripts/eval_dashboard/nightly_latency.py` holds the rules.
 - A footer asking owners to reply in the thread.
 

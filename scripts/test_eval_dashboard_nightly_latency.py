@@ -16,8 +16,9 @@ def case(name, agent=None, domain="capacity"):
     return {"case": name, "domain": domain, "agent_p50_s": agent}
 
 
-def night(cases=(), p50=None, p95=None, truncated=False):
-    return {"cases": list(cases), "turn1_p50_s": p50, "turn1_p95_s": p95, "truncated": truncated}
+def night(cases=(), p50=None, p95=None, truncated=False, missing=(), running=()):
+    return {"cases": list(cases), "turn1_p50_s": p50, "turn1_p95_s": p95, "truncated": truncated,
+            "missing_parts": list(missing), "running_parts": list(running)}
 
 
 def steady(count, agent=100.0, p50=10.0, p95=20.0, names=("a", "b", "c", "d")):
@@ -49,6 +50,16 @@ class NightLineTest(unittest.TestCase):
         line = nl.night_line(steady(1) + slow_cut + steady(3))
         self.assertIn("typical 10.0 s, 20.0 s", line)
         self.assertIn("(typical 100 s)", line)
+
+    def test_partial_nights_are_left_out_of_the_typical_and_labelled(self):
+        half = [night([case("a", 900.0)], 90.0, 900.0, missing=["main-b"]) for _ in range(3)]
+        half += [night([case("a", 900.0)], 90.0, 900.0, running=["writers"]) for _ in range(2)]
+        line = nl.night_line(steady(1) + half + steady(3))
+        self.assertIn("typical 10.0 s, 20.0 s", line)
+        self.assertIn("(typical 100 s)", line)
+        self.assertFalse(line.endswith("(partial: over the parts on record)"))
+        last = night([case("a", 120.0)], 10.0, 20.0, missing=["main-b"])
+        self.assertTrue(nl.night_line([last] + steady(7)).endswith("(partial: over the parts on record)"))
 
     def test_only_the_newest_seven_earlier_nights_count(self):
         line = nl.night_line(steady(1) + steady(7, agent=100.0) + steady(10, agent=1000.0))

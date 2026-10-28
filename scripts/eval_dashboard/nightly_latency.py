@@ -14,8 +14,10 @@ spike reaches the space instead of waiting for someone to open a page::
 The night line (``night_line``) is always there when last night carried
 timing, a night cut off at the deadline included: a slowdown is one way a
 night reaches its deadline, and the cases it ran have their timing. Its line
-says it covers only those cases. Each number's typical is the median of the same number over the
-last BASELINE_NIGHTS earlier nights that carry it and were not cut short,
+says it covers only those cases, and so does a night with a part missing or
+still running. Each number's typical is the median of the same number over
+the last BASELINE_NIGHTS earlier whole nights that carry it (not cut short,
+no part missing or still running),
 with at least MIN_BASELINE_NIGHTS of them; a number at NIGHT_SPIKE_RATIO
 times its typical or more gets the 🐢 mark. "Agent time, median case" is the
 median of the cases' agent p50: the night document carries per-case
@@ -69,8 +71,9 @@ TURN1_P50 = "turn1_p50_s"
 TURN1_P95 = "turn1_p95_s"
 CASE_AGENT_P50 = "agent_p50_s"
 
-LINE = "⏱ *Latency*: {turn1}{sep}{agent}{cut}"
+LINE = "⏱ *Latency*: {turn1}{sep}{agent}{note}"
 CUT_NOTE = " (cut short: over the cases it ran)"
+PARTIAL_NOTE = " (partial: over the parts on record)"
 TURN1_TEXT = "turn 1 p50 {p50}, p95 {p95} (target p95 < {target} s{typical})"
 TURN1_TYPICAL = "; typical {p50}, {p95}"
 TURN1_NOT_TIMED = "turn 1 not timed"
@@ -94,7 +97,7 @@ def _seconds(value: float | None) -> str:
     return SECONDS.format(value=value)
 
 
-def _whole(value: float | None) -> str:
+def _whole_seconds(value: float | None) -> str:
     return WHOLE_SECONDS.format(value=value)
 
 
@@ -103,6 +106,11 @@ def _number(value) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return float(value) if math.isfinite(value) and value > 0 else None
+
+
+def whole(night: dict) -> bool:
+    """A night with every part, none cut short: its numbers cover the matrix."""
+    return not (night.get("truncated") or night.get("missing_parts") or night.get("running_parts"))
 
 
 def median_case_agent(night: dict) -> float | None:
@@ -120,8 +128,8 @@ def typical(values: list[float]) -> float | None:
 
 def night_baselines(nights: list[dict]) -> dict[str, float | None]:
     """The typical of each night number over ``nights[1:]`` (``nights``
-    newest first, ``nights[0]`` last night), skipping nights cut short."""
-    earlier = [n for n in reversed(nights[1:]) if not n.get("truncated")]
+    newest first, ``nights[0]`` last night), whole nights only."""
+    earlier = [n for n in reversed(nights[1:]) if whole(n)]
     return {
         TURN1_P50: typical([v for v in (_number(n.get(TURN1_P50)) for n in earlier) if v is not None]),
         TURN1_P95: typical([v for v in (_number(n.get(TURN1_P95)) for n in earlier) if v is not None]),
@@ -158,11 +166,12 @@ def night_line(nights: list[dict]) -> str | None:
     else:
         turn1 = TURN1_NOT_TIMED
     if agent is not None:
-        agent_typical = AGENT_TYPICAL.format(value=_whole(base[CASE_AGENT_P50])) if base[CASE_AGENT_P50] else ""
-        agent_text = AGENT_TEXT.format(value=_marked(agent, base[CASE_AGENT_P50], _whole(agent)), typical=agent_typical)
+        agent_typical = AGENT_TYPICAL.format(value=_whole_seconds(base[CASE_AGENT_P50])) if base[CASE_AGENT_P50] else ""
+        agent_text = AGENT_TEXT.format(value=_marked(agent, base[CASE_AGENT_P50], _whole_seconds(agent)), typical=agent_typical)
     else:
         agent_text = AGENT_NOT_TIMED
-    return LINE.format(turn1=turn1, sep=nightly.SEP, agent=agent_text, cut=CUT_NOTE if night.get("truncated") else "")
+    note = CUT_NOTE if night.get("truncated") else "" if whole(night) else PARTIAL_NOTE
+    return LINE.format(turn1=turn1, sep=nightly.SEP, agent=agent_text, note=note)
 
 
 def _case_history(nights: list[dict]) -> dict[str, list[float]]:
@@ -182,7 +191,7 @@ def _is_slow(value: float, base: float | None) -> bool:
 
 def slow_cases(nights: list[dict]) -> tuple[list[dict], int]:
     """``(slow, timed)`` for ``nights[0]``: each slow case as ``{case,
-    domain, value, typical, ratio, sustained}`` (``sustained`` the nights in
+    value, typical, ratio, sustained}`` (``sustained`` the nights in
     a row it was slow, last night included), largest ratio first; ``timed``
     the cases last night with timing and a typical."""
     if not nights:
@@ -207,7 +216,7 @@ def slow_cases(nights: list[dict]) -> tuple[list[dict], int]:
             if not _is_slow(series[index], typical(series[:index])):
                 break
             streak += 1
-        slow.append({"case": name, "domain": case.get("domain"), "value": value, "typical": base, "ratio": value / base, "sustained": streak})
+        slow.append({"case": name, "value": value, "typical": base, "ratio": value / base, "sustained": streak})
     slow.sort(key=lambda s: (-s["ratio"], s["case"]))
     return slow, timed
 
@@ -221,7 +230,7 @@ def is_broad(slow: list[dict], timed: int, listed: int) -> bool:
 
 def slow_text(entry: dict, domain: str, owner: str) -> str:
     sustained = SUSTAINED_TEXT.format(nights=entry["sustained"]) if entry["sustained"] >= SUSTAINED_NIGHTS else ""
-    return SLOW_LINE.format(domain=domain, case=entry["case"], typical=_whole(entry["typical"]), value=_whole(entry["value"]),
+    return SLOW_LINE.format(domain=domain, case=entry["case"], typical=_whole_seconds(entry["typical"]), value=_whole_seconds(entry["value"]),
                             ratio=entry["ratio"], sustained=sustained, owner=owner)
 
 

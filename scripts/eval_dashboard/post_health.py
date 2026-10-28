@@ -1562,13 +1562,13 @@ def pool_digest_line(pool: dict) -> str:
 
 def nightly_latency_line(data: dict, now: datetime) -> str | None:
     """The latency block's night line (nightly_latency.py) for the one-line
-    nightly summary: last night only, when it carried timing and no part
-    of it is still running (its timing would cover only the parts done).
-    It runs on the morning the section failed, so a failure of its own is
-    no line, never a lost digest."""
+    nightly summary: last night only, when it carried timing; the line says
+    so when the night is cut short or partial. It runs on the morning the
+    section failed, so a failure of its own is no line, never a lost
+    digest."""
     try:
         night, _ = nightly.last_night(data, now)
-        if night is None or night.get("running_parts"):
+        if night is None:
             return None
         return nightly_latency.night_line(nightly.night_reports(data, running=nightly.running_nights(data, now)))
     except Exception:  # noqa: BLE001 -- the digest must still go out

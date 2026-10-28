@@ -562,12 +562,14 @@ class LatencyBlockTest(Harness):
         self.assertIn("Nightly section skipped: a reason.", text)
         self.assertNotIn("Latency", text)
 
-    def test_the_one_line_fallback_skips_a_night_with_a_part_still_running(self):
+    def test_the_one_line_fallback_labels_a_partial_night(self):
         doc = self.timed_nights()
-        night, _ = nightly.last_night(doc, NOW)
-        with mock.patch.object(post_health.nightly, "last_night", return_value=({**night, "running_parts": ["writers"]}, night)):
-            self.assertIsNone(post_health.nightly_latency_line(doc, NOW))
-        self.assertIsNotNone(post_health.nightly_latency_line(doc, NOW))
+        reports = nightly.night_reports(doc)
+        for key in ("running_parts", "missing_parts"):
+            partial = [{**reports[0], key: ["main-b"]}, *reports[1:]]
+            with mock.patch.object(post_health.nightly, "night_reports", return_value=partial):
+                self.assertTrue(post_health.nightly_latency_line(doc, NOW).endswith("(partial: over the parts on record)"))
+        self.assertNotIn("partial", post_health.nightly_latency_line(doc, NOW))
 
     def test_the_one_line_fallback_carries_the_night_line(self):
         text = post_health.render_digest({"state": "GREEN", "metrics": {}}, NOW, self.timed_nights(), section="a reason")
