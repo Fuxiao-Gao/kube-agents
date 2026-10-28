@@ -402,6 +402,17 @@ def _cluster_agent_roster() -> list[dict]:
     return roster
 
 
+def _managed_clusters(excluded: set[tuple[str, str, str]]) -> list[dict]:
+    """The Cluster Agent roster as clusters, less any cluster the scope excludes."""
+    managed = []
+    for entry in _cluster_agent_roster():
+        ref = (entry.get("project"), entry.get("location"), entry.get("cluster"))
+        if ref in excluded:
+            continue
+        managed.append({"profile": entry["name"], **{key: entry[key] for key in ("project", "location", "cluster") if entry.get(key)}})
+    return managed
+
+
 @mcp.tool()
 def fleet_scope() -> str:
     """
@@ -412,8 +423,20 @@ def fleet_scope() -> str:
     root). Returns JSON:
       {"declared": true, "resolved_at": "...", "projects": [...],
        "unread": [{"project": ..., "outcome": ...}],
+       "managed_clusters": [{"profile": ..., "project": ..., "location": ..., "cluster": ...}],
        "excluded_clusters": [{"project": ..., "location": ..., "cluster": ...}],
+       "counts": {"managed": N, "excluded": M},
        "collector_args": "...", "source": "<the snapshot's path>"}
+    The scope names three different sets of clusters, and they never overlap.
+    `managed_clusters` are the clusters this install manages: one per Cluster
+    Agent profile, less any cluster the scope excludes. They are what a fleet
+    audit or a fleet answer covers. `excluded_clusters` are clusters the scope
+    leaves out; none of them is managed. The clusters a project holds beyond
+    those two are neither, and a collector reads them with their project.
+    `counts` gives the size of the first two sets. Equal counts are a
+    coincidence, not a sign that the managed clusters are excluded: an audit
+    never stops because `excluded` equals `managed`. A profile whose cluster
+    identity cannot be read is listed by `profile` alone.
     `projects` is the sweep: every project the scope resolved to that this
     install could read (its Kubernetes Engine API off included; the collectors
     count such a project empty), plus the management project whatever the
@@ -450,16 +473,21 @@ def fleet_scope() -> str:
         return f"ERROR: the operator's scope render could not be read, so the scope is unknown; do not enumerate projects: {e}"
     except Exception as e:  # noqa: BLE001 - a tool answers, it does not raise
         return f"ERROR: Could not read the scope snapshot: {e}"
+    excluded = set(targets.excluded_clusters) if targets is not None else set()
+    managed = _managed_clusters(excluded)
     if targets is None:
-        return json.dumps({"declared": False, "projects": [], "unread": [], "excluded_clusters": [], "collector_args": "",
+        return json.dumps({"declared": False, "projects": [], "unread": [], "managed_clusters": managed,
+                           "excluded_clusters": [], "counts": {"managed": len(managed), "excluded": 0}, "collector_args": "",
                            "note": "no declared scope: the collectors enumerate every project the identity can list"}, indent=2)
     return json.dumps({
         "declared": True,
         "resolved_at": targets.resolved_at,
         "projects": list(targets.projects),
         "unread": [{"project": project, "outcome": outcome} for project, outcome in targets.unread],
+        "managed_clusters": managed,
         "excluded_clusters": [{"project": project, "location": location, "cluster": cluster}
                               for project, location, cluster in targets.excluded_clusters],
+        "counts": {"managed": len(managed), "excluded": len(targets.excluded_clusters)},
         "collector_args": targets.collector_args(),
         **({"note": targets.note} if targets.note else {}),
         "source": targets.path,

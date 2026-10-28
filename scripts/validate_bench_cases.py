@@ -327,6 +327,11 @@ FIXTURE_NOT_READY = {
         "re-apply); no pool project has a backend service draining longer than the 600 s "
         "GKE waits per node"
     ),
+    "fleet-audit-as-many-excluded-as-managed": (
+        "#3213: needs an eval install whose PlatformAgent spec.scope.exclude.clusters "
+        "names as many clusters in the management project as the install manages; no "
+        "pool install declares a cluster exclusion and the case cannot patch the CR for a run"
+    ),
     "scope-excluded-cluster-not-listed": (
         "#3213: needs an eval install whose PlatformAgent spec.scope.exclude.clusters "
         "names seeded-b (seeded-a and seeded-c in scope); no pool install declares a "

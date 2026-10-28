@@ -1834,6 +1834,51 @@ class FleetScopeToolTest(unittest.TestCase):
         self.assertTrue(out["collector_args"].endswith(" --scope-exclude-clusters payments-prod/us-central1/lane-b"), out["collector_args"])
         self.assertEqual(self._call(self.SNAPSHOT)["excluded_clusters"], [])
 
+    def _profile(self, name, identity=None):
+        home = Path(self.tmp.name) / "profiles" / name
+        home.mkdir(parents=True)
+        (home / "profile.yaml").write_text("")
+        (home / "USER.md").write_text("")
+        if identity:
+            (home / "config.yaml").write_text(json.dumps({"cluster_identity": identity}))
+
+    def _excluding(self, *clusters):
+        declared = dict(self.SNAPSHOT["declared"], exclude={"projects": [], "clusters": [
+            {"projectId": "payments-prod", "location": "us-central1", "clusterName": c} for c in clusters]})
+        return dict(self.SNAPSHOT, declared=declared)
+
+    def test_as_many_excluded_as_managed_keeps_the_managed_clusters(self):
+        # #3933: with 8 excluded and 8 managed, the agent read the excluded list
+        # as the managed set and cancelled the audit. The two sets are listed apart.
+        for name in ("lane-a", "lane-b"):
+            self._profile(f"cluster-payments-prod-{name}", {"project": "payments-prod", "cluster": name, "location": "us-central1"})
+        out = self._call(self._excluding("old-x", "old-y"))
+        self.assertEqual([c["cluster"] for c in out["managed_clusters"]], ["lane-a", "lane-b"])
+        self.assertEqual([c["cluster"] for c in out["excluded_clusters"]], ["old-x", "old-y"])
+        self.assertEqual(out["counts"], {"managed": 2, "excluded": 2})
+
+    def test_a_profile_of_an_excluded_cluster_is_not_managed(self):
+        # Before the reconcile prunes it, an excluded cluster's profile can still be on the volume.
+        self._profile("cluster-payments-prod-lane-a", {"project": "payments-prod", "cluster": "lane-a", "location": "us-central1"})
+        self._profile("cluster-payments-prod-lane-b", {"project": "payments-prod", "cluster": "lane-b", "location": "us-central1"})
+        out = self._call(self._excluding("lane-b"))
+        self.assertEqual(out["managed_clusters"], [
+            {"profile": "cluster-payments-prod-lane-a", "project": "payments-prod", "location": "us-central1", "cluster": "lane-a"}])
+        self.assertEqual(out["counts"], {"managed": 1, "excluded": 1})
+
+    def test_a_profile_without_an_identity_is_listed_by_name(self):
+        self._profile("cluster-unstamped")
+        out = self._call(self.SNAPSHOT)
+        self.assertEqual(out["managed_clusters"], [{"profile": "cluster-unstamped"}])
+        self.assertEqual(out["counts"], {"managed": 1, "excluded": 0})
+
+    def test_an_undeclared_scope_still_lists_the_managed_clusters(self):
+        self._profile("cluster-payments-prod-lane-a", {"project": "payments-prod", "cluster": "lane-a", "location": "us-central1"})
+        out = self._call(None)
+        self.assertFalse(out["declared"])
+        self.assertEqual([c["cluster"] for c in out["managed_clusters"]], ["lane-a"])
+        self.assertEqual(out["counts"], {"managed": 1, "excluded": 0})
+
     def test_no_declared_scope_and_no_snapshot_both_report_undeclared(self):
         undeclared = dict(self.SNAPSHOT, declared={k: [] for k in ("projects", "folders", "organizations", "sharedVpcHosts", "metricsScopes")})
         self.assertFalse(self._call(undeclared)["declared"])

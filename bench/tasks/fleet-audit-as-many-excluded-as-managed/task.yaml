@@ -1,0 +1,47 @@
+# Domain: fleet audits. Journey: ask for a fleet audit on an install whose
+# spec.scope.exclude.clusters names as many clusters as it manages; the audit
+# must run on the managed clusters, not cancel (#3933).
+#
+# Parked (FIXTURE_NOT_READY, #3213): the precondition is the install's own
+# PlatformAgent, whose spec.scope.exclude.clusters must name as many clusters
+# in the management project as the install manages, none of them managed. No
+# pool install declares that, and the case format cannot patch the CR for a
+# run. The live runs were made by hand on a dev install whose eight managed
+# clusters include seeded-a to seeded-d, with eight non-existent clusters in
+# the management project excluded.
+#
+# Red before #3933's fix: on the #3753 harness install (8 excluded, 8 managed)
+# two of three fleet audits answered that "all 8 managed clusters are
+# explicitly excluded" and cancelled. With 2 managed and the same 8 excluded,
+# the audit ran ("Checked 2 clusters out of the 10 in scope").
+#
+# The objective is that the audit ran: the seeded clusters, which carry
+# planted findings, are named, and the answer does not say the audit was
+# cancelled.
+id: fleet-audit-as-many-excluded-as-managed
+name: A fleet audit runs when as many clusters are excluded as are managed
+prompt: >-
+  Run a fleet audit across every cluster you manage and report the findings,
+  grouped by cluster.
+expected_output: >-
+  The audit runs on the clusters the install manages and reports findings for
+  them, grouped by cluster, including seeded-a, seeded-b, seeded-c and
+  seeded-d. It does not cancel, and it does not say the managed clusters are
+  excluded; where it names the excluded clusters, it says they were not
+  checked.
+infrastructure:
+  deployer: noop
+fixtures: []
+validated: false
+
+# Slug per docs/designs/domains.yaml.
+domain: fleet-audits
+
+verification_spec:
+  - name: the-audit-ran-on-the-managed-clusters
+    role: objective
+    mode: assert
+    check:
+      type: report_contains
+      required_phrases: ["seeded-a", "seeded-b", "seeded-c", "seeded-d"]
+      forbidden_phrases: ["audit was cancelled", "audit cancelled", "audit is cancelled", "cancelled the audit"]
