@@ -509,7 +509,7 @@ func (r *PlatformAgentReconciler) reconcileA2ADispatcher(ctx context.Context, ag
 	for i := range profiles {
 		if d, capped := cappedTaskDeadline(agent, &profiles[i]); capped {
 			r.recordEvent(agent, corev1.EventTypeWarning, reasonProfileDeadlineCapped, fmt.Sprintf(
-				"AgentProfile %s: spec.lifecycle.activeDeadlineSeconds %d is clamped to %ds by the install's task deadline cap (spec.harness.tuning.profiles.maxTaskDeadlineSeconds), the longest a task's credential may live, so its tasks end at %ds",
+				"AgentProfile %s: spec.lifecycle.activeDeadlineSeconds %d is clamped to %ds by the install's task deadline cap (spec.harness.tuning.profiles.maxTaskDeadlineSeconds), so its tasks end at %ds",
 				profiles[i].Name, profiles[i].Spec.Lifecycle.ActiveDeadlineSeconds, d, d))
 		}
 	}

@@ -910,9 +910,10 @@ type ProfileTuning struct {
 
 	// MaxTaskDeadlineSeconds caps the deadline any profile task gets: a
 	// profile whose lifecycle.activeDeadlineSeconds is longer has its tasks
-	// clamped to this, with a warning. It is also the longest a task's
-	// credential may live, which the auth callout enforces, so a leaked
-	// credential is bounded by it. It may only be lowered from the default.
+	// clamped to this, with a warning. Once profile tasks get their own bus
+	// credentials it is also the longest a task's credential may live, which the
+	// auth callout enforces, bounding a leaked one; the operator renders it
+	// to the callout already. It may only be lowered from the default.
 	// Absent means DefaultProfileMaxTaskDeadlineSeconds (6h).
 	// +kubebuilder:validation:Minimum=60
 	// +kubebuilder:validation:Maximum=21600
@@ -931,11 +932,11 @@ type ProfileTuning struct {
 // value, which the controller owns, and ChildReserve's is derived from the
 // ceiling.
 const (
-	DefaultProfileWarmReplicas         = 1
-	DefaultProfileLeaseSeconds         = 90
-	DefaultProfileRenewSeconds         = 20
-	DefaultProfileRestartGraceSeconds  = 60
-	DefaultProfileAcceptTimeoutSeconds = 10
+	DefaultProfileWarmReplicas           = 1
+	DefaultProfileLeaseSeconds           = 90
+	DefaultProfileRenewSeconds           = 20
+	DefaultProfileRestartGraceSeconds    = 60
+	DefaultProfileAcceptTimeoutSeconds   = 10
 	DefaultProfileMaxTaskDeadlineSeconds = 21600
 )
 

@@ -352,7 +352,7 @@ spec:
                     one per tier) or allow one tier"
                   rule:
                     "!has(self.identity) || !has(self.identity.serviceAccountName)
-                    || self.identity.serviceAccountName == '' || !has(self.allowedTiers)
+                    || self.identity.serviceAccountName.size() == 0 || !has(self.allowedTiers)
                     || size(self.allowedTiers) <= 1"
             status:
               description: AgentProfileStatus defines the observed state of AgentProfile.

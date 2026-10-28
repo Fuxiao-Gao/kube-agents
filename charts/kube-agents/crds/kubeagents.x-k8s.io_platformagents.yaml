@@ -9890,9 +9890,10 @@ spec:
                               description: |-
                                 MaxTaskDeadlineSeconds caps the deadline any profile task gets: a
                                 profile whose lifecycle.activeDeadlineSeconds is longer has its tasks
-                                clamped to this, with a warning. It is also the longest a task's
-                                credential may live, which the auth callout enforces, so a leaked
-                                credential is bounded by it. It may only be lowered from the default.
+                                clamped to this, with a warning. Once profile tasks get their own bus
+                                credentials it is also the longest a task's credential may live, which the
+                                auth callout enforces, bounding a leaked one; the operator renders it
+                                to the callout already. It may only be lowered from the default.
                                 Absent means DefaultProfileMaxTaskDeadlineSeconds (6h).
                               maximum: 21600
                               minimum: 60

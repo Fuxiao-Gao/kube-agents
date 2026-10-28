@@ -44,7 +44,7 @@ const DefaultAgentProfileQueueTimeoutSeconds = 3600
 const AgentProfileTopicPattern = `^(shared\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?|agent\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)$`
 
 // AgentProfileSpec defines the desired state of AgentProfile.
-// +kubebuilder:validation:XValidation:rule="!has(self.identity) || !has(self.identity.serviceAccountName) || self.identity.serviceAccountName == '' || !has(self.allowedTiers) || size(self.allowedTiers) <= 1",message="spec.identity.serviceAccountName names one ServiceAccount, so it can serve only one tier: leave it unset (the operator creates one per tier) or allow one tier"
+// +kubebuilder:validation:XValidation:rule="!has(self.identity) || !has(self.identity.serviceAccountName) || self.identity.serviceAccountName.size() == 0 || !has(self.allowedTiers) || size(self.allowedTiers) <= 1",message="spec.identity.serviceAccountName names one ServiceAccount, so it can serve only one tier: leave it unset (the operator creates one per tier) or allow one tier"
 type AgentProfileSpec struct {
 	// Description is the routing blurb, rendered into the A2A agent card.
 	// +kubebuilder:validation:MinLength=1
