@@ -591,6 +591,7 @@ the replica's own limit. This is why the design needs both the exec tier and the
    - **Raise the broker's CPU limit (#4106)** to at least 2 cores, the exec replica's limit
      (§3.3). It is the first limit measured (§2.3), and it costs one value in the operator. On
      Autopilot it raises the request too, so the footprint and the quota preflight grow with it.
+     Because it is one operator value, it is the fastest single relief for current installs.
    - **Graceful shutdown and a PodDisruptionBudget.** Today `serve()` runs `serve_forever()` with
      no SIGTERM handler, and the Deployment sets no `terminationGracePeriodSeconds` and no
      `preStop`, so a pod stop drops the commands in flight. The broker gets a SIGTERM handler that
@@ -609,6 +610,14 @@ the replica's own limit. This is why the design needs both the exec tier and the
 3. **Exec tier on the eval install and the experiment install,** at 2 replicas. Run §8.2.
 4. **Default on** at a replica count from the measurements, with the chart footprint updated.
 5. **Then** mark `credential-proxy-single-pod.md` superseded. It already points here.
+
+The cache contract (§6) is not needed to ship the tier, and its work can run in parallel with
+steps 1 to 3. The footprint in §8.4 assumes it, though: about 7 to 8 replicas with the cache
+against about 34 to 40 without, for a 1,000-cluster round in one hour [predicted]. So for large
+fleets the cache must land before default on (step 4).
+
+Do not add new work to the stateful pod beyond phase 0. §3.7 can remove most of its routes later:
+the content workspace, and the chat relays if they become safe on N pods.
 
 The stateful broker keeps `/v1/exec` through the transition. A sandbox on an older image has no
 exec URL, and its shim calls the stateful pod; a 404 there would break every command. The route
