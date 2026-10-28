@@ -25,7 +25,7 @@ import urllib.error
 import urllib.request
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, NamedTuple, Optional, Sequence
+from typing import Any, Dict, NamedTuple, Optional, Sequence, Set
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout, wait as futures_wait
 from contextlib import ExitStack, closing, nullcontext
 from pathlib import Path
@@ -441,6 +441,24 @@ MANAGED_DOTENV_PATH = os.path.join(
 # Resolved from HERMES_MANAGED_DIR the same way, and for the same reason.
 MANAGED_CONFIG_PATH = os.path.join(
     os.environ.get("HERMES_MANAGED_DIR", "").strip() or "/etc/hermes", "config.yaml"
+)
+
+# How a Cluster Agent describes a fix on an event or stall triage card. (The
+# drift card keeps its own wording: its report compares the live object with
+# the declared state, which it reads from the object's field ownership.) A
+# Cluster Agent has no GitOps repository: the Platform Agent finds the file
+# when it opens the Pull Request. Without this, "precisely
+# enough that someone can open the Pull Request from your report alone" sent a
+# worker that had its cause in the first minute on a 21-minute hunt for the
+# workload's source, and it never answered (gke-labs#3078).
+TRIAGE_FIX_AGAINST_LIVE_OBJECT = (
+    "Describe each change against the live object you read: its kind, namespace and name, the field, and the "
+    "current and proposed value, or for a missing object, what to create and the fields it needs. You have no "
+    "GitOps repository and need none, because the agent that opens the Pull Request finds the file. Do not look "
+    "for the workload's source, whether in this pod's files, with git, or through any repository tool: a source "
+    "file you haven't seen is not a gap in the report. The cause is the evidenced dependency or setting the failure "
+    "points to, not the command or log line that reports it, so check that it exists before you call the "
+    "investigation done. Then complete the card. "
 )
 
 
@@ -944,6 +962,14 @@ SECONDS_PER_MINUTE = 60
 # taking the whole server down with it.
 DEFAULT_TRIAGE_WATCHDOG_SECONDS = 3600
 TRIAGE_WATCHDOG_SECONDS = _alert_daily_limit("TRIAGE_WATCHDOG_SECONDS", DEFAULT_TRIAGE_WATCHDOG_SECONDS)
+# How long a quiet follow-up with no chat thread keeps waiting for the alert's
+# card, or for a board that would not answer, counted from the daemon's first
+# attempt (a 503 the watcher retries each sweep) before it is answered
+# `unrouted` for good. An hour, as triage is allowed before the watchdog calls
+# its absence out, but its own constant: the watchdog's knob has a zero that
+# means off, and the object's own stamps are already a quiet period old when
+# the first attempt arrives.
+FOLLOWUP_CARD_WAIT_SECONDS = 3600
 # The busy timeout of the sqlite connects the follow-up and the watchdog open.
 SQLITE_BUSY_TIMEOUT_SECONDS = 5.0
 
@@ -2704,7 +2730,8 @@ def _triage_who_acts(open_pull_request: bool) -> str:
     if not open_pull_request:
         return (
             "A human reads your options and the agent that holds the GitOps write path opens the Pull Request — not you, and not from this card. "
-            "Your job is to make that possible: name the manifest change each option needs precisely enough that someone can open the Pull Request from your report alone. "
+            "Your job is to make that possible: name the change each option needs precisely enough that someone can open the Pull Request from your report alone. "
+            f"{TRIAGE_FIX_AGAINST_LIVE_OBJECT}"
             "Two things are true whoever acts on it — the fix ships as a Pull Request against the GitOps repository, and nothing is written to the live cluster directly "
             "(no `kubectl scale`, `patch`, or `apply`)."
         )
@@ -2714,8 +2741,10 @@ def _triage_who_acts(open_pull_request: bool) -> str:
         "complete this card (`done`), reads your report, and opens the Pull Request for the option you marked ✅ Recommended, or for "
         "the single Proposed fix — not you, and not from this card (if this card ends `blocked`, the follow-up card stays held in "
         "`todo` until this card is unblocked and completed or archived). "
-        "Your job is to make that possible: name the manifest change each option needs precisely enough that the Pull Request can be "
-        "opened from your report alone, and with two or more options mark exactly one Recommended. Keep the `- **To authorize:**` bullet "
+        "Your job is to make that possible: name the change each option needs precisely enough that the Pull Request can be "
+        "opened from your report alone, and with two or more options mark exactly one Recommended. "
+        f"{TRIAGE_FIX_AGAINST_LIVE_OBJECT}"
+        "Keep the `- **To authorize:**` bullet "
         "label as the template above writes it (the notifier keys on that label to store your report for thread follow-ups), telling "
         f"the reader that a GitOps Pull Request for the recommended fix {TRIAGE_OPEN_PR_MARKER} (and with two or more options, "
         "that they can reply **'apply Option B'** to request an alternative option instead) — do not tell the reader to reply "
@@ -3275,6 +3304,17 @@ def _drift_task_body(payload: Dict[str, Any]) -> str:
     establishing whether the state git declares still runs before proposing that
     the change be undone.
 
+    The detector does not consult git, so the object may be one git does not
+    declare at all, and then there is no declared state to revert to
+    (docs/designs/drift-detection.md, "Resources not in Git at all"). The
+    worker has no repository to check, so the body tells it to read that off
+    the live object's GitOps markers, which the skill lists, and widens the
+    options and the **Done when** line to codifying it. Deleting it is sound
+    too, but no pull request can delete what git does not hold, so it is an
+    unlettered **Manual step** bullet: slack_ux_incident.parse_triage turns
+    every lettered option into an 'apply Option X' button, and a lettered
+    delete would become a button for a pull request that cannot exist. bench/tasks/gitops-drift-unmanaged-object-triage grades it.
+
     On an install with no usable GitOps repository the card is
     :func:`_drift_task_body_without_gitops` instead: an explanation with no
     options. The bench contract above binds only this, the registered path.
@@ -3296,6 +3336,21 @@ def _drift_task_body(payload: Dict[str, Any]) -> str:
         f"one a revert would take down, while a change nothing depends on is one a codify would write somebody's "
         f"accident into git. The skill says where the evidence for that lives for each kind of change, and "
         f"whichever way it comes out belongs in the report.\n\n"
+        f"**Before any of that, establish whether git declares this object at all.** You have no access to the "
+        f"repository; the live object tells you. A GitOps tool marks what it applies — its field manager, or its "
+        f"tracking label or annotation — and the skill lists them. If the object still exists, carries none of "
+        f"them, and its only field managers are a person's `kubectl` subcommands (`kubectl-create`, "
+        f"`kubectl-edit`, `kubectl-label`, `kubectl-patch` and the like), say it is probably not in git and what "
+        f"you checked. There is then no declared state to revert to, so do not offer one: codify it in git, saying "
+        f"whether the manifest keeps the change or undoes it — that is the option, or the two options, to letter. "
+        f"Deleting it is also sound, since git declares nothing, but no pull request can do it, so it is never a "
+        f"lettered option, never the recommendation, and never named in the 'apply' line: where it is worth "
+        f"naming, add one bullet after the lettered options, `- **Manual step (<title>):** <why, and the command a "
+        f"person runs>`, and do not call it an option. If its only markers are ones the skill calls ambiguous, "
+        f"which a person's `kubectl apply` or `helm install` leaves too, or a field manager you do not recognise, "
+        f"which may be a pipeline's, keep the revert beside those options and say what would decide between them. "
+        f"A deleted object carries nothing to read, so its absence of markers is no evidence: say whether git "
+        f"declares it could not be read off the cluster, and keep the revert.\n\n"
         f"**Finish by calling `kanban_complete(result=<your full report>, summary=<one line>)`.** "
         f"Pass the entire report as `result`, not a summary of it: this card is subscribed to the chat thread where "
         f"the alert was raised, and `result` is what gets posted there. A card completed with a one-line `result` "
@@ -3304,7 +3359,8 @@ def _drift_task_body(payload: Dict[str, Any]) -> str:
         f"says whether the change still stands or was already reconciled away, with the evidence; and proposes "
         f"either reverting it to the declared state or codifying it in git, with the consequence of each — a "
         f"revert's consequence being whether the state git declares would still run, read off this cluster or "
-        f"reported as not established. "
+        f"reported as not established — or, for an object git does not declare, proposes codifying it, naming "
+        f"deletion by hand as a manual step where it is worth naming. "
         f"Nothing else is a condition of finishing. State those three things in `summary`'s one line as well: "
         f"a judge that grades this card reads `summary` before `result`.\n\n"
         f"**Do this yourself. Do not delegate it to another agent, and do not open child cards for it** — "
@@ -3315,7 +3371,8 @@ def _drift_task_body(payload: Dict[str, Any]) -> str:
         f"the declared state is the one that should win.\n\n"
         f"Propose as many options as the situation genuinely warrants. Usually there are two — revert to what git "
         f"declares, or change git to declare what is now live — and both are worth stating even when one is "
-        f"obviously right, because the reader is deciding which state wins.\n\n"
+        f"obviously right, because the reader is deciding which state wins. For an object git does not declare "
+        f"they are the ones above.\n\n"
         f"**With two or more options:** label them 'Option A', 'Option B', ... in order, name those same letters "
         f"in the call to action, and mark exactly one of them '✅ **Recommended: Option <letter>**'. "
         f"The template below shows that shape; repeat its Option line once for each further option.\n\n"
@@ -3324,7 +3381,8 @@ def _drift_task_body(payload: Dict[str, Any]) -> str:
         f"else, replacing the ones in the template below:\n"
         f"- **Proposed fix (<Action Title>):** <1-sentence description of the GitOps fix>.\n"
         f"- **To authorize:** reply **'apply'** to open a GitOps Pull Request with this fix.\n"
-        f"No Recommended line, and nothing after **'apply'** in the call to action.\n\n"
+        f"No Recommended line, and nothing after **'apply'** in the call to action. The one exception is the "
+        f"**Manual step** bullet for an object git does not declare, which may follow them.\n\n"
         f"**If the change was already reconciled away and nothing is left to do,** make 'What to do' this one "
         f"bullet: '- **No action needed:** the object already matches the declared state.' No Proposed fix, and "
         f"keep the 'To authorize:' bullet off entirely. Do not invent a fix to fill the section.\n\n"
@@ -3335,7 +3393,8 @@ def _drift_task_body(payload: Dict[str, Any]) -> str:
         f"## What's wrong\n\n"
         f"<1 sentence: who changed what, and whether it is still live>\n\n"
         f"## Why\n\n"
-        f"- <What the live object shows now, and how it differs from what git declares, with the evidence>\n"
+        f"- <What the live object shows now, and how it differs from what git declares (or that git declares "
+        f"nothing for it), with the evidence>\n"
         f"- <What the change affects — availability, cost, security posture — in 1-2 sentences>\n\n"
         f"## What to do\n\n"
         f"- **Option A (<Action Title>):** <1-sentence description of Option A GitOps fix>.\n"
@@ -3558,8 +3617,9 @@ def _stall_task_body(payload: Dict[str, Any]) -> str:
         f"---"
         f"\n\n**Who acts on this:**\n"
         f"A human reads your options and the agent that holds the GitOps write path opens the Pull Request — not "
-        f"you, and not from this card. Name the manifest change each option needs precisely enough that someone can "
-        f"open the Pull Request from your report alone: the object, the field, and the value. Two things are true "
+        f"you, and not from this card. Name the change each option needs precisely enough that someone can "
+        f"open the Pull Request from your report alone. {TRIAGE_FIX_AGAINST_LIVE_OBJECT}"
+        f"Two things are true "
         f"whoever acts on it — the fix ships as a Pull Request against the GitOps repository, and nothing is written "
         f"to the live cluster directly (no `kubectl create`, `patch`, or `apply`)."
     )
@@ -6388,10 +6448,13 @@ def _card_for_alert_session(session_id: str) -> Optional[str]:
         return BOARD_UNREADABLE
 
 
-def _comment_alert_card(session_id: str, text: str) -> bool:
+def _comment_alert_card(session_id: str, text: str, card: Optional[str] = None) -> bool:
     """Leave ``text`` as a comment on the alert's card, so the board carries the
-    follow-up beside the report. False when there is no card or the board refused."""
-    card = _card_for_alert_session(session_id)
+    follow-up beside the report. ``card`` is the id when the caller has already
+    read it; otherwise it is looked up. False when there is no card or the
+    board refused; the caller decides whether that loses anything."""
+    if card is None:
+        card = _card_for_alert_session(session_id)
     if not card or card == BOARD_UNREADABLE:
         return False
     try:
@@ -6399,9 +6462,39 @@ def _comment_alert_card(session_id: str, text: str) -> bool:
 
         kanban(f"comment {shlex.quote(card)} {shlex.quote(text)}")
         return True
-    except Exception as exc:  # noqa: BLE001 - reported; the chat line is the delivery that matters
+    except Exception as exc:  # noqa: BLE001 - reported; the caller answers for the delivery
         logger.warning(f"Could not comment on card {card} for session {session_id}: {exc}")
         return False
+
+
+# What the daemon remembers about card-only follow-ups, per session: when it
+# first tried, so the wait for a card is bounded from the attempt rather than
+# from the object's stamps, and that the line is on the card, so a retry the
+# watcher sends because its 10s client gave up while the board was slow does
+# not write the line again. In memory on purpose: a restart forgets both, and
+# the cost of forgetting is one more hour of waiting or one duplicate line.
+_FOLLOWUP_FIRST_ATTEMPT_AT: Dict[str, float] = {}
+_FOLLOWUP_CARD_POSTED: Set[str] = set()
+# Sessions whose card comment is being written right now: a second request
+# for one (the watcher's retry while the first still waits on the board's
+# lock) is answered 503 without touching the board, so the two cannot both
+# post when the lock frees.
+_FOLLOWUP_CARD_IN_FLIGHT: Set[str] = set()
+_FOLLOWUP_MEMORY_LIMIT = 10_000
+
+
+def _followup_can_wait_for_card(session_id: str, now: Optional[float] = None) -> bool:
+    """Whether a card-only follow-up should be retried rather than let go: true
+    while the daemon's first attempt for the session is younger than
+    FOLLOWUP_CARD_WAIT_SECONDS. The first call records the attempt."""
+    moment = time.time() if now is None else now
+    first = _FOLLOWUP_FIRST_ATTEMPT_AT.setdefault(session_id, moment)
+    if len(_FOLLOWUP_FIRST_ATTEMPT_AT) >= _FOLLOWUP_MEMORY_LIMIT:
+        for sid, at in list(_FOLLOWUP_FIRST_ATTEMPT_AT.items()):
+            if sid != session_id and moment - at >= FOLLOWUP_CARD_WAIT_SECONDS:
+                _FOLLOWUP_FIRST_ATTEMPT_AT.pop(sid, None)
+                _FOLLOWUP_CARD_POSTED.discard(sid)
+    return moment - first < FOLLOWUP_CARD_WAIT_SECONDS
 
 
 def _followup_message(session_id: str, payload: Dict[str, Any], now: Optional[datetime] = None) -> str:
@@ -6437,7 +6530,7 @@ def _followup_message(session_id: str, payload: Dict[str, Any], now: Optional[da
 
 
 def _post_followup(session_id: str, platform: str, chat_id: str, thread_id: str, text: str) -> None:
-    """Deliver a follow-up line into the alert's thread and onto its card."""
+    """Deliver a follow-up line into the alert's thread and onto its card (the routed path)."""
     if _send_to_chat(platform, text, chat_id, thread_id) is None:
         logger.error(f"Follow-up for session {session_id} did not reach {platform} thread {thread_id}")
     _comment_alert_card(session_id, text)
@@ -6456,10 +6549,19 @@ def _inject_followup(
     recorded; the line goes there as a reply, and onto the card the session
     filed as a comment, so a reader of either sees that the object went quiet
     and when. No ledger row, no quota, no agent turn: nothing new happened in
-    the cluster, something stopped happening. A session nothing routed (the
-    alert never reached chat) gets `unrouted` and nothing is posted; the
-    watcher marks the incident notified either way, which is right, since
-    there is no thread to tell.
+    the cluster, something stopped happening. The card does not need the
+    thread: an install with no chat surface (every eval install) routes no
+    session anywhere, and its cards still have to say the object went quiet.
+    With no thread the card is the only delivery, so it is written here,
+    before the answer, and a comment that fails is a 503 the watcher retries
+    on its next sweep. A card not filed yet, or a board that cannot say, is
+    the same 503 while the daemon's first attempt for the session is younger
+    than FOLLOWUP_CARD_WAIT_SECONDS (triage may still be queued); past that,
+    and for a session with neither thread nor card, the answer is `unrouted`,
+    on which the watcher marks the incident notified, since there is nowhere
+    to tell. A line already on the card is answered `followup` again without
+    touching the board, for the retry the watcher sends when its client gave
+    up on a slow board after the comment had landed.
 
     A reply, not an edit of the alert: the gateway edits by update key only
     inside a conversation request (a2a/gateway/notify.go, postConversation),
@@ -6468,10 +6570,35 @@ def _inject_followup(
     message had taken that key since, the triage report included.
     """
     platform, chat_id, thread_id = _lookup_session_routing(session_id)
-    if not platform or not thread_id:
-        logger.info(f"Follow-up for session {session_id}: no chat thread is routed to it; nothing posted")
-        return {"status": "unrouted"}
     text = _followup_message(session_id, payload)
+    if not platform or not thread_id:
+        if session_id in _FOLLOWUP_CARD_POSTED:
+            return {"status": "followup"}  # the watcher's retry of a line already on the card
+        if session_id in _FOLLOWUP_CARD_IN_FLIGHT:
+            raise HTTPException(status_code=503, detail="no chat thread, and the card comment is still being written; retry")
+        # In flight from the board read on, not from the write: the read is the
+        # handler's longest wait, and a retry arriving during it must not read
+        # and write a second line of its own.
+        _FOLLOWUP_CARD_IN_FLIGHT.add(session_id)
+        try:
+            can_wait = _followup_can_wait_for_card(session_id)
+            card = _card_for_alert_session(session_id)
+            if not card or card == BOARD_UNREADABLE:
+                why = "the board cannot say whether the alert has a card" if card == BOARD_UNREADABLE else "the alert's card is not on the board yet"
+                if can_wait:
+                    raise HTTPException(status_code=503, detail=f"no chat thread, and {why}; retry")
+                logger.info(f"Follow-up for session {session_id}: no chat thread, and {why}, an hour after the first attempt; nothing posted")
+                return {"status": "unrouted"}
+            landed = _comment_alert_card(session_id, text, card=card)
+        finally:
+            _FOLLOWUP_CARD_IN_FLIGHT.discard(session_id)
+        if not landed:
+            if can_wait:
+                raise HTTPException(status_code=503, detail=f"no chat thread, and the comment on card {card} did not land; retry")
+            logger.warning(f"Follow-up for session {session_id}: the comment on card {card} did not land within the hour; nothing posted")
+            return {"status": "unrouted"}
+        _FOLLOWUP_CARD_POSTED.add(session_id)
+        return {"status": "followup"}
     background_tasks.add_task(_post_followup, session_id, platform, chat_id, thread_id, text)
     return {"status": "followup"}
 

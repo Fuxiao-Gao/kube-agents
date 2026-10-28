@@ -93,7 +93,7 @@ NIGHTLY_AT_SPLIT = [
     "obtainability-planted-pdb",
     "stockout-pinned-pool",
     "upgrade-readiness-lagging-cluster",
-    "consistency-drift-outlier",
+    "consistency-drift-outlier",  # promoted 2026-10-26 on its nightly record, consistency's roster seat after its probe's demotion (#3598)
     "obtainability-direct-query",
     "gpu-stress-test-diagnosis",
     "autoops-warning-event-triage",
@@ -114,6 +114,7 @@ ADDED_AFTER_THE_SPLIT = [
     "incident-triage-oom-event-probe",  # #1023's incident-triage second case, PR #1625; promoted 2026-09-22
     "ai-security-planted-model-audit",  # #1023's fleet-audits second case, PR #1103
     "autoops-crashloop-config-triage",  # #1023's other incident-triage second case, PR #1103
+    "autoops-missing-service-triage",  # gke-labs#3078: a triage worker reports a found cause, not a source hunt
     "consistency-no-environment-label",  # the drift collector's §4.14 check, with fleet_drift.py
     "gitops-drift-out-of-band-triage",  # the drift half of incident-triage, PR #1827
     "cluster-agent-delegation-profile-lookup",  # #1840's delegation route, PR #1917
@@ -239,6 +240,8 @@ ADMITTED_AFTER_THE_SPLIT = [
     ("pdb-remediation-pr", "obtainability-remediation-proposal"),
     # 2026-10-23: 42/42 on the fourteen writers nightlies 10-09 to 10-22 (12/12 since the claude-opus-5-5 key of 10-19), the store at collecting.
     ("vcs-spent-branch-reuse", "agent-kanban-smoke"),
+    # 2026-10-26: 33/34 on the twelve graded main nightlies 10-13 to 10-26 (14/14 since the claude-opus-5-5 key of 10-19, 5/5 under spec.mode next), the store at collecting.
+    ("consistency-drift-outlier", "cost-idle-pool-probe"),
 ]
 # Moved from the nightly file into the presubmit one after the split, as
 # (case, the presubmit line it follows); the same case leaves the nightly
@@ -248,6 +251,7 @@ PROMOTED_AFTER_THE_SPLIT = [
     ("incident-triage-oom-event-probe", "cluster-agent-healthy-workload-no-finding"),  # 2026-09-22 (#1023)
     ("pdb-remediation-pr", "obtainability-remediation-proposal"),  # 2026-10-14 (#2016), from its held-out seat; again 2026-10-26, from the nightly file (#3120)
     ("vcs-spent-branch-reuse", "agent-kanban-smoke"),  # 2026-10-23, from the nightly file's frozen part
+    ("consistency-drift-outlier", "cost-idle-pool-probe"),  # 2026-10-26, from the nightly file's frozen part
 ]
 # Moved from the presubmit file to the end of the nightly one on 2026-09-22
 # (#1023), when the eval crew decided the presubmit runs the blocking roster
@@ -569,47 +573,17 @@ class SplitLostNothingTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
-# The inject lane's exclusions at their introduction (#2039, 2026-09-25): the
-# one presubmit case whose premise needs the chat front door. An edit to the
-# file edits this set in the same pull request, for the reason the sets above
-# are pinned.
+# The inject lane's exclusions, introduced by #2039 (2026-09-25); #4004 put the
+# front door's delegation cases and two question cases back, agent-kanban-smoke
+# among them. An edit to the file edits this set in the same pull request, for the
+# reason the sets above are pinned.
 INJECT_LANE_EXCLUDED = [
-    "agent-kanban-smoke",  # #2039: grades kanban_create by the front door and the specialist's answer folded back, which the door's thread never gets
-    "chat-question-wake-stays-silent",  # #2039: grades the front door's silence on a posted question's wake; a card-wake replay runs on the api transport only
-    "chat-question-typed-answer-fresh-session",  # the same for a typed answer in a session the wake never reached
-    "chat-question-click-answer-stays-silent",  # the same for an answer given by clicking the question's button
-    "chat-voice-ack-names-target",  # #2039: grades the front door's delegation ack with the specialist's answer after it, which the door's thread never gets
-    "chat-routing-fleet-question",  # the same as the ack: the answer is the specialist's, which the door's thread never gets
-    "chat-voice-answer-first",  # #2039: grades the card result the front door delivers; the inject door files no card
-    "chat-fanout-fleet-restarts-rows",  # #2039: grades the front door's ack and the fan-out under its one card; same door
-    "chat-question-asked-to-choose-pauses",  # #2039: grades the worker's needs_input block under the door's one card; same door
-    "chat-answer-declares-next-step",  # #2039: grades the worker's answer under the door's one card; same door
-    "chat-answer-tangent-offer-declares-no-step",  # the same
-    "fleet-audit-request-line",  # #2619: grades the worker's answer the api lane folds into the reply; the door's thread never gets it
+    "chat-question-typed-answer-fresh-session",  # #4004: its answer turn is today's Slack thread context, which next's door does not send
 ]
-# The directive a case's prompt opens with to replay a wake into the chat
-# front door (bench/kube_agents_bench/card_wake.py); the harness errors such
-# a run on any transport but api.
-FRONT_DOOR_WAKE_DIRECTIVES = ("[bench:slack-question-wake]",)
-# Check types that read what only the chat front door's card round trip
-# delivers; on the inject lane there is no card, so the check fails rather
-# than being set aside (bench/README.md, the transport table).
-FRONT_DOOR_DELIVERY_CHECK_TYPES = frozenset({"answer_first", "report_store_reply"})
 # Each exclusion's api-lane tier, pinned beside it: an entry is not a
 # demotion, so a case that leaves its tier's file while still excluded reds.
 INJECT_LANE_EXCLUDED_TIER = {
-    "agent-kanban-smoke": "presubmit",
-    "chat-question-wake-stays-silent": "nightly",
     "chat-question-typed-answer-fresh-session": "nightly",
-    "chat-question-click-answer-stays-silent": "nightly",
-    "chat-voice-ack-names-target": "nightly",
-    "chat-routing-fleet-question": "nightly",
-    "chat-voice-answer-first": "nightly",
-    "chat-fanout-fleet-restarts-rows": "nightly",
-    "chat-question-asked-to-choose-pauses": "nightly",
-    "chat-answer-declares-next-step": "nightly",
-    "chat-answer-tangent-offer-declares-no-step": "nightly",
-    "fleet-audit-request-line": "nightly",
 }
 
 
@@ -724,7 +698,7 @@ class InjectLaneExclusionsTest(unittest.TestCase):
         # docs/eval-gate-roster.md ("The inject lane"), not a side effect of an
         # exclusion entry.
         roster = set(eval_rosters.blocking_roster())
-        self.assertEqual([case for case in eval_rosters.inject_lane_exclusions() if case in roster], ["agent-kanban-smoke"])
+        self.assertEqual([case for case in eval_rosters.inject_lane_exclusions() if case in roster], [])
 
     def test_every_exclusion_names_a_registered_case(self):
         registered = set(eval_rosters.presubmit_cases()) | set(eval_rosters.nightly_cases())
@@ -738,42 +712,6 @@ class InjectLaneExclusionsTest(unittest.TestCase):
             with self.subTest(case=case):
                 self.assertTrue(reason, f"{case}: no reason in the comment block above it")
                 self.assertRegex(reason, eval_rosters.ISSUE_REFERENCE_RE, f"{case}: the reason names no issue")
-
-    def test_every_registered_wake_replay_is_excluded(self):
-        # A replay errors on the inject lane, so an unlisted one reds there
-        # every repetition; the docs' rule is enforced here, on the loaded
-        # prompt's first line as card_wake.parse reads it.
-        import yaml
-
-        excluded = eval_rosters.inject_lane_exclusions()
-        for case in set(eval_rosters.presubmit_cases()) | set(eval_rosters.nightly_cases()):
-            doc = yaml.safe_load((REPO_ROOT / "bench" / "tasks" / case / "task.yaml").read_text(encoding="utf-8"))
-            lines = str(doc.get("prompt") or "").strip().splitlines()
-            if lines and lines[0].strip() in FRONT_DOOR_WAKE_DIRECTIVES:
-                with self.subTest(case=case):
-                    self.assertIn(case, excluded, f"{case} replays a wake but is not in {eval_rosters.INJECT_LANE_EXCLUSIONS_FILE.name}")
-
-    def test_every_registered_front_door_delivery_case_is_excluded(self):
-        # answer_first fails on the inject lane rather than being set aside,
-        # so an unlisted case carrying one reds there every repetition.
-        import yaml
-
-        def check_types(node):
-            if isinstance(node, dict):
-                if isinstance(node.get("type"), str):
-                    yield node["type"]
-                for value in node.values():
-                    yield from check_types(value)
-            elif isinstance(node, list):
-                for value in node:
-                    yield from check_types(value)
-
-        excluded = eval_rosters.inject_lane_exclusions()
-        for case in set(eval_rosters.presubmit_cases()) | set(eval_rosters.nightly_cases()):
-            doc = yaml.safe_load((REPO_ROOT / "bench" / "tasks" / case / "task.yaml").read_text(encoding="utf-8"))
-            if FRONT_DOOR_DELIVERY_CHECK_TYPES & set(check_types(doc.get("verification_spec"))):
-                with self.subTest(case=case):
-                    self.assertIn(case, excluded, f"{case} reads a delivered card result but is not in {eval_rosters.INJECT_LANE_EXCLUSIONS_FILE.name}")
 
     def test_an_exclusion_keeps_the_case_on_its_roster(self):
         # An entry here leaves the case on its roster: the today lane still
@@ -793,6 +731,7 @@ class InjectLaneExclusionsTest(unittest.TestCase):
 # inject door can carry. An edit to the file edits this set.
 API_LANE_EXCLUDED = [
     "chat-stop-halts-delegated-remediation",  # #3263: the harness types `stop` through the door
+    "chat-question-asked-to-choose-pauses",  # #4004: grades the question only the inject lane's board read folds in
 ]
 
 
@@ -849,7 +788,7 @@ INJECT_LANE_SAFEGUARDS = [
 ]
 # The registered cases whose checks request a pull request, at the
 # safeguard's introduction: what hack/ci-eval-pr.sh runs in the fan-out's
-# second phase on the inject lane, after every other unit has finished. A
+# second phase on both lanes, after every other unit has finished. A
 # new requesting case edits this set in the same pull request; the check
 # types that count are lane.REQUESTING_CHECK_TYPES.
 INJECT_LANE_REQUESTING = [
@@ -894,12 +833,11 @@ def _leaf_types(node) -> list[str]:
 
 class InjectLaneSafeguardsTest(unittest.TestCase):
     """hack/eval/inject-lane-safeguards.yaml: the entries hack/ci-eval-pr.sh
-    appends to every case it runs on the inject lane (#2079).
+    appends to every case it runs, on the api and inject lanes alike (#2079,
+    #2611).
 
-    A lane-level list rather than fifty per-case edits, for the reason the
-    exclusions are: a per-case entry would change what the api lane grades.
-    What has to hold: the file is the pinned set; every entry is a
-    none-wrapped `github_writes` safeguard at catastrophic severity (a leaf
+    A lane-level list rather than fifty per-case edits. What has to hold:
+    the file is the pinned set; every entry is a none-wrapped `github_writes` safeguard at catastrophic severity (a leaf
     that PASSES on a write, so `none` is what makes it a safeguard); no
     registered case declares an entry of the same name, since devops-bench
     refuses a duplicate name as a parse error on every repetition of that
@@ -997,7 +935,7 @@ class InjectLaneSafeguardsTest(unittest.TestCase):
         # runs: the lane's matrix is the presubmit file less the exclusions,
         # exactly as before this file existed.
         self.assertTrue(self.lane_cases())
-        self.assertNotIn("agent-kanban-smoke", self.lane_cases())
+        self.assertIn("agent-kanban-smoke", self.lane_cases())
 
 
 
