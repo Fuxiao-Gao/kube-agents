@@ -80,7 +80,8 @@ func ProfileDurableFilter(profile, tier, kind string) string {
 // it. A worker never starts on its own accept. An accept is a core NATS
 // publish, so it can be lost or arrive late, and a dispatcher that timed out
 // and re-offered would otherwise have two workers running the task. The
-// dispatcher confirms only the pod its live offer is with, and answers any
+// dispatcher confirms only the pod its live offer is with, on that pod's own
+// DispatchSubject so no other worker can receive it, and answers any
 // other accept, a late one included, with abandon. A worker that hears
 // neither within the offer's accept window drops the task. A lost confirm
 // therefore costs the task (its lease never starts, and it fails as
@@ -191,16 +192,19 @@ func (r LeaseRenewal) Validate() error {
 }
 
 // LeaseRecord is a lease as the dispatcher persists it under
-// ProfileLeaseKey. Expiry is read from ExpiresAt, not from a bucket TTL, so
-// a dispatcher that restarts can read every record and give a lease that
-// went quiet only while it was down the restart grace.
+// ProfileLeaseKey. The dispatcher writes it when it confirms the task to a
+// worker, not when the worker accepts: a worker that accepted but never heard
+// the confirm hasn't started, and must not look like it is running. Expiry is
+// read from ExpiresAt, not from a bucket TTL, so a dispatcher that restarts
+// can read every record and give a lease that went quiet only while it was
+// down the restart grace.
 type LeaseRecord struct {
-	TaskID     string    `json:"taskId"`
-	Pod        string    `json:"pod"`
-	Kind       string    `json:"kind"`
-	AcceptedAt time.Time `json:"acceptedAt"`
-	RenewedAt  time.Time `json:"renewedAt"`
-	ExpiresAt  time.Time `json:"expiresAt"`
+	TaskID      string    `json:"taskId"`
+	Pod         string    `json:"pod"`
+	Kind        string    `json:"kind"`
+	ConfirmedAt time.Time `json:"confirmedAt"`
+	RenewedAt   time.Time `json:"renewedAt"`
+	ExpiresAt   time.Time `json:"expiresAt"`
 }
 
 // Expired reports whether the lease has run out at now, given grace on
