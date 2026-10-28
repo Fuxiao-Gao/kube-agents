@@ -28,11 +28,15 @@ Its typical is the median of its agent p50 over its last BASELINE_NIGHTS
 earlier nights with timing, at least MIN_BASELINE_NIGHTS of them; a night
 cut short still counts here, because a case that ran in it ran whole. A case
 slow on SUSTAINED_NIGHTS or more of its nights with timing in a row, last
-night included, is "sustained". When more than BROAD_SHARE of the cases with
-a typical are slow, and more than BROAD_MIN_SLOW of them, one line says so
-instead of naming them: a shift that wide has one cause (the model, the
-mode, quota), not one per case. Up to BROAD_MIN_SLOW are always named, so
-a night that timed few cases still names its slow one.
+night included, is "sustained"; the nights counted are the case's own nights
+with timing, so a night it did not run in does not break the streak. A
+case's typical is its own recent past, so a slowdown that lasts about half
+of BASELINE_NIGHTS becomes the typical and the case drops off the list.
+When more than BROAD_SHARE of the cases with a typical are slow, and more
+than the digest's list holds, one line says so instead of naming them: a
+shift that wide has one cause (the model, the mode, quota), not one per
+case. A list's worth is always named, so a night that timed few cases
+still names its slow one.
 
 All of it is advisory, like the turn-1 target: no verdict, state or gate
 reads it. A backtest on the history of 2026-10-15 to 10-28 set the case
@@ -60,9 +64,6 @@ CASE_SPIKE_RATIO = 2.0
 CASE_SPIKE_FLOOR_S = 60
 SUSTAINED_NIGHTS = 2
 BROAD_SHARE = 0.25
-# The digest's list cap (nightly_digest.LIST_MAX_LINES): up to this many
-# slow cases are always named, however few cases the night timed.
-BROAD_MIN_SLOW = 5
 
 TURN1_P50 = "turn1_p50_s"
 TURN1_P95 = "turn1_p95_s"
@@ -211,8 +212,11 @@ def slow_cases(nights: list[dict]) -> tuple[list[dict], int]:
     return slow, timed
 
 
-def is_broad(slow: list[dict], timed: int) -> bool:
-    return len(slow) > BROAD_MIN_SLOW and len(slow) > BROAD_SHARE * timed
+def is_broad(slow: list[dict], timed: int, listed: int) -> bool:
+    """Whether one broad-slowdown line replaces the list: more slow cases
+    than the ``listed`` lines the list holds, and more than BROAD_SHARE of
+    ``timed``."""
+    return len(slow) > listed and len(slow) > BROAD_SHARE * timed
 
 
 def slow_text(entry: dict, domain: str, owner: str) -> str:

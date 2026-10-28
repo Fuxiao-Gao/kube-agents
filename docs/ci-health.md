@@ -898,8 +898,10 @@ Nightly report's.
   **🐢 Slow cases**: a case whose agent p50 is at least 2× its own typical
   (its last 7 earlier nights with timing, at least 3) and at least 60 s more,
   largest ratio first, with its owner; "sustained N nights" when it was slow
-  on 2 or more of its nights in a row. When more than a quarter of the timed
-  cases are slow, and more than 5, one "broad slowdown" line replaces the
+  on 2 or more of its nights in a row (its nights with timing, so a night it
+  did not run in does not break the streak). A slowdown that lasts about four
+  nights becomes the case's typical, and the case drops off the list. When more than a quarter of the cases
+  with timing and a typical are slow, and more than 5, one "broad slowdown" line replaces the
   list: a shift that wide has one cause. A night cut off at the deadline
   carries the block too, over the cases it ran. It is advisory and moves no
   state, verdict or gate. `scripts/eval_dashboard/nightly_latency.py` holds the rules.
@@ -909,8 +911,8 @@ Each list shows at most 5 lines; the rest are one line linking to the Nightly
 report. A night with no new bug, no case owed a bug for the first time, no
 case red for the first night (a tracked case red again after a green night
 counts), no recovery, no infra item and no part cut off, missing or still running is
-one line instead: the date, the pass count and how many were not graded, "no
-new reds, nothing recovered", and how many are still red, then the latency block. A night whose main part was cut
+one summary line instead: the date, the pass count and how many were not graded, "no
+new reds, nothing recovered", and how many are still red, followed by the latency block. A night whose main part was cut
 off at the deadline, or a run-level event, is labelled so, none of its cases are
 counted, and only the infra list and the latency block follow; a writers part cut off, missing or still running is named in
 the header; a cut-off part's cases stay in the pass count, as on the Nightly page, but its reds are not listed.

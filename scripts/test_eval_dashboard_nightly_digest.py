@@ -500,10 +500,6 @@ class SkipTest(Harness):
         self.assertIn(f"\n{post_health.NIGHTLY_URL}\n🌙 Nightly section skipped: {reason}.\n", text)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 def timed(t, agent_s, turn1_s=None):
     """``t`` with every rep carrying the agent run's and the opening turn's seconds."""
     for rep in t["reps"]:
@@ -549,6 +545,33 @@ class LatencyBlockTest(Harness):
         self.assertTrue(lines[-3].startswith("⏱ *Latency*"))
         self.assertEqual(lines[-1], nightly_digest.FOOTER)
 
+    def test_a_broad_slowdown_is_one_line_in_place_of_the_list(self):
+        names = [f"slow-{i}" for i in range(7)]
+        nights = [night(day, [timed(green(name), 100.0, 10.0) for name in names]) for day in range(13, 20)]
+        nights.append(night(20, [timed(green(name), 400.0, 10.0) for name in names]))
+        doc = data(*nights, extra_cases=[(name, "capacity") for name in names])
+        lines = self.build(doc).lines
+        broad = [line for line in lines if line.startswith("🐢 *Broad slowdown*: 7 of 7 timed cases")]
+        self.assertEqual(len(broad), 1)
+        self.assertTrue(broad[0].endswith(PAGE))
+        self.assertNotIn(nightly_digest.nightly_latency.SLOW_HEADING, lines)
+
+    def test_a_failing_fallback_line_never_loses_the_digest(self):
+        with mock.patch.object(post_health.nightly_latency, "night_line", side_effect=ValueError("boom")), contextlib.redirect_stderr(io.StringIO()):
+            text = post_health.render_digest({"state": "GREEN", "metrics": {}}, NOW, self.timed_nights(), section="a reason")
+        self.assertIn("Nightly section skipped: a reason.", text)
+        self.assertNotIn("Latency", text)
+
+    def test_the_one_line_fallback_skips_a_night_with_a_part_still_running(self):
+        doc = self.timed_nights()
+        night, _ = nightly.last_night(doc, NOW)
+        with mock.patch.object(post_health.nightly, "last_night", return_value=({**night, "running_parts": ["writers"]}, night)):
+            self.assertIsNone(post_health.nightly_latency_line(doc, NOW))
+        self.assertIsNotNone(post_health.nightly_latency_line(doc, NOW))
+
     def test_the_one_line_fallback_carries_the_night_line(self):
         text = post_health.render_digest({"state": "GREEN", "metrics": {}}, NOW, self.timed_nights(), section="a reason")
         self.assertIn("⏱ *Latency*: turn 1 p50 10.0 s", text)
+
+if __name__ == "__main__":
+    unittest.main()

@@ -104,11 +104,11 @@ class SlowCasesTest(unittest.TestCase):
         self.assertNotIn("sustained", nl.slow_text(by_case["b"], "Capacity", "@x"))
 
     def test_broad_above_a_quarter_of_the_timed_cases_and_more_than_the_list_holds(self):
-        self.assertTrue(nl.is_broad([{}] * 6, 20))
-        self.assertFalse(nl.is_broad([{}] * 6, 24))
+        self.assertTrue(nl.is_broad([{}] * 6, 20, 5))
+        self.assertFalse(nl.is_broad([{}] * 6, 24, 5))
         # A quarter of a small night is still named, case by case.
-        self.assertFalse(nl.is_broad([{}] * 5, 6))
-        self.assertFalse(nl.is_broad([], 0))
+        self.assertFalse(nl.is_broad([{}] * 5, 6, 5))
+        self.assertFalse(nl.is_broad([], 0, 5))
 
     def test_slow_text(self):
         entry = {"case": "a", "value": 428.0, "typical": 18.0, "ratio": 428.0 / 18.0, "sustained": 3}
