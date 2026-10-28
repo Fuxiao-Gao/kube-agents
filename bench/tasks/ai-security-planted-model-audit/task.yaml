@@ -113,6 +113,9 @@ verification_spec:
   # For `agentic-harness-demo-fa2/us-central1/agentic-harness-demo-fa2-platform-agent-host`
   # the credential id is
   # `model-credential-plaintext-env.agentic-harness-demo-fa.eval-ai-defects.deployment-eval-vllm-s-33653d`.
+  # The object phrase is `eval-vllm`, not `eval-vllm-s`, on purpose: it
+  # survives the object cut down to 20 characters, so a namespace, check
+  # slug or id-length change of a few characters does not reopen #3667.
   # Same approach as ai-security-manual-names-reconciler.
   - name: a-finding-was-filed-against-the-planted-workload
     role: objective
@@ -124,7 +127,7 @@ verification_spec:
       type: ledger_issue_contains
       audit: ai-security-audit
       scope: finding_ids
-      required_phrases: ["eval-ai-defects", "eval-vllm-s"]
+      required_phrases: ["eval-ai-defects", "eval-vllm"]
   # The credential finding specifically — the major-severity half of the
   # plant. The roster slug reaches the delta block only if a finding was
   # FILED under that check (the consistency-drift-outlier discriminator
