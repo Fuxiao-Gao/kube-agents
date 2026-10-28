@@ -6,20 +6,22 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gke-labs/kube-agents/a2a/lib"
 )
 
 func targetParams(project, location, cluster string) map[string]string {
 	return map[string]string{"project": project, "location": location, "cluster": cluster}
 }
 
-var clusterParams = []profileCardParam{{Name: "project", Required: true}, {Name: "location", Required: true}, {Name: "cluster", Required: true}}
+var clusterParams = []lib.ProfileParameter{{Name: "project", Required: true}, {Name: "location", Required: true}, {Name: "cluster", Required: true}}
 
 func testDirectory() *profileDirectory {
 	d := newProfileDirectory()
-	d.put("cluster", &profileCard{Name: "cluster", Parameters: clusterParams})
-	d.put("prod-east", &profileCard{Name: "prod-east", Parameters: clusterParams,
-		ClusterRef: &profileClusterRef{ProjectID: "p1", Location: "us-east1", Cluster: "prod"}})
-	d.put("chat", &profileCard{Name: "chat"})
+	d.put("cluster", &lib.AgentCard{Name: "cluster", Parameters: clusterParams})
+	d.put("prod-east", &lib.AgentCard{Name: "prod-east", Parameters: clusterParams,
+		ClusterRef: &lib.ClusterRef{ProjectID: "p1", Location: "us-east1", Cluster: "prod"}})
+	d.put("chat", &lib.AgentCard{Name: "chat"})
 	return d
 }
 
@@ -89,8 +91,8 @@ func TestResolveProfile(t *testing.T) {
 
 func TestResolveProfile_TwoProfilesPinnedToOneClusterIsRefused(t *testing.T) {
 	d := testDirectory()
-	d.put("prod-east-2", &profileCard{Name: "prod-east-2", Parameters: clusterParams,
-		ClusterRef: &profileClusterRef{ProjectID: "p1", Location: "us-east1", Cluster: "prod"}})
+	d.put("prod-east-2", &lib.AgentCard{Name: "prod-east-2", Parameters: clusterParams,
+		ClusterRef: &lib.ClusterRef{ProjectID: "p1", Location: "us-east1", Cluster: "prod"}})
 	_, _, err := resolveProfile(d, "cluster", targetParams("p1", "us-east1", "prod"))
 	if got := refusalOf(t, err); !strings.Contains(got, "more than one agent profile is pinned") {
 		t.Fatalf("refusal = %q", got)

@@ -86,31 +86,9 @@ func submissionSubject(addressee, taskID string, route *profileRoute) string {
 	return lib.TaskSubmitSubject(route.Profile, string(route.Tier), route.Kind, taskID)
 }
 
-// profileCard is the routing half of a profile's card on DIRECTORY
-// (a2a.agents.<profile>), as the operator publishes it: the contract on #3655,
-// addendum 1. Tiers absent means read alone.
-type profileCard struct {
-	Name        string             `json:"name"`
-	Description string             `json:"description,omitempty"`
-	Tiers       []string           `json:"tiers,omitempty"`
-	ClusterRef  *profileClusterRef `json:"clusterRef,omitempty"`
-	Parameters  []profileCardParam `json:"parameters,omitempty"`
-}
-
-type profileClusterRef struct {
-	ProjectID string `json:"projectId"`
-	Location  string `json:"location"`
-	Cluster   string `json:"cluster"`
-}
-
-type profileCardParam struct {
-	Name     string `json:"name"`
-	Required bool   `json:"required,omitempty"`
-}
-
-// takesTarget reports whether the profile declares the three parameters that
-// name a cluster.
-func (c profileCard) takesTarget() bool {
+// takesTarget reports whether a profile's card declares the three
+// parameters that name a cluster (the contract on #3655, addendum 1).
+func takesTarget(c lib.AgentCard) bool {
 	have := map[string]bool{}
 	for _, p := range c.Parameters {
 		have[p.Name] = true
@@ -127,7 +105,7 @@ func (t clusterTarget) String() string {
 	return t.Project + "/" + t.Location + "/" + t.Cluster
 }
 
-func (t clusterTarget) matches(r *profileClusterRef) bool {
+func (t clusterTarget) matches(r *lib.ClusterRef) bool {
 	return r != nil && r.ProjectID == t.Project && r.Location == t.Location && r.Cluster == t.Cluster
 }
 
@@ -150,19 +128,19 @@ func targetOf(params map[string]string) (t clusterTarget, ok, partial bool) {
 }
 
 // profileDirectory is the gateway's view of the profiles it can address, kept
-// from DIRECTORY. Safe for concurrent use.
+// from their cards on DIRECTORY (a2a.agents.<profile>). Safe for concurrent use.
 type profileDirectory struct {
 	mu    sync.RWMutex
-	cards map[string]profileCard
+	cards map[string]lib.AgentCard
 }
 
 func newProfileDirectory() *profileDirectory {
-	return &profileDirectory{cards: map[string]profileCard{}}
+	return &profileDirectory{cards: map[string]lib.AgentCard{}}
 }
 
 // put records a card, or forgets the profile when card is nil (a deleted
 // profile's card).
-func (d *profileDirectory) put(name string, card *profileCard) {
+func (d *profileDirectory) put(name string, card *lib.AgentCard) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if card == nil {
@@ -172,7 +150,7 @@ func (d *profileDirectory) put(name string, card *profileCard) {
 	d.cards[name] = *card
 }
 
-func (d *profileDirectory) lookup(name string) (profileCard, bool) {
+func (d *profileDirectory) lookup(name string) (lib.AgentCard, bool) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	c, ok := d.cards[name]
@@ -241,7 +219,7 @@ func resolveProfile(dir *profileDirectory, addressee string, params map[string]s
 			return "", nil, refused(noticeProfilePinnedOther, addressee, ref, target)
 		}
 		return addressee, &target, nil
-	case card.takesTarget():
+	case takesTarget(card):
 		if !hasTarget {
 			return "", nil, refused(noticeProfileNoTarget, addressee)
 		}
