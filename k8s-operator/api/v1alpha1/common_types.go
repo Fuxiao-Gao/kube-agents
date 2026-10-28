@@ -846,16 +846,67 @@ type TuningSpec struct {
 }
 
 // ProfileTuning carries the AgentProfile knobs on the PlatformAgent.
+//
+// The interval rules apply each field's default when it is absent, so a
+// field set alone is still checked against the other's default.
+// +kubebuilder:validation:XValidation:rule="(has(self.leaseSeconds) ? self.leaseSeconds : 90) >= 3 * (has(self.renewSeconds) ? self.renewSeconds : 20)",message="leaseSeconds must be at least three renewSeconds (defaults 90 and 20), so one late renewal doesn't expire a live task's lease"
+// +kubebuilder:validation:XValidation:rule="(has(self.restartGraceSeconds) ? self.restartGraceSeconds : 60) >= 2 * (has(self.renewSeconds) ? self.renewSeconds : 20)",message="restartGraceSeconds must be at least two renewSeconds (defaults 60 and 20), so a live worker renews at least twice inside a restarted dispatcher's grace"
+// +kubebuilder:validation:XValidation:rule="!has(self.childReserve) || !has(self.ceiling) || self.childReserve < self.ceiling",message="childReserve must be below ceiling: the reserve is a share of the ceiling that top-level tasks can't take"
 type ProfileTuning struct {
 	// Ceiling is the most profile tasks running at once across every profile
-	// on the install. The dispatcher enforces it, reserving max(1,
-	// ceil(Ceiling/3)) of it for interactive tiers so unattended work can't
-	// starve people, and the profile namespace's pod quota is derived from it.
-	// Absent means DefaultProfileCeiling.
+	// on the install, of every kind. The dispatcher enforces it, reserving
+	// max(1, ceil(Ceiling/3)) of it for interactive tiers so unattended work
+	// can't starve people, and ChildReserve for child tasks so waiting parents
+	// can't hold every slot. The profile namespace's pod quota is derived
+	// from it. Absent means maxInProgress's resolved value, so an install's
+	// footprint doesn't jump while both exist (spec-profiles-dispatch.md).
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=1000
 	// +optional
 	Ceiling *int `json:"ceiling,omitempty"`
+
+	// ChildReserve is the share of Ceiling kept for child tasks, which
+	// top-level tasks can't take. A parent holds its slot while its children
+	// run, so without it a ceiling full of waiting parents could never start
+	// their children. Absent means max(1, ceil(Ceiling/3)).
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=999
+	// +optional
+	ChildReserve *int `json:"childReserve,omitempty"`
+
+	// LeaseSeconds is how long a task's liveness lease lasts without a
+	// renewal before the dispatcher fails the task (it is never re-run).
+	// Absent means DefaultProfileLeaseSeconds.
+	// +kubebuilder:validation:Minimum=15
+	// +kubebuilder:validation:Maximum=3600
+	// +optional
+	LeaseSeconds *int `json:"leaseSeconds,omitempty"`
+
+	// RenewSeconds is how often a worker renews each task's lease; the
+	// dispatcher sends it with every offer. Absent means
+	// DefaultProfileRenewSeconds.
+	// +kubebuilder:validation:Minimum=5
+	// +kubebuilder:validation:Maximum=300
+	// +optional
+	RenewSeconds *int `json:"renewSeconds,omitempty"`
+
+	// RestartGraceSeconds is how long a restarted dispatcher waits, from its
+	// own start, for a renewal on each task it re-adopts before failing it.
+	// While the dispatcher is down nobody reads renewals, so this is what
+	// keeps a redeploy from failing every task in flight. Absent means
+	// DefaultProfileRestartGraceSeconds.
+	// +kubebuilder:validation:Minimum=10
+	// +kubebuilder:validation:Maximum=3600
+	// +optional
+	RestartGraceSeconds *int `json:"restartGraceSeconds,omitempty"`
+
+	// AcceptTimeoutSeconds is how long the dispatcher waits for a worker to
+	// accept an offer before treating it as declined. Absent means
+	// DefaultProfileAcceptTimeoutSeconds.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=120
+	// +optional
+	AcceptTimeoutSeconds *int `json:"acceptTimeoutSeconds,omitempty"`
 
 	// WarmReplicas is how many warm worker pods each interactive (profile,
 	// tier) keeps running. Absent means DefaultProfileWarmReplicas.
@@ -865,10 +916,15 @@ type ProfileTuning struct {
 	WarmReplicas *int `json:"warmReplicas,omitempty"`
 }
 
-// The ProfileTuning defaults.
+// The ProfileTuning defaults. The ceiling's is maxInProgress's resolved
+// value, which the controller owns, and ChildReserve's is derived from the
+// ceiling.
 const (
-	DefaultProfileCeiling      = 8
-	DefaultProfileWarmReplicas = 1
+	DefaultProfileWarmReplicas         = 1
+	DefaultProfileLeaseSeconds         = 90
+	DefaultProfileRenewSeconds         = 20
+	DefaultProfileRestartGraceSeconds  = 60
+	DefaultProfileAcceptTimeoutSeconds = 10
 )
 
 // AgentLimits bounds a single agent run. Both limits exist because they fail the same

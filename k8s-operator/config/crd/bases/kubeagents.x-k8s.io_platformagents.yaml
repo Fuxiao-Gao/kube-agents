@@ -9849,15 +9849,60 @@ spec:
                             (profile, tier). Until the sizing budget exists these are fixed,
                             conservative defaults.
                           properties:
+                            acceptTimeoutSeconds:
+                              description: |-
+                                AcceptTimeoutSeconds is how long the dispatcher waits for a worker to
+                                accept an offer before treating it as declined. Absent means
+                                DefaultProfileAcceptTimeoutSeconds.
+                              maximum: 120
+                              minimum: 1
+                              type: integer
                             ceiling:
                               description: |-
                                 Ceiling is the most profile tasks running at once across every profile
-                                on the install. The dispatcher enforces it, reserving max(1,
-                                ceil(Ceiling/3)) of it for interactive tiers so unattended work can't
-                                starve people, and the profile namespace's pod quota is derived from it.
-                                Absent means DefaultProfileCeiling.
+                                on the install, of every kind. The dispatcher enforces it, reserving
+                                max(1, ceil(Ceiling/3)) of it for interactive tiers so unattended work
+                                can't starve people, and ChildReserve for child tasks so waiting parents
+                                can't hold every slot. The profile namespace's pod quota is derived
+                                from it. Absent means maxInProgress's resolved value, so an install's
+                                footprint doesn't jump while both exist (spec-profiles-dispatch.md).
                               maximum: 1000
                               minimum: 1
+                              type: integer
+                            childReserve:
+                              description: |-
+                                ChildReserve is the share of Ceiling kept for child tasks, which
+                                top-level tasks can't take. A parent holds its slot while its children
+                                run, so without it a ceiling full of waiting parents could never start
+                                their children. Absent means max(1, ceil(Ceiling/3)).
+                              maximum: 999
+                              minimum: 1
+                              type: integer
+                            leaseSeconds:
+                              description: |-
+                                LeaseSeconds is how long a task's liveness lease lasts without a
+                                renewal before the dispatcher fails the task (it is never re-run).
+                                Absent means DefaultProfileLeaseSeconds.
+                              maximum: 3600
+                              minimum: 15
+                              type: integer
+                            renewSeconds:
+                              description: |-
+                                RenewSeconds is how often a worker renews each task's lease; the
+                                dispatcher sends it with every offer. Absent means
+                                DefaultProfileRenewSeconds.
+                              maximum: 300
+                              minimum: 5
+                              type: integer
+                            restartGraceSeconds:
+                              description: |-
+                                RestartGraceSeconds is how long a restarted dispatcher waits, from its
+                                own start, for a renewal on each task it re-adopts before failing it.
+                                While the dispatcher is down nobody reads renewals, so this is what
+                                keeps a redeploy from failing every task in flight. Absent means
+                                DefaultProfileRestartGraceSeconds.
+                              maximum: 3600
+                              minimum: 10
                               type: integer
                             warmReplicas:
                               description: |-
@@ -9867,6 +9912,29 @@ spec:
                               minimum: 0
                               type: integer
                           type: object
+                          x-kubernetes-validations:
+                            - message:
+                                leaseSeconds must be at least three renewSeconds
+                                (defaults 90 and 20), so one late renewal doesn't expire
+                                a live task's lease
+                              rule:
+                                "(has(self.leaseSeconds) ? self.leaseSeconds : 90)
+                                >= 3 * (has(self.renewSeconds) ? self.renewSeconds : 20)"
+                            - message:
+                                restartGraceSeconds must be at least two renewSeconds
+                                (defaults 60 and 20), so a live worker renews at least
+                                twice inside a restarted dispatcher's grace
+                              rule:
+                                "(has(self.restartGraceSeconds) ? self.restartGraceSeconds
+                                : 60) >= 2 * (has(self.renewSeconds) ? self.renewSeconds
+                                : 20)"
+                            - message:
+                                "childReserve must be below ceiling: the reserve
+                                is a share of the ceiling that top-level tasks can't
+                                take"
+                              rule:
+                                "!has(self.childReserve) || !has(self.ceiling) ||
+                                self.childReserve < self.ceiling"
                       type: object
                   required:
                     - clusterName

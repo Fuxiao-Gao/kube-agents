@@ -119,9 +119,33 @@ type AgentProfileSpec struct {
 	// +optional
 	AllowedTiers []string `json:"allowedTiers,omitempty"`
 
+	// Parameters are the task parameters this profile's persona declares, as
+	// the gateway and the dispatcher need them without reading the persona
+	// image: the gateway routes cluster work to a profile that declares
+	// project, location and cluster, and the dispatcher refuses a submission
+	// missing a required one. The worker checks this list against the
+	// persona's at start and refuses to run a task when they differ.
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=16
+	// +optional
+	Parameters []AgentProfileParameter `json:"parameters,omitempty"`
+
 	// Resources is the pod resource class.
 	// +required
 	Resources AgentProfileResources `json:"resources"`
+}
+
+// AgentProfileParameter is one declared task parameter. The name is the
+// lower-case identifier the persona declares and the worker exports as
+// PROFILE_TASK_<NAME> (lib.TaskParameterNameRE).
+type AgentProfileParameter struct {
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9_]{0,62}$`
+	// +required
+	Name string `json:"name"`
+	// Required means a submission without it is refused.
+	// +optional
+	Required bool `json:"required,omitempty"`
 }
 
 // AgentProfilePersona is the persona artifact.

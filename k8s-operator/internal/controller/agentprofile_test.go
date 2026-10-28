@@ -169,6 +169,7 @@ func agentProfileSpecPaths() []string {
 		p.Spec.QueueTimeoutSeconds = 1
 		p.Spec.Tools = []agentv1alpha1.AgentProfileTool{{Name: "jq", Image: "registry.example/jq:1"}}
 		p.Spec.AllowedTiers = []string{agentv1alpha1.AgentProfileTierRead}
+		p.Spec.Parameters = []agentv1alpha1.AgentProfileParameter{{Name: "cluster", Required: true}}
 	})
 	raw, _ := json.Marshal(p.Spec)
 	var top map[string]json.RawMessage
@@ -612,7 +613,11 @@ func checkFixture(t *testing.T, path, rendered string) {
 // holds its hand-built envelope to the protocol.
 func TestTheAgentCardFixtureIsWhatTheOperatorRenders(t *testing.T) {
 	at := time.Date(2026, 10, 6, 0, 0, 0, 0, time.UTC)
-	card := desiredAgentCard(ptr.To(testAgentProfile("ns", "auditor")))
+	// With declared parameters, so the a2a contract test can hold the
+	// routing fields' names to lib.AgentCard's.
+	card := desiredAgentCard(ptr.To(testAgentProfile("ns", "auditor", func(p *agentv1alpha1.AgentProfile) {
+		p.Spec.Parameters = []agentv1alpha1.AgentProfileParameter{{Name: "project", Required: true}, {Name: "location", Required: true}, {Name: "cluster", Required: true}}
+	})))
 	body, err := renderDirectoryEnvelope("auditor", &card, at, "000000000000000000000000")
 	if err != nil {
 		t.Fatal(err)
@@ -634,11 +639,18 @@ func TestADirectoryEntryIsCurrentOnlyWhenItIsTheSameCard(t *testing.T) {
 	staleCard := want
 	staleCard.Description = "an older blurb"
 	staleBytes, _ := renderDirectoryEnvelope("auditor", &staleCard, at, "c")
+	// A card from before the routing fields, or with other tiers, is stale
+	// too, so the operator republishes it.
+	oldCard := a2aAgentCard{Name: want.Name, Description: want.Description}
+	oldBytes, _ := renderDirectoryEnvelope("auditor", &oldCard, at, "d")
+	tierCard := want
+	tierCard.Tiers = []string{agentv1alpha1.AgentProfileTierRead, agentv1alpha1.AgentProfileTierUnattended}
+	tierBytes, _ := renderDirectoryEnvelope("auditor", &tierCard, at, "e")
 
 	for name, tc := range map[string]struct {
 		raw  []byte
 		want bool
-	}{"card": {cardBytes, true}, "tombstone": {closedBytes, false}, "stale card": {staleBytes, false}} {
+	}{"card": {cardBytes, true}, "tombstone": {closedBytes, false}, "stale card": {staleBytes, false}, "card without routing fields": {oldBytes, false}, "card with other tiers": {tierBytes, false}} {
 		entry, err := parseDirectoryEntry(tc.raw)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
@@ -1595,5 +1607,30 @@ func TestAProfileServiceAccountChangeWakesTheAgentBesideIt(t *testing.T) {
 		if got, ok := agentNamespaceOfProfileServiceAccount(ns); ok {
 			t.Errorf("%s maps to %q, want nothing", ns, got)
 		}
+	}
+}
+
+// The card carries the profile's tiers, its pinned cluster and its declared
+// parameters, which is what the gateway routes on.
+func TestTheCardCarriesWhatTheGatewayRoutesOn(t *testing.T) {
+	p := testAgentProfile("ns", "prod-a", func(p *agentv1alpha1.AgentProfile) {
+		p.Spec.AllowedTiers = []string{agentv1alpha1.AgentProfileTierRead, agentv1alpha1.AgentProfileTierUnattended}
+		p.Spec.ClusterRef = &agentv1alpha1.AgentProfileClusterRef{ProjectID: "p", Location: "us-central1", Cluster: "a"}
+		p.Spec.Parameters = []agentv1alpha1.AgentProfileParameter{{Name: "namespace"}}
+	})
+	card := desiredAgentCard(&p)
+	if !slices.Equal(card.Tiers, []string{"read", "unattended"}) {
+		t.Errorf("tiers = %v", card.Tiers)
+	}
+	if card.ClusterRef == nil || *card.ClusterRef != (a2aCardClusterRef{ProjectID: "p", Location: "us-central1", Cluster: "a"}) {
+		t.Errorf("clusterRef = %+v", card.ClusterRef)
+	}
+	if len(card.Parameters) != 1 || card.Parameters[0] != (a2aCardParameter{Name: "namespace"}) {
+		t.Errorf("parameters = %+v", card.Parameters)
+	}
+	// A profile with neither: read alone, no pin, no parameters.
+	bare := desiredAgentCard(ptr.To(testAgentProfile("ns", "bare")))
+	if !slices.Equal(bare.Tiers, []string{"read"}) || bare.ClusterRef != nil || bare.Parameters != nil {
+		t.Errorf("bare card = %+v", bare)
 	}
 }
