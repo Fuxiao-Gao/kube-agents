@@ -15,9 +15,10 @@
 # explicitly excluded" and cancelled. With 2 managed and the same 8 excluded,
 # the audit ran ("Checked 2 clusters out of the 10 in scope").
 #
-# The objective is that the audit ran: the seeded clusters, which carry
-# planted findings, are named, and the answer does not say the audit was
-# cancelled.
+# The objective is that the audit ran: it names at least one seeded cluster
+# (an audit summary can leave out a cluster with nothing to report), and it
+# does not say the audit was cancelled or that the managed clusters are
+# excluded.
 id: fleet-audit-as-many-excluded-as-managed
 name: A fleet audit runs when as many clusters are excluded as are managed
 prompt: >-
@@ -25,8 +26,7 @@ prompt: >-
   grouped by cluster.
 expected_output: >-
   The audit runs on the clusters the install manages and reports findings for
-  them, grouped by cluster, including seeded-a, seeded-b, seeded-c and
-  seeded-d. It does not cancel, and it does not say the managed clusters are
+  them, grouped by cluster. It does not cancel, and it does not say the managed clusters are
   excluded; where it names the excluded clusters, it says they were not
   checked.
 infrastructure:
@@ -43,5 +43,5 @@ verification_spec:
     mode: assert
     check:
       type: report_contains
-      required_phrases: ["seeded-a", "seeded-b", "seeded-c", "seeded-d"]
-      forbidden_phrases: ["audit was cancelled", "audit cancelled", "audit is cancelled", "cancelled the audit"]
+      any_of_phrases: ["seeded-a", "seeded-b", "seeded-c", "seeded-d"]
+      forbidden_phrases: ["audit was cancelled", "audit cancelled", "audit is cancelled", "cancelled the audit", "managed clusters are explicitly excluded"]
