@@ -116,6 +116,11 @@ type DispatchMessage struct {
 	// enforces and the intervals are set in one place.
 	LeaseSeconds int `json:"leaseSeconds,omitempty"`
 	RenewSeconds int `json:"renewSeconds,omitempty"`
+	// AcceptSeconds is how long the worker waits, after accepting, for the
+	// dispatcher's confirm or abandon; with neither it drops the task. The
+	// dispatcher's acceptTimeoutSeconds, sent because workers don't read the
+	// dispatch config. An offer only.
+	AcceptSeconds int `json:"acceptSeconds,omitempty"`
 	// Reason says why a task is abandoned. An abandon only.
 	Reason string `json:"reason,omitempty"`
 }
@@ -136,6 +141,8 @@ func (m DispatchMessage) Validate() error {
 			return errors.New("dispatch offer: no deadline")
 		case m.RenewSeconds <= 0 || m.LeaseSeconds < 3*m.RenewSeconds:
 			return fmt.Errorf("dispatch offer: lease %ds must be at least three renewals of %ds", m.LeaseSeconds, m.RenewSeconds)
+		case m.AcceptSeconds <= 0:
+			return errors.New("dispatch offer: no accept window")
 		}
 	case DispatchConfirm:
 	case DispatchAbandon:
@@ -205,6 +212,12 @@ type LeaseRecord struct {
 	ConfirmedAt time.Time `json:"confirmedAt"`
 	RenewedAt   time.Time `json:"renewedAt"`
 	ExpiresAt   time.Time `json:"expiresAt"`
+	// Deadline, LeaseSeconds and RenewSeconds are the offer's, kept so a
+	// restarted dispatcher re-adopts the task on the terms its worker was
+	// given, not on a config that may have changed since.
+	Deadline     time.Time `json:"deadline"`
+	LeaseSeconds int       `json:"leaseSeconds"`
+	RenewSeconds int       `json:"renewSeconds"`
 }
 
 // Expired reports whether the lease has run out at now, given grace on

@@ -59,7 +59,7 @@ func validOffer() DispatchMessage {
 		Type: DispatchOffer, TaskID: "t1", Kind: SubmitKindTop,
 		Envelope:     json.RawMessage(`{"taskId":"t1"}`),
 		Deadline:     time.Date(2026, 10, 28, 18, 0, 0, 0, time.UTC),
-		LeaseSeconds: 90, RenewSeconds: 20,
+		LeaseSeconds: 90, RenewSeconds: 20, AcceptSeconds: 10,
 	}
 }
 
@@ -90,6 +90,7 @@ func TestADispatchMessageIsCheckedBothWays(t *testing.T) {
 		"no deadline":        {func(m *DispatchMessage) { m.Deadline = time.Time{} }, "deadline"},
 		"no renewal":         {func(m *DispatchMessage) { m.RenewSeconds = 0 }, "renewals"},
 		"lease too short":    {func(m *DispatchMessage) { m.LeaseSeconds = 59 }, "renewals"},
+		"no accept window":   {func(m *DispatchMessage) { m.AcceptSeconds = 0 }, "accept window"},
 		"abandon no reason":  {func(m *DispatchMessage) { *m = DispatchMessage{Type: DispatchAbandon, TaskID: "t1"} }, "reason"},
 	} {
 		m := validOffer()
