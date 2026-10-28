@@ -2136,7 +2136,8 @@ scope_exclude_settle() { # <label>
     out="$(${bound[@]+"${bound[@]}"} kubectl --context "${AGENT_CLUSTER_CONTEXT}" -n "${TARGET_NAMESPACE}" exec "${pod}" -c "${EVAL_GATEWAY_CONTAINER}" -- \
       env HERMES_HOME="${EVAL_GATEWAY_HOME}" "${EVAL_GATEWAY_PYTHON}" "${EVAL_SCOPE_RECONCILE_SCRIPT}" --require-create-pass 2>&1)" || rc=$?
     if [ "${rc}" -eq 0 ]; then
-      echo "Scope exclusion (${label}): the gateway reads ${want}; reconcile: $(printf '%s\n' "${out}" | tail -1)"
+      # Its summary line, not its last: a notification it failed to post comes after.
+      echo "Scope exclusion (${label}): the gateway reads ${want}; reconcile: $(printf '%s\n' "${out}" | grep -F 'Done:' | tail -1)"
       return 0
     fi
     if [ "${rc}" -eq "${EVAL_SCOPE_RECONCILE_BUSY_EXIT}" ] && [ "${SECONDS}" -lt "${deadline}" ]; then
