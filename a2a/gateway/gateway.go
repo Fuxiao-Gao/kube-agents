@@ -2356,6 +2356,13 @@ type taskStart struct {
 	// stored record holds the child without its parent's link (observedAs
 	// and chainLast read the link). Set for a child only.
 	LinkParent bool
+	// Route, when set, addresses the task to an AgentProfile: the grant is
+	// minted against the resolved profile at the requester's tier with the
+	// target in scope, and the submission goes on the profile's .submit
+	// subject with the parameters as a part (spec-profiles-dispatch.md,
+	// "Addressing"). rec.Addressee is the resolved profile. Nil for every
+	// task addressed to platform or a session.
+	Route *profileRoute
 }
 
 // startTask opens a turn for a human message, and returns its task id once
@@ -2407,7 +2414,7 @@ func (g *Gateway) startTaskWith(ctx context.Context, rec *SessionRecord, ts task
 	// A mint that fails refuses the turn. The alternative is a submission
 	// with no capability, which the executor refuses anyway, one round trip
 	// and a pod later, with the reason in a different component's log.
-	capRef, err := g.mintCapability(ctx, taskID, rec.Addressee)
+	capRef, err := g.mintTaskCapability(ctx, taskID, rec.Addressee, ts.Route)
 	if err != nil {
 		g.log.Error("capability mint failed", "taskId", taskID, "addressee", rec.Addressee, "err", err)
 		if !g.cfg.CapabilityOptional {
@@ -2422,7 +2429,7 @@ func (g *Gateway) startTaskWith(ctx context.Context, rec *SessionRecord, ts task
 		capRef = nil
 	}
 
-	payload, err := messagePayload(ts.Text, taskID, rec.ContextID)
+	payload, err := submissionPayload(ts.Text, taskID, rec.ContextID, ts.Route)
 	if err != nil {
 		g.log.Error("message payload build failed", "err", err)
 		return "", false
@@ -2528,7 +2535,7 @@ func (g *Gateway) startTaskWith(ctx context.Context, rec *SessionRecord, ts task
 	// per-subject cap, and past that cap a worker scanning the subject
 	// cannot tell the evicted submission's replacement from the real thing
 	// (lib.EnvOriginSeq).
-	originSeq, err := g.client.PublishSeq(ctx, lib.TaskInSubject(rec.Addressee, taskID), env)
+	originSeq, err := g.client.PublishSeq(ctx, submissionSubject(rec.Addressee, taskID, ts.Route), env)
 	if err != nil {
 		g.log.Error("task publish failed", "taskId", taskID, "err", err)
 		if statusMsgID != "" {

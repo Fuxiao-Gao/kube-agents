@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,6 +38,53 @@ const (
 	noticeTargetUnconfirmed   = "⚠️ not started: can't confirm %s is in this install's scope yet"
 	noticeTargetParamsInvalid = "⚠️ not started: the task's parameters aren't valid: %v"
 )
+
+// profileGrantDelegate is the principal a profile task's grant names as its
+// delegate: the dispatcher, which resolves the grant when it asks the
+// verifier whether the task may run (the contract on #3655, section 6). The
+// verifier resolves an entry only for the caller it names.
+const profileGrantDelegate = "dispatcher"
+
+// mintTaskCapability mints a task's root grant: against the resolved profile
+// for a profile route, and as mintCapability does for everything else.
+func (g *Gateway) mintTaskCapability(ctx context.Context, taskID, addressee string, route *profileRoute) (*capability.Ref, error) {
+	if route == nil {
+		return g.mintCapability(ctx, taskID, addressee)
+	}
+	ref, err := capability.NewMinter(g.client.JetStream()).Mint(ctx, taskID, capability.Entry{
+		Tier:     route.Tier,
+		Scope:    route.Scope,
+		Profile:  route.Profile,
+		Delegate: profileGrantDelegate,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &ref, nil
+}
+
+// submissionPayload is the submission's message: the text, and for a profile
+// route with parameters, the taskParameters part beside it.
+func submissionPayload(text, taskID, contextID string, route *profileRoute) ([]byte, error) {
+	if route == nil || len(route.Params) == 0 {
+		return messagePayload(text, taskID, contextID)
+	}
+	params, err := lib.TaskParametersPart(lib.TaskParameters{Parameters: route.Params})
+	if err != nil {
+		return nil, err
+	}
+	return messagePayloadParts([]lib.Part{{Kind: "text", Text: text}, params}, taskID, contextID)
+}
+
+// submissionSubject is where a new task is published: a profile's .submit
+// subject, carrying the tier and kind its durables route on, or the
+// addressee's .in subject for platform and sessions.
+func submissionSubject(addressee, taskID string, route *profileRoute) string {
+	if route == nil {
+		return lib.TaskInSubject(addressee, taskID)
+	}
+	return lib.TaskSubmitSubject(route.Profile, string(route.Tier), route.Kind, taskID)
+}
 
 // profileCard is the routing half of a profile's card on DIRECTORY
 // (a2a.agents.<profile>), as the operator publishes it: the contract on #3655,
