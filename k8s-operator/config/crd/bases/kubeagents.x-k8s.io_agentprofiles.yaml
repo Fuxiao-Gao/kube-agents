@@ -162,9 +162,10 @@ spec:
                   properties:
                     serviceAccountName:
                       description: |-
-                        ServiceAccountName is an existing ServiceAccount in the profile's
-                        namespace. Naming one hands this profile's pods whatever RBAC it holds;
-                        absent, the operator creates a ServiceAccount with none.
+                        ServiceAccountName is an existing ServiceAccount in the profile
+                        namespace (<namespace>-profiles), and it serves the profile's one
+                        allowed tier. Naming one hands this profile's pods whatever RBAC it
+                        holds; absent, the operator creates a ServiceAccount per tier with none.
                       maxLength: 253
                       pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                       type: string

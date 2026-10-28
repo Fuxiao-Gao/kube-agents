@@ -197,9 +197,10 @@ type AgentProfileBus struct {
 
 // AgentProfileIdentity names the ServiceAccount the profile's pods run as.
 type AgentProfileIdentity struct {
-	// ServiceAccountName is an existing ServiceAccount in the profile's
-	// namespace. Naming one hands this profile's pods whatever RBAC it holds;
-	// absent, the operator creates a ServiceAccount with none.
+	// ServiceAccountName is an existing ServiceAccount in the profile
+	// namespace (<namespace>-profiles), and it serves the profile's one
+	// allowed tier. Naming one hands this profile's pods whatever RBAC it
+	// holds; absent, the operator creates a ServiceAccount per tier with none.
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	// +kubebuilder:validation:XValidation:rule="!self.startsWith('agentprofile-')",message="serviceAccountName may not name an operator-created AgentProfile ServiceAccount (agentprofile-*): that ServiceAccount belongs to another profile"
