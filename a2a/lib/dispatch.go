@@ -74,8 +74,20 @@ func ProfileDurableFilter(profile, tier, kind string) string {
 }
 
 // The kinds of DispatchMessage.
+//
+// An offer is accepted or declined (DispatchAccept), and an accept is
+// answered: confirm, and the worker starts the task; abandon, and it drops
+// it. A worker never starts on its own accept. An accept is a core NATS
+// publish, so it can be lost or arrive late, and a dispatcher that timed out
+// and re-offered would otherwise have two workers running the task. The
+// dispatcher confirms only the pod its live offer is with, and answers any
+// other accept, a late one included, with abandon. A worker that hears
+// neither within the offer's accept window drops the task. A lost confirm
+// therefore costs the task (its lease never starts, and it fails as
+// lease-expired), never a second run.
 const (
 	DispatchOffer   = "offer"
+	DispatchConfirm = "confirm"
 	DispatchAbandon = "abandon"
 )
 
@@ -124,12 +136,13 @@ func (m DispatchMessage) Validate() error {
 		case m.RenewSeconds <= 0 || m.LeaseSeconds < 3*m.RenewSeconds:
 			return fmt.Errorf("dispatch offer: lease %ds must be at least three renewals of %ds", m.LeaseSeconds, m.RenewSeconds)
 		}
+	case DispatchConfirm:
 	case DispatchAbandon:
 		if m.Reason == "" || len(m.Reason) > DispatchReasonCap {
 			return fmt.Errorf("dispatch abandon: needs a reason of at most %d bytes", DispatchReasonCap)
 		}
 	default:
-		return fmt.Errorf("dispatch message type %q is not %s or %s", m.Type, DispatchOffer, DispatchAbandon)
+		return fmt.Errorf("dispatch message type %q is not %s, %s or %s", m.Type, DispatchOffer, DispatchConfirm, DispatchAbandon)
 	}
 	return nil
 }

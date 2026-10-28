@@ -66,7 +66,7 @@ func validOffer() DispatchMessage {
 // An offer and an abandon survive the wire, and each malformed one is
 // refused with a reason that names what is wrong.
 func TestADispatchMessageIsCheckedBothWays(t *testing.T) {
-	for _, m := range []DispatchMessage{validOffer(), {Type: DispatchAbandon, TaskID: "t1", Reason: "stopped by the conversation"}} {
+	for _, m := range []DispatchMessage{validOffer(), {Type: DispatchConfirm, TaskID: "t1"}, {Type: DispatchAbandon, TaskID: "t1", Reason: "stopped by the conversation"}} {
 		raw, err := json.Marshal(m)
 		if err != nil {
 			t.Fatal(err)
