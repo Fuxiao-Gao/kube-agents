@@ -19,6 +19,8 @@ const (
 	dispatcherFixturePath = "testdata/rendered-identity-map-dispatcher.json"
 	renderedDispatcherSA  = "system:serviceaccount:kubeagents-system:agent-a2a-dispatcher"
 	tokenDispatcher       = "token-for-the-rendered-dispatcher-serviceaccount-padded-to-len"
+	// renderedConsolePassword is the console's in the rendered nats.conf.
+	renderedConsolePassword = "pw-console"
 )
 
 func renderedDispatcherMap(t *testing.T) string {
@@ -59,21 +61,23 @@ func TestTheRenderedDispatcherReachesItsContractAndNothingNear(t *testing.T) {
 	pod := "tse-read-7f9c"
 	checkPublish(t, nc, violations, map[string]bool{
 		// Allowed: the contract.
-		lib.DispatchSubject("tse", "read", pod):                                           false,
-		lib.TaskEventsSubject("tse", "t1"):                                                true,
-		lib.ProfileLeaseSubject(lib.ProfileLeaseKey("tse", "read", pod, "t1")):            false,
-		"$JS.API.CONSUMER.MSG.NEXT.TASKS." + lib.ProfileDurableName("tse", "read", "top"): false,
-		"$JS.ACK.TASKS." + lib.ProfileDurableName("tse", "read", "top") + ".1.1.1.1.0":    false,
-		"a2a.cap.verify.dispatcher":                                                       false,
+		lib.DispatchSubject("tse", "read", pod):                                                                     false,
+		lib.ProfileLeaseSubject(lib.ProfileLeaseKey("tse", "read", pod, "t1")):                                      false,
+		"$JS.API.CONSUMER.MSG.NEXT." + lib.ProfileSubmitStream + "." + lib.ProfileDurableName("tse", "read", "top"): false,
+		"$JS.ACK." + lib.ProfileSubmitStream + "." + lib.ProfileDurableName("tse", "read", "top") + ".1.1.1.1.0":    false,
+		"a2a.cap.verify.dispatcher":            false,
+		lib.TaskSupervisorSubject("tse", "t1"): false, // terminal failures, on the profile's supervisor subject
 		// Refused: the nearest things it must not do.
-		lib.TaskInSubject("tse", "t1"):                                                  true,
-		lib.TaskSubmitSubject("tse", "read", "top", "t1"):                               true,
-		lib.TaskSupervisorSubject("tse", "t1"):                                          false,
-		lib.DispatchAcceptSubject("tse", "read", pod):                                   true,
-		"$JS.API.CONSUMER.CREATE.TASKS." + lib.ProfileDurableName("tse", "read", "top"): true,
-		"$JS.API.CONSUMER.MSG.NEXT.TASKS.session-x-origin":                              true,
-		// A durable the operator didn't create for it: no grant.
-		"$JS.API.CONSUMER.MSG.NEXT.TASKS." + lib.ProfileDurableName("other", "read", "top"): true,
+		lib.TaskEventsSubject("tse", "t1"):                true, // .events is the executor's alone
+		lib.TaskInSubject("tse", "t1"):                    true,
+		lib.TaskSubmitSubject("tse", "read", "top", "t1"): true,
+		lib.DispatchAcceptSubject("tse", "read", pod):     true,
+		"$JS.API.CONSUMER.CREATE." + lib.ProfileSubmitStream + "." + lib.ProfileDurableName("tse", "read", "top"): true,
+		"$JS.API.CONSUMER.MSG.NEXT.TASKS.session-x-origin":                                                        true,
+		// The same durable name on TASKS, and a durable the operator didn't
+		// create for it: no grant.
+		"$JS.API.CONSUMER.MSG.NEXT.TASKS." + lib.ProfileDurableName("tse", "read", "top"):                             true,
+		"$JS.API.CONSUMER.MSG.NEXT." + lib.ProfileSubmitStream + "." + lib.ProfileDurableName("other", "read", "top"): true,
 		"$KV.cap.root.x":         true,
 		"$KV.session-state.x":    true,
 		"a2a.cap.verify.gateway": true,
@@ -85,6 +89,7 @@ func TestTheRenderedDispatcherReachesItsContractAndNothingNear(t *testing.T) {
 		lib.DispatchAcceptSubject("tse", "read", pod): false,
 		lib.DispatchLeaseSubject("tse", "read", pod):  false,
 		"a2a.tasks.>":                           true,
+		"a2a.submit.>":                          true,
 		lib.TaskEventsSubject("tse", "t1"):      true,
 		lib.DispatchSubject("tse", "read", pod): true,
 		"_INBOX.gateway.>":                      true,
@@ -95,9 +100,10 @@ func TestTheRenderedDispatcherReachesItsContractAndNothingNear(t *testing.T) {
 	}
 }
 
-// With a dispatcher, the rendered operator makes the profiles' durables: a
-// consumer whose filter is a submit subject, and nothing else on TASKS. A
-// create carries its filter in the subject, which is what holds it there.
+// With a dispatcher, the rendered operator makes the profiles' durables on
+// PROFILE_SUBMITS: a consumer whose filter is a submission subject, and
+// nothing on TASKS. A create carries its filter in the subject, which is
+// what holds it there.
 func TestTheRenderedOperatorMakesOnlySubmitDurables(t *testing.T) {
 	h := startHarness(t, renderedDispatcherMap(t), map[string]Attested{
 		tokenRenderedOperator: {ServiceAccount: renderedOperatorSA},
@@ -109,8 +115,13 @@ func TestTheRenderedOperatorMakesOnlySubmitDurables(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := seedJS.CreateStream(ctx, jetstream.StreamConfig{Name: "TASKS", Subjects: []string{"a2a.tasks.>"}}); err != nil {
-		t.Fatalf("creating TASKS as seed: %v", err)
+	for _, cfg := range []jetstream.StreamConfig{
+		{Name: lib.TasksStream, Subjects: []string{"a2a.tasks.>"}},
+		{Name: lib.ProfileSubmitStream, Subjects: []string{lib.SubmitSubjectPrefix + ">"}},
+	} {
+		if _, err := seedJS.CreateStream(ctx, cfg); err != nil {
+			t.Fatalf("creating %s as seed: %v", cfg.Name, err)
+		}
 	}
 	op, _ := h.connectAs(t, "operator", tokenRenderedOperator)
 	js, err := jetstream.New(op)
@@ -118,21 +129,71 @@ func TestTheRenderedOperatorMakesOnlySubmitDurables(t *testing.T) {
 		t.Fatal(err)
 	}
 	durable := lib.ProfileDurableName("tse", "read", "top")
-	if _, err := js.CreateOrUpdateConsumer(ctx, "TASKS", jetstream.ConsumerConfig{
+	if _, err := js.CreateOrUpdateConsumer(ctx, lib.ProfileSubmitStream, jetstream.ConsumerConfig{
 		Durable: durable, FilterSubject: lib.ProfileDurableFilter("tse", "read", "top"), AckPolicy: jetstream.AckExplicitPolicy,
 	}); err != nil {
 		t.Fatalf("the operator could not make a submit durable: %v", err)
 	}
-	if err := js.DeleteConsumer(ctx, "TASKS", durable); err != nil {
+	if err := js.DeleteConsumer(ctx, lib.ProfileSubmitStream, durable); err != nil {
 		t.Fatalf("the operator could not delete it: %v", err)
 	}
-	short, cancelShort := context.WithTimeout(ctx, 3*time.Second)
-	defer cancelShort()
-	if _, err := js.CreateOrUpdateConsumer(short, "TASKS", jetstream.ConsumerConfig{
-		Durable: "profile-tse-read-top", FilterSubject: lib.TaskInSubject("tse", "*"), AckPolicy: jetstream.AckExplicitPolicy,
-	}); err == nil {
-		t.Error("the operator made a durable over a task's .in")
+	for name, try := range map[string]func(context.Context) error{
+		"a durable on TASKS": func(ctx context.Context) error {
+			_, err := js.CreateOrUpdateConsumer(ctx, lib.TasksStream, jetstream.ConsumerConfig{
+				Durable: durable, FilterSubject: lib.TaskInSubject("tse", "*"), AckPolicy: jetstream.AckExplicitPolicy,
+			})
+			return err
+		},
+		"a PROFILE_SUBMITS durable over every submission": func(ctx context.Context) error {
+			_, err := js.CreateOrUpdateConsumer(ctx, lib.ProfileSubmitStream, jetstream.ConsumerConfig{
+				Durable: durable, FilterSubject: lib.SubmitSubjectPrefix + ">", AckPolicy: jetstream.AckExplicitPolicy,
+			})
+			return err
+		},
+	} {
+		short, cancelShort := context.WithTimeout(ctx, 3*time.Second)
+		if err := try(short); err == nil {
+			t.Errorf("the operator made %s", name)
+		}
+		cancelShort()
 	}
+}
+
+// The console reads a profile submission by subject, and can make no
+// consumer on PROFILE_SUBMITS: it shows a profile task's prompt, and holds
+// nothing that could pull a profile's queue.
+func TestTheRenderedConsoleReadsSubmissionsOnly(t *testing.T) {
+	h := startHarness(t, renderedDispatcherMap(t), nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	seed, _ := connectStatic(t, h, "seed", renderedSeedPassword)
+	seedJS, err := jetstream.New(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seedJS.CreateStream(ctx, jetstream.StreamConfig{
+		Name: lib.ProfileSubmitStream, Subjects: []string{lib.SubmitSubjectPrefix + ">"}, AllowDirect: true,
+	}); err != nil {
+		t.Fatalf("creating %s as seed: %v", lib.ProfileSubmitStream, err)
+	}
+	// Nothing rendered here publishes a submission yet (the gateway's grant
+	// comes with its own change), so the read is of an empty stream: the
+	// server answering "no message" is the grant, where a refused request
+	// would get no answer at all.
+	subject := lib.TaskSubmitSubject("tse", "read", "top", "t1")
+	nc, violations := connectStatic(t, h, "console", renderedConsolePassword)
+	msg, err := nc.RequestWithContext(ctx, "$JS.API.DIRECT.GET."+lib.ProfileSubmitStream+"."+subject, nil)
+	if err != nil || msg.Header.Get("Status") != "404" {
+		t.Fatalf("the console's direct get of %s = %v, %v; want the server's 404 for a stream with no such message", subject, msg, err)
+	}
+	checkPublish(t, nc, violations, map[string]bool{
+		"$JS.API.CONSUMER.CREATE." + lib.ProfileSubmitStream + ".x." + subject:                                      true,
+		"$JS.API.CONSUMER.MSG.NEXT." + lib.ProfileSubmitStream + "." + lib.ProfileDurableName("tse", "read", "top"): true,
+		"$JS.API.CONSUMER.INFO." + lib.ProfileSubmitStream + "." + lib.ProfileDurableName("tse", "read", "top"):     true,
+		"$JS.API.STREAM.INFO." + lib.ProfileSubmitStream:                                                            true,
+		"$JS.ACK." + lib.ProfileSubmitStream + ".>":                                                                 true,
+		subject: true,
+	})
 }
 
 // The dispatcher lists a (profile, tier)'s leases after a restart, through

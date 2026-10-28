@@ -60,7 +60,7 @@ func ProfileLeaseKeyFilter(profile, tier, taskID string) string {
 	return fmt.Sprintf("%s.%s.*.%s", profile, tier, taskID)
 }
 
-// ProfileDurableName is the shared durable on TASKS for one (profile, tier,
+// ProfileDurableName is the shared durable on ProfileSubmitStream for one (profile, tier,
 // kind): profile-<profile>-<tier>-<kind>. The operator creates it and the
 // dispatcher is its only reader.
 func ProfileDurableName(profile, tier, kind string) string {
@@ -70,7 +70,7 @@ func ProfileDurableName(profile, tier, kind string) string {
 // ProfileDurableFilter is that durable's filter: the submissions for one
 // (profile, tier, kind), whatever the task.
 func ProfileDurableFilter(profile, tier, kind string) string {
-	return fmt.Sprintf("a2a.tasks.%s.%s.%s.*.submit", profile, tier, kind)
+	return fmt.Sprintf("%s%s.%s.%s.*", SubmitSubjectPrefix, profile, tier, kind)
 }
 
 // The kinds of DispatchMessage.
@@ -106,7 +106,7 @@ type DispatchMessage struct {
 	// offer only.
 	Kind string `json:"kind,omitempty"`
 	// Envelope is the submission, verbatim: the worker has no grant on
-	// .submit, so this is how it reads the task. An offer only.
+	// PROFILE_SUBMITS, so this is how it reads the task. An offer only.
 	Envelope json.RawMessage `json:"envelope,omitempty"`
 	// Deadline is when the task must have ended (the profile's
 	// lifecycle.activeDeadlineSeconds from acceptance). An offer only.

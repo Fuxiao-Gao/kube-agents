@@ -1,5 +1,5 @@
 {
-  "version": "b4adc583ae2a8b91",
+  "version": "b410f03c5a5cf23f",
   "identities": [
     {
       "serviceAccount": "system:serviceaccount:kubeagents-system:agent-a2a-provision",
@@ -23,6 +23,7 @@
           "$JS.API.STREAM.CREATE.KV_cap",
           "$JS.API.STREAM.CREATE.KV_feedback",
           "$JS.API.STREAM.CREATE.KV_PROFILE_LEASES",
+          "$JS.API.STREAM.CREATE.PROFILE_SUBMITS",
           "$JS.API.STREAM.INFO.TASKS",
           "$JS.API.STREAM.INFO.DIRECTORY",
           "$JS.API.STREAM.INFO.TOPICS-STATE",
@@ -32,6 +33,7 @@
           "$JS.API.STREAM.INFO.KV_cap",
           "$JS.API.STREAM.INFO.KV_feedback",
           "$JS.API.STREAM.INFO.KV_PROFILE_LEASES",
+          "$JS.API.STREAM.INFO.PROFILE_SUBMITS",
           "_INBOX.provision.>"
         ],
         "subscribe": [
@@ -102,9 +104,9 @@
         "publish": [
           "a2a.agents.*",
           "$JS.API.DIRECT.GET.DIRECTORY.a2a.agents.*",
-          "$JS.API.CONSUMER.CREATE.TASKS.*.a2a.tasks.*.*.*.*.submit",
-          "$JS.API.CONSUMER.INFO.TASKS.*",
-          "$JS.API.CONSUMER.DELETE.TASKS.*"
+          "$JS.API.CONSUMER.CREATE.PROFILE_SUBMITS.*.a2a.submit.*.*.*.*",
+          "$JS.API.CONSUMER.INFO.PROFILE_SUBMITS.*",
+          "$JS.API.CONSUMER.DELETE.PROFILE_SUBMITS.*"
         ],
         "subscribe": [
           "_INBOX.operator.>"
@@ -129,12 +131,12 @@
       "account": "APP",
       "grants": {
         "publish": [
-          "$JS.API.CONSUMER.INFO.TASKS.profile-tse-read-top",
-          "$JS.API.CONSUMER.MSG.NEXT.TASKS.profile-tse-read-top",
-          "$JS.ACK.TASKS.profile-tse-read-top.>",
-          "$JS.API.CONSUMER.INFO.TASKS.profile-tse-read-child",
-          "$JS.API.CONSUMER.MSG.NEXT.TASKS.profile-tse-read-child",
-          "$JS.ACK.TASKS.profile-tse-read-child.>",
+          "$JS.API.CONSUMER.INFO.PROFILE_SUBMITS.profile-tse-read-top",
+          "$JS.API.CONSUMER.MSG.NEXT.PROFILE_SUBMITS.profile-tse-read-top",
+          "$JS.ACK.PROFILE_SUBMITS.profile-tse-read-top.>",
+          "$JS.API.CONSUMER.INFO.PROFILE_SUBMITS.profile-tse-read-child",
+          "$JS.API.CONSUMER.MSG.NEXT.PROFILE_SUBMITS.profile-tse-read-child",
+          "$JS.ACK.PROFILE_SUBMITS.profile-tse-read-child.>",
           "a2a.tasks.tse.*.supervisor",
           "$KV.PROFILE_LEASES.>",
           "$JS.API.STREAM.INFO.KV_PROFILE_LEASES",

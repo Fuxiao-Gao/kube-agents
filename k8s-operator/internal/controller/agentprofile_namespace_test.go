@@ -371,7 +371,7 @@ func TestAProfileDeleteRefusalHoldsNothing(t *testing.T) {
 func TestProfileDispatchTuningDefaults(t *testing.T) {
 	agent := a2aTestAgent()
 	for name, tc := range map[string]struct{ got, want int }{
-		"childReserve":         {resolveProfileChildReserve(agent), 2}, // ceil(6/3)
+		"childReserve":         {func() int { c, _ := dispatchReserves(agent, resolveProfileCeiling(agent)); return c }(), 2}, // ceil(6/3)
 		"leaseSeconds":         {resolveProfileLeaseSeconds(agent), 90},
 		"renewSeconds":         {resolveProfileRenewSeconds(agent), 20},
 		"restartGraceSeconds":  {resolveProfileRestartGraceSeconds(agent), 60},
@@ -382,14 +382,14 @@ func TestProfileDispatchTuningDefaults(t *testing.T) {
 		}
 	}
 	for ceiling, want := range map[int]int{1: 0, 2: 1, 3: 1, 4: 2, 9: 3, 10: 4} {
-		if got := resolveProfileChildReserve(profileTunedAgent(ptr.To(ceiling), nil)); got != want {
+		if got, _ := dispatchReserves(profileTunedAgent(ptr.To(ceiling), nil), ceiling); got != want {
 			t.Errorf("ceiling %d: childReserve = %d, want %d", ceiling, got, want)
 		}
 	}
 	tuned := profileTunedAgent(ptr.To(10), nil)
 	tuned.Spec.Harness.Tuning.Profiles.ChildReserve = ptr.To(7)
 	tuned.Spec.Harness.Tuning.Profiles.LeaseSeconds = ptr.To(300)
-	if got := resolveProfileChildReserve(tuned); got != 7 {
+	if got, _ := dispatchReserves(tuned, 10); got != 7 {
 		t.Errorf("childReserve = %d, want the CR's 7", got)
 	}
 	if got := resolveProfileLeaseSeconds(tuned); got != 300 {

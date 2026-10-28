@@ -752,6 +752,7 @@ func TestBuildA2ANATSConfigConsoleUser(t *testing.T) {
 		"$JS.API.CONSUMER.MSG.NEXT.DIRECTORY.*",
 		"$JS.API.CONSUMER.MSG.NEXT.TOPICS-STATE.*",
 		"$JS.API.CONSUMER.MSG.NEXT.TOPICS-JOURNAL.*",
+		"$JS.API.DIRECT.GET.PROFILE_SUBMITS.>",
 		"chat.console.*.in",
 		"_INBOX.console.>",
 	}
@@ -2152,7 +2153,7 @@ func TestCleanupA2AResumesAfterAMidPassError(t *testing.T) {
 	failRole := true
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(agent).
+		WithObjects(agent, chartProfileNamespace(agent)).
 		WithStatusSubresource(&agentv1alpha1.PlatformAgent{}).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Patch: fakeServerSideApplyInterceptors().Patch,
@@ -2184,6 +2185,13 @@ func TestCleanupA2AResumesAfterAMidPassError(t *testing.T) {
 
 	if _, err := r.reconcileA2A(ctx, agent); err != nil {
 		t.Fatalf("render: %v", err)
+	}
+	// Precondition: the profile namespace's half rendered, so its delete
+	// below proves something.
+	for _, obj := range []client.Object{&rbacv1.Role{}, &rbacv1.RoleBinding{}} {
+		if err := cl.Get(ctx, types.NamespacedName{Name: "test-agent-a2a-dispatcher", Namespace: "test-ns-profiles"}, obj); err != nil {
+			t.Fatalf("precondition: the dispatcher's pod-read %T in the profile namespace wasn't rendered: %v", obj, err)
+		}
 	}
 
 	// The render has to have produced what the cleanup is asked to remove.
@@ -2237,6 +2245,15 @@ func TestCleanupA2AResumesAfterAMidPassError(t *testing.T) {
 		err := cl.Get(ctx, types.NamespacedName{Name: tc.name, Namespace: "test-ns"}, tc.obj)
 		if !errors.IsNotFound(err) {
 			t.Errorf("%s survived the resumed cleanup (err=%v) — the early exit stepped over it", tc.what, err)
+		}
+	}
+
+	// The dispatcher's pod-read Role and binding in the profile namespace,
+	// which carry no owner reference and so need the flip's own delete.
+	for _, obj := range []client.Object{&rbacv1.Role{}, &rbacv1.RoleBinding{}} {
+		err := cl.Get(ctx, types.NamespacedName{Name: "test-agent-a2a-dispatcher", Namespace: "test-ns-profiles"}, obj)
+		if !errors.IsNotFound(err) {
+			t.Errorf("the dispatcher's pod-read %T in the profile namespace survived the cleanup (err=%v)", obj, err)
 		}
 	}
 
@@ -5792,6 +5809,10 @@ func TestEveryNATSUserGrantIsEnumeratedAndStreamScoped(t *testing.T) {
 	consoleStreams := a2aSameVerbsOn(
 		[]string{a2aTasksStream, "DIRECTORY", a2aTopicsStateStream, a2aTopicsJournalStream},
 		"STREAM.INFO", "CONSUMER.CREATE", "CONSUMER.INFO", "CONSUMER.MSG.NEXT")
+	// Plus the profiles' submissions, read by subject and nothing else: no
+	// STREAM.INFO (the same subjects_filter listing) and no consumer verb,
+	// so a browser credential can't pull a profile's queue.
+	consoleStreams[a2aProfileSubmitStream] = []string{"DIRECT.GET"}
 	rows := map[string]a2aGrantRow{
 		"gateway": {
 			streams: map[string][]string{

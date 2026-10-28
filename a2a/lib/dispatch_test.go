@@ -265,13 +265,15 @@ func TestTheOperatorsDispatchConfigDecodesAndValidates(t *testing.T) {
 // fixture, written by the operator's tests) agree with this package's
 // constants, and the durable passes SubscribeHeld's checks: the operator
 // can't import lib, so this is what holds its copies of the held mark, the
-// AckWait, the tamper list and the labels equal to these.
+// AckWait and the labels equal to these. The two tamper lists aren't
+// compared; a drift makes the dispatcher refuse to bind, which fails safe.
 func TestTheOperatorsHeldDurableIsOneSubscribeHeldBinds(t *testing.T) {
 	raw, err := os.ReadFile("testdata/rendered-held-durable.json")
 	if err != nil {
 		t.Fatalf("%v\nRegenerate with: go test ./internal/controller/ -run 'Fixture' -update (in k8s-operator)", err)
 	}
 	var doc struct {
+		Stream        string            `json:"stream"`
 		Durable       string            `json:"durable"`
 		Filter        string            `json:"filter"`
 		AckPolicy     string            `json:"ackPolicy"`
@@ -285,8 +287,8 @@ func TestTheOperatorsHeldDurableIsOneSubscribeHeldBinds(t *testing.T) {
 	if err := dec.Decode(&doc); err != nil {
 		t.Fatal(err)
 	}
-	if doc.Durable != ProfileDurableName("tse", "read", SubmitKindTop) || doc.Filter != ProfileDurableFilter("tse", "read", SubmitKindTop) {
-		t.Errorf("durable %q filter %q, want lib's names", doc.Durable, doc.Filter)
+	if doc.Stream != ProfileSubmitStream || doc.Durable != ProfileDurableName("tse", "read", SubmitKindTop) || doc.Filter != ProfileDurableFilter("tse", "read", SubmitKindTop) {
+		t.Errorf("stream %q durable %q filter %q, want lib's names", doc.Stream, doc.Durable, doc.Filter)
 	}
 	ackWait, err := time.ParseDuration(doc.AckWait)
 	if err != nil || ackWait != DefaultHeldAckWait {

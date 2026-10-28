@@ -95,15 +95,14 @@ func a2aDispatcherPodSelector(agent *agentv1alpha1.PlatformAgent) map[string]str
 
 // dispatcherIdentity is the dispatcher's bus principal. Every grant, and why:
 //
-//   - its durables on TASKS (profile-<profile>-<tier>-<kind>, which only the
-//     operator creates): INFO to bind, MSG.NEXT to fetch, and $JS.ACK on them
-//     to ack, nak and send the in-progress heartbeats a held message lives on.
-//     No CONSUMER.CREATE: the durables are the operator's. Each durable is
-//     named: a NATS wildcard matches a whole token, never a prefix, so
-//     TASKS.profile-* would name one consumer called "profile-*" and TASKS.*
-//     would reach every session's consumers and so every task's input. The
-//     grants are fixed for a connection, so the dispatcher reconnects when
-//     its config adds a durable (contract on #3655).
+//   - its durables on PROFILE_SUBMITS (profile-<profile>-<tier>-<kind>,
+//     which only the operator creates): INFO to bind, MSG.NEXT to fetch, and
+//     $JS.ACK on them to ack, nak and send the in-progress heartbeats a held
+//     message lives on. No CONSUMER.CREATE: the durables are the operator's.
+//     Each durable is named rather than PROFILE_SUBMITS.*, so a dispatcher
+//     reads only the durables its config lists. The grants are fixed for a
+//     connection, so the dispatcher reconnects when its config adds a
+//     durable (contract on #3655).
 //   - PROFILE_LEASES, which it alone writes: put and delete on $KV, INFO and
 //     direct get, and CONSUMER.CREATE/DELETE on the bucket's stream for the
 //     ordered consumer that lists a (profile, tier)'s keys after a restart.
@@ -120,16 +119,16 @@ func a2aDispatcherPodSelector(agent *agentv1alpha1.PlatformAgent) map[string]str
 //   - the verifier, for CheckProfileRun, on its own caller subject, with
 //     answers in its own reply namespace.
 //
-// No subscribe on a2a.tasks.>: it reads submissions only through its
-// durables, and never a task's .in or .events.
+// No subscribe on a2a.tasks.> or a2a.submit.>: it reads submissions only
+// through its durables, and never a task's .in or .events.
 func dispatcherIdentity(agent *agentv1alpha1.PlatformAgent, ns string, profiles, durables []string) a2aIdentity {
 	const leases = "KV_PROFILE_LEASES"
 	var perProfile []string
 	for _, d := range durables {
 		perProfile = append(perProfile,
-			"$JS.API.CONSUMER.INFO.TASKS."+d,
-			"$JS.API.CONSUMER.MSG.NEXT.TASKS."+d,
-			"$JS.ACK.TASKS."+d+".>",
+			"$JS.API.CONSUMER.INFO."+a2aProfileSubmitStream+"."+d,
+			"$JS.API.CONSUMER.MSG.NEXT."+a2aProfileSubmitStream+"."+d,
+			"$JS.ACK."+a2aProfileSubmitStream+"."+d+".>",
 		)
 	}
 	for _, p := range profiles {

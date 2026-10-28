@@ -686,7 +686,10 @@ func TestThePlatformAgentCRDBoundsTheDispatchIntervals(t *testing.T) {
 		{agentv1alpha1.ProfileTuning{RenewSeconds: ptr.To(31), LeaseSeconds: ptr.To(100), RestartGraceSeconds: ptr.To(62)}, ""},
 		{agentv1alpha1.ProfileTuning{RenewSeconds: ptr.To(30), LeaseSeconds: ptr.To(90)}, ""},
 		{agentv1alpha1.ProfileTuning{Ceiling: ptr.To(4), ChildReserve: ptr.To(3)}, ""},
-		{agentv1alpha1.ProfileTuning{Ceiling: ptr.To(4), ChildReserve: ptr.To(4)}, "childReserve must be below ceiling"},
+		{agentv1alpha1.ProfileTuning{Ceiling: ptr.To(4), ChildReserve: ptr.To(4)}, "childReserve must be below the profile ceiling"},
+		// With the ceiling unset, the reserve is held to maxInProgress's default (6).
+		{agentv1alpha1.ProfileTuning{ChildReserve: ptr.To(6)}, "childReserve must be below the profile ceiling"},
+		{agentv1alpha1.ProfileTuning{ChildReserve: ptr.To(5)}, ""},
 		// The task deadline cap may only be lowered from 6h.
 		{agentv1alpha1.ProfileTuning{MaxTaskDeadlineSeconds: ptr.To(900)}, ""},
 		{agentv1alpha1.ProfileTuning{MaxTaskDeadlineSeconds: ptr.To(21601)}, "maxTaskDeadlineSeconds"},

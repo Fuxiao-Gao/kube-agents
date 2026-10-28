@@ -14,9 +14,9 @@ import (
 	agentv1alpha1 "github.com/gke-labs/kube-agents/k8s-operator/api/v1alpha1"
 )
 
-// jetStreamWithTasks starts an embedded JetStream server holding a TASKS
-// stream shaped like the provisioned one (every a2a.tasks subject).
-func jetStreamWithTasks(t *testing.T) jetstream.JetStream {
+// jetStreamWithProfileSubmits starts an embedded JetStream server holding a
+// stream shaped like the provisioned PROFILE_SUBMITS (every a2a.submit subject).
+func jetStreamWithProfileSubmits(t *testing.T) jetstream.JetStream {
 	t.Helper()
 	s, err := natsserver.NewServer(&natsserver.Options{Port: -1, JetStream: true, StoreDir: t.TempDir()})
 	if err != nil {
@@ -36,7 +36,7 @@ func jetStreamWithTasks(t *testing.T) jetstream.JetStream {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := js.CreateStream(context.Background(), jetstream.StreamConfig{Name: a2aTasksStream, Subjects: []string{"a2a.tasks.>"}}); err != nil {
+	if _, err := js.CreateStream(context.Background(), jetstream.StreamConfig{Name: a2aProfileSubmitStream, Subjects: []string{a2aProfileSubmitPrefix + ">"}}); err != nil {
 		t.Fatal(err)
 	}
 	return js
@@ -47,7 +47,7 @@ func jetStreamWithTasks(t *testing.T) jetstream.JetStream {
 // takes, filtered to that kind's submissions and capped at the profile's
 // concurrency.
 func TestEnsureDurableMakesWhatTheDispatcherBinds(t *testing.T) {
-	js := jetStreamWithTasks(t)
+	js := jetStreamWithProfileSubmits(t)
 	ctx := context.Background()
 	p := testAgentProfile("ns", "tse", func(p *agentv1alpha1.AgentProfile) { p.Spec.Concurrency = 3 })
 	want := desiredProfileDurables(&p)
@@ -58,7 +58,7 @@ func TestEnsureDurableMakesWhatTheDispatcherBinds(t *testing.T) {
 		if err := ensureDurable(ctx, js, d); err != nil {
 			t.Fatalf("ensure %s: %v", d.name, err)
 		}
-		c, err := js.Consumer(ctx, a2aTasksStream, d.name)
+		c, err := js.Consumer(ctx, a2aProfileSubmitStream, d.name)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -74,22 +74,23 @@ func TestEnsureDurableMakesWhatTheDispatcherBinds(t *testing.T) {
 	if err := ensureDurable(ctx, js, d); err != nil {
 		t.Fatal(err)
 	}
-	c, _ := js.Consumer(ctx, a2aTasksStream, d.name)
+	c, _ := js.Consumer(ctx, a2aProfileSubmitStream, d.name)
 	if got := c.CachedInfo().Config.MaxAckPending; got != 5 {
 		t.Errorf("MaxAckPending after the change = %d, want 5", got)
 	}
 }
 
-// A consumer under a durable's name that this operator didn't make, or one
-// whose filter or AckWait differs, is refused rather than adopted or moved
-// under a bound dispatcher, and is never deleted.
+// A consumer under a durable's name that this operator didn't make is refused
+// and never deleted; one it made whose filter or AckWait has moved is refused
+// rather than moved under a bound dispatcher, and is deleted when its profile
+// or tier goes (it carries the mark).
 func TestEnsureDurableRefusesWhatItDidntMakeAndDeletesOnlyItsOwn(t *testing.T) {
-	js := jetStreamWithTasks(t)
+	js := jetStreamWithProfileSubmits(t)
 	ctx := context.Background()
 	p := testAgentProfile("ns", "tse")
 	d := desiredProfileDurables(&p)[0]
 	// Someone else's consumer under the name, with a wider filter.
-	if _, err := js.CreateOrUpdateConsumer(ctx, a2aTasksStream, jetstream.ConsumerConfig{Durable: d.name, FilterSubject: "a2a.tasks.>", AckPolicy: jetstream.AckExplicitPolicy}); err != nil {
+	if _, err := js.CreateOrUpdateConsumer(ctx, a2aProfileSubmitStream, jetstream.ConsumerConfig{Durable: d.name, FilterSubject: a2aProfileSubmitPrefix + ">", AckPolicy: jetstream.AckExplicitPolicy}); err != nil {
 		t.Fatal(err)
 	}
 	if err := ensureDurable(ctx, js, d); err == nil || !strings.Contains(err.Error(), "held-delivery mark") {
@@ -98,12 +99,12 @@ func TestEnsureDurableRefusesWhatItDidntMakeAndDeletesOnlyItsOwn(t *testing.T) {
 	if err := deleteDurable(ctx, js, d.name); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := js.Consumer(ctx, a2aTasksStream, d.name); err != nil {
+	if _, err := js.Consumer(ctx, a2aProfileSubmitStream, d.name); err != nil {
 		t.Errorf("a consumer the operator didn't make was deleted: %v", err)
 	}
 	// Ours, but with a filter that moved: refused, not moved.
-	_ = js.DeleteConsumer(ctx, a2aTasksStream, d.name)
-	if _, err := js.CreateOrUpdateConsumer(ctx, a2aTasksStream, jetstream.ConsumerConfig{
+	_ = js.DeleteConsumer(ctx, a2aProfileSubmitStream, d.name)
+	if _, err := js.CreateOrUpdateConsumer(ctx, a2aProfileSubmitStream, jetstream.ConsumerConfig{
 		Durable: d.name, FilterSubject: profileDurableFilter("tse", "read", "child"), AckPolicy: jetstream.AckExplicitPolicy,
 		AckWait: a2aHeldAckWait, Metadata: map[string]string{a2aHeldMarkerKey: a2aHeldMarkerValue},
 	}); err != nil {
@@ -116,7 +117,7 @@ func TestEnsureDurableRefusesWhatItDidntMakeAndDeletesOnlyItsOwn(t *testing.T) {
 	if err := deleteDurable(ctx, js, d.name); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := js.Consumer(ctx, a2aTasksStream, d.name); err == nil {
+	if _, err := js.Consumer(ctx, a2aProfileSubmitStream, d.name); err == nil {
 		t.Error("the operator's own durable survived its delete")
 	}
 }
@@ -124,7 +125,7 @@ func TestEnsureDurableRefusesWhatItDidntMakeAndDeletesOnlyItsOwn(t *testing.T) {
 // Dropping a tier deletes that tier's durables and keeps the others; a
 // withdrawn profile loses them all.
 func TestSyncingAProfilesDurablesDropsATiersQueue(t *testing.T) {
-	js := jetStreamWithTasks(t)
+	js := jetStreamWithProfileSubmits(t)
 	ctx := context.Background()
 	both := testAgentProfile("ns", "tse", func(p *agentv1alpha1.AgentProfile) {
 		p.Spec.AllowedTiers = []string{agentv1alpha1.AgentProfileTierRead, agentv1alpha1.AgentProfileTierUnattended}
@@ -136,7 +137,7 @@ func TestSyncingAProfilesDurablesDropsATiersQueue(t *testing.T) {
 		}
 	}
 	exists := func(name string) bool {
-		_, err := js.Consumer(ctx, a2aTasksStream, name)
+		_, err := js.Consumer(ctx, a2aProfileSubmitStream, name)
 		return err == nil
 	}
 	sync(desiredProfileDurables(&both))
@@ -158,8 +159,8 @@ func TestSyncingAProfilesDurablesDropsATiersQueue(t *testing.T) {
 	}
 }
 
-// On a TASKS stream with no consumer slot left, the durable's refusal says
-// why and what to do, rather than a bare server error.
+// On a stream with no consumer slot left, the durable's refusal says why,
+// rather than a bare server error.
 func TestADurableThatDoesntFitSaysWhy(t *testing.T) {
 	s, err := natsserver.NewServer(&natsserver.Options{Port: -1, JetStream: true, StoreDir: t.TempDir()})
 	if err != nil {
@@ -177,7 +178,7 @@ func TestADurableThatDoesntFitSaysWhy(t *testing.T) {
 	t.Cleanup(nc.Close)
 	js, _ := jetstream.New(nc)
 	ctx := context.Background()
-	if _, err := js.CreateStream(ctx, jetstream.StreamConfig{Name: a2aTasksStream, Subjects: []string{"a2a.tasks.>"}, MaxConsumers: 1}); err != nil {
+	if _, err := js.CreateStream(ctx, jetstream.StreamConfig{Name: a2aProfileSubmitStream, Subjects: []string{a2aProfileSubmitPrefix + ">"}, MaxConsumers: 1}); err != nil {
 		t.Fatal(err)
 	}
 	p := testAgentProfile("ns", "tse")
@@ -185,7 +186,7 @@ func TestADurableThatDoesntFitSaysWhy(t *testing.T) {
 	if err := ensureDurable(ctx, js, want[0]); err != nil {
 		t.Fatalf("the first durable: %v", err)
 	}
-	if err := ensureDurable(ctx, js, want[1]); err == nil || !strings.Contains(err.Error(), "no consumer slot left") || !strings.Contains(err.Error(), "maxSessions") {
+	if err := ensureDurable(ctx, js, want[1]); err == nil || !strings.Contains(err.Error(), "no consumer slot left") || !strings.Contains(err.Error(), "16 profiles") {
 		t.Errorf("a durable past max_consumers = %v, want the slot explanation", err)
 	}
 }
@@ -194,11 +195,11 @@ func TestADurableThatDoesntFitSaysWhy(t *testing.T) {
 // still not adopted when it carries a setting the operator never sets: the
 // mark is a public constant.
 func TestEnsureDurableRefusesAForgedMark(t *testing.T) {
-	js := jetStreamWithTasks(t)
+	js := jetStreamWithProfileSubmits(t)
 	ctx := context.Background()
 	p := testAgentProfile("ns", "tse")
 	d := desiredProfileDurables(&p)[0]
-	if _, err := js.CreateOrUpdateConsumer(ctx, a2aTasksStream, jetstream.ConsumerConfig{
+	if _, err := js.CreateOrUpdateConsumer(ctx, a2aProfileSubmitStream, jetstream.ConsumerConfig{
 		Durable: d.name, FilterSubject: d.filter, AckPolicy: jetstream.AckExplicitPolicy, MaxAckPending: d.maxAckPending,
 		AckWait: a2aHeldAckWait, Metadata: map[string]string{a2aHeldMarkerKey: a2aHeldMarkerValue}, MaxDeliver: 1,
 	}); err != nil {
@@ -228,7 +229,7 @@ func TestATierSwapFitsOnAFullStream(t *testing.T) {
 	t.Cleanup(nc.Close)
 	js, _ := jetstream.New(nc)
 	ctx := context.Background()
-	if _, err := js.CreateStream(ctx, jetstream.StreamConfig{Name: a2aTasksStream, Subjects: []string{"a2a.tasks.>"}, MaxConsumers: 2}); err != nil {
+	if _, err := js.CreateStream(ctx, jetstream.StreamConfig{Name: a2aProfileSubmitStream, Subjects: []string{a2aProfileSubmitPrefix + ">"}, MaxConsumers: 2}); err != nil {
 		t.Fatal(err)
 	}
 	sync := func(want []profileDurable) error { return syncDurables(ctx, js, "tse", want) }
@@ -253,6 +254,7 @@ func TestRenderedHeldDurableFixture(t *testing.T) {
 	p := testAgentProfile("ns", "tse", func(p *agentv1alpha1.AgentProfile) { p.Spec.Concurrency = 3 })
 	d := desiredProfileDurables(&p)[0]
 	doc := map[string]any{
+		"stream":        a2aProfileSubmitStream,
 		"durable":       d.name,
 		"filter":        d.filter,
 		"ackPolicy":     "explicit",

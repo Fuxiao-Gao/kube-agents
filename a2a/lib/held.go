@@ -304,8 +304,10 @@ func (h *heldState) bind(ctx context.Context, js jetstream.JetStream, cfg Subscr
 // carry a setting that quietly breaks held delivery: a push deliver subject,
 // headers-only deliveries with no envelope, an inactivity reaper that deletes
 // the durable during a dispatcher restart, a delivery limit that drops a task
-// after one failed offer, or a start position or backoff that skips or delays
-// submissions. Each of these refuses the bind.
+// after one failed offer, a start position or backoff that skips or delays
+// submissions, a pause, a priority pin, pull limits, or memory storage. Each
+// of these refuses the bind. MaxWaiting isn't checked: the server fills its
+// own default in, so a stored value can't tell an edit from that default.
 func heldConfigTampered(cc jetstream.ConsumerConfig) string {
 	switch {
 	case cc.DeliverSubject != "":
@@ -324,6 +326,14 @@ func heldConfigTampered(cc jetstream.ConsumerConfig) string {
 		return "backs off redeliveries"
 	case cc.RateLimit != 0:
 		return "is rate limited"
+	case cc.PauseUntil != nil && !cc.PauseUntil.IsZero():
+		return "is paused until " + cc.PauseUntil.String()
+	case cc.PriorityPolicy != jetstream.PriorityPolicyNone || len(cc.PriorityGroups) > 0:
+		return "pins or overflows deliveries to a priority group"
+	case cc.MaxRequestBatch != 0 || cc.MaxRequestExpires != 0 || cc.MaxRequestMaxBytes != 0:
+		return "limits pull requests"
+	case cc.MemoryStorage:
+		return "keeps its state in memory, lost on a server restart"
 	}
 	return ""
 }
