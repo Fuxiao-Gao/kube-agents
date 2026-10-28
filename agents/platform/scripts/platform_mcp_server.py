@@ -1279,13 +1279,15 @@ def update_finding(
     through. A decision covers the finding's whole item: every other open,
     undecided finding with the same check, project and cluster (one line in
     the nudge's message) takes it too, and their ids come back in
-    `item_rows_decided`. So one call per item the user decided is enough. A
-    finding in state 'surfaced' was shown to the user in the nudge as one line
-    with every finding of its item, so a decision on its id is the user's
-    decision for that line: apply it, then say in the reply which other
-    findings it covered. Ask first only when the finding is not 'surfaced',
-    because the user has not seen its line. A finding that no longer
-    reproduces is not set here: that is a verification outcome.
+    `item_rows_decided`. So one call per item the user decided is enough.
+    Covering the rest of the item is the decision's design, not a side effect
+    to confirm: the nudge prints one id per item and tells the user that a
+    decision on it covers every undecided finding of the item. So apply the
+    decision the user gave, and say in the reply which other findings it
+    covered. Ask first only when the item also holds a finding in state
+    'queued': no message has named that finding yet, so the user has not seen
+    it. A finding that no longer reproduces is not set here: that is a
+    verification outcome.
 
     Args:
         finding_id: The finding's id.
