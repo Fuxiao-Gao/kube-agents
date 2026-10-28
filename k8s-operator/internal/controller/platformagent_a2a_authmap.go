@@ -159,6 +159,18 @@ func renderA2AAuthMap(agent *agentv1alpha1.PlatformAgent, profiles []agentv1alph
 		})
 	}
 	identities = append(identities, agentProfileMapEntries(agent, profiles)...)
+	// The dispatcher, when this operator has an image for it. Its grants
+	// name each durable the operator creates, so it is built here, from the
+	// same profiles (platformagent_a2a_dispatcher.go).
+	if a2aDispatcherEnabled() {
+		id := dispatcherIdentity(agent, agent.Namespace, dispatcherDurables(agent, profiles))
+		identities = append(identities, a2aAuthMapIdentity{
+			ServiceAccount: id.serviceAccount,
+			User:           id.user,
+			Account:        id.account,
+			Grants:         a2aAuthMapGrants{Publish: id.publish, Subscribe: id.subscribe},
+		})
+	}
 
 	// Refuse here what the callout would refuse there.
 	//

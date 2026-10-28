@@ -1,7 +1,9 @@
 package lib
 
 import (
+	"bytes"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -226,5 +228,31 @@ func TestThePoolSelectorNamesTheWorkerComponentProfileAndTier(t *testing.T) {
 	want := "kubeagents.x-k8s.io/a2a-component=agentprofile-worker,kubeagents.x-k8s.io/agentprofile=tse,kubeagents.x-k8s.io/agentprofile-tier=read"
 	if got := ProfilePoolSelector("tse", "read"); got != want {
 		t.Errorf("selector = %q, want %q", got, want)
+	}
+}
+
+// The dispatch config the operator renders (its fixture, written by the
+// operator's tests) decodes into DispatchConfig and passes the dispatcher's
+// own checks: the operator module can't import this one, so this is what
+// holds the two sets of JSON names equal.
+func TestTheOperatorsDispatchConfigDecodesAndValidates(t *testing.T) {
+	raw, err := os.ReadFile("testdata/rendered-dispatch-config.json")
+	if err != nil {
+		t.Fatalf("%v\nRegenerate with: go test ./internal/controller/ -run 'Fixture' -update (in k8s-operator)", err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var cfg DispatchConfig
+	if err := dec.Decode(&cfg); err != nil {
+		t.Fatalf("the operator's dispatch config does not decode strictly: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("the operator's dispatch config fails the dispatcher's checks: %v", err)
+	}
+	if len(cfg.Profiles) != 1 || cfg.Profiles[0].Name != "tse" || len(cfg.Profiles[0].Parameters) != 3 || len(cfg.Profiles[0].Durables) != 2 {
+		t.Errorf("profiles = %+v", cfg.Profiles)
+	}
+	if cfg.Version == "" || cfg.Namespace == "" || cfg.ProfileNamespace != cfg.Namespace+"-profiles" {
+		t.Errorf("version %q, namespace %q, profile namespace %q", cfg.Version, cfg.Namespace, cfg.ProfileNamespace)
 	}
 }

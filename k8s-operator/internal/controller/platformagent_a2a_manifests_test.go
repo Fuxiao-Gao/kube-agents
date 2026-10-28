@@ -1068,6 +1068,7 @@ func TestBuildA2ANATSNetworkPolicy(t *testing.T) {
 		{"app": "test-agent-gateway"},
 		{"app": "test-agent-a2a-gateway"},
 		{"app": "test-agent-a2a-verifier"},
+		{"app": "test-agent-a2a-dispatcher"},
 		{labelPartOf: a2aPartOf, "app.kubernetes.io/component": "a2a-session"},
 		{labelPartOf: a2aPartOf, a2aComponentLabel: "provision"},
 		{labelPartOf: a2aPartOf, a2aComponentLabel: "seed"},
@@ -1674,6 +1675,7 @@ func TestEveryA2AContainerHasAHardenedSecurityContext(t *testing.T) {
 	dep := buildA2AGatewayDeployment(agent)
 	callout := buildA2ACalloutDeployment(agent)
 	verifier := buildA2AVerifierDeployment(agent)
+	dispatcher := buildA2ADispatcherDeployment(agent)
 	console := buildA2AConsoleDeployment(agent)
 	mcp := buildA2AMCPDeployment(agent)
 
@@ -1682,6 +1684,7 @@ func TestEveryA2AContainerHasAHardenedSecurityContext(t *testing.T) {
 		builder string
 		spec    corev1.PodSpec
 	}{
+		{"dispatcher", "buildA2ADispatcherDeployment", dispatcher.Spec.Template.Spec},
 		{"nats", "buildA2ANATSStatefulSet", sts.Spec.Template.Spec},
 		{"provision", "buildA2AProvisionJob", job.Spec.Template.Spec},
 		{"gateway", "buildA2AGatewayDeployment", dep.Spec.Template.Spec},
@@ -1759,6 +1762,7 @@ func TestEveryA2AContainerLandsInAWorkingDirectoryItsUserCanUse(t *testing.T) {
 	dep := buildA2AGatewayDeployment(agent)
 	callout := buildA2ACalloutDeployment(agent)
 	verifier := buildA2AVerifierDeployment(agent)
+	dispatcher := buildA2ADispatcherDeployment(agent)
 	console := buildA2AConsoleDeployment(agent)
 	mcp := buildA2AMCPDeployment(agent)
 
@@ -1807,6 +1811,13 @@ func TestEveryA2AContainerLandsInAWorkingDirectoryItsUserCanUse(t *testing.T) {
 		// ends it would not announce itself. The callout writes nothing, so
 		// traversable is enough.
 		{render: "callout", builder: "buildA2ACalloutDeployment", container: "callout", spec: callout.Spec.Template.Spec,
+			imageWorkDir: "/home/nonroot", usable: []string{"/"}},
+		// The dispatcher's image is the dispatcher PR's, on the same
+		// distroless static nonroot base as the gateway, callout and
+		// verifier: WorkingDir /home/nonroot, UID 1000 imposed here, and a
+		// binary that writes nothing. Pinned ahead of the image so that PR
+		// builds to it.
+		{render: "dispatcher", builder: "buildA2ADispatcherDeployment", container: a2aDispatcherContainerName, spec: dispatcher.Spec.Template.Spec,
 			imageWorkDir: "/home/nonroot", usable: []string{"/"}},
 		// The third pod on that same distroless static nonroot base, same
 		// shape and same row: WorkingDir /home/nonroot in the image, UID 1000
@@ -2132,6 +2143,9 @@ func remedyRecreateWidth(t *testing.T, message string) int {
 // clean pass run, and require the tree to be empty at the end rather than
 // merely error-free.
 func TestCleanupA2AResumesAfterAMidPassError(t *testing.T) {
+	// With the dispatcher on, so its objects are rendered and the cleanup
+	// is held to deleting them too.
+	t.Setenv(a2aDispatcherImageEnvVar, "registry.example/a2a-dispatcher:test")
 	scheme := setupScheme()
 	agent := a2aTestAgent()
 
