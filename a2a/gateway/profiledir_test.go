@@ -125,12 +125,34 @@ func TestDirectoryFeed_TheReadNeverOverwritesALiveCard(t *testing.T) {
 
 func TestDirectoryFeed_RefusesACardForAnotherProfile(t *testing.T) {
 	f := &directoryFeed{dir: newProfileDirectory(), log: slog.New(slog.NewTextHandler(io.Discard, nil)), live: map[string]bool{}}
-	// A card naming prod-east, relocated onto cluster's subject.
-	if f.apply(lib.AgentSubject("cluster"), cardEnvelope(t, lib.AgentCard{Name: "prod-east"}), true) {
+	// An envelope from cluster's own profile on its own subject, whose card
+	// names another profile: the envelope agrees with the subject, the card
+	// doesn't.
+	payload, err := json.Marshal(lib.AgentCard{Name: "prod-east"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := lib.NewAgentCardEnvelope(lib.Party{Session: "operator", Profile: "cluster"}, "corr-card", payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.apply(lib.AgentSubject("cluster"), raw, true) {
 		t.Fatal("a card relocated onto another profile's subject was applied")
 	}
 	if _, ok := f.dir.lookup("cluster"); ok {
 		t.Fatal("the relocated card was recorded")
+	}
+}
+
+func TestDirectoryFeed_RefusesAnEnvelopeFromAnotherProfile(t *testing.T) {
+	f := &directoryFeed{dir: newProfileDirectory(), log: slog.New(slog.NewTextHandler(io.Discard, nil)), live: map[string]bool{}}
+	// prod-east's own card, relocated onto cluster's subject.
+	if f.apply(lib.AgentSubject("cluster"), cardEnvelope(t, lib.AgentCard{Name: "prod-east"}), true) {
+		t.Fatal("a card relocated onto another profile's subject was applied")
 	}
 }
 

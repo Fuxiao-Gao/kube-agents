@@ -211,8 +211,9 @@ func TestDeliverChildResult_ReachesAProfileParentOnItsIn(t *testing.T) {
 
 func TestDeliverChildResult_LeavesASessionParentToTheWake(t *testing.T) {
 	r := startProfileRig(t)
-	rec := &SessionRecord{Key: "discord:4/4", Tasks: []TaskRef{
-		{ID: "task-parent", Addressee: "chat-otter-1a2b"},
+	rec := &SessionRecord{Key: "discord:4/4", ContextID: "ctx-4", Tasks: []TaskRef{
+		{ID: "task-parent", Addressee: "chat-otter-1a2b", CorrelationID: "corr-p",
+			Attribution: json.RawMessage(`{"requester":{"backend":"discord","subject":"hmac:00"}}`)},
 		{ID: "task-child", Addressee: "prod-east", Role: taskRoleChild, ParentTaskID: "task-parent"},
 	}}
 	child, _ := rec.TaskRefFor("task-child")
