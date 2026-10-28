@@ -97,7 +97,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 try:
-    from eval_dashboard import gate_issue, ghcli, nightly, periodics
+    from eval_dashboard import gate_issue, ghcli, nightly, nightly_latency, periodics
 
     # By name, not as a module: `health` is the parameter every render_*
     # function here takes, and importing the module would shadow it.
@@ -118,7 +118,7 @@ try:
     )
 except ImportError:  # run as a script: scripts/eval_dashboard/post_health.py
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-    from eval_dashboard import gate_issue, ghcli, nightly, periodics
+    from eval_dashboard import gate_issue, ghcli, nightly, nightly_latency, periodics
     from eval_dashboard.health import (
         CAPACITY_ROLES,
         POOL_BREACH,
@@ -1560,6 +1560,23 @@ def pool_digest_line(pool: dict) -> str:
     )
 
 
+def nightly_latency_line(data: dict, now: datetime) -> str | None:
+    """The latency block's night line (nightly_latency.py) for the one-line
+    nightly summary: last night only, when it carried timing; the line says
+    so when the night is cut short or partial. It runs on the morning the
+    section failed, so a failure of its own is no line, never a lost
+    digest."""
+    try:
+        night, _ = nightly.last_night(data, now)
+        if night is None:
+            return None
+        return nightly_latency.night_line(nightly.night_reports(data, running=nightly.running_nights(data, now)))
+    except Exception:  # noqa: BLE001 -- the digest must still go out
+        traceback.print_exc()
+        log("warning: nightly latency line skipped")
+        return None
+
+
 def render_digest(health: dict, now: datetime, data: dict | None = None, section=None, coverage=()) -> str:
     """The 24h numbers, the stale note while a stall lasts, and -- when
     data.json was given -- last night's nightly run. ``section`` is what
@@ -1568,7 +1585,9 @@ def render_digest(health: dict, now: datetime, data: dict | None = None, section
     the one line on the night with a link to its report -- the counts, what
     is newly failing against the night before, the opening chat turn's p50
     and p95 when the reps carried it, and the wall clock, or that the night
-    was truncated or missing -- and a reason adds a line saying why the
+    was truncated or missing -- then the latency block's night line
+    (nightly_latency.py) when last night carried timing, and a reason adds
+    a line saying why the
     section is missing. ``coverage`` is ``coverage_lines``'s: one line per
     domain with no blocking presubmit seat, none while every domain has one."""
     metrics = health.get("metrics") or {}
@@ -1611,6 +1630,9 @@ def render_digest(health: dict, now: datetime, data: dict | None = None, section
             lines.append("")
     elif data is not None:
         lines.append(nightly.digest_line(data, now, clock=lambda value: clock(value, weekday=True)))
+        latency = nightly_latency_line(data, now)
+        if latency:
+            lines.append(latency)
         lines.append(NIGHTLY_URL)
         if isinstance(section, str):
             lines.append(NIGHTLY_SKIPPED.format(reason=section))
