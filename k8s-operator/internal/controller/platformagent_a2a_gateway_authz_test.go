@@ -288,8 +288,10 @@ func TestGatewayJetStreamGrantOnARealServer(t *testing.T) {
 		{"$JS.API.CONSUMER.DELETE." + a2aTasksStream + ".bridge-platform", ""},
 		{"$JS.API.CONSUMER.DELETE." + a2aTasksStream + "." + a2aGatewayRelayDurable, ""},
 		{"$JS.API.CONSUMER.INFO." + a2aTasksStream + "." + a2aGatewayRelayDurable, ""},
-		// The directory: the identity plane. The gateway reads it by
-		// subscribing to the cards, and holds nothing on it here.
+		// The directory: the identity plane. Subscribing alone misses cards
+		// published before the gateway started, so it reads them too, by
+		// DIRECT.GET on card subjects only (table 1). Nothing past that: no
+		// purge or delete, no consumer, no batch get across the stream.
 		{"$JS.API.STREAM.PURGE.DIRECTORY", ""},
 		{"$JS.API.STREAM.DELETE.DIRECTORY", ""},
 		{"$JS.API.CONSUMER.CREATE.DIRECTORY.peek", `{"stream_name":"DIRECTORY","config":{"name":"peek","deliver_subject":"_INBOX.gateway.peek"}}`},

@@ -5158,9 +5158,11 @@ func TestGatewayHoldsNoWholesaleJetStreamAPI(t *testing.T) {
 			"$JS.API.DIRECT.GET."+s,
 		)
 	}
-	// The directory, the identity plane: the gateway reads each profile's
-	// card (its subject list, then a direct get by card subject) and holds
-	// no consumer on it and no direct get past the card subjects.
+	// The directory, the identity plane. The gateway follows the cards by
+	// subscribing, but subscribing alone misses cards published before it
+	// started, so it also reads them: the subject list, then DIRECT.GET on
+	// card subjects only. No consumer on it, and no direct get past the card
+	// subjects.
 	forbidden = append(forbidden,
 		"$JS.API.CONSUMER.CREATE.DIRECTORY.x",
 		"$JS.API.CONSUMER.CREATE.DIRECTORY.x.a2a.agents.platform",
