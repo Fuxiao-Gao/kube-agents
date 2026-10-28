@@ -294,6 +294,10 @@ const (
 // publish for an addressee this grant does not name.
 const a2aBridgeAddressee = "platform"
 
+// a2aProfileSubmitSubjects is every AgentProfile's submission subject,
+// a2a.tasks.<profile>.<tier>.<kind>.<task>.submit (lib.TaskSubmitSubject).
+const a2aProfileSubmitSubjects = "a2a.tasks.*.*.*.*.submit"
+
 // The operator's own bus principal: its NATS user and inbox owner, and the
 // directory it writes AgentProfile cards to (agentprofile_card.go).
 const (
@@ -399,6 +403,11 @@ func gatewayIdentity(agent *agentv1alpha1.PlatformAgent, ns string) a2aIdentity 
 	publish := []string{
 		"a2a.tasks.*.*.in",
 		"a2a.tasks.*.*.supervisor",
+		// A new task for an AgentProfile, on the profile's .submit subject
+		// with its tier and kind (spec-profiles-dispatch.md, "Addressing").
+		// The gateway is the subject's one writer: the dispatcher reads it
+		// through its durables, and no worker or session holds it.
+		a2aProfileSubmitSubjects,
 		// The session registry's data plane. The bucket is spelled here and
 		// named by constant inside the grant function; the two are held
 		// together by TestGatewayGrantNamesTheBucketItsDataPlaneWritesTo,
@@ -438,6 +447,14 @@ func gatewayIdentity(agent *agentv1alpha1.PlatformAgent, ns string) a2aIdentity 
 		a2aBoardSubject,
 	}
 	publish = append(publish, a2aGatewayJetStreamGrants()...)
+	// The profile cards' start-up read (a2a/gateway/profiledir.go): the
+	// directory's subject list, then a direct get per profile. The live half
+	// is the a2a.agents.> subscription below. STREAM.INFO on DIRECTORY tells
+	// the gateway the profile names its subscription already shows it.
+	publish = append(publish,
+		"$JS.API.STREAM.INFO."+a2aDirectoryStream,
+		"$JS.API.DIRECT.GET."+a2aDirectoryStream+"."+a2aDirectorySubjectPrefix+"*",
+	)
 	publish = append(publish,
 		"$JS.ACK.TASKS.>",
 		"$JS.FC.>",
