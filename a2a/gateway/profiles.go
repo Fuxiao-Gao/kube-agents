@@ -128,7 +128,8 @@ func targetOf(params map[string]string) (t clusterTarget, ok, partial bool) {
 }
 
 // profileDirectory is the gateway's view of the profiles it can address, kept
-// from their cards on DIRECTORY (a2a.agents.<profile>). Safe for concurrent use.
+// from their cards on DIRECTORY (a2a.agents.<profile>). Safe for concurrent
+// use; a nil directory reads as empty.
 type profileDirectory struct {
 	mu    sync.RWMutex
 	cards map[string]lib.AgentCard
@@ -151,6 +152,9 @@ func (d *profileDirectory) put(name string, card *lib.AgentCard) {
 }
 
 func (d *profileDirectory) lookup(name string) (lib.AgentCard, bool) {
+	if d == nil {
+		return lib.AgentCard{}, false
+	}
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	c, ok := d.cards[name]
@@ -159,6 +163,9 @@ func (d *profileDirectory) lookup(name string) (lib.AgentCard, bool) {
 
 // pinnedTo is every profile pinned to t, in name order.
 func (d *profileDirectory) pinnedTo(t clusterTarget) []string {
+	if d == nil {
+		return nil
+	}
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	var out []string

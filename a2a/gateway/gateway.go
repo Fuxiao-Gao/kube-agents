@@ -166,14 +166,17 @@ func SupervisorAgreement(cfg *Config) lib.AgreementPolicy {
 
 // Gateway wires the adapter, the session manager, and the bus client.
 type Gateway struct {
-	cfg     *Config
-	client  *lib.Client
-	reg     *Registry
-	adapter Adapter
-	pm      *PrincipalMap
-	ps      *Pseudonymizer
-	log     *slog.Logger
-	spawner spawner // nil until SpawnSessions arms (W4)
+	// profiles is the AgentProfiles this gateway can address, kept from
+	// their cards on DIRECTORY (startProfileDirectory).
+	profiles *profileDirectory
+	cfg      *Config
+	client   *lib.Client
+	reg      *Registry
+	adapter  Adapter
+	pm       *PrincipalMap
+	ps       *Pseudonymizer
+	log      *slog.Logger
+	spawner  spawner // nil until SpawnSessions arms (W4)
 	// usage reads what "/feedback summary" prints (feedback_summary.go);
 	// nil where the gateway has no cluster credentials, and the command then
 	// answers that the summary is unavailable.
@@ -496,6 +499,7 @@ func New(o Options) (*Gateway, error) {
 		log:              log,
 		runCtx:           context.Background(),
 		sessionLocks:     map[string]*sessionLockEntry{},
+		profiles:         newProfileDirectory(),
 		taskSessions:     map[string]string{},
 		relays:           map[string]*relayState{},
 		cardStopTimers:   map[string]*time.Timer{},
@@ -606,6 +610,7 @@ func (g *Gateway) Run(ctx context.Context) error {
 	}
 	defer sub.Stop()
 
+	g.startProfileDirectory(ctx)
 	go g.reapLoop(ctx)
 	if g.spawner != nil {
 		go g.sweepLoop(ctx)
