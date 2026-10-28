@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,22 +109,6 @@ func TestAProfileNamedUnderTheOldBoundSurvivesTheCRDUpgrade(t *testing.T) {
 	if err := c.Update(ctx, live); err != nil {
 		t.Fatalf("upgrading the CRD: %v", err)
 	}
-	// The new rules are in force once a fresh 55-character create is refused.
-	deadline := time.Now().Add(crdSettleTimeout)
-	for {
-		err := create(strings.Repeat("n", 55))
-		if err != nil && strings.Contains(err.Error(), "too long for its tiers") {
-			break
-		}
-		if err == nil {
-			t.Fatal("a new 55-character profile was admitted under the upgraded CRD")
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the upgraded CRD never refused a new 55-character profile: %v", err)
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-
 	get := func(name string) *agentv1alpha1.AgentProfile {
 		t.Helper()
 		var p agentv1alpha1.AgentProfile
@@ -131,6 +116,32 @@ func TestAProfileNamedUnderTheOldBoundSurvivesTheCRDUpgrade(t *testing.T) {
 			t.Fatalf("get %s: %v", name, err)
 		}
 		return &p
+	}
+
+	// The new rules are in force once a fresh 55-character create is refused.
+	// Until the server picks up the new CRD such a create is still admitted,
+	// so each probe gets its own name and an admitted one is deleted.
+	deadline := time.Now().Add(crdSettleTimeout)
+	for i := 0; ; i++ {
+		probe := fmt.Sprintf("n%03d%s", i, strings.Repeat("n", 51))
+		err := create(probe)
+		if err != nil && strings.Contains(err.Error(), "too long for its tiers") {
+			break
+		}
+		if err == nil {
+			p := get(probe)
+			p.Finalizers = nil
+			if err := c.Update(ctx, p); err != nil {
+				t.Fatalf("clearing a probe admitted under the old CRD: %v", err)
+			}
+			if err := c.Delete(ctx, p); err != nil {
+				t.Fatalf("deleting a probe admitted under the old CRD: %v", err)
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the upgraded CRD never refused a new 55-character profile: %v", err)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 
 	// The old profile: status, spec, finalizer removal and delete all go through.
