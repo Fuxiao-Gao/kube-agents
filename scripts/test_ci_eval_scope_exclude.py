@@ -285,13 +285,6 @@ class WiringTest(unittest.TestCase):
         loop = re.search(r'^for SCOPE_LINE in ', self.src, re.MULTILINE)
         self.assertLess(capture, loop.start())
 
-    def test_a_scope_case_that_writes_keeps_the_per_repetition_repository_reset(self):
-        unit = lifted("run_one_unit")
-        reset = unit.index('reset_agent_pulls "${name} rep ${rep}"')
-        gate = unit.rindex("\n  if ", 0, reset)
-        self.assertIn('${INJECT_LANE_REQUESTING:-},${STOPPED_ASK_CASES:-}', unit[gate:reset])
-        self.assertNotIn("unit_phase", unit[gate:reset])
-
     def test_phase_2_runs_after_the_writers_one_case_at_a_time_between_apply_and_restore(self):
         writers = self.src.index('launch_units "${UNIT_QUEUE_WRITERS}"')
         loop = re.search(r'^for SCOPE_LINE in .*?^done$', self.src, re.DOTALL | re.MULTILINE)

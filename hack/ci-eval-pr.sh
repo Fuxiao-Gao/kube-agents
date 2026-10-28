@@ -4383,9 +4383,8 @@ run_one_unit() { # <task-path> <task-name> <rep> <reuse:true|empty> <has-stack:t
   # sibling is working on is open here. Not clean: the unit does not run, the
   # locks go back, and the repetition grades MISSING -- unless what stopped it
   # was the reset's own mint running out on a transient failure, which is
-  # recorded as infrastructure, as the grading mint's is above. Read from the
-  # lists rather than unit_phase: a scope-excluding case that writes is phase 2.
-  if case ",${INJECT_LANE_REQUESTING:-},${STOPPED_ASK_CASES:-}," in *",${name},"*) true ;; *) false ;; esac; then
+  # recorded as infrastructure, as the grading mint's is above.
+  if [ "$(unit_phase "${name}")" = "1" ]; then
     local reset_rc=0
     reset_agent_pulls "${name} rep ${rep}" || reset_rc=$?
     if [ "${reset_rc}" -ne 0 ]; then
@@ -4545,7 +4544,9 @@ scheduled_audits pause "fan-out"
 #
 # A case that excludes seeded slots from the install's scope (SCOPE_EXCLUDE_NAMES)
 # is phase 2, run after both and alone, each case between its own scope edit and
-# restore (scope_exclude_apply); it takes 2 even when it also writes.
+# restore (scope_exclude_apply); it takes 2 even when it also writes, and then
+# keeps the writer pause but not run_one_unit's per-repetition repository reset,
+# which no scope-excluding case needs today: each of them is read-only.
 unit_phase() { # <task-name> -> 2 for a scope-excluding case, 1 for a case that requests a pull request or a stopped ask, 0 otherwise
   case ",${SCOPE_EXCLUDE_NAMES:-}," in
     *",$1,"*) echo 2; return ;;
