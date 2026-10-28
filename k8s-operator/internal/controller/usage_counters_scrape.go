@@ -69,9 +69,10 @@ const (
 	toolInvocationsSeries  = "kubeagents_tool_invocations_total"
 	eventsInjectedSeries   = "k8s_event_watcher_events_injected_total"
 	processStartTimeSeries = "process_start_time_seconds"
-	// vcsRequestsSeries is the broker's version-control counter, by verb and
-	// status; remediationsProposedTotal sums it under vcsProposalCreateVerb
-	// and vcsStatusSuccess alone: a proposal the forge accepted is a proposal.
+	// vcsRequestsSeries is the broker's version-control counter, by verb,
+	// status and provider; remediationsProposedTotal sums it under
+	// vcsProposalCreateVerb and vcsStatusSuccess alone, over every provider:
+	// a proposal the forge accepted is a proposal.
 	vcsRequestsSeries     = "kubeagents_vcs_requests_total"
 	vcsVerbLabel          = "verb"
 	vcsProposalCreateVerb = "proposal-create"
@@ -84,7 +85,8 @@ const (
 	// gateway accepted, by platform; summed over every platform.
 	chatInboundSeries = "kubeagents_chat_messages_inbound_total"
 	// brokerFailuresSeries is the broker's failure counter, summed over its
-	// kind label into brokerFailuresTotal; the kinds stay in Prometheus.
+	// kind and tool labels into brokerFailuresTotal; the kinds, and the tool a
+	// timed-out command ran, stay in Prometheus.
 	brokerFailuresSeries = "kubeagents_broker_execution_failures_total"
 	// chatTurnsErroredSeries is the chat plugin's count of synchronous turns
 	// the Hermes gateway failed to complete, summed over its platform label
@@ -102,6 +104,10 @@ const (
 	// label into negativeFeedbackTotal; the chat_feedback_reactions hook feeds
 	// it, and no A2A family joins it.
 	chatFeedbackNegativeSeries = "kubeagents_chat_feedback_negative_total"
+	// vcsClosedUnmergedSeries is the broker's count of this install's proposals
+	// the forge reported closed without a merge, summed whole into
+	// remediationsClosedUnmergedTotal; it carries no label.
+	vcsClosedUnmergedSeries = "kubeagents_vcs_proposals_closed_unmerged_total"
 	// a2aMessagesInboundSeries is the A2A gateway's counter of the chat
 	// messages it accepted as turns, by platform: the same counter on a
 	// next-mode install, where Chat ingress is the A2A gateway's rather than
@@ -223,6 +229,8 @@ func usageSeriesFor(counter string) (family string, filter usageLabelFilter) {
 		return kanbanGaveUpSeries, nil
 	case usageCounterNegativeFeedback:
 		return chatFeedbackNegativeSeries, nil
+	case usageCounterRemediationsClosedUnmerged:
+		return vcsClosedUnmergedSeries, nil
 	default:
 		return toolInvocationsSeries, usageLabelFilter{toolInvocationsStatusLabel: toolInvocationsCountedStatuses}
 	}

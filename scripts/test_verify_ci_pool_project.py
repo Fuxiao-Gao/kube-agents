@@ -4400,6 +4400,11 @@ FLEET_RESOURCE_ROLES = {
     "google_compute_disk": {"roles/compute.storageAdmin"},
     "google_compute_firewall": {"roles/compute.securityAdmin", "roles/compute.viewer"},
     "google_compute_instance": {"roles/compute.instanceAdmin.v1", "roles/compute.viewer"},
+    # The lb-drain fixture: a health check and a backend service on the default pool's instance
+    # group (compute.instanceGroups.use is in loadBalancerAdmin; the GKE provider's refresh of the
+    # pool's group is compute.viewer's, above).
+    "google_compute_health_check": {"roles/compute.loadBalancerAdmin"},
+    "google_compute_backend_service": {"roles/compute.loadBalancerAdmin"},
     "google_service_account": {"roles/iam.serviceAccountAdmin"},
     "google_service_account_iam_member": {"roles/iam.serviceAccountAdmin"},
     "google_project_iam_member": {"roles/resourcemanager.projectIamAdmin"},
@@ -5650,6 +5655,29 @@ class PoolStateReaderMatchesTerraformTest(unittest.TestCase):
         self.assertEqual(re.findall(r'"([^"]+)"', stripped), ["a", "f", "principalSet://iam.googleapis.com/locations/global/workforcePools/p/*", "with # hash"])
         self.assertEqual(re.search(r"x\s*=\s*\[(.*?)\]", stripped, re.S).group(1).count('"'), 8, "the bracket in the comment did not end the list")
 
+
+
+class DrainTimeoutWindowTest(unittest.TestCase):
+    """seeded-b's planted backend drain stays inside the window the patch roll
+    survives. Above GKE's 600-second per-node wait, or the readiness rule's
+    lb-connection-draining finding (and its case) is healed; below the
+    provider's 30-minute node-pool update timeout, which GKE's own give-up
+    matches, because Compute Engine holds the old node's delete for the full
+    drain. At 3600 every patch roll of seeded-b's pool failed fleet-wide on
+    2026-10-27 (#4043)."""
+
+    GKE_NODE_WAIT_SECONDS = 600
+    NODE_POOL_UPDATE_TIMEOUT_SECONDS = 1800
+
+    def test_the_drain_sits_between_the_node_wait_and_the_update_timeout(self):
+        text = _without_hcl_comments((checker._ROOT / "bench" / "tf" / "fleet" / "defects-b.tf").read_text())
+        block = re.search(r'resource\s+"google_compute_backend_service"\s+"drain_timeout"\s*\{(.*?)\n\}', text, re.S)
+        self.assertIsNotNone(block, "defects-b.tf no longer declares the drain_timeout backend service")
+        value = re.search(r"^\s*connection_draining_timeout_sec\s*=\s*(\d+)\s*$", block.group(1), re.M)
+        self.assertIsNotNone(value, "drain_timeout sets no literal connection_draining_timeout_sec")
+        seconds = int(value.group(1))
+        self.assertGreater(seconds, self.GKE_NODE_WAIT_SECONDS, "at or under GKE's wait the fixture's defect is gone")
+        self.assertLess(seconds, self.NODE_POOL_UPDATE_TIMEOUT_SECONDS, "the pool's patch roll would outlast the update timeout and fail")
 
 if __name__ == "__main__":
     unittest.main()

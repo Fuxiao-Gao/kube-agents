@@ -138,6 +138,16 @@ REP_STORM = "storm"
 # scorer so the two cannot drift.
 REP_CEILING = "ceiling"
 DELEGATION_CEILING_MARKER = "KUBE_AGENTS_DELEGATION_CEILING"
+# The fifth kind: an `infra` repetition never run because the lease-time
+# seeded-fleet scan saw a fixture the case needs drifted; its reason carries
+# `fixture-drift:<role>` (bench/kube_agents_bench/fixture_drift.py). Not a
+# storm rep either: nothing was lost to 429s, and the fixture's drift is
+# `fixture_drift`'s to report, from the scan itself. Out of rule 2's count and
+# every pass-rate denominator.
+REP_FIXTURE = "fixture"
+# Matched with the opening parenthesis the scorer words it with
+# ("... nothing to grade (fixture-drift:<role>: ...)"), as classify.py does.
+FIXTURE_DRIFT_MARKER = "(fixture-drift:"
 
 # How old data.json may be before health.json is flagged stale. The
 # collector writes `stale_after_s` when it knows its own cadence
@@ -344,11 +354,12 @@ NOON = 12
 # (hack/fleet-fixture-state.py) is what would have said so, and the CI health
 # workflow now runs it against every pool project once an hour and publishes
 # fixture-state.json beside health.json (scripts/eval_dashboard/
-# fixture_state.py). Nothing in the presubmit runs this check and nothing
-# acts on a drift (decision 2026-09-14: evals v1 detects, does not act), so a drifted role
-# reds the cases that depend on it on the runs that lease those projects;
-# the run-based rules above see that red as it happens, and this rule names
-# the cause and its owner (the fleet's reconcile). DEGRADED, not an OUTAGE:
+# fixture_state.py). The presubmit and the nightly run the same check on
+# their own lease and record the cases whose grade depends on a drifted role
+# as infrastructure (`fixture-drift:<role>`, REP_FIXTURE above) rather than
+# running them, which replaced the 2026-09-14 "detect, do not act" decision;
+# so a drift no longer reds those cases, and this rule is where it shows:
+# it names the cause and its owner (the fleet's reconcile). DEGRADED, not an OUTAGE:
 # it is a few cases on some projects, with the fix in someone's hands.
 #
 # The rule: the same role drifted on the same project in
@@ -573,6 +584,20 @@ ADVICE_FIXTURE_CAPACITY_MIXED = (
     " {roles} beside them reads capacity: seeded-a's default pool is below the headroom margin the scan keeps for the next fixtures,"
     " a re-apply changes nothing for it, and the pool's size in bench/tf/fleet/main.tf (seeded_a_default) is its fix."
 )
+# Drift no re-apply clears (fixture_state.no_reapply_op, #4005): when it is
+# every drift line on the incident, the advice names the real remedy per kind
+# instead of the re-apply. Beside an ordinary drift the re-apply advice stands.
+ADVICE_FIXTURE_NO_REAPPLY = (
+    "A red on a case that depends on {roles} from a run that leased {projects} is the fixture, not your change,"
+    " and no re-apply of bench/tf/fleet clears it. {remedy}"
+)
+FIXTURE_NO_REAPPLY_REMEDY = {
+    fixture_state.OP_AGE_GATE: "{roles} reads a cluster under its age gate, which clears itself at {when}; retest after then.",
+    fixture_state.OP_AHEAD_OF_CHANNEL: (
+        "{roles} reads a master ahead of its release channel, which seeded_b_pin.py holds until the channel ships a newer patch of that minor;"
+        " retest once a scan reads it healthy, or sooner re-create seeded-b under a lease (bench/tf/fleet/README.md)."
+    ),
+}
 ADVICE_POOL_DRIFT = (
     "A 403 or a missing-resource red from a run that leased {projects} is the pool project's shape, not your change"
     " ({findings}); retest once the pool owner has run the repair, which pool-state.json names per project for every named finding."
@@ -684,6 +709,8 @@ def rep_kind(rep: dict) -> str:
     reason = rep.get("reason") or ""
     if DELEGATION_CEILING_MARKER in reason:
         return REP_CEILING
+    if result == REP_RESULT_INFRA and FIXTURE_DRIFT_MARKER in reason:
+        return REP_FIXTURE
     if result != REP_RESULT_INFRA and "KUBE_AGENTS_INFRA_FAILURE" not in reason and REPLAY_ERROR_RE.search(reason):
         return REP_FAIL
     if result == REP_RESULT_INFRA:
@@ -694,11 +721,11 @@ def rep_kind(rep: dict) -> str:
 
 
 class Task:
-    __slots__ = ("ceilings", "fails", "name", "passes", "storms")
+    __slots__ = ("ceilings", "fails", "fixtures", "name", "passes", "storms")
 
     def __init__(self, task: dict):
         self.name = task.get("name") or ""
-        self.passes = self.fails = self.storms = self.ceilings = 0
+        self.passes = self.fails = self.storms = self.ceilings = self.fixtures = 0
         reps = task.get("reps")
         if reps is None:
             # No per-rep detail (SCHEMA.md: absence means unknown); the
@@ -712,6 +739,8 @@ class Task:
                 self.storms += 1
             elif kind == REP_CEILING:
                 self.ceilings += 1
+            elif kind == REP_FIXTURE:
+                self.fixtures += 1
             else:
                 self.fails += 1
 
@@ -784,7 +813,7 @@ class Run:
 
     @property
     def total_reps(self) -> int:
-        return sum(task.passes + task.fails + task.storms + task.ceilings for task in self.tasks)
+        return sum(task.passes + task.fails + task.storms + task.ceilings + task.fixtures for task in self.tasks)
 
     @property
     def lost_pod(self) -> bool:
@@ -1981,6 +2010,13 @@ def advice_for(
     if condition == FIXTURE_DRIFT:
         incident = incident or {}
         roles = list(incident.get("roles") or [])
+        remedy = fixture_no_reapply(incident)
+        if remedy:
+            return ADVICE_FIXTURE_NO_REAPPLY.format(
+                roles=", ".join(roles) or "the drifted fixture roles",
+                projects=_project_list(list(incident.get("projects") or [])) or "the drifted projects",
+                remedy=remedy,
+            )
         capacity = [role for role in roles if role in CAPACITY_ROLES]
         template = ADVICE_FIXTURE_CAPACITY if roles and len(capacity) == len(roles) else ADVICE_FIXTURE_DRIFT
         advice = template.format(
@@ -1993,6 +2029,30 @@ def advice_for(
     if condition == POOL_DRIFT:
         return _pool_drift_advice(incident or {})
     return ADVICE_SETUP
+
+
+def fixture_no_reapply(incident: dict) -> str | None:
+    """The remedy sentences, one per kind, when every drift line on a
+    fixture-drift incident is one no re-apply clears; None otherwise. The age
+    gate names the latest time any project's gate passes."""
+    kinds: dict[str, set[str]] = {}
+    clears_at = None
+    for roles in (incident.get("drift") or {}).values():
+        for role, lines in roles.items():
+            if not fixture_state.reapply_clears_nothing(lines):
+                return None
+            for line in lines:
+                kinds.setdefault(fixture_state.no_reapply_op(line), set()).add(role)
+                when = fixture_state.age_gate_clears_at(line)
+                if when and (clears_at is None or when > clears_at):
+                    clears_at = when
+    if not kinds:
+        return None
+    day = f"{clears_at.astimezone(READER_TZ):%a} " if clears_at else ""
+    return " ".join(
+        FIXTURE_NO_REAPPLY_REMEDY[op].format(roles=", ".join(sorted(roles)), when=day + reader_clock(clears_at))
+        for op, roles in sorted(kinds.items())
+    )
 
 
 def pool_drift_split(incident: dict) -> tuple[list[str], list[str], list[str]]:
@@ -2069,8 +2129,10 @@ def assess(runs, now: datetime, roster: Roster, fixture_state_doc: dict | None =
         state, condition = DEGRADED, FIXTURE_DRIFT
         cause = CAUSE_FIXTURE_DRIFT.format(roles=", ".join(r3c["roles"]), projects=len(r3c["projects"]))
     elif r3e["fires"]:
-        # Below fixture drift: a drifted fixture reds the cases that read it,
-        # a drifted grant reds whatever the agent asks of it; both are the
+        # Below fixture drift: a drifted fixture takes the cases that read it
+        # out of the gate (they red only on a run whose own lease-time scan
+        # could not read the role), a drifted grant reds whatever the agent
+        # asks of it; both are the
         # pool's and neither is a run-based signal. A finding a leased run
         # passes with (`passes_leases`) reds nothing, and the advice says so.
         state, condition = DEGRADED, POOL_DRIFT
@@ -2162,6 +2224,16 @@ def assess(runs, now: datetime, roster: Roster, fixture_state_doc: dict | None =
         }
     else:
         incident = None
+    last_lost_pod = max((run.finished for run in visible if run.lost_pod), default=None)
+    last_deadline_kill = max((run.finished for run in visible if run.deadline_kill), default=None)
+    # Lost pods and deadline kills fire on a two-hour window; the gate leaves
+    # them only once RECOVERY_GREEN_RUNS runs have landed after the last loss
+    # or kill (recovered), and the list below holds them to the same bar, or
+    # a quiet night would read as the nodes healed.
+    awaiting_runs = {
+        LOST_PODS: last_lost_pod is not None and not _runs_landed_after(full_runs, last_lost_pod, verdict_only=False),
+        DEADLINE_KILL: last_deadline_kill is not None and not _runs_landed_after(full_runs, last_deadline_kill, verdict_only=True),
+    }
     return {
         "state": state,
         "condition": condition,
@@ -2173,12 +2245,47 @@ def assess(runs, now: datetime, roster: Roster, fixture_state_doc: dict | None =
         "current": current,
         "full_runs": full_runs,
         "last_setup_death": max((run.finished for run in visible if run.setup_death), default=None),
-        "last_lost_pod": max((run.finished for run in visible if run.lost_pod), default=None),
-        "last_deadline_kill": max((run.finished for run in visible if run.deadline_kill), default=None),
+        "last_lost_pod": last_lost_pod,
+        "last_deadline_kill": last_deadline_kill,
         "roster": roster,
         "fixture": r3c,
         "pool_state": r3e,
+        # Every condition whose rule still fires, whose scan could not say, or
+        # whose run-based exit is not yet met, whatever condition won above:
+        # the poster closes a bot-filed tracking issue when its condition
+        # leaves this list (#3664).
+        "open_conditions": [
+            name
+            for name, rule in ((SHARED_BREAK, r1), (DEADLINE_KILL, r3d), (LOST_PODS, r3b), (STORM, r2), (DELEGATION_CEILING, r2b), (SETUP_DEATHS, r3), (FIXTURE_DRIFT, r3c), (POOL_DRIFT, r3e))
+            if _unresolved(rule) or awaiting_runs.get(name, False)
+        ],
     }
+
+
+def _runs_landed_after(full_runs, after: datetime, verdict_only: bool) -> bool:
+    """recovered()'s run bar for a loss or a kill: the newest
+    RECOVERY_GREEN_RUNS full runs -- green ones for lost pods, ones with a
+    verdict either way for deadline kills -- all finished after `after`, on
+    distinct pull requests."""
+    pool = [run for run in full_runs if run.has_verdict] if verdict_only else full_runs
+    recent = pool[-RECOVERY_GREEN_RUNS:]
+    if len(recent) < RECOVERY_GREEN_RUNS or any(run.finished <= after for run in recent):
+        return False
+    if not verdict_only and any(run.result != RUN_SUCCESS for run in recent):
+        return False
+    return len(_prs(recent)) >= RECOVERY_GREEN_RUNS
+
+
+def _unresolved(rule: dict) -> bool:
+    """A rule that fires, or a scan rule with no full reading to clear on: no
+    document, a stale one, one that could check no project or skipped some
+    (the incident's may be among them, as _scan_hold's `waiting` guards),
+    or a hand run over a few named projects."""
+    if rule["fires"] or rule.get("known") is False:
+        return True
+    if rule.get("known") and rule.get("checked", 0) < rule.get("total", 0):
+        return True
+    return any(bool(rule.get(key)) for key in ("stale", "unknown", "partial"))
 
 
 def recovered(full_runs, prev: dict, since: datetime, last_setup_death: datetime | None, roster: Roster, last_lost_pod: datetime | None = None, last_deadline_kill: datetime | None = None) -> bool:
@@ -2459,7 +2566,12 @@ def adjudicate(
         # The poster keeps the current condition's issue in `issue` and
         # every issue of the episode in `issues`; the one for the decided
         # condition is cited, wherever it sits.
-        candidates = [(posted or {}).get("issue"), *((posted or {}).get("issues") or []), (prev or {}).get("issue")]
+        # The previous health.json stands in only while no poster state
+        # carries `issues`: once one does it is the authority, and an issue
+        # it dropped (closed by a human) must not come back through here.
+        candidates = [(posted or {}).get("issue"), *((posted or {}).get("issues") or [])]
+        if not isinstance(posted, dict) or "issues" not in posted:
+            candidates.append((prev or {}).get("issue"))
         issue = next((match for match in (issue_for(candidate, decided["condition"]) for candidate in candidates) if match), None)
     evidence = list(assessed["evidence"])
     if decided["recovering"]:
@@ -2591,6 +2703,7 @@ def adjudicate(
         "evidence": evidence,
         "advice": advice,
         "recovering": decided["recovering"],
+        "open_conditions": assessed["open_conditions"],
         "stale": stale,
         "fixture_state": fixture_state_block(assessed["fixture"]),
         "pool_state": scan_block(assessed["pool_state"]),
@@ -2645,6 +2758,7 @@ def scan_block(scan_result: dict) -> dict | None:
         "reds_runs_projects": scan_result.get("reds_runs_projects", []),
         "unknown": scan_result["unknown"],
         "stale": scan_result["stale"],
+        "partial": bool(scan_result.get("partial")),
         "reason": scan_result["reason"],
     }
 

@@ -100,7 +100,10 @@ model:
 # It is 600s because Gemini thinks in silence on this path: with the request
 # shape Hermes sends, no reasoning deltas stream, and a hard prompt measured
 # 140-210s before its first chunk, so a shorter bound would cut off healthy
-# long thinks, and every retry would repeat the same think.
+# long thinks, and every retry would repeat the same think. That was measured
+# before the chart's gateway asked Gemini for its thoughts; thought summaries
+# may now arrive as reasoning deltas before the answer, which has not been
+# measured, so the bound stays.
 # request_timeout_seconds is the per-read socket timeout (and the stream read
 # timeout), not a cap on a whole call; the chart's LiteLLM sets no timeout of
 # its own. A call that stalls is retried inside each of Hermes' 3 attempts
@@ -134,6 +137,16 @@ mcp_servers:
       - "${HERMES_HOME}/scripts/router_server.py"
     env:
       HERMES_HOME: "${HERMES_HOME}"
+      # For list_agents' Host Cluster Identity and GCP Projects in Scope
+      # sections (agent_roster.py), so the tool renders what the injected block
+      # renders. The operator sets the GKE_* and GCP_PROJECT_ID values outside
+      # kind only; an unset one arrives here as the literal "${...}"
+      # placeholder, which agent_roster.py treats as unset.
+      GKE_CLUSTER_NAME: "${GKE_CLUSTER_NAME}"
+      GKE_PROJECT_ID: "${GKE_PROJECT_ID}"
+      GKE_LOCATION: "${GKE_LOCATION}"
+      GCP_PROJECT_ID: "${GCP_PROJECT_ID}"
+      KUBEAGENTS_SCOPE_FILE: "${KUBEAGENTS_SCOPE_FILE}"
 
 # Explicitly list platform_toolsets (reserved Hermes key). ONLY the router MCP —
 # no base tool bundle. `mcp-<name>` here maps to `mcp_servers.<name>` above.

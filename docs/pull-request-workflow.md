@@ -121,8 +121,8 @@ same target on every pull request, and it is a required check, so a warning-seve
 any tracked script fails the merge. Install the shellcheck release that job pins (see the Install
 shellcheck step in `.github/workflows/validate.yml`) from
 <https://github.com/koalaman/shellcheck/releases> rather than the distribution package: the apt
-package on the `ubuntu-latest` runner image is 0.9.0 (Ubuntu 24.04), two releases behind, and a
-release two behind reports a different set of findings than CI.
+package on the GitHub-hosted runner image is whatever release that image's Ubuntu ships, not the
+one the job pins and asserts, and a different release reports a different set of findings than CI.
 Fix a finding or suppress it with `# shellcheck disable=SCnnnn # reason` on the line above the
 command (shellcheck rejects a directive placed after one); the Makefile's exclude list is not the
 place, and the comment above the target says why. In a mirrored `gke-*` skill, make the edit in
@@ -200,30 +200,51 @@ Hindsight's images sit behind `hindsight.enabled` — unset by default, and then
 `images.json`, run `make images-check` and `make docs-generate`, then grep the tree for the old
 version before opening the pull request.
 
-**CodeQL alerts.** CodeQL runs here through GitHub's default setup, which analyses pushes to `main`
-and the other protected branches, a weekly schedule, and, intermittently, pull requests whose head
-branch lives in this repository; in the repository's history one fork pull request has been
-analysed, and no pull request of any kind since early September. Contributor branches live on
-forks, so a change that closes a code-scanning alert cannot count on CI to show it closing.
-Reproduce it locally instead: install the CLI as a `gh` extension, pin it to the version the
-alert's `tool.version` reports, and build a database over a scratch tree holding the flagged file
-at its repository path, once before the change and once after:
+**CodeQL alerts.** CodeQL runs here through
+[`codeql.yml`](../.github/workflows/codeql.yml): on every pull request that touches Python, Go,
+JavaScript or workflow files, pull requests from forks included, on pushes to `main` and
+`release/**`, and weekly. A push runs the workflow file on the pushed branch, so a release line
+is covered once it is cut from a `main` that carries the file; a line cut before that
+(`release/0.17` and older) gets no analysis after default setup is off until the file is
+back-ported to it. It needs GitHub's default setup off: GitHub rejects the workflow's
+uploads while default setup is on, so an administrator switches it off when this workflow lands
+and leaves it off, and turning it back on fails every run at upload. A pull-request
+run analyses the merge commit and reports the findings on changed lines as annotations on the
+pull request and in the `CodeQL` check that GitHub posts once the `Analyze (<language>)` jobs have
+uploaded, so an alert a change would introduce shows up before the merge. It does not show an
+alert closing: a pull-request run reports changed lines only, and an absent annotation is not
+evidence. To show an alert closing, or to see one before the pull request opens, reproduce it
+locally: install the CLI as a `gh` extension, pin it to the version the alert's `tool.version`
+reports, and build a database once before the change and once after. For Python the database is
+over a scratch tree holding the flagged file at its repository path. For Go it is over the module
+that holds the file, because a Go database is built rather than read, and the build is named rather
+than left to the autobuilder, which runs whatever build file its source root holds (from the
+repository root, `make`, whose default target is the platform image's Docker build; it fails
+fast on a runner where the image tag is empty and runs for real where it is not):
 
 ```bash
 gh extension install github/gh-codeql
-gh codeql set-version 2.27.1 # the alert's tool.version
+gh codeql set-version 2.27.3 # the alert's tool.version
+# Python: the flagged file alone, at its repository path under /tmp/cq/tree
 gh codeql database create /tmp/cq/db --language=python --source-root /tmp/cq/tree
 gh codeql database analyze /tmp/cq/db \
   codeql/python-queries:Security/CWE-312/CleartextLogging.ql \
   --download --format=sarif-latest --output /tmp/cq/out.sarif
+# Go: the module that holds the flagged file, built under the tracer
+gh codeql database create /tmp/cq/db-go --language=go --source-root a2a \
+  --command 'go build ./...'
+gh codeql database analyze /tmp/cq/db-go \
+  codeql/go-queries:Security/CWE-312/CleartextLogging.ql \
+  --download --format=sarif-latest --output /tmp/cq/out-go.sarif
 ```
 
 An alert names a rule id, not a query. The query is the `.ql` in the pack whose `@id` matches it:
 after the first `--download`,
 `grep -rl '@id py/clear-text-logging-sensitive-data' ~/.codeql/packages/codeql/python-queries/`
 finds `Security/CWE-312/CleartextLogging.ql`, and `CleartextStorage.ql` beside it is the storage
-rule. The before run has to reproduce the alert at `main`'s line, and the SARIF's `codeFlows` names
-the source the flagged line was reached from; the after run reports none. Quote both under
+rule; the same grep for `@id go/clear-text-logging` over `codeql/go-queries/` finds the Go query
+above. The before run has to reproduce the alert at `main`'s line, and the SARIF's `codeFlows`
+names the source the flagged line was reached from; the after run reports none. Quote both under
 **Testing**. The pack `--download` resolves can differ from the one the hosted analysis ran, so the
 code-scanning tab on the merged head is still the final check.
 
@@ -253,6 +274,8 @@ loop while you work:
   `OK`. [`tests/integration/README.md`](../tests/integration/README.md) is the tier's contract;
   [`testing-map.md`](testing-map.md) says which suite runs where.
 - `make docs-check`, plus `cd docs/site && npm ci && npm run build` if you touched `docs/site/`.
+  `make docs-check` needs `go` on `PATH`: the CRD field pages are read from the operator's Go API
+  types, and the check fails without it.
 
 ## The automated review
 
@@ -573,8 +596,9 @@ The two labels are the two people:
   (GoogleCloudPlatform/oss-test-infra#2748). An `lgtm` given before that change reached Prow
   (2026-10-22 14:43Z) has no stored tree, and a push still strips it.
 - **`approved` is an `OWNERS` approver's.** `/approve`, from someone in the `OWNERS` file governing
-  the changed paths — [`OWNERS`](../OWNERS) at the root and [`hack/OWNERS`](../hack/OWNERS) for the
-  presubmit eval rosters (`hack/eval/presubmit-cases.txt` and `hack/eval/blocking-roster.txt`)
+  the changed paths — [`OWNERS`](../OWNERS) at the root,
+  [`k8s-api-proxy/OWNERS`](../k8s-api-proxy/OWNERS), which adds approvers for that module, and
+  [`hack/OWNERS`](../hack/OWNERS) for the presubmit eval rosters (`hack/eval/presubmit-cases.txt` and `hack/eval/blocking-roster.txt`)
   and the inject lane's exclusions and safeguards under `hack/eval/` alone, with [`OWNERS_ALIASES`](../OWNERS_ALIASES) expanding `eval-crew`. The last names only
   `eval-crew` and sets `no_parent_owners`, so a root approver's `/approve` does not clear a change
   to what the presubmit runs or what blocks; the nightly file and the case directories under
@@ -701,6 +725,13 @@ kind of verdict, so a run after an override reuses it in seconds. The reused run
 ordinary `Job succeeded.`; the `/override` comment, the build log's `REVALIDATED` line and a key the
 run leaves in its `finished.json` metadata are the record that it was one, and step 0 reads the key
 so that such a run is never itself taken for a green.
+
+Do not post `/test pull-kube-agents-smoke-test` on an approved pull request whose `Smoke gate` is
+green, above all one in the merge queue. The run posts a pending smoke status, and if the queue's
+`Smoke gate` reads it before the run reports, the queue fails the group and removes the pull
+request. The sweep puts it back once after the first such removal since the last push, but a second
+one keeps it out until a push. If `Smoke gate` is pending, a `/test` or a push is how you get a
+fresh green. `/retest` is fine: it reruns only failed contexts.
 
 No verdict carries across a change to what the job grades. When the blocking job's `spec.mode`
 changes in `oss-test-infra` (the swap to `next`, or a rollback to `today`), set the repository

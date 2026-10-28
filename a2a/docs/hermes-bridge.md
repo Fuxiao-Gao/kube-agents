@@ -388,14 +388,17 @@ no key is refused at start.
 A kanban card the persona creates completes after the turn has answered, and the API server
 has no channel to push that completion back. So before a task's first turn the bridge records the
 conversation its session answers (the platform, the gateway's conversation key from the task's
-`authority.audience.conversation`, the `contextId`, and the kind of the prompt's ask, which the
-cards' posts keep marked while they run) in the pod's session-kv, with
+`authority.audience.conversation`, the `contextId`, the kind of the prompt's ask, which the
+cards' posts keep marked while they run, and `user_id` from `authority.requester.principal` plus
+`chat_type` from `authority.audience.kind` so the memory provider can isolate personal memory per
+user and disable personal memory in group conversations) in the pod's session-kv, with
 `PUT /v1/sessions/{id}/route` on `BRIDGE_ROUTE_URL` (default `http://127.0.0.1:8699`) and the
 `SESSION_KV_API_KEY` (inherited from the agent container on a rendered bridge). The card's report then goes back to that conversation through the
 gateway's chat.notify route (`docs/designs/spec-chatops-gateway.md`). The PUT is best effort: the
 turn runs either way, and when it fails the answer ends with a line saying a card's answer cannot
-be posted back. A Google Chat or Slack conversation is posted back. A
-conversation on a door with no notify route (inject, the A2A door, Discord) records nothing. The `cli` executor records no route, so its cards still do not report back.
+be posted back. A Google Chat, Slack or console conversation is posted back. A console
+conversation's route also carries the turn's task (`task_id`), so the card's report names the turn it answers, and no `user_id`, since the console credential is shared. A conversation on a door with no notify route (the Google-token A2A door or Discord) records an identity-only
+entry (`platform: ""`) when `authority.requester.principal` is set, while shared-credential doors (inject and static-token A2A) record nothing. The `cli` executor records no route, so its cards still do not report back.
 
 Hermes can also run a wake turn in the session that filed a card: a synthetic message saying how the card ended, with the worker's result. On a conversation with no notify route, Slack included, a finished card (or one sent for review) wakes the session. On Google Chat only a card that failed, timed out or blocked does, because #2734 posts the finished card's report itself. The wake turn's reply isn't delivered anywhere, since the bridge only reads answers to its own task turns, but it stays in the session's history for the next turn. The wake turn can't file a card: in an `a2a-ctx-*` session, or one descended from it such as its compressed continuation, `kanban_create` refuses on a wake turn and says to wait for the person to ask (#2610, `deploy/docker/patches/kanban_wake_guard.py`). So does `kanban_unblock`: a blocked card's question is for the person, and their reply, a turn of its own, can unblock it.
 
@@ -432,7 +435,23 @@ store can be found from the terminal alone. Exit 75 is Hermes's `EX_TEMPFAIL` fo
 gave up on the provider's rate limit or billing; it is named `reason: hermes-rate-limited` instead,
 which the eval harness classes as infrastructure rather than the persona's failure (the image patch
 `apply_quiet_rate_limit_exit.py` makes a plain `-Q` run exit 75 on that failure, as a kanban worker
-already did). A
+already did). An answer whose first non-empty line (any case, surrounding whitespace ignored) is
+exactly `thought` or starts with `thought:` is the model's own reasoning written as content
+(#3206), and it is not published: on either executor, and on any turn of a steered task, the task
+ends `failed` with `reason: hermes-unstructured-reasoning - the agent's reply was withheld because
+it contained unstructured model reasoning instead of an answer; anything the agent did during the
+turn has already happened, so check that before asking again[; session: <id>][; turn: N]`, and the
+bridge logs a warning with the task, session and answer size, never the text. That holds when a
+cancel raced the end of the turn too: a withheld answer ends `failed`, not `completed`. The rule is
+`opensWithUnstructuredReasoning` in `reasoning_leak.go`. The image patch
+`apply_unstructured_reasoning_replay.py` keeps such a reply out of the history Hermes sends the
+model on later calls. Output that never passes the bridge is not guarded: a kanban card's result
+posted by the notifier, a `today`-mode reply from Hermes's own gateway platforms, and cron
+deliveries on every leg, `report_to_chat` included. The scheduled `deliver: "chat"` report of a
+fleet-audit job the image ships is already immune, because the relay posts the record the run's
+`finish` wrote, not its final message; a fleet-audit job created at runtime still posts its final
+message (`docs/designs/cron-report-relay.md`). For the rest the history patch only lowers the
+rate. A
 submission with no text parts is terminal `rejected`. New-task detection is the
 dispatcher's rule, and 9/9 widened it: BOTH event subjects empty means new, not `…events`
 alone (profiles spec). The bridge satisfies that without a change of its own, because it
@@ -574,20 +593,21 @@ when its deadline passes ends `reason: session-busy - waited <d> for the session
 turn; no request was sent`, and one cancelled while waiting ends `canceled-before-start`. The
 failures name themselves in the status message:
 
-| Reason                   | When                                                                                                                              | Eval harness class |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
-| `hermes-rate-limited`    | the server answered 429 (its concurrent-run cap), or `X-Hermes-Failure-Reason` names the provider's rate limit or billing         | infrastructure     |
-| `hermes-api-unreachable` | no response: still refused after the two-minute retry, the task's deadline passed before any connection, or the connection failed | infrastructure     |
-| `hermes-api-refused`     | any other 4xx answer: the server refused the request before running a turn                                                        | infrastructure     |
-| `session-busy`           | the deadline passed while the task waited for the session's previous turn; no request was sent                                    | infrastructure     |
-| `hermes-api-failed`      | a 5xx answer, or a 200 whose turn Hermes marks failed; the message carries the status, session and the error or a body tail       | persona            |
-| `hermes-api-unreadable`  | a 2xx answer that is not a chat completion with at least one choice                                                               | persona            |
-| `hermes-api-read-failed` | the response body broke off mid-read                                                                                              | persona            |
-| `hermes-api-oversize`    | a 2xx body over the 8 MiB read cap (`apiResponseCap` in `api.go`); refused rather than truncated, with the limit named            | persona            |
-| `request-encode-failed`  | the bridge could not encode the request; a bridge fault, not expected in practice                                                 | graded (unlisted)  |
-| `request-build-failed`   | the bridge could not build the request; the URL is checked at start, so likewise                                                  | graded (unlisted)  |
-| `card-stop-unavailable`  | a card-stop control got no usable answer from session-kv ("Stopping a conversation's cards" below)                                | not an eval task   |
-| `card-stop-unsupported`  | a card-stop control reached the `cli` executor, which has no conversation session                                                 | not an eval task   |
+| Reason                          | When                                                                                                                                 | Eval harness class |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------ |
+| `hermes-rate-limited`           | the server answered 429 (its concurrent-run cap), or `X-Hermes-Failure-Reason` names the provider's rate limit or billing            | infrastructure     |
+| `hermes-api-unreachable`        | no response: still refused after the two-minute retry, the task's deadline passed before any connection, or the connection failed    | infrastructure     |
+| `hermes-api-refused`            | any other 4xx answer: the server refused the request before running a turn                                                           | infrastructure     |
+| `session-busy`                  | the deadline passed while the task waited for the session's previous turn; no request was sent                                       | infrastructure     |
+| `hermes-api-failed`             | a 5xx answer, or a 200 whose turn Hermes marks failed; the message carries the status, session and the error or a body tail          | persona            |
+| `hermes-api-unreadable`         | a 2xx answer that is not a chat completion with at least one choice                                                                  | persona            |
+| `hermes-api-read-failed`        | the response body broke off mid-read                                                                                                 | persona            |
+| `hermes-api-oversize`           | a 2xx body over the 8 MiB read cap (`apiResponseCap` in `api.go`); refused rather than truncated, with the limit named               | persona            |
+| `hermes-unstructured-reasoning` | the answer opens with a `thought` or `thought:` line, the model's reasoning written as content (#3206); withheld, on either executor | persona            |
+| `request-encode-failed`         | the bridge could not encode the request; a bridge fault, not expected in practice                                                    | graded (unlisted)  |
+| `request-build-failed`          | the bridge could not build the request; the URL is checked at start, so likewise                                                     | graded (unlisted)  |
+| `card-stop-unavailable`         | a card-stop control got no usable answer from session-kv ("Stopping a conversation's cards" below)                                   | not an eval task   |
+| `card-stop-unsupported`         | a card-stop control reached the `cli` executor, which has no conversation session                                                    | not an eval task   |
 
 ## Stopping a conversation's cards
 
@@ -625,7 +645,9 @@ terminal. No Hermes turn runs. Instead the bridge:
    worker; this sidecar shares the hostname but not the pid namespace.
 3. ends the task `completed`. The `result` artifact holds a short text and the cardStop result
    part:
-   `{"cardStop":{"v":1,"stopped":[{"id","title","priorStatus"}],"settled":[{"id","title"}],"failed":N,"pending":N,"unresolved":N,"truncated":bool,"deadline":bool,"listsCut":bool}}`.
+   `{"cardStop":{"v":1,"stopped":[{"id","title","priorStatus"}],"settled":[{"id","title"}],"failed":N,"pending":N,"unresolved":N,"truncated":bool,"deadline":bool,"listsCut":bool,"notStopped":[{"id","title"}]}}`.
+   `notStopped` names the cards the three counts count, session-kv's failed, then pending, then
+   unresolved ones, and is left out when every card stopped.
    The text counts what session-kv answered, and says plainly what the stop could not promise:
    `unresolved` cards were stopped just after a worker was claimed for them, so a worker may
    still start; `pending` archives were still running when session-kv ran out of time;
@@ -662,7 +684,7 @@ count: a task past it is accepted and `submitted` and then queued with no subpro
 worker frees, and the harness classifies a repetition that reaches its budget still
 `submitted` as infrastructure rather than a graded case - it cancels the task and the bridge
 answers `canceled-before-start`. The presubmit fans units out at `EVAL_TASK_PARALLELISM`,
-default 4, the nightly at 8, so the install gives the bridge a `BRIDGE_CONCURRENCY` at or above
+default 4, the next-mode nightlies at 6, so the install gives the bridge a `BRIDGE_CONCURRENCY` at or above
 that value; at the defaults two of every four concurrent units wait for as long as the two ahead
 of them run. The queue behind the workers is fixed at `taskQueueCapacity`, 1024 in `bridge.go`,
 and a submission past it is finalized `failed` with `reason: bridge-queue-overflow`, also
