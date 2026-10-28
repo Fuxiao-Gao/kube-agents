@@ -2810,7 +2810,7 @@ func a2aOperatorNATSPeers() []networkingv1.NetworkPolicyPeer {
 	}}
 }
 
-// a2aProvisionScript is the provisioning payload: the four streams, four KV
+// a2aProvisionScript is the provisioning payload: the four streams, five KV
 // buckets, and four starter topics from the deployment spec, created
 // idempotently with the nats CLI. Topics are provisioned-only (payload spec):
 // which topics exist is exactly the subject lists rendered here.
@@ -4059,7 +4059,7 @@ func a2aTasksReserve(agent *agentv1alpha1.PlatformAgent) int {
 // stream sized at the floor holds a default install fine, and failing it for
 // being below a floor it was never going to be below is a false alarm.
 func a2aTasksConsumerBudget(agent *agentv1alpha1.PlatformAgent) int {
-	return resolveA2AMaxSessions(agent)*a2aSessionConsumersPerSession + a2aTasksReserve(agent) + a2aProfileDurableAllowance()
+	return resolveA2AMaxSessions(agent)*a2aSessionConsumersPerSession + a2aTasksReserve(agent)
 }
 
 // a2aProfileDurablesAllowed is the AgentProfile durables the TASKS budget
@@ -4068,6 +4068,14 @@ func a2aTasksConsumerBudget(agent *agentv1alpha1.PlatformAgent) int {
 // the CRD, so this is an allowance, not a count: a profile past it gets no
 // durables (the create is refused at the stream's cap) and its CardPublished
 // condition says why. A sizing knob replaces it when the budget work lands.
+//
+// It sizes a TASKS stream at creation only, and is not part of the budget the
+// provision script holds an existing stream to: a stream's max_consumers
+// can't be raised in place, so holding a live stream to it would refuse every
+// existing next install the day the dispatcher is turned on, with deleting
+// TASKS (and its audit history) as the only way out. On a stream created
+// before the dispatcher the durables take spare slots instead, and a profile
+// they don't fit says so (ensureDurable).
 const a2aProfileDurablesAllowed = 16 * 2 * 2
 
 // a2aProfileDurableAllowance is a2aProfileDurablesAllowed when this operator
@@ -4082,7 +4090,7 @@ func a2aProfileDurableAllowance() int {
 
 // a2aTasksMaxConsumers is what a fresh TASKS stream is created with.
 func a2aTasksMaxConsumers(agent *agentv1alpha1.PlatformAgent) int {
-	if budget := a2aTasksConsumerBudget(agent); budget > a2aTasksMaxConsumersFloor {
+	if budget := a2aTasksConsumerBudget(agent) + a2aProfileDurableAllowance(); budget > a2aTasksMaxConsumersFloor {
 		return budget
 	}
 	return a2aTasksMaxConsumersFloor

@@ -13,6 +13,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -252,9 +253,74 @@ func TestRemovingTheDispatcherImageRemovesTheDispatcher(t *testing.T) {
 func TestTheTasksBudgetCarriesTheProfileDurablesWithADispatcher(t *testing.T) {
 	agent := a2aTestAgent()
 	t.Setenv(a2aDispatcherImageEnvVar, "")
-	without := a2aTasksConsumerBudget(agent)
+	budget, created := a2aTasksConsumerBudget(agent), a2aTasksMaxConsumers(agent)
 	withDispatcher(t)
-	if got := a2aTasksConsumerBudget(agent); got != without+a2aProfileDurablesAllowed {
-		t.Errorf("budget with a dispatcher = %d, want %d + %d", got, without, a2aProfileDurablesAllowed)
+	// A new stream is created with room for the durables...
+	if got := a2aTasksMaxConsumers(agent); got != max(budget+a2aProfileDurablesAllowed, a2aTasksMaxConsumersFloor) {
+		t.Errorf("a new TASKS with a dispatcher gets max_consumers %d, want %d", got, budget+a2aProfileDurablesAllowed)
+	}
+	// ...but an existing one is held to the sessions' budget alone, so
+	// turning the dispatcher on never refuses provisioning on an install
+	// whose stream predates it (max_consumers can't be raised in place).
+	if got := a2aTasksConsumerBudget(agent); got != budget {
+		t.Errorf("the budget an existing stream is held to moved from %d to %d with a dispatcher", budget, got)
+	}
+	_ = created
+}
+
+// The reserves are disjoint shares of the ceiling that always leave a slot
+// for top-level unattended work, child first, and nothing at a ceiling of 1.
+func TestTheDispatchReservesLeaveASlotForEveryKind(t *testing.T) {
+	for ceiling, want := range map[int][2]int{
+		1: {0, 0}, 2: {1, 0}, 3: {1, 1}, 4: {2, 1}, 6: {2, 2}, 9: {3, 3}, 10: {4, 4},
+	} {
+		agent := profileTunedAgent(ptr.To(ceiling), nil)
+		child, interactive := dispatchReserves(agent, ceiling)
+		if child != want[0] || interactive != want[1] {
+			t.Errorf("ceiling %d: child %d, interactive %d; want %d, %d", ceiling, child, interactive, want[0], want[1])
+		}
+		if ceiling > 1 && child+interactive > ceiling-1 {
+			t.Errorf("ceiling %d: reserves %d+%d leave no slot for top-level unattended work", ceiling, child, interactive)
+		}
+	}
+}
+
+// A ceiling too small for every reserve warns on the PlatformAgent, naming
+// the reserve that is short; the default ceiling honours both.
+func TestASmallCeilingWarnsWhichReserveIsShort(t *testing.T) {
+	for ceiling, want := range map[int][]string{
+		1: {"child reserve is 0 of 1", "interactive reserve is 0 of 1"},
+		2: {"interactive reserve is 0 of 1"},
+		3: nil,
+		6: nil,
+	} {
+		agent := profileTunedAgent(ptr.To(ceiling), nil)
+		child, interactive := dispatchReserves(agent, ceiling)
+		msg := dispatchReservesShortfall(agent, ceiling, child, interactive)
+		if len(want) == 0 && msg != "" {
+			t.Errorf("ceiling %d warns: %s", ceiling, msg)
+		}
+		for _, w := range want {
+			if !strings.Contains(msg, w) {
+				t.Errorf("ceiling %d: warning %q doesn't say %q", ceiling, msg, w)
+			}
+		}
+	}
+	withDispatcher(t)
+	agent := profileTunedAgent(ptr.To(2), nil)
+	scheme := setupScheme()
+	rec := record.NewFakeRecorder(10)
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent).WithInterceptorFuncs(fakeServerSideApplyInterceptors()).Build()
+	r := &PlatformAgentReconciler{Client: c, Scheme: scheme, Recorder: rec}
+	if _, err := r.reconcileA2ADispatcher(context.Background(), agent, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case e := <-rec.Events:
+		if !strings.Contains(e, reasonProfileReservesShort) || !strings.Contains(e, "interactive reserve") {
+			t.Errorf("event = %q", e)
+		}
+	default:
+		t.Error("a ceiling of 2 wrote no warning")
 	}
 }

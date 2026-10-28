@@ -1,5 +1,5 @@
 {
-  "version": "23de8e042c7a16a6",
+  "version": "6b3c87b3c580a316",
   "identities": [
     {
       "serviceAccount": "system:serviceaccount:kubeagents-system:agent-a2a-provision",
@@ -141,6 +141,7 @@
           "$JS.API.DIRECT.GET.KV_PROFILE_LEASES.>",
           "$JS.API.CONSUMER.CREATE.KV_PROFILE_LEASES.>",
           "$JS.API.CONSUMER.DELETE.KV_PROFILE_LEASES.*",
+          "$JS.FC.KV_PROFILE_LEASES.>",
           "a2a.dispatch.*.*.*",
           "a2a.cap.verify.dispatcher",
           "_INBOX.dispatcher.>"

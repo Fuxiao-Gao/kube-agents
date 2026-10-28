@@ -674,15 +674,17 @@ type fakeDirectory struct {
 	// forgets records each namespace whose connection the reconciler
 	// dropped, as forgetBus would on the NATS publisher.
 	forgets []string
-	// durables is each profile's last SyncDurables.
-	durables map[string][]profileDurable
+	// durables is each profile's last SyncDurables; durablesRefused makes
+	// it fail as a connection opened under an older map would.
+	durables        map[string][]profileDurable
+	durablesRefused bool
 }
 
 func (f *fakeDirectory) forget(namespace string) { f.forgets = append(f.forgets, namespace) }
 
 func (f *fakeDirectory) SyncDurables(_ context.Context, _ *agentv1alpha1.PlatformAgent, profile string, want []profileDurable) error {
-	if f.down {
-		return errors.New("bus down")
+	if f.down || f.durablesRefused {
+		return errors.New("permissions violation")
 	}
 	if f.durables == nil {
 		f.durables = map[string][]profileDurable{}
@@ -1645,5 +1647,27 @@ func TestTheCardCarriesWhatTheGatewayRoutesOn(t *testing.T) {
 	bare := desiredAgentCard(ptr.To(testAgentProfile("ns", "bare")))
 	if !slices.Equal(bare.Tiers, []string{"read"}) || bare.ClusterRef != nil || bare.Parameters != nil {
 		t.Errorf("bare card = %+v", bare)
+	}
+}
+
+// A durable sync that fails drops the bus connection, so the retry reconnects
+// under the map the callout serves now: grants are fixed when a connection
+// opens, and one opened before the map granted the operator its durables
+// would be refused for as long as it stayed open.
+func TestAFailedDurableSyncDropsTheBusConnection(t *testing.T) {
+	withOperatorBusPrincipal(t)
+	t.Setenv(a2aDispatcherImageEnvVar, "registry.example/a2a-dispatcher:test")
+	agent := a2aTestAgent()
+	p := testAgentProfile(agent.Namespace, "auditor")
+	h := newProfileHarness(t, agent, &p)
+	h.dir.durablesRefused = true
+	h.reconcile(agent.Namespace, "auditor")
+	if !slices.Contains(h.dir.forgets, agent.Namespace) {
+		t.Errorf("a refused durable sync kept the connection: forgets = %v", h.dir.forgets)
+	}
+	h.dir.durablesRefused = false
+	h.reconcile(agent.Namespace, "auditor")
+	if got := h.dir.durables["auditor"]; len(got) != 2 {
+		t.Errorf("after the reconnect the durables = %+v, want read top and child", got)
 	}
 }

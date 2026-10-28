@@ -226,9 +226,13 @@ type DispatchConfig struct {
 	// ProfileNamespace is where the worker pods run, <Namespace>-profiles;
 	// the dispatcher watches pods there (ProfilePoolSelector).
 	ProfileNamespace string `json:"profileNamespace"`
-	// Ceiling caps running profile tasks of every kind, install-wide, with
-	// InteractiveReserve kept for interactive tiers and ChildReserve for
-	// child tasks.
+	// Ceiling caps running profile tasks of every kind, install-wide.
+	// InteractiveReserve is kept for interactive tiers and ChildReserve for
+	// child tasks: disjoint shares of the ceiling that together leave at
+	// least one slot reserved for neither, so top-level unattended work can
+	// always run. A task fills its own kind's reserve first, then the shared
+	// slots. At a ceiling of 1 both are 0: every task runs alone, and a parent
+	// can never start a child.
 	Ceiling            int `json:"ceiling"`
 	InteractiveReserve int `json:"interactiveReserve"`
 	ChildReserve       int `json:"childReserve"`
@@ -272,8 +276,8 @@ func (c DispatchConfig) Validate() error {
 		return fmt.Errorf("dispatch config: namespace %q, profile namespace %q", c.Namespace, c.ProfileNamespace)
 	case c.Ceiling < 1:
 		return fmt.Errorf("dispatch config: ceiling %d", c.Ceiling)
-	case c.ChildReserve < 0 || (c.ChildReserve > 0 && c.ChildReserve >= c.Ceiling):
-		return fmt.Errorf("dispatch config: childReserve %d against ceiling %d", c.ChildReserve, c.Ceiling)
+	case c.ChildReserve < 0 || c.InteractiveReserve < 0 || c.ChildReserve+c.InteractiveReserve > max(0, c.Ceiling-1):
+		return fmt.Errorf("dispatch config: childReserve %d and interactiveReserve %d must leave a slot of ceiling %d reserved for neither", c.ChildReserve, c.InteractiveReserve, c.Ceiling)
 	case c.RenewSeconds <= 0 || c.LeaseSeconds < 3*c.RenewSeconds:
 		return fmt.Errorf("dispatch config: lease %ds must be at least three renewals of %ds", c.LeaseSeconds, c.RenewSeconds)
 	case c.RestartGraceSeconds < 2*c.RenewSeconds:

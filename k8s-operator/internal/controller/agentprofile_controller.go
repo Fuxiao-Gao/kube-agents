@@ -371,6 +371,11 @@ func (r *AgentProfileReconciler) publishCard(ctx context.Context, agent *agentv1
 	// one per (allowed tier, kind), and a dropped tier's deleted.
 	if a2aDispatcherEnabled() {
 		if err := r.cards().SyncDurables(ctx, agent, p.Name, desiredProfileDurables(p)); err != nil {
+			// Drop the connection: callout grants are fixed when it opens,
+			// and one opened before the callout served the map that grants
+			// the operator its durables would be refused forever. The retry
+			// reconnects under the map the callout serves now.
+			r.forgetBus(agent.Namespace)
 			return reasonAgentProfileBusError, "the agent card is published, but its durables are not: " + err.Error(), err
 		}
 	}
@@ -402,6 +407,7 @@ func (r *AgentProfileReconciler) withdrawCard(ctx context.Context, agent *agentv
 	// card, held submissions and all. Only the ones this operator made.
 	if a2aDispatcherEnabled() {
 		if err := r.cards().SyncDurables(ctx, agent, p.Name, nil); err != nil {
+			r.forgetBus(agent.Namespace) // as in publishCard
 			return reasonAgentProfileBusError, "the card is withdrawn, but the durables are not deleted: " + err.Error(), err
 		}
 	}

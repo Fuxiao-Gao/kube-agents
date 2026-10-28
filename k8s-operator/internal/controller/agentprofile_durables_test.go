@@ -167,3 +167,35 @@ func TestSyncingAProfilesDurablesDropsATiersQueue(t *testing.T) {
 		}
 	}
 }
+
+// On a TASKS stream with no consumer slot left, the durable's refusal says
+// why and what to do, rather than a bare server error.
+func TestADurableThatDoesntFitSaysWhy(t *testing.T) {
+	s, err := natsserver.NewServer(&natsserver.Options{Port: -1, JetStream: true, StoreDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go s.Start()
+	if !s.ReadyForConnections(5 * time.Second) {
+		t.Fatal("nats-server not ready")
+	}
+	t.Cleanup(s.Shutdown)
+	nc, err := nats.Connect(s.ClientURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(nc.Close)
+	js, _ := jetstream.New(nc)
+	ctx := context.Background()
+	if _, err := js.CreateStream(ctx, jetstream.StreamConfig{Name: a2aTasksStream, Subjects: []string{"a2a.tasks.>"}, MaxConsumers: 1}); err != nil {
+		t.Fatal(err)
+	}
+	p := testAgentProfile("ns", "tse")
+	want := desiredProfileDurables(&p)
+	if err := ensureDurable(ctx, js, want[0]); err != nil {
+		t.Fatalf("the first durable: %v", err)
+	}
+	if err := ensureDurable(ctx, js, want[1]); err == nil || !strings.Contains(err.Error(), "no consumer slot left") || !strings.Contains(err.Error(), "maxSessions") {
+		t.Errorf("a durable past max_consumers = %v, want the slot explanation", err)
+	}
+}

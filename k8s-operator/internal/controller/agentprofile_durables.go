@@ -108,6 +108,9 @@ func ensureDurable(ctx context.Context, js jetstream.JetStream, d profileDurable
 		AckWait:       a2aHeldAckWait,
 		Metadata:      map[string]string{a2aHeldMarkerKey: a2aHeldMarkerValue},
 	})
+	if errors.Is(err, jetstream.ErrMaximumConsumersLimit) {
+		return fmt.Errorf("durable %s: TASKS has no consumer slot left for it (%w). A TASKS stream created before the dispatcher has no room set aside for profile durables, and its max_consumers can't be raised in place: lower spec.harness.tuning.maxSessions to free slots, or recreate TASKS (losing its history) so it is created with the allowance", d.name, err)
+	}
 	if err != nil {
 		return fmt.Errorf("durable %s: %w", d.name, err)
 	}

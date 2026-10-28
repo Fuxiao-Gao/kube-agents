@@ -193,7 +193,7 @@ func TestADispatchConfigIsChecked(t *testing.T) {
 		t.Fatalf("a good config: %v", err)
 	}
 	one := validDispatchConfig()
-	one.Ceiling, one.ChildReserve, one.InteractiveReserve = 1, 0, 1
+	one.Ceiling, one.ChildReserve, one.InteractiveReserve = 1, 0, 0
 	if err := one.Validate(); err != nil {
 		t.Errorf("a ceiling of 1 with no child reserve: %v", err)
 	}
@@ -201,16 +201,17 @@ func TestADispatchConfigIsChecked(t *testing.T) {
 		edit func(*DispatchConfig)
 		want string
 	}{
-		"no namespace":           {func(c *DispatchConfig) { c.Namespace = "" }, "namespace"},
-		"no ceiling":             {func(c *DispatchConfig) { c.Ceiling = 0 }, "ceiling"},
-		"reserve at ceiling":     {func(c *DispatchConfig) { c.ChildReserve = 6 }, "childReserve"},
-		"reserve of a 1 ceiling": {func(c *DispatchConfig) { c.Ceiling, c.ChildReserve, c.InteractiveReserve = 1, 1, 1 }, "childReserve"},
-		"short lease":            {func(c *DispatchConfig) { c.LeaseSeconds = 59 }, "three renewals"},
-		"short grace":            {func(c *DispatchConfig) { c.RestartGraceSeconds = 39 }, "two renewals"},
-		"no accept timeout":      {func(c *DispatchConfig) { c.AcceptTimeoutSeconds = 0 }, "acceptTimeoutSeconds"},
-		"duplicate profile":      {func(c *DispatchConfig) { c.Profiles = append(c.Profiles, c.Profiles[0]) }, "twice"},
-		"no concurrency":         {func(c *DispatchConfig) { c.Profiles[0].Concurrency = 0 }, "concurrency"},
-		"misnamed durable":       {func(c *DispatchConfig) { c.Profiles[0].Durables[0].Name = "other" }, "durable"},
+		"no namespace":              {func(c *DispatchConfig) { c.Namespace = "" }, "namespace"},
+		"no ceiling":                {func(c *DispatchConfig) { c.Ceiling = 0 }, "ceiling"},
+		"reserve at ceiling":        {func(c *DispatchConfig) { c.ChildReserve = 6 }, "childReserve"},
+		"reserve of a 1 ceiling":    {func(c *DispatchConfig) { c.Ceiling, c.ChildReserve, c.InteractiveReserve = 1, 0, 1 }, "interactiveReserve"},
+		"reserves fill the ceiling": {func(c *DispatchConfig) { c.Ceiling, c.ChildReserve, c.InteractiveReserve = 4, 2, 2 }, "reserved for neither"},
+		"short lease":               {func(c *DispatchConfig) { c.LeaseSeconds = 59 }, "three renewals"},
+		"short grace":               {func(c *DispatchConfig) { c.RestartGraceSeconds = 39 }, "two renewals"},
+		"no accept timeout":         {func(c *DispatchConfig) { c.AcceptTimeoutSeconds = 0 }, "acceptTimeoutSeconds"},
+		"duplicate profile":         {func(c *DispatchConfig) { c.Profiles = append(c.Profiles, c.Profiles[0]) }, "twice"},
+		"no concurrency":            {func(c *DispatchConfig) { c.Profiles[0].Concurrency = 0 }, "concurrency"},
+		"misnamed durable":          {func(c *DispatchConfig) { c.Profiles[0].Durables[0].Name = "other" }, "durable"},
 	} {
 		c := validDispatchConfig()
 		c.Profiles = append([]DispatchProfile(nil), c.Profiles...)

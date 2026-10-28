@@ -146,6 +146,12 @@ func dispatcherIdentity(agent *agentv1alpha1.PlatformAgent, ns string, profiles,
 			"$JS.API.DIRECT.GET."+leases+".>",
 			"$JS.API.CONSUMER.CREATE."+leases+".>",
 			"$JS.API.CONSUMER.DELETE."+leases+".*",
+			// The key listing and watch run an ordered push consumer with
+			// flow control, which the client answers on $JS.FC. Listings
+			// as large as a test can make didn't reach flow control (the
+			// listing is headers-only), so this is held for the larger
+			// ones that do, as the gateway's and the bridge's are.
+			"$JS.FC."+leases+".>",
 			"a2a.dispatch.*.*.*",
 			"a2a.cap.verify."+a2aDispatcherUser,
 			"_INBOX."+a2aDispatcherUser+".>",
@@ -293,6 +299,50 @@ func buildA2ADispatcherPodsRoleBinding(agent *agentv1alpha1.PlatformAgent) *rbac
 	}
 }
 
+// dispatchReserves are the child and interactive reserves the dispatcher
+// enforces. They are disjoint shares of the ceiling, and together leave at
+// least one slot reserved for neither, so top-level unattended work can always
+// run. The child reserve comes first, because without it waiting parents can
+// deadlock the ceiling; the interactive reserve, max(1, ceil(ceiling/3)), gets
+// what is left. A ceiling of 1 reserves nothing: every task runs alone, and a
+// parent there can never start a child.
+func dispatchReserves(agent *agentv1alpha1.PlatformAgent, ceiling int) (child, interactive int) {
+	if ceiling < 2 {
+		return 0, 0
+	}
+	child = min(resolveProfileChildReserve(agent), ceiling-1)
+	interactive = min(max(1, (ceiling+2)/3), ceiling-1-child)
+	return child, interactive
+}
+
+// reasonProfileReservesShort is the Warning Event on the PlatformAgent when
+// its profile ceiling is too small to honour every reserve #3660 promises.
+const reasonProfileReservesShort = "ProfileReservesShort"
+
+// dispatchReservesShortfall says which reserve the ceiling can't honour in
+// full, or "". Each reserve's promise is max(1, ceil(ceiling/3)) unless the
+// CR sets childReserve; dispatchReserves trims them to leave a slot for
+// top-level unattended work, child first.
+func dispatchReservesShortfall(agent *agentv1alpha1.PlatformAgent, ceiling, child, interactive int) string {
+	promised := max(1, (ceiling+2)/3)
+	wantChild := promised
+	if t := profileTuning(agent); t != nil && t.ChildReserve != nil {
+		wantChild = *t.ChildReserve
+	}
+	var short []string
+	if child < wantChild {
+		short = append(short, fmt.Sprintf("the child reserve is %d of %d", child, wantChild))
+	}
+	if interactive < promised {
+		short = append(short, fmt.Sprintf("the interactive reserve is %d of %d", interactive, promised))
+	}
+	if len(short) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("spec.harness.tuning.profiles.ceiling %d is too small to honour every reserve and leave a slot for top-level unattended work: %s. Raise the ceiling (or maxInProgress, which it defaults to) to at least 3 for every kind to get its share.",
+		ceiling, strings.Join(short, ", "))
+}
+
 // dispatcherGrantNames are the profiles the dispatch config lists and every
 // durable under them, in its order: the names the dispatcher's grants
 // enumerate.
@@ -355,20 +405,18 @@ func profileDurableName(profile, tier, kind string) string {
 // the durables the operator creates for it, one per (tier, kind).
 func desiredDispatchConfig(agent *agentv1alpha1.PlatformAgent, profiles []agentv1alpha1.AgentProfile) (a2aDispatchConfig, error) {
 	ceiling := resolveProfileCeiling(agent)
+	child, interactive := dispatchReserves(agent, ceiling)
 	cfg := a2aDispatchConfig{
 		Namespace:            agent.Namespace,
 		ProfileNamespace:     profileNamespaceName(agent),
 		Ceiling:              ceiling,
-		InteractiveReserve:   max(1, (ceiling+2)/3),
-		ChildReserve:         resolveProfileChildReserve(agent),
+		InteractiveReserve:   interactive,
+		ChildReserve:         child,
 		LeaseSeconds:         resolveProfileLeaseSeconds(agent),
 		RenewSeconds:         resolveProfileRenewSeconds(agent),
 		RestartGraceSeconds:  resolveProfileRestartGraceSeconds(agent),
 		AcceptTimeoutSeconds: resolveProfileAcceptTimeoutSeconds(agent),
 		Profiles:             []a2aDispatchProfile{},
-	}
-	if cfg.InteractiveReserve >= ceiling {
-		cfg.InteractiveReserve = ceiling
 	}
 	resolved := resolveAgentProfileIdentities(agent, profiles)
 	for i := range profiles {
@@ -433,6 +481,13 @@ func (r *PlatformAgentReconciler) reconcileA2ADispatcher(ctx context.Context, ag
 	cm, err := buildA2ADispatchConfigMap(agent, profiles)
 	if err != nil {
 		return nil, fmt.Errorf("failed to render the dispatch config: %w", err)
+	}
+	// A ceiling too small for every reserve is said out loud, so nobody
+	// finds out by interactive users waiting.
+	ceiling := resolveProfileCeiling(agent)
+	child, interactive := dispatchReserves(agent, ceiling)
+	if msg := dispatchReservesShortfall(agent, ceiling, child, interactive); msg != "" {
+		r.recordEvent(agent, corev1.EventTypeWarning, reasonProfileReservesShort, msg)
 	}
 	// The identity before the Deployment that mounts a token for it, and the
 	// config and its Role before the pod that watches them.

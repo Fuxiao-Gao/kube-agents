@@ -3,6 +3,7 @@ package authcallout
 import (
 	"context"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -131,5 +132,58 @@ func TestTheRenderedOperatorMakesOnlySubmitDurables(t *testing.T) {
 		Durable: "profile-tse-read-top", FilterSubject: lib.TaskInSubject("tse", "*"), AckPolicy: jetstream.AckExplicitPolicy,
 	}); err == nil {
 		t.Error("the operator made a durable over a task's .in")
+	}
+}
+
+// The dispatcher lists a (profile, tier)'s leases after a restart, through
+// the ordered consumer KV key listing runs, flow control and all.
+func TestTheRenderedDispatcherListsItsLeases(t *testing.T) {
+	h := startHarness(t, renderedDispatcherMap(t), map[string]Attested{
+		tokenDispatcher: {ServiceAccount: renderedDispatcherSA},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	seed, _ := connectStatic(t, h, "seed", renderedSeedPassword)
+	seedJS, err := jetstream.New(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seedJS.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: lib.ProfileLeaseBucket, History: 1}); err != nil {
+		t.Fatalf("creating PROFILE_LEASES as seed: %v", err)
+	}
+	nc, _ := h.connectAs(t, "dispatcher", tokenDispatcher)
+	js, err := jetstream.New(nc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kv, err := js.KeyValue(ctx, lib.ProfileLeaseBucket)
+	if err != nil {
+		t.Fatalf("the dispatcher can't open its bucket: %v", err)
+	}
+	// 600 leases, more than one delivery batch. The listing is a
+	// headers-only ordered consumer, and at this size the server didn't ask
+	// for flow control, so this doesn't prove the $JS.FC grant (removing it
+	// still passes); the grant is held for the much larger listings flow
+	// control does reach, as the gateway's and the bridge's are.
+	big := []byte(`{}`)
+	for i := range 600 {
+		key := lib.ProfileLeaseKey("tse", "read", "tse-read-7f9c", "t"+strconv.Itoa(i))
+		if _, err := kv.Put(ctx, key, big); err != nil {
+			t.Fatalf("put %s: %v", key, err)
+		}
+	}
+	lister, err := kv.ListKeysFiltered(ctx, "tse.read.>")
+	if err != nil {
+		t.Fatalf("the dispatcher can't list its leases: %v", err)
+	}
+	n := 0
+	for range lister.Keys() {
+		n++
+	}
+	if n != 600 {
+		t.Errorf("listed %d leases, want 600", n)
+	}
+	if err := kv.Delete(ctx, lib.ProfileLeaseKey("tse", "read", "tse-read-7f9c", "t0")); err != nil {
+		t.Errorf("the dispatcher can't delete a lease: %v", err)
 	}
 }
