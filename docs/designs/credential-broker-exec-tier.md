@@ -208,8 +208,10 @@ shim always takes the fallback and nothing reports it.
   to them, where they would get a 404. They do not carry `kubeagents.x-k8s.io/has-credential-proxy`,
   which opens the github-token-minter to a pod. The exec builder mounts no forge credentials and no
   Slack tokens, so scaling out makes no copies of secrets that exec never uses.
-- Same resources per replica as today (requests 500m CPU / 1 GiB, limits 1 CPU / 2 GiB [code,
-  `credential_proxy_manifests.go:140-149`]).
+- Resources per replica: requests 1 CPU / 2 GiB, limits 2 CPU / 2 GiB. Today's broker requests
+  500m CPU / 1 GiB with limits 1 CPU / 2 GiB [code, `credential_proxy_manifests.go:140-149`]. The
+  2 GiB request is the minimum from §4.2, and the 2-CPU limit follows step 0 (§9). On Autopilot
+  without bursting the limit is clamped to the request, so there the request is 2 CPU / 2 GiB.
   The slot cap and the memory budget stay per replica.
 - A NetworkPolicy target for the exec tier: ingress on 8765 from the sandbox, from session pods
   only under the cluster-view flag (the condition the stateful broker has today), and the metrics
@@ -217,7 +219,8 @@ shim always takes the fallback and nothing reports it.
   peer: the sandbox (`shell_sandbox_manifests.go`) and session pods
   (`platformagent_a2a_manifests.go`). The agent pod gets no egress to it, because `/v1/exec`
   admits only the shell and session roles.
-- The chart's footprint and the quota preflight add N × the exec replica's requests.
+- The chart's footprint and the quota preflight add N × the exec replica's requests: 1 CPU /
+  2 GiB each on Standard, and 2 CPU / 2 GiB on Autopilot, where the request equals the limit.
 
 ### 3.4 Identity and tokens per replica
 
@@ -336,6 +339,12 @@ caller presents, and nothing the caller can set alone changes it.
   turn. The sandbox session receives the turn token at its start, the way it receives
   `HERMES_PROFILE_HOME`, so it needs an `AcceptEnv` entry and the session-command path. #3889's
   per-task credentials have the same shape, and the turn token can be one of them.
+- The turn token does not exist on `main`. The broker authenticates only projected
+  ServiceAccount tokens, through TokenReview (`ServiceAccountAuthenticator` in
+  `credential_proxy.py`), and the session role comes from the token audience and
+  `CREDENTIAL_PROXY_SESSION_CALLERS`. So the shell-role half of this section depends on open
+  question 9. Until it is answered, shell-role requests keep today's single arrival-order queue:
+  no class and no background cap (§9, step 2). Only session pods get a class.
 - No header and no sandbox variable sets the class. The sandbox's `sshd` accepts only `LANG`,
   `LC_*` and `HERMES_PROFILE_HOME` (`deploy/sandbox/sshd_config`), so a cron variable would not
   reach the shim, and a header that any command can set is not a claim.
@@ -353,9 +362,10 @@ caller presents, and nothing the caller can set alone changes it.
   background work and the reserve is not one-way.
 - Inside a class the order stays arrival order. Interactive requests go ahead of queued background
   requests, within the cap.
-- On Autopilot without bursting the budget admits 4, so `B = 2`, and the same sweep needs about
-  three times the replicas. When the tier is on, each exec replica gets a 2 GiB minimum memory
-  request, so `B = 6` on every cluster mode.
+- Without a minimum, Autopilot's clamp to a 1 GiB request would make the budget admit 4, and
+  `B = 2`. When the tier is on, each exec replica requests at least 2 GiB (§3.3). On Autopilot
+  the limit then equals that request, so the budget admits 9, the slot cap holds it to 8, and
+  `B = 6` on every cluster mode.
 - The memory budget applies to both classes as it does today.
 - The wait histogram and the refusal counter get a `class` label.
 
@@ -504,23 +514,35 @@ minute at about 3 s each with the broker at 4 CPU (about 1.8 slots in use), agai
 at 17 s with 1 CPU [measured, #4107]. Slot-minutes per cluster therefore depend on CPU. So the
 CPU-limit raise (#4106) is step 0 (§9), and the slot terms are taken after it.
 
-[predicted, for scale only, from #4107's 16-cluster audit window at 4 CPU] 1,077 commands × 3.0 s
-over 16 clusters is about 3.4 slot-minutes per cluster per audit round. A 1,000-cluster round in
-one hour then needs about 57 background slots on average, which is 10 replicas at `B = 6`. If the
-cache takes 80% of the sweep's reads (an assumption), that becomes about 12 slots, or 2 replicas.
-These are averages; the peak is higher. The CPU term may dominate: the broker needed 2.5 cores at
-16 clusters, and how cores grow per admitted slot is what §8.2 measures. This is why the design
-needs both the exec tier and the cache contract.
+[predicted, for scale only] The worked example takes an exec replica with a 2-CPU limit (§3.3)
+and a 1,000-cluster audit round in one hour. #4107 measured two points at 16 clusters, and
+neither is at 2 CPU, so the example gives both:
+
+| #4107's 16-cluster audit window | Slot-minutes per cluster | Background slots | Slot term (`B = 6`) | CPU term (2 CPU per replica)                       | Replicas |
+| ------------------------------- | ------------------------ | ---------------- | ------------------- | -------------------------------------------------- | -------- |
+| 4 CPU: 1,077 commands × 3.0 s   | about 3.4                | about 57         | 10                  | 2.5 cores for 1.8 slots in use: about 79 cores, 40 | about 40 |
+| 1 CPU: 674 commands × 17.3 s    | about 12                 | about 202        | 34                  | 1 core for 6.5 slots in use: about 31 cores, 16    | about 34 |
+
+So the CPU term or the slower commands set the count, not the slots alone: about 34 to 40
+replicas without a cache. If the cache takes 80% of the sweep's reads (an assumption), that becomes
+about 7 to 8. These are averages; the peak is higher. The cores per slot in use are derived from
+the whole broker's CPU, which also runs the Cloud API relay and the other routes, so they overstate
+exec's share. The broker plan's 2-CPU control run (§8.2) replaces this table with a measurement at
+the replica's own limit. This is why the design needs both the exec tier and the cache contract.
 
 ## 9. Rollout
 
-0. **Raise the broker's CPU limit (#4106).** It is the first limit measured (§2.3), and it costs
-   one value in the operator.
+0. **Raise the broker's CPU limit (#4106)** to at least 2 cores, the exec replica's limit (§3.3).
+   It is the first limit measured (§2.3), and it costs one value in the operator. On Autopilot it
+   raises the request too, so the footprint and the quota preflight grow with it.
 1. **Off by default.** New CR field `spec.deployment.credentialProxy.exec.replicas`. The value 0
    (the default) means no exec tier and no `CREDENTIAL_PROXY_EXEC_URL`, so every install behaves
    as today.
-2. **The broker-side class and per-class metrics first,** on the single pod. They are useful
-   alone. They give the traffic mix (§8.1) before anything scales.
+2. **Per-class metrics and the session-role class first,** on the single pod. They give the
+   traffic mix (§8.1) before anything scales. The background cap applies only once the turn token
+   exists (open question 9). Until then, shell-role requests keep today's single queue, so chat
+   commands and the MCP server's interactive tools that run through `sandbox_exec` are no worse
+   off than today.
 3. **Exec tier on the eval install and the experiment install,** at 2 replicas. Run §8.2.
 4. **Default on** at a replica count from the measurements, with the chart footprint updated.
 5. **Then** mark `credential-proxy-single-pod.md` superseded. It already points here.
@@ -538,8 +560,9 @@ To revert, set replicas to 0. The shim falls back to `CREDENTIAL_PROXY_URL`.
   replica can fill it while another is idle. The retry in §4.3 and the per-replica metrics in §8.1
   are the checks.
 - **Caches filled N times.** More cold `get-credentials` (§3.4) and more TokenReviews.
-- **Footprint.** Each replica adds 500m CPU and 1 GiB to the requests. On small installs, 0
-  replicas stays the default until a fleet needs it.
+- **Footprint.** Each replica adds 1 CPU and 2 GiB to the requests on Standard, and 2 CPU and
+  2 GiB on Autopilot, where the request equals the limit (§3.3). On small installs, 0 replicas
+  stays the default until a fleet needs it.
 - **A wrong class.** Interactive work without a turn token runs as background and waits longer.
   A copied turn token can use at most the interactive cap. Neither gains access.
 - **Two addresses.** A caller that uses the wrong URL gets a 404 from the exec role, which is loud
