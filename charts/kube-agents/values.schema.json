@@ -905,6 +905,11 @@
                       "type": "integer",
                       "minimum": 1,
                       "maximum": 120
+                    },
+                    "maxTaskDeadlineSeconds": {
+                      "type": "integer",
+                      "minimum": 60,
+                      "maximum": 21600
                     }
                   }
                 },

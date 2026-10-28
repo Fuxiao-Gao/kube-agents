@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -322,5 +323,64 @@ func TestASmallCeilingWarnsWhichReserveIsShort(t *testing.T) {
 		}
 	default:
 		t.Error("a ceiling of 2 wrote no warning")
+	}
+}
+
+// A task deadline past the cap is clamped in the dispatch config, warned on,
+// and the callout is told the same bound for task credentials.
+func TestATaskDeadlinePastTheCapIsClampedAndWarned(t *testing.T) {
+	withDispatcher(t)
+	agent := a2aTestAgent()
+	long := testAgentProfile(agent.Namespace, "slow", func(p *agentv1alpha1.AgentProfile) {
+		p.Spec.Lifecycle.ActiveDeadlineSeconds = 86400
+	})
+	short := testAgentProfile(agent.Namespace, "quick")
+	cfg, err := desiredDispatchConfig(agent, []agentv1alpha1.AgentProfile{long, short})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]int{}
+	for _, p := range cfg.Profiles {
+		got[p.Name] = p.ActiveDeadlineSeconds
+	}
+	if got["slow"] != 21600 || got["quick"] != int(short.Spec.Lifecycle.ActiveDeadlineSeconds) {
+		t.Errorf("deadlines = %v, want slow clamped to 21600 and quick as set", got)
+	}
+	scheme := setupScheme()
+	rec := record.NewFakeRecorder(10)
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent).WithInterceptorFuncs(fakeServerSideApplyInterceptors()).Build()
+	r := &PlatformAgentReconciler{Client: c, Scheme: scheme, Recorder: rec}
+	if _, err := r.reconcileA2ADispatcher(context.Background(), agent, []agentv1alpha1.AgentProfile{long, short}, false); err != nil {
+		t.Fatal(err)
+	}
+	warned := false
+	for len(rec.Events) > 0 {
+		e := <-rec.Events
+		warned = warned || (strings.Contains(e, reasonProfileDeadlineCapped) && strings.Contains(e, "slow") && strings.Contains(e, "clamped to 21600s"))
+	}
+	if !warned {
+		t.Error("no warning for the clamped deadline")
+	}
+	env := map[string]string{}
+	for _, e := range buildA2ACalloutDeployment(agent).Spec.Template.Spec.Containers[0].Env {
+		env[e.Name] = e.Value
+	}
+	if env["A2A_TASK_CREDENTIAL_MAX_LIFETIME"] != "6h0m0s" {
+		t.Errorf("the callout's credential lifetime = %q, want the cap", env["A2A_TASK_CREDENTIAL_MAX_LIFETIME"])
+	}
+	// Lowered on the CR, the clamp and the callout move together.
+	lowered := agent.DeepCopy()
+	lowered.Spec.Harness = &agentv1alpha1.HarnessSpec{Tuning: &agentv1alpha1.TuningSpec{Profiles: &agentv1alpha1.ProfileTuning{MaxTaskDeadlineSeconds: ptr.To(900)}}}
+	cfg, _ = desiredDispatchConfig(lowered, []agentv1alpha1.AgentProfile{short})
+	env = map[string]string{}
+	for _, e := range buildA2ACalloutDeployment(lowered).Spec.Template.Spec.Containers[0].Env {
+		env[e.Name] = e.Value
+	}
+	lifetime, err := time.ParseDuration(env["A2A_TASK_CREDENTIAL_MAX_LIFETIME"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Profiles[0].ActiveDeadlineSeconds != 900 || lifetime != 900*time.Second {
+		t.Errorf("lowered to 900s: the clamp gives %ds and the callout %s; they must be the same bound", cfg.Profiles[0].ActiveDeadlineSeconds, lifetime)
 	}
 }

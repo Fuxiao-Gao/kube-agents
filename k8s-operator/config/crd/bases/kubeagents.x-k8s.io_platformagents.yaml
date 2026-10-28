@@ -9886,6 +9886,17 @@ spec:
                               maximum: 3600
                               minimum: 15
                               type: integer
+                            maxTaskDeadlineSeconds:
+                              description: |-
+                                MaxTaskDeadlineSeconds caps the deadline any profile task gets: a
+                                profile whose lifecycle.activeDeadlineSeconds is longer has its tasks
+                                clamped to this, with a warning. It is also the longest a task's
+                                credential may live, which the auth callout enforces, so a leaked
+                                credential is bounded by it. It may only be lowered from the default.
+                                Absent means DefaultProfileMaxTaskDeadlineSeconds (6h).
+                              maximum: 21600
+                              minimum: 60
+                              type: integer
                             renewSeconds:
                               description: |-
                                 RenewSeconds is how often a worker renews each task's lease; the

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -133,6 +134,14 @@ func resolveProfileRenewSeconds(agent *agentv1alpha1.PlatformAgent) int {
 
 func resolveProfileRestartGraceSeconds(agent *agentv1alpha1.PlatformAgent) int {
 	return profileIntOr(agent, func(t *agentv1alpha1.ProfileTuning) *int { return t.RestartGraceSeconds }, agentv1alpha1.DefaultProfileRestartGraceSeconds)
+}
+
+// resolveProfileMaxTaskDeadline is the install's task deadline cap: what the
+// dispatch config clamps every profile task's deadline to, and the auth
+// callout's longest task credential. One resolver for both, so they can't
+// disagree and the dispatcher never issues a credential the callout refuses.
+func resolveProfileMaxTaskDeadline(agent *agentv1alpha1.PlatformAgent) time.Duration {
+	return time.Duration(profileIntOr(agent, func(t *agentv1alpha1.ProfileTuning) *int { return t.MaxTaskDeadlineSeconds }, agentv1alpha1.DefaultProfileMaxTaskDeadlineSeconds)) * time.Second
 }
 
 func resolveProfileAcceptTimeoutSeconds(agent *agentv1alpha1.PlatformAgent) int {

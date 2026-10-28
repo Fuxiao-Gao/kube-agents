@@ -25,6 +25,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -315,6 +316,22 @@ func dispatchReserves(agent *agentv1alpha1.PlatformAgent, ceiling int) (child, i
 	return child, interactive
 }
 
+// reasonProfileDeadlineCapped is the Warning Event on the PlatformAgent when a
+// profile's activeDeadlineSeconds is past the install's task deadline cap.
+const reasonProfileDeadlineCapped = "ProfileDeadlineCapped"
+
+// cappedTaskDeadline is a profile's task deadline in seconds, clamped to the
+// install's cap (resolveProfileMaxTaskDeadline), and whether it was clamped.
+// The cap isn't a CRD maximum on activeDeadlineSeconds: on an existing field
+// that would wedge every profile already above it.
+func cappedTaskDeadline(agent *agentv1alpha1.PlatformAgent, p *agentv1alpha1.AgentProfile) (int, bool) {
+	limit := int(resolveProfileMaxTaskDeadline(agent) / time.Second)
+	if d := int(p.Spec.Lifecycle.ActiveDeadlineSeconds); d <= limit {
+		return d, false
+	}
+	return limit, true
+}
+
 // reasonProfileReservesShort is the Warning Event on the PlatformAgent when
 // its profile ceiling is too small to honour every reserve #3660 promises.
 const reasonProfileReservesShort = "ProfileReservesShort"
@@ -429,7 +446,7 @@ func desiredDispatchConfig(agent *agentv1alpha1.PlatformAgent, profiles []agentv
 			Tiers:                 p.AllowedTierList(),
 			Concurrency:           int(p.Spec.Concurrency),
 			QueueTimeoutSeconds:   int(p.QueueTimeout()),
-			ActiveDeadlineSeconds: int(p.Spec.Lifecycle.ActiveDeadlineSeconds),
+			ActiveDeadlineSeconds: func() int { d, _ := cappedTaskDeadline(agent, p); return d }(),
 			Durables:              []a2aDispatchDurable{},
 		}
 		for _, param := range p.Spec.Parameters {
@@ -488,6 +505,13 @@ func (r *PlatformAgentReconciler) reconcileA2ADispatcher(ctx context.Context, ag
 	child, interactive := dispatchReserves(agent, ceiling)
 	if msg := dispatchReservesShortfall(agent, ceiling, child, interactive); msg != "" {
 		r.recordEvent(agent, corev1.EventTypeWarning, reasonProfileReservesShort, msg)
+	}
+	for i := range profiles {
+		if d, capped := cappedTaskDeadline(agent, &profiles[i]); capped {
+			r.recordEvent(agent, corev1.EventTypeWarning, reasonProfileDeadlineCapped, fmt.Sprintf(
+				"AgentProfile %s: spec.lifecycle.activeDeadlineSeconds %d is clamped to %ds by the install's task deadline cap (spec.harness.tuning.profiles.maxTaskDeadlineSeconds), the longest a task's credential may live, so its tasks end at %ds",
+				profiles[i].Name, profiles[i].Spec.Lifecycle.ActiveDeadlineSeconds, d, d))
+		}
 	}
 	// The identity before the Deployment that mounts a token for it, and the
 	// config and its Role before the pod that watches them.

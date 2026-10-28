@@ -908,6 +908,17 @@ type ProfileTuning struct {
 	// +optional
 	AcceptTimeoutSeconds *int `json:"acceptTimeoutSeconds,omitempty"`
 
+	// MaxTaskDeadlineSeconds caps the deadline any profile task gets: a
+	// profile whose lifecycle.activeDeadlineSeconds is longer has its tasks
+	// clamped to this, with a warning. It is also the longest a task's
+	// credential may live, which the auth callout enforces, so a leaked
+	// credential is bounded by it. It may only be lowered from the default.
+	// Absent means DefaultProfileMaxTaskDeadlineSeconds (6h).
+	// +kubebuilder:validation:Minimum=60
+	// +kubebuilder:validation:Maximum=21600
+	// +optional
+	MaxTaskDeadlineSeconds *int `json:"maxTaskDeadlineSeconds,omitempty"`
+
 	// WarmReplicas is how many warm worker pods each interactive (profile,
 	// tier) keeps running. Absent means DefaultProfileWarmReplicas.
 	// +kubebuilder:validation:Minimum=0
@@ -925,6 +936,7 @@ const (
 	DefaultProfileRenewSeconds         = 20
 	DefaultProfileRestartGraceSeconds  = 60
 	DefaultProfileAcceptTimeoutSeconds = 10
+	DefaultProfileMaxTaskDeadlineSeconds = 21600
 )
 
 // AgentLimits bounds a single agent run. Both limits exist because they fail the same

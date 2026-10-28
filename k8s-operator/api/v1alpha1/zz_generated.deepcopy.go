@@ -1454,6 +1454,11 @@ func (in *ProfileTuning) DeepCopyInto(out *ProfileTuning) {
 		*out = new(int)
 		**out = **in
 	}
+	if in.MaxTaskDeadlineSeconds != nil {
+		in, out := &in.MaxTaskDeadlineSeconds, &out.MaxTaskDeadlineSeconds
+		*out = new(int)
+		**out = **in
+	}
 	if in.WarmReplicas != nil {
 		in, out := &in.WarmReplicas, &out.WarmReplicas
 		*out = new(int)

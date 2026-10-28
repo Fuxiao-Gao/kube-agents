@@ -687,6 +687,10 @@ func TestThePlatformAgentCRDBoundsTheDispatchIntervals(t *testing.T) {
 		{agentv1alpha1.ProfileTuning{RenewSeconds: ptr.To(30), LeaseSeconds: ptr.To(90)}, ""},
 		{agentv1alpha1.ProfileTuning{Ceiling: ptr.To(4), ChildReserve: ptr.To(3)}, ""},
 		{agentv1alpha1.ProfileTuning{Ceiling: ptr.To(4), ChildReserve: ptr.To(4)}, "childReserve must be below ceiling"},
+		// The task deadline cap may only be lowered from 6h.
+		{agentv1alpha1.ProfileTuning{MaxTaskDeadlineSeconds: ptr.To(900)}, ""},
+		{agentv1alpha1.ProfileTuning{MaxTaskDeadlineSeconds: ptr.To(21601)}, "maxTaskDeadlineSeconds"},
+		{agentv1alpha1.ProfileTuning{MaxTaskDeadlineSeconds: ptr.To(59)}, "maxTaskDeadlineSeconds"},
 	} {
 		agent := a2aTestAgent()
 		agent.Name = fmt.Sprintf("agent-%d", i)
