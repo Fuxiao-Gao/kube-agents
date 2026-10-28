@@ -219,6 +219,13 @@ const DispatchConfigKey = "dispatch.json"
 type DispatchConfig struct {
 	// Version changes whenever anything below does.
 	Version string `json:"version"`
+	// Namespace is the install's namespace (the PlatformAgent's). A task of
+	// a profile that declares no target parameters is checked against
+	// namespace/<Namespace>; CheckProfileRun's target is never empty.
+	Namespace string `json:"namespace"`
+	// ProfileNamespace is where the worker pods run, <Namespace>-profiles;
+	// the dispatcher watches pods there (ProfilePoolSelector).
+	ProfileNamespace string `json:"profileNamespace"`
 	// Ceiling caps running profile tasks of every kind, install-wide, with
 	// InteractiveReserve kept for interactive tiers and ChildReserve for
 	// child tasks.
@@ -261,6 +268,8 @@ type DispatchDurable struct {
 // keeps its last good config rather than run on a broken one.
 func (c DispatchConfig) Validate() error {
 	switch {
+	case !ValidSubjectToken(c.Namespace) || c.ProfileNamespace == "":
+		return fmt.Errorf("dispatch config: namespace %q, profile namespace %q", c.Namespace, c.ProfileNamespace)
 	case c.Ceiling < 1:
 		return fmt.Errorf("dispatch config: ceiling %d", c.Ceiling)
 	case c.ChildReserve < 0 || (c.ChildReserve > 0 && c.ChildReserve >= c.Ceiling):
@@ -288,4 +297,22 @@ func (c DispatchConfig) Validate() error {
 		}
 	}
 	return nil
+}
+
+// The labels on a warm worker pod, which the dispatcher selects a pool by
+// (ProfilePoolSelector) when it looks for a ready pod to offer a task to.
+// The operator's ServiceAccounts in the profile namespace carry the same
+// profile and tier labels.
+const (
+	ProfileComponentLabel  = "kubeagents.x-k8s.io/a2a-component"
+	ProfileWorkerComponent = "agentprofile-worker"
+	ProfileNameLabel       = "kubeagents.x-k8s.io/agentprofile"
+	ProfileTierLabel       = "kubeagents.x-k8s.io/agentprofile-tier"
+)
+
+// ProfilePoolSelector is the label selector for one (profile, tier)'s warm
+// worker pods. Ready pods among them, less the ones holding a lease, are the
+// ones a task can be offered to.
+func ProfilePoolSelector(profile, tier string) string {
+	return fmt.Sprintf("%s=%s,%s=%s,%s=%s", ProfileComponentLabel, ProfileWorkerComponent, ProfileNameLabel, profile, ProfileTierLabel, tier)
 }

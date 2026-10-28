@@ -170,7 +170,8 @@ func TestAProfileCardCarriesItsRoutingFields(t *testing.T) {
 
 func validDispatchConfig() DispatchConfig {
 	return DispatchConfig{
-		Version: "v1", Ceiling: 6, InteractiveReserve: 2, ChildReserve: 2,
+		Version: "v1", Namespace: "kubeagents-system", ProfileNamespace: "kubeagents-system-profiles",
+		Ceiling: 6, InteractiveReserve: 2, ChildReserve: 2,
 		LeaseSeconds: 90, RenewSeconds: 20, RestartGraceSeconds: 60, AcceptTimeoutSeconds: 10,
 		Profiles: []DispatchProfile{{
 			Name: "tse", Tiers: []string{"read"}, Concurrency: 2, QueueTimeoutSeconds: 3600, ActiveDeadlineSeconds: 1800,
@@ -198,6 +199,7 @@ func TestADispatchConfigIsChecked(t *testing.T) {
 		edit func(*DispatchConfig)
 		want string
 	}{
+		"no namespace":           {func(c *DispatchConfig) { c.Namespace = "" }, "namespace"},
 		"no ceiling":             {func(c *DispatchConfig) { c.Ceiling = 0 }, "ceiling"},
 		"reserve at ceiling":     {func(c *DispatchConfig) { c.ChildReserve = 6 }, "childReserve"},
 		"reserve of a 1 ceiling": {func(c *DispatchConfig) { c.Ceiling, c.ChildReserve, c.InteractiveReserve = 1, 1, 1 }, "childReserve"},
@@ -215,5 +217,14 @@ func TestADispatchConfigIsChecked(t *testing.T) {
 		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: Validate = %v, want an error saying %q", name, err, tc.want)
 		}
+	}
+}
+
+// The pool selector names the worker component, the profile and the tier, so
+// it can't pick up a ServiceAccount's labels or another tier's pods.
+func TestThePoolSelectorNamesTheWorkerComponentProfileAndTier(t *testing.T) {
+	want := "kubeagents.x-k8s.io/a2a-component=agentprofile-worker,kubeagents.x-k8s.io/agentprofile=tse,kubeagents.x-k8s.io/agentprofile-tier=read"
+	if got := ProfilePoolSelector("tse", "read"); got != want {
+		t.Errorf("selector = %q, want %q", got, want)
 	}
 }
