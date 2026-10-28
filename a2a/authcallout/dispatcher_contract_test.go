@@ -60,7 +60,7 @@ func TestTheRenderedDispatcherReachesItsContractAndNothingNear(t *testing.T) {
 	checkPublish(t, nc, violations, map[string]bool{
 		// Allowed: the contract.
 		lib.DispatchSubject("tse", "read", pod):                                           false,
-		lib.TaskEventsSubject("tse", "t1"):                                                false,
+		lib.TaskEventsSubject("tse", "t1"):                                                true,
 		lib.ProfileLeaseSubject(lib.ProfileLeaseKey("tse", "read", pod, "t1")):            false,
 		"$JS.API.CONSUMER.MSG.NEXT.TASKS." + lib.ProfileDurableName("tse", "read", "top"): false,
 		"$JS.ACK.TASKS." + lib.ProfileDurableName("tse", "read", "top") + ".1.1.1.1.0":    false,
@@ -68,7 +68,7 @@ func TestTheRenderedDispatcherReachesItsContractAndNothingNear(t *testing.T) {
 		// Refused: the nearest things it must not do.
 		lib.TaskInSubject("tse", "t1"):                                                  true,
 		lib.TaskSubmitSubject("tse", "read", "top", "t1"):                               true,
-		lib.TaskSupervisorSubject("tse", "t1"):                                          true,
+		lib.TaskSupervisorSubject("tse", "t1"):                                          false,
 		lib.DispatchAcceptSubject("tse", "read", pod):                                   true,
 		"$JS.API.CONSUMER.CREATE.TASKS." + lib.ProfileDurableName("tse", "read", "top"): true,
 		"$JS.API.CONSUMER.MSG.NEXT.TASKS.session-x-origin":                              true,
@@ -78,8 +78,8 @@ func TestTheRenderedDispatcherReachesItsContractAndNothingNear(t *testing.T) {
 		"$KV.session-state.x":    true,
 		"a2a.cap.verify.gateway": true,
 		"a2a.agents.tse":         true,
-		// Task events of something it doesn't dispatch for: a session's.
-		lib.TaskEventsSubject("session-abc", "t1"): true,
+		// The supervisor subject of something it doesn't dispatch for: a session's.
+		lib.TaskSupervisorSubject("session-abc", "t1"): true,
 	})
 	for subject, wantRefused := range map[string]bool{
 		lib.DispatchAcceptSubject("tse", "read", pod): false,

@@ -15,7 +15,10 @@ import (
 // contract on #3655): one per (profile, tier, kind), created and owned by the
 // operator, read only by the dispatcher. This is lib.EnsureHeldConsumer's
 // contract restated here, because this module can't import that one: a
-// durable made here must be one the dispatcher's SubscribeHeld accepts.
+// durable made here must pass SubscribeHeld's checks on the stored config
+// (the held-durable fixture test holds that). SubscribeHeld's intake check
+// still takes the .in class on this tree; the dispatcher's PR moves it to
+// the submit shape these durables filter on.
 const (
 	// heldMarkerKey/Value are lib's: the metadata SubscribeHeld requires,
 	// so the dispatcher binds only a durable made for held delivery, and
@@ -96,6 +99,11 @@ func ensureDurable(ctx context.Context, js jetstream.JetStream, d profileDurable
 			return fmt.Errorf("durable %s filters %q; refusing to move it to %q under a bound dispatcher (re-create it)", d.name, old.FilterSubject, d.filter)
 		case old.AckWait != a2aHeldAckWait:
 			return fmt.Errorf("durable %s has AckWait %v; refusing to change it to %v under a bound dispatcher (re-create it)", d.name, old.AckWait, a2aHeldAckWait)
+		case heldConfigTampered(old) != "":
+			// The mark is a public constant, so it proves nothing on its
+			// own: anything this operator would have left at its default
+			// and that is set says someone else made the consumer.
+			return fmt.Errorf("a consumer named %s exists on %s that %s, which the operator never sets; it doesn't adopt it", d.name, a2aTasksStream, heldConfigTampered(old))
 		case old.MaxAckPending == d.maxAckPending:
 			return nil
 		}
@@ -115,6 +123,33 @@ func ensureDurable(ctx context.Context, js jetstream.JetStream, d profileDurable
 		return fmt.Errorf("durable %s: %w", d.name, err)
 	}
 	return nil
+}
+
+// heldConfigTampered is lib's check of the same name: the first setting the
+// operator leaves at its default that a stored consumer has changed, or "".
+// The dispatcher refuses to bind such a durable, and the operator refuses to
+// adopt one (lib.heldConfigTampered holds the list; the durable-config
+// fixture test holds the two equal).
+func heldConfigTampered(cc jetstream.ConsumerConfig) string {
+	switch {
+	case cc.DeliverSubject != "":
+		return "pushes to " + cc.DeliverSubject
+	case cc.HeadersOnly:
+		return "delivers headers only"
+	case cc.InactiveThreshold != 0:
+		return "is deleted after " + cc.InactiveThreshold.String() + " inactive"
+	case cc.MaxDeliver > 0:
+		return fmt.Sprintf("stops redelivering after %d deliveries", cc.MaxDeliver)
+	case cc.DeliverPolicy != jetstream.DeliverAllPolicy:
+		return "does not start at the first submission"
+	case cc.ReplayPolicy != jetstream.ReplayInstantPolicy:
+		return "replays at the original rate"
+	case len(cc.BackOff) > 0:
+		return "backs off redeliveries"
+	case cc.RateLimit != 0:
+		return "is rate limited"
+	}
+	return ""
 }
 
 // deleteDurable deletes the named durable if it exists and carries the held
@@ -151,18 +186,27 @@ func (n *natsCardPublisher) SyncDurables(ctx context.Context, agent *agentv1alph
 	}
 	ctx, cancel := context.WithTimeout(ctx, cardBusTimeout)
 	defer cancel()
+	return syncDurables(ctx, js, profile, want)
+}
+
+// syncDurables is SyncDurables on a JetStream handle.
+func syncDurables(ctx context.Context, js jetstream.JetStream, profile string, want []profileDurable) error {
 	keep := map[string]bool{}
 	for _, d := range want {
 		keep[d.name] = true
-		if err := ensureDurable(ctx, js, d); err != nil {
-			return err
-		}
 	}
+	// Dropped names first: on a stream with no spare consumer slot, a tier
+	// swap needs the old tier's slots before the new tier's durables fit.
 	for _, name := range allProfileDurableNames(profile) {
 		if keep[name] {
 			continue
 		}
 		if err := deleteDurable(ctx, js, name); err != nil {
+			return err
+		}
+	}
+	for _, d := range want {
+		if err := ensureDurable(ctx, js, d); err != nil {
 			return err
 		}
 	}

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // The dispatcher's names line up with the subjects they read: a durable's
@@ -256,5 +258,58 @@ func TestTheOperatorsDispatchConfigDecodesAndValidates(t *testing.T) {
 	}
 	if cfg.Version == "" || cfg.Namespace == "" || cfg.ProfileNamespace != cfg.Namespace+"-profiles" {
 		t.Errorf("version %q, namespace %q, profile namespace %q", cfg.Version, cfg.Namespace, cfg.ProfileNamespace)
+	}
+}
+
+// The durable the operator makes and the pool labels it renders (its
+// fixture, written by the operator's tests) agree with this package's
+// constants, and the durable passes SubscribeHeld's checks: the operator
+// can't import lib, so this is what holds its copies of the held mark, the
+// AckWait, the tamper list and the labels equal to these.
+func TestTheOperatorsHeldDurableIsOneSubscribeHeldBinds(t *testing.T) {
+	raw, err := os.ReadFile("testdata/rendered-held-durable.json")
+	if err != nil {
+		t.Fatalf("%v\nRegenerate with: go test ./internal/controller/ -run 'Fixture' -update (in k8s-operator)", err)
+	}
+	var doc struct {
+		Durable       string            `json:"durable"`
+		Filter        string            `json:"filter"`
+		AckPolicy     string            `json:"ackPolicy"`
+		AckWait       string            `json:"ackWait"`
+		MaxAckPending int               `json:"maxAckPending"`
+		Metadata      map[string]string `json:"metadata"`
+		PoolLabels    map[string]string `json:"poolLabels"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Durable != ProfileDurableName("tse", "read", SubmitKindTop) || doc.Filter != ProfileDurableFilter("tse", "read", SubmitKindTop) {
+		t.Errorf("durable %q filter %q, want lib's names", doc.Durable, doc.Filter)
+	}
+	ackWait, err := time.ParseDuration(doc.AckWait)
+	if err != nil || ackWait != DefaultHeldAckWait {
+		t.Errorf("the operator's AckWait %q is not DefaultHeldAckWait %v", doc.AckWait, DefaultHeldAckWait)
+	}
+	if doc.Metadata[heldMarkerKey] != heldMarkerValue || len(doc.Metadata) != 1 {
+		t.Errorf("the operator's mark %v is not %s=%s", doc.Metadata, heldMarkerKey, heldMarkerValue)
+	}
+	cc := jetstream.ConsumerConfig{
+		Durable: doc.Durable, FilterSubject: doc.Filter, AckPolicy: jetstream.AckExplicitPolicy,
+		MaxAckPending: doc.MaxAckPending, AckWait: ackWait, Metadata: doc.Metadata,
+		DeliverPolicy: jetstream.DeliverAllPolicy, ReplayPolicy: jetstream.ReplayInstantPolicy,
+	}
+	if doc.AckPolicy != "explicit" || cc.MaxAckPending < 1 || heldConfigTampered(cc) != "" {
+		t.Errorf("the operator's durable fails SubscribeHeld's checks: ack %q, cap %d, tampered %q", doc.AckPolicy, cc.MaxAckPending, heldConfigTampered(cc))
+	}
+	want := map[string]string{ProfileComponentLabel: ProfileWorkerComponent, ProfileNameLabel: "tse", ProfileTierLabel: "read"}
+	for k, v := range want {
+		if doc.PoolLabels[k] != v {
+			t.Errorf("pool label %s = %q, want %q (lib.ProfilePoolSelector selects on it)", k, doc.PoolLabels[k], v)
+		}
+	}
+	if len(doc.PoolLabels) != len(want) {
+		t.Errorf("pool labels %v, want exactly %v", doc.PoolLabels, want)
 	}
 }

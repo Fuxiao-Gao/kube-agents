@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -130,19 +131,8 @@ func TestSyncingAProfilesDurablesDropsATiersQueue(t *testing.T) {
 	})
 	sync := func(want []profileDurable) {
 		t.Helper()
-		keep := map[string]bool{}
-		for _, d := range want {
-			keep[d.name] = true
-			if err := ensureDurable(ctx, js, d); err != nil {
-				t.Fatal(err)
-			}
-		}
-		for _, name := range allProfileDurableNames("tse") {
-			if !keep[name] {
-				if err := deleteDurable(ctx, js, name); err != nil {
-					t.Fatal(err)
-				}
-			}
+		if err := syncDurables(ctx, js, "tse", want); err != nil {
+			t.Fatal(err)
 		}
 	}
 	exists := func(name string) bool {
@@ -198,4 +188,86 @@ func TestADurableThatDoesntFitSaysWhy(t *testing.T) {
 	if err := ensureDurable(ctx, js, want[1]); err == nil || !strings.Contains(err.Error(), "no consumer slot left") || !strings.Contains(err.Error(), "maxSessions") {
 		t.Errorf("a durable past max_consumers = %v, want the slot explanation", err)
 	}
+}
+
+// A consumer with the held mark and the right filter, AckWait and cap is
+// still not adopted when it carries a setting the operator never sets: the
+// mark is a public constant.
+func TestEnsureDurableRefusesAForgedMark(t *testing.T) {
+	js := jetStreamWithTasks(t)
+	ctx := context.Background()
+	p := testAgentProfile("ns", "tse")
+	d := desiredProfileDurables(&p)[0]
+	if _, err := js.CreateOrUpdateConsumer(ctx, a2aTasksStream, jetstream.ConsumerConfig{
+		Durable: d.name, FilterSubject: d.filter, AckPolicy: jetstream.AckExplicitPolicy, MaxAckPending: d.maxAckPending,
+		AckWait: a2aHeldAckWait, Metadata: map[string]string{a2aHeldMarkerKey: a2aHeldMarkerValue}, MaxDeliver: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureDurable(ctx, js, d); err == nil || !strings.Contains(err.Error(), "stops redelivering") {
+		t.Errorf("ensure over a forged-mark consumer = %v, want it refused", err)
+	}
+}
+
+// A tier swap on a stream with no spare consumer slot completes: the
+// dropped tier's durables are deleted before the new tier's are made.
+func TestATierSwapFitsOnAFullStream(t *testing.T) {
+	s, err := natsserver.NewServer(&natsserver.Options{Port: -1, JetStream: true, StoreDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go s.Start()
+	if !s.ReadyForConnections(5 * time.Second) {
+		t.Fatal("nats-server not ready")
+	}
+	t.Cleanup(s.Shutdown)
+	nc, err := nats.Connect(s.ClientURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(nc.Close)
+	js, _ := jetstream.New(nc)
+	ctx := context.Background()
+	if _, err := js.CreateStream(ctx, jetstream.StreamConfig{Name: a2aTasksStream, Subjects: []string{"a2a.tasks.>"}, MaxConsumers: 2}); err != nil {
+		t.Fatal(err)
+	}
+	sync := func(want []profileDurable) error { return syncDurables(ctx, js, "tse", want) }
+	read := testAgentProfile("ns", "tse")
+	if err := sync(desiredProfileDurables(&read)); err != nil {
+		t.Fatalf("read tier: %v", err)
+	}
+	unattended := testAgentProfile("ns", "tse", func(p *agentv1alpha1.AgentProfile) {
+		p.Spec.AllowedTiers = []string{agentv1alpha1.AgentProfileTierUnattended}
+	})
+	if err := sync(desiredProfileDurables(&unattended)); err != nil {
+		t.Fatalf("swapping read for unattended on a full stream: %v", err)
+	}
+}
+
+// heldDurableFixturePath is the durable config the operator makes and the
+// worker pool labels it will put on worker pods, which lib reads to hold its
+// constants equal to these copies (this module can't import lib).
+const heldDurableFixturePath = "../../../a2a/lib/testdata/rendered-held-durable.json"
+
+func TestRenderedHeldDurableFixture(t *testing.T) {
+	p := testAgentProfile("ns", "tse", func(p *agentv1alpha1.AgentProfile) { p.Spec.Concurrency = 3 })
+	d := desiredProfileDurables(&p)[0]
+	doc := map[string]any{
+		"durable":       d.name,
+		"filter":        d.filter,
+		"ackPolicy":     "explicit",
+		"ackWait":       a2aHeldAckWait.String(),
+		"maxAckPending": d.maxAckPending,
+		"metadata":      map[string]string{a2aHeldMarkerKey: a2aHeldMarkerValue},
+		"poolLabels": map[string]string{
+			a2aComponentLabel:     agentProfileWorkerComponent,
+			agentProfileNameLabel: "tse",
+			agentProfileTierLabel: "read",
+		},
+	}
+	body, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkFixture(t, heldDurableFixturePath, string(body)+"\n")
 }

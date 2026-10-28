@@ -1,5 +1,5 @@
 {
-  "version": "6b3c87b3c580a316",
+  "version": "b4adc583ae2a8b91",
   "identities": [
     {
       "serviceAccount": "system:serviceaccount:kubeagents-system:agent-a2a-provision",
@@ -135,7 +135,7 @@
           "$JS.API.CONSUMER.INFO.TASKS.profile-tse-read-child",
           "$JS.API.CONSUMER.MSG.NEXT.TASKS.profile-tse-read-child",
           "$JS.ACK.TASKS.profile-tse-read-child.>",
-          "a2a.tasks.tse.*.events",
+          "a2a.tasks.tse.*.supervisor",
           "$KV.PROFILE_LEASES.>",
           "$JS.API.STREAM.INFO.KV_PROFILE_LEASES",
           "$JS.API.DIRECT.GET.KV_PROFILE_LEASES.>",

@@ -304,7 +304,7 @@ func TestBuildA2ANATSStatefulSet(t *testing.T) {
 	}
 }
 
-// The provisioning payload: four streams, four KV buckets, four starter
+// The provisioning payload: four streams, five KV buckets, four starter
 // topics, the deployment spec's retention numbers verbatim.
 func TestBuildA2AProvisionJob(t *testing.T) {
 	agent := a2aTestAgent()
@@ -2223,6 +2223,13 @@ func TestCleanupA2AResumesAfterAMidPassError(t *testing.T) {
 		{"gateway Role", &rbacv1.Role{}, "test-agent-a2a-gateway"},
 		{"gateway RoleBinding", &rbacv1.RoleBinding{}, "test-agent-a2a-gateway"},
 		{"gateway ServiceAccount", &corev1.ServiceAccount{}, "test-agent-a2a-gateway"},
+		// The dispatcher, rendered because the image is set above; its Role
+		// is the first the injected failure stops on.
+		{"dispatcher Deployment", &appsv1.Deployment{}, "test-agent-a2a-dispatcher"},
+		{"dispatch ConfigMap", &corev1.ConfigMap{}, "test-agent-a2a-dispatch"},
+		{"dispatcher Role", &rbacv1.Role{}, "test-agent-a2a-dispatcher"},
+		{"dispatcher RoleBinding", &rbacv1.RoleBinding{}, "test-agent-a2a-dispatcher"},
+		{"dispatcher ServiceAccount", &corev1.ServiceAccount{}, "test-agent-a2a-dispatcher"},
 		{"NATS Service", &corev1.Service{}, "test-agent-a2a-nats"},
 		{"NATS config Secret", &corev1.Secret{}, "test-agent-a2a-nats-config"},
 		{"NATS StatefulSet", &appsv1.StatefulSet{}, "test-agent-a2a-nats"},
@@ -2249,6 +2256,8 @@ func TestCleanupA2AResumesAfterAMidPassError(t *testing.T) {
 // StatefulSet sentinel.
 func TestCleanupA2AResumesAfterAMidPassErrorOnFullRender(t *testing.T) {
 	t.Setenv(a2aInjectBackendEnvVar, "true")
+	// The dispatcher too, so the labelled-kind sweep sees its objects.
+	t.Setenv(a2aDispatcherImageEnvVar, "registry.example/a2a-dispatcher:test")
 	scheme := setupScheme()
 	next := a2aTestAgent()
 	today := next.DeepCopy()

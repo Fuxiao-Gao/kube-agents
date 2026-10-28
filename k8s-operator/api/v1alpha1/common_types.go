@@ -854,10 +854,13 @@ type TuningSpec struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.childReserve) || !has(self.ceiling) || self.childReserve < self.ceiling",message="childReserve must be below ceiling: the reserve is a share of the ceiling that top-level tasks can't take"
 type ProfileTuning struct {
 	// Ceiling is the most profile tasks running at once across every profile
-	// on the install, of every kind. The dispatcher enforces it, reserving
-	// max(1, ceil(Ceiling/3)) of it for interactive tiers so unattended work
-	// can't starve people, and ChildReserve for child tasks so waiting parents
-	// can't hold every slot. The profile namespace's pod quota is derived
+	// on the install, of every kind. The dispatcher keeps two disjoint
+	// reserves in it, ChildReserve for child tasks (so waiting parents can't
+	// hold every slot) and max(1, ceil(Ceiling/3)) for interactive tiers (so
+	// unattended work can't starve people), trimmed child first to leave at
+	// least one slot for top-level unattended work. With the default
+	// reserves, ceilings of 1, 2 and 4 can't honour both in full, and the
+	// PlatformAgent warns. The profile namespace's pod quota is derived
 	// from it. Absent means maxInProgress's resolved value, so an install's
 	// footprint doesn't jump while both exist (spec-profiles-dispatch.md).
 	// +kubebuilder:validation:Minimum=1
@@ -868,7 +871,8 @@ type ProfileTuning struct {
 	// ChildReserve is the share of Ceiling kept for child tasks, which
 	// top-level tasks can't take. A parent holds its slot while its children
 	// run, so without it a ceiling full of waiting parents could never start
-	// their children. Absent means max(1, ceil(Ceiling/3)).
+	// their children. Absent means max(1, ceil(Ceiling/3)), trimmed to
+	// Ceiling-1 so one slot stays unreserved (none at a ceiling of 1).
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=999
 	// +optional

@@ -110,12 +110,13 @@ func a2aDispatcherPodSelector(agent *agentv1alpha1.PlatformAgent) map[string]str
 //   - the hand-off: publish offers and abandons on a2a.dispatch.*.*.<pod>, and
 //     read accepts and lease renewals on .accept and .lease beneath them. The
 //     pod token in those subjects is the only identity it trusts.
-//   - terminal failures on a task's .events (decided under #3660's
-//     delegation): a refusal at admission, an expired lease, a deadline.
-//     Named per profile it dispatches for, a2a.tasks.<profile>.*.events, so
-//     it can't write a session's or the bridge's task events. The executor
-//     stays the only other writer, and TASKS refuses rollup headers, so this
-//     publisher can't purge the stream.
+//   - terminal failures on a task's .supervisor subject: a refusal at
+//     admission, an expired lease, a deadline. That subject is where a
+//     task's supervisor writes the terminal it synthesizes
+//     (lib.TaskSupervisorSubject), so .events stays the executor's alone.
+//     Named per profile it dispatches for, a2a.tasks.<profile>.*.supervisor,
+//     so it can't write a session's or the bridge's. TASKS refuses rollup
+//     headers, so this publisher can't purge the stream.
 //   - the verifier, for CheckProfileRun, on its own caller subject, with
 //     answers in its own reply namespace.
 //
@@ -132,7 +133,7 @@ func dispatcherIdentity(agent *agentv1alpha1.PlatformAgent, ns string, profiles,
 		)
 	}
 	for _, p := range profiles {
-		perProfile = append(perProfile, "a2a.tasks."+p+".*.events")
+		perProfile = append(perProfile, "a2a.tasks."+p+".*.supervisor")
 	}
 	return a2aIdentity{
 		user:    a2aDispatcherUser,
@@ -311,7 +312,13 @@ func dispatchReserves(agent *agentv1alpha1.PlatformAgent, ceiling int) (child, i
 	if ceiling < 2 {
 		return 0, 0
 	}
-	child = min(resolveProfileChildReserve(agent), ceiling-1)
+	// From the ceiling given, not the agent's: the shortfall advice asks
+	// what other ceilings would do.
+	wantChild := max(1, (ceiling+2)/3)
+	if t := profileTuning(agent); t != nil && t.ChildReserve != nil {
+		wantChild = *t.ChildReserve
+	}
+	child = min(wantChild, ceiling-1)
 	interactive = min(max(1, (ceiling+2)/3), ceiling-1-child)
 	return child, interactive
 }
@@ -356,8 +363,37 @@ func dispatchReservesShortfall(agent *agentv1alpha1.PlatformAgent, ceiling, chil
 	if len(short) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("spec.harness.tuning.profiles.ceiling %d is too small to honour every reserve and leave a slot for top-level unattended work: %s. Raise the ceiling (or maxInProgress, which it defaults to) to at least 3 for every kind to get its share.",
-		ceiling, strings.Join(short, ", "))
+	advice := "No ceiling up to 1000 honours them; lower spec.harness.tuning.profiles.childReserve."
+	if c := smallestHonouringCeiling(agent, ceiling); c > 0 {
+		advice = fmt.Sprintf("Raise the ceiling (or maxInProgress, which it defaults to) to at least %d.", c)
+	}
+	return fmt.Sprintf("spec.harness.tuning.profiles.ceiling %d is too small to honour every reserve and leave a slot for top-level unattended work: %s. %s",
+		ceiling, strings.Join(short, ", "), advice)
+}
+
+// smallestHonouringCeiling is the smallest ceiling above this one at which
+// dispatchReserves honours both reserves in full, or 0 if none up to the
+// CRD's maximum does. Not monotonic in general (the default reserves are
+// honoured at 3 but not at 4), so it searches.
+func smallestHonouringCeiling(agent *agentv1alpha1.PlatformAgent, ceiling int) int {
+	for c := ceiling + 1; c <= 1000; c++ {
+		child, interactive := dispatchReserves(agent, c)
+		if dispatchReservesShortfall0(agent, c, child, interactive) {
+			return c
+		}
+	}
+	return 0
+}
+
+// dispatchReservesShortfall0 reports whether both reserves are honoured in
+// full at ceiling, without building the message.
+func dispatchReservesShortfall0(agent *agentv1alpha1.PlatformAgent, ceiling, child, interactive int) bool {
+	promised := max(1, (ceiling+2)/3)
+	wantChild := promised
+	if t := profileTuning(agent); t != nil && t.ChildReserve != nil {
+		wantChild = *t.ChildReserve
+	}
+	return child >= wantChild && interactive >= promised
 }
 
 // dispatcherGrantNames are the profiles the dispatch config lists and every
@@ -506,7 +542,13 @@ func (r *PlatformAgentReconciler) reconcileA2ADispatcher(ctx context.Context, ag
 	if msg := dispatchReservesShortfall(agent, ceiling, child, interactive); msg != "" {
 		r.recordEvent(agent, corev1.EventTypeWarning, reasonProfileReservesShort, msg)
 	}
+	resolved := resolveAgentProfileIdentities(agent, profiles)
 	for i := range profiles {
+		// Only profiles the dispatch config admits: a refused one has no
+		// tasks to cap, and its condition says why it's refused.
+		if resolved[profiles[i].Name].refused != nil {
+			continue
+		}
 		if d, capped := cappedTaskDeadline(agent, &profiles[i]); capped {
 			r.recordEvent(agent, corev1.EventTypeWarning, reasonProfileDeadlineCapped, fmt.Sprintf(
 				"AgentProfile %s: spec.lifecycle.activeDeadlineSeconds %d is clamped to %ds by the install's task deadline cap (spec.harness.tuning.profiles.maxTaskDeadlineSeconds), so its tasks end at %ds",
