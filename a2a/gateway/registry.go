@@ -248,6 +248,11 @@ type TaskRequester struct {
 type TaskRef struct {
 	ID        string `json:"id"`
 	Addressee string `json:"addressee"`
+	// Tier is the tier a task addressed to an AgentProfile runs at; empty
+	// for a task addressed to platform or a session. A profile task's child
+	// runs at its tier, and the child's end reaches it as a childResult on
+	// its .in rather than as a wake (deliverChildResult).
+	Tier string `json:"tier,omitempty"`
 	// CorrelationID is the task's, kept past ActiveTask so a cancel for a
 	// task the record has released can still ride the task's own chain.
 	// Empty on entries written before it was recorded.

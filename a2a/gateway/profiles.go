@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/gke-labs/kube-agents/a2a/capability"
 	"github.com/gke-labs/kube-agents/a2a/lib"
@@ -23,21 +26,35 @@ const (
 	paramCluster  = "cluster"
 )
 
-// The refusals resolveProfile and checkTargetScope give, worded for the room.
-// Each names what was asked, since the asker may not know the install's
-// profiles or scope.
+// The refusals resolveProfile and checkTargetScope give, as reasons a caller
+// prefixes for the room (refusalNotice). Each names what was asked, since the
+// asker may not know the install's profiles or scope.
 const (
-	noticeProfileUnknown      = "⚠️ not started: there is no agent profile named %q"
-	noticeProfilePinnedOther  = "⚠️ not started: %s works only on cluster %s, not %s"
-	noticeProfileNoTarget     = "⚠️ not started: %s needs a target cluster (project, location and cluster)"
-	noticeProfileTakesNone    = "⚠️ not started: %s doesn't take a target cluster"
-	noticeProfileAmbiguous    = "⚠️ not started: more than one agent profile is pinned to cluster %s"
-	noticeProfileNoGeneric    = "⚠️ not started: no agent profile serves cluster %s"
-	noticeTargetExcluded      = "⚠️ not started: cluster %s is excluded from this install's scope"
-	noticeTargetOutOfScope    = "⚠️ not started: cluster %s is outside this install's scope"
-	noticeTargetUnconfirmed   = "⚠️ not started: can't confirm %s is in this install's scope yet"
-	noticeTargetParamsInvalid = "⚠️ not started: the task's parameters aren't valid: %v"
+	noticeProfileUnknown      = "there is no agent profile named %q"
+	noticeProfilePinnedOther  = "%s works only on cluster %s, not %s"
+	noticeProfileNoTarget     = "%s needs a target cluster (project, location and cluster)"
+	noticeProfileTakesNone    = "%s doesn't take a target cluster"
+	noticeProfileAmbiguous    = "more than one agent profile is pinned to cluster %s"
+	noticeProfileNoGeneric    = "no agent profile serves cluster %s"
+	noticeTargetExcluded      = "cluster %s is excluded from this install's scope"
+	noticeTargetOutOfScope    = "cluster %s is outside this install's scope"
+	noticeTargetUnconfirmed   = "can't confirm %s is in this install's scope yet"
+	noticeTargetParamsInvalid = "the task's parameters aren't valid: %v"
+	noticeProfileNoIdentity   = "an agent profile runs a task only for an identified requester"
+	noticeProfileRouteFailed  = "the task couldn't be routed to its agent profile"
 )
+
+// childNeverStarted is a child's end when it never reached an executor.
+// The prefixes a profile refusal is posted under.
+const (
+	noticeTurnNotStarted       = "⚠️ not started: "
+	noticeDelegationRefusedFor = "⚠️ delegation refused: "
+)
+
+const childNeverStarted = "the delegated task never started"
+
+// childResultCutNote ends a child result cut to lib.ChildResultTextCap.
+const childResultCutNote = " … (cut; the child's full result is on its own task)"
 
 // profileGrantDelegate is the principal a profile task's grant names as its
 // delegate: the dispatcher, which resolves the grant when it asks the
@@ -193,6 +210,17 @@ type errRefused struct{ notice string }
 
 func (e errRefused) Error() string { return e.notice }
 
+// refusalNotice is err's notice for the room after prefix (the turn's own
+// "not started" or a delegation's "delegation refused"): a refusal's reason,
+// or a generic line for anything else, whose detail stays in the log.
+func refusalNotice(prefix string, err error) string {
+	var r errRefused
+	if errors.As(err, &r) {
+		return prefix + r.notice
+	}
+	return prefix + noticeProfileRouteFailed
+}
+
 func refused(format string, args ...any) error {
 	return errRefused{notice: fmt.Sprintf(format, args...)}
 }
@@ -211,7 +239,8 @@ func resolveProfile(dir *profileDirectory, addressee string, params map[string]s
 	}
 	card, ok := dir.lookup(addressee)
 	if !ok {
-		return "", nil, refused(noticeProfileUnknown, addressee)
+		// The addressee is the asker's to write, so the room gets it capped.
+		return "", nil, refused(noticeProfileUnknown, truncateRunes(addressee, delegateAddresseeLogCap))
 	}
 	target, hasTarget, partial := targetOf(params)
 	switch {
@@ -313,4 +342,108 @@ func checkTargetScope(decl *scopeDeclaration, t clusterTarget) error {
 		return refused(noticeTargetUnconfirmed, t)
 	}
 	return refused(noticeTargetOutOfScope, t)
+}
+
+// requesterTier is the tier a profile task runs at for this requester, until
+// the PlatformAgent's membership mapping exists (the contract on #3655,
+// addendum 1): read for a person at any door, and a refusal for a requester
+// with no attested identity. Unattended is a named trigger's tier, and no
+// trigger submits through the gateway yet.
+func requesterTier(r TaskRequester) (capability.Tier, error) {
+	if strings.TrimSpace(r.Subject) == "" {
+		return "", refused(noticeProfileNoIdentity)
+	}
+	return capability.TierRead, nil
+}
+
+// profileRouteFor resolves addressee and params to the route a task takes:
+// the resolved profile, the target checked against the install's scope, and
+// the grant's scope (spec-profiles-dispatch.md, "Addressing", steps 1 to 3).
+// A pinned profile addressed with no target gets its own cluster's three
+// parameters, so the submission names its target either way. A task with no
+// target is scoped to the install's namespace.
+func (g *Gateway) profileRouteFor(addressee string, params map[string]string, tier capability.Tier, kind string) (*profileRoute, error) {
+	profile, target, err := resolveProfile(g.profiles, addressee, params)
+	if err != nil {
+		return nil, err
+	}
+	route := &profileRoute{Profile: profile, Tier: tier, Kind: kind, Params: maps.Clone(params),
+		Scope: capability.NamespaceScope(g.cfg.Namespace)}
+	if target == nil {
+		return route, nil
+	}
+	decl, err := loadScope(g.cfg.ScopeFile)
+	if err != nil {
+		g.log.Warn("scope file unreadable; refusing the target", "path", g.cfg.ScopeFile, "err", err)
+		decl = nil
+	}
+	if err := checkTargetScope(decl, *target); err != nil {
+		return nil, err
+	}
+	if route.Params == nil {
+		route.Params = map[string]string{}
+	}
+	route.Params[paramProject], route.Params[paramLocation], route.Params[paramCluster] = target.Project, target.Location, target.Cluster
+	route.Scope = target.scope()
+	return route, nil
+}
+
+// deliverChildResult hands a child's end to a parent addressed to an
+// AgentProfile: a childResult message on the parent's .in, which the parent
+// reads while it waits open. It reports false for a parent that isn't a
+// profile task (a session parent is woken instead) and for a delivery that
+// failed, which is logged.
+func (g *Gateway) deliverChildResult(ctx context.Context, rec *SessionRecord, child TaskRef, state lib.TaskState, result, reason string) bool {
+	parent, ok := rec.TaskRefFor(child.ParentTaskID)
+	if !ok || parent.Tier == "" {
+		return false
+	}
+	text := reason
+	if state == lib.StateCompleted {
+		text = result
+	}
+	if len(text) > lib.ChildResultTextCap {
+		text = truncateBytes(text, lib.ChildResultTextCap-len(childResultCutNote)) + childResultCutNote
+	}
+	part, err := lib.ChildResultPart(lib.ChildResult{ChildTaskID: child.ID, Addressee: child.Addressee, State: state, Text: text})
+	if err != nil {
+		g.log.Error("child result build failed", "child", child.ID, "parent", parent.ID, "err", err)
+		return false
+	}
+	payload, err := messagePayloadParts([]lib.Part{part}, parent.ID, rec.ContextID)
+	if err != nil {
+		g.log.Error("child result payload build failed", "err", err)
+		return false
+	}
+	authority, err := AuthorityFromAttribution(parent.Attribution)
+	if err != nil {
+		g.log.Error("child result authority unreadable", "parent", parent.ID, "err", err)
+		return false
+	}
+	// The parent's own capability: the message continues the parent's task,
+	// as a steer does, and is no new request.
+	env, err := lib.NewMessageEnvelope(gatewayParty, parent.ID, rec.ContextID, parent.CorrelationID, payload,
+		lib.WithTo(lib.Party{Session: parent.Addressee}),
+		lib.WithAuthority(authority.Render(parent.Capability)))
+	if err != nil {
+		g.log.Error("child result envelope build failed", "err", err)
+		return false
+	}
+	if err := g.client.Publish(ctx, lib.TaskInSubject(parent.Addressee, parent.ID), env); err != nil {
+		g.log.Error("child result publish failed", "child", child.ID, "parent", parent.ID, "err", err)
+		return false
+	}
+	g.log.Info("child result delivered", "child", child.ID, "parent", parent.ID, "state", state)
+	return true
+}
+
+// truncateBytes cuts s to at most n bytes without splitting a UTF-8 rune.
+func truncateBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }

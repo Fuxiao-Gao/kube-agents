@@ -1083,7 +1083,29 @@ func (g *Gateway) routeTurn(ctx context.Context, msg InboundMessage, backend, pr
 			"addressee", rec.Addressee, "taskAge", time.Since(active.SubmittedAt).Round(time.Second))
 		g.steerTask(ctx, rec, msg, backend, authority)
 	default:
-		if rest, ok := chattext.IsDelegate(msg.Text); ok && g.spawner != nil {
+		// A turn a client addressed to an AgentProfile (the console's frame
+		// and the A2A door name one) is resolved, scoped and minted for it
+		// before anything about the conversation's route moves, so a refusal
+		// leaves the record as it was.
+		var route *profileRoute
+		if msg.Profile != "" {
+			requester := TaskRequester{Backend: backend, Subject: requesterSubject(g.ps, backend, msg.AuthorID)}
+			tier, err := requesterTier(requester)
+			if err == nil {
+				route, err = g.profileRouteFor(msg.Profile, msg.Parameters, tier, lib.SubmitKindTop)
+			}
+			if err != nil {
+				g.log.Warn("profile task refused", "conversation", rec.Key, "profile", truncateRunes(msg.Profile, delegateAddresseeLogCap), "err", err)
+				g.post(rec.Key, refusalNotice(noticeTurnNotStarted, err))
+				return
+			}
+		}
+		if route != nil {
+			// Steers and a stop reach the task on its own .in, under the
+			// profile it resolved to; the next plain ask re-homes as after a
+			// delegated task.
+			rec.Addressee = route.Profile
+		} else if rest, ok := chattext.IsDelegate(msg.Text); ok && g.spawner != nil {
 			// The Delegate flow (W4 amendment): this ONE task goes to a
 			// freshly spawned session worker - the addressee is the new
 			// session name, the rest of the text is the task. On a
@@ -1162,7 +1184,7 @@ func (g *Gateway) routeTurn(ctx context.Context, msg InboundMessage, backend, pr
 		// task itself out, and shown on the task's status line (showBusy).
 		// fixedRouteAhead answers false off the fixed route. Informational:
 		// the turn has already started either way.
-		if taskID := g.startTask(ctx, rec, msg, backend, principal, authority); taskID != "" {
+		if taskID := g.startTask(ctx, rec, msg, backend, principal, authority, route); taskID != "" {
 			if ahead, busy := g.fixedRouteAhead(ctx, rec, backend, taskID); busy {
 				g.showBusy(rec, taskID, ahead)
 			}
@@ -1401,12 +1423,19 @@ func (g *Gateway) healActiveTask(ctx context.Context, rec *SessionRecord) {
 		switch {
 		case child && healedTask != nil:
 			turns, result, reason := healedChildOutcome(healedTask)
+			// A parent addressed to an AgentProfile waits open for this.
+			if g.deliverChildResult(ctx, rec, ref, healedTask.State, result, reason) {
+				break
+			}
 			// false: the heal's status card above carries no result text.
 			if woken, why := g.wakeSession(ctx, rec, ref, healedTask.State, turns, result, reason, false, toCards); !woken {
 				g.observeChildEnd(rec, ref, healedTask.State, healedSource, reason, why)
 			}
 		case child:
-			g.observeChildEnd(rec, ref, lib.StateFailed, TerminalNeverStarted, "", "the delegated task never started")
+			if g.deliverChildResult(ctx, rec, ref, lib.StateFailed, "", childNeverStarted) {
+				break
+			}
+			g.observeChildEnd(rec, ref, lib.StateFailed, TerminalNeverStarted, "", childNeverStarted)
 		}
 		// Write the release now, not at the end of the turn: a turn that
 		// returns early — a cap refusal, on exactly the Delegate that
@@ -1900,7 +1929,7 @@ func (g *Gateway) sessionCommand(ctx context.Context, rec *SessionRecord, msg In
 	if !g.nextIncarnation(ctx, rec) {
 		return false
 	}
-	g.startTask(ctx, rec, msg, backend, principal, authority)
+	g.startTask(ctx, rec, msg, backend, principal, authority, nil)
 	return true
 }
 
@@ -2372,8 +2401,9 @@ type taskStart struct {
 
 // startTask opens a turn for a human message, and returns its task id once
 // the submission is on the bus, "" otherwise (startTaskWith).
-func (g *Gateway) startTask(ctx context.Context, rec *SessionRecord, msg InboundMessage, backend, principal string, authority Authority) string {
+func (g *Gateway) startTask(ctx context.Context, rec *SessionRecord, msg InboundMessage, backend, principal string, authority Authority, route *profileRoute) string {
 	taskID, _ := g.startTaskWith(ctx, rec, taskStart{
+		Route:     route,
 		Text:      msg.Text,
 		MessageID: msg.MessageID,
 		Click:     msg.Click,
@@ -2506,6 +2536,9 @@ func (g *Gateway) startTaskWith(ctx context.Context, rec *SessionRecord, ts task
 		}
 	}
 	ref.carrySteerAuthors(TaskRef{SteerAuthors: ts.SteerAuthors, SteerAuthorsOverflow: ts.SteerAuthorsOverflow})
+	if ts.Route != nil {
+		ref.Tier = string(ts.Route.Tier)
+	}
 	rec.Tasks = append(rec.Tasks, ref)
 	if ts.LinkParent {
 		for i := range rec.Tasks {
