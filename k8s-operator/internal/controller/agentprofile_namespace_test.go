@@ -40,6 +40,13 @@ func TestProfileTuningDefaults(t *testing.T) {
 	if got := resolveProfileCeiling(kanban); got != 11 {
 		t.Errorf("ceiling = %d, want maxInProgress's 11", got)
 	}
+	// maxInProgress has no maximum, so a ceiling taken from it is clamped
+	// to the ceiling field's own.
+	huge := a2aTestAgent()
+	huge.Spec.Harness = &agentv1alpha1.HarnessSpec{Tuning: &agentv1alpha1.TuningSpec{MaxInProgress: ptr.To(agentv1alpha1.MaxProfileCeiling + 1)}}
+	if got := resolveProfileCeiling(huge); got != agentv1alpha1.MaxProfileCeiling {
+		t.Errorf("ceiling = %d from a maxInProgress past the ceiling's maximum, want %d", got, agentv1alpha1.MaxProfileCeiling)
+	}
 	if got := resolveProfileWarmReplicas(agent); got != agentv1alpha1.DefaultProfileWarmReplicas {
 		t.Errorf("warm replicas = %d, want the default %d", got, agentv1alpha1.DefaultProfileWarmReplicas)
 	}
