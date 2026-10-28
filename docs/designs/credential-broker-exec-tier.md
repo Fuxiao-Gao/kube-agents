@@ -71,7 +71,7 @@ What changes, side by side:
 | Chat relays, workspace, vcs/forge, watchers | The one broker pod                           | Same pod, unchanged                                                             |
 | Cloud API relay (`/v1/gcp/`)                | The one broker pod                           | Same pod as a first step; it takes no slot and can move later (open question 4) |
 | How callers reach commands                  | `CREDENTIAL_PROXY_URL`                       | **NEW:** `CREDENTIAL_PROXY_EXEC_URL`; if it is not set, as today                |
-| Upgrade of the command path                 | `Recreate`: commands stop during the restart | `RollingUpdate`: no outage, if open question 1 holds                            |
+| Upgrade of the command path                 | `Recreate`: commands stop during the restart | `RollingUpdate` with a drain on SIGTERM and a PDB (§9 step 0): no outage        |
 | Identity and permissions                    | One KSA / GSA                                | Same KSA / GSA, no new IAM                                                      |
 | Code                                        | `credential_proxy.py`                        | Same file and image, with `CREDENTIAL_PROXY_ROLE=exec` on the new pods          |
 
@@ -160,15 +160,33 @@ one pod's CPU is one limit.
 
 ### 3.1 Which routes move
 
-| Route                                                       | Where                                                     | Why                                                                          |
-| ----------------------------------------------------------- | --------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `POST /v1/exec`                                             | Exec tier (and stateful broker during the transition, §9) | No state across calls if open question 1 holds; most of the slot-taking load |
-| `GET /v1/exec/admission` (#4084)                            | Exec tier                                                 | Reports the tier's capacity (§3.5)                                           |
-| `/v1/gcp/` Cloud API relay                                  | Stateful broker (first step)                              | Takes no slot; can move later                                                |
-| `/v1/vcs/<verb>`, `/v1/forge/refresh`, `/v1/github/refresh` | Stateful broker                                           | Keeps one forge-token coalesce cache, so GitHub mints do not multiply by N   |
-| `/v1/workspace/*`                                           | Stateful broker                                           | Handles live in one emptyDir                                                 |
-| `/v1/chat/*`, `/v1/mcp/*`, `/v1/pubsub/*`                   | Stateful broker                                           | In-process receipts, one Socket Mode connection                              |
-| `/v1/watcher/*`, `/v1/k8s/*`, `/v1/feedback/submit`         | Stateful broker                                           | Unchanged; small load                                                        |
+| Route                                                       | Where                                                     | Why                                                                           |
+| ----------------------------------------------------------- | --------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `POST /v1/exec`                                             | Exec tier (and stateful broker during the transition, §9) | No state across calls (§11, question 1, closed); most of the slot-taking load |
+| `GET /v1/exec/admission` (#4084)                            | Exec tier                                                 | Reports the tier's capacity (§3.5)                                            |
+| `/v1/gcp/` Cloud API relay                                  | Stateful broker (first step)                              | Takes no slot; can move later                                                 |
+| `/v1/vcs/<verb>`, `/v1/forge/refresh`, `/v1/github/refresh` | Stateful broker                                           | Keeps one forge-token coalesce cache, so GitHub mints do not multiply by N    |
+| `/v1/workspace/*`                                           | Stateful broker                                           | **Needs one pod:** handles live in one in-memory store and one emptyDir       |
+| `/v1/chat/*` relays, `/v1/chat/a2a/*` included              | Stateful broker                                           | **Needs one pod:** in-process receipt maps, one Socket Mode connection        |
+| `/v1/mcp/*`, `/v1/pubsub/*`                                 | Stateful broker (first step)                              | Safe on N pods: no state across calls                                         |
+| `/v1/watcher/*`, `/v1/k8s/*`, `/v1/feedback/submit`         | Stateful broker (first step)                              | Safe on N pods: `/v1/k8s/*` keeps only a 300 s endpoint cache                 |
+
+Only two route groups need the single pod: the content-workspace handles and the chat relays'
+event, ack and nack routes. The rest stay on it as a first step, not because they keep state:
+
+- **The A2A Google Chat relay stays a broker route in `next` mode.** With Chat on, the install's
+  subscription goes to the broker's A2A relay instance, and the legacy instance is not built
+  (`platformagent_manifests.go:4587-4597`). The consumer moved to the A2A gateway; the Pub/Sub pull
+  and its receipt map did not. So the stateful pod stays in both modes.
+- **Slack leaves the broker only in `next` mode with Slack on and Chat off**
+  (`a2aSlackArmed`, `platformagent_a2a_manifests.go:1400-1401`). With both on, Slack stays on the
+  broker's relay.
+- **The watchers keep no broker state.** The event watcher and the drift detector run in the
+  gateway pod's `agent-api-auth` sidecar (`platformagent_manifests.go:4154-4161`), and the gateway
+  is capped at 1 replica (`supportedGatewayReplicas`, `manifest_helpers.go:84`). The broker only
+  relays their calls; `/v1/k8s/*` keeps a 300 s endpoint cache (`WATCHER_ENDPOINT_TTL_S`,
+  `credential_proxy.py:466`). `/v1/mcp/*`, `/v1/pubsub/*` and `/v1/feedback/submit` keep no state
+  across calls either.
 
 The stateful broker keeps a slot cap and an admission queue: `/v1/vcs/*` and
 `/v1/feedback/submit` take slots there. The fleet audits also load the Cloud API relay, which
@@ -200,8 +218,9 @@ shim always takes the fallback and nothing reports it.
 ### 3.3 Deployment
 
 - A second Deployment, `<agent>-credential-proxy-exec`, and Service, port 8765. Replicas from a new
-  CR field (§9). Strategy `RollingUpdate` if open question 1 confirms that no state crosses
-  calls. This also removes the exec outage during an upgrade.
+  CR field (§9). Strategy `RollingUpdate`: no exec call keeps state across calls (§11, question
+  1, closed), and step 0's drain on SIGTERM and PodDisruptionBudget (§9) let a rollout finish the
+  commands in flight. This also removes the exec outage during an upgrade.
 - Same KSA, so the same Workload Identity GSA and the same grants. No new IAM.
 - Own selector and labels. The exec pods do not reuse `credentialProxySelector`
   (`credential_proxy_manifests.go`), so today's Service does not send chat and workspace calls
@@ -290,9 +309,19 @@ What stays on the exec tier: `gcloud` (cluster lists, `describe`, `get-credentia
 session pods' commands. The Cloud API relay stays on the stateful broker. The budget doc measured a
 `gcloud` child at 101 to 102 MiB, and a `kubectl` read at 45 to 48 MiB plus 71 MiB for the GKE auth
 plugin under it [doc, `credential-proxy-child-memory-budget.md` §1]. So `kubectl` leaving frees
-about 116 MiB of child memory per command, and the exec tier keeps the `gcloud` children. How much
-of the CPU and slot load is `kubectl` and how much is `gcloud` is not measured. §8.1 adds that
-split.
+about 116 MiB of child memory per command, and the exec tier keeps the `gcloud` children.
+
+How the load splits between them:
+
+- At the 143-cluster install, the broker ran about 6,000 exec requests an hour, about 80%
+  `kubectl` and 20% `gcloud` by count (#2324, #2637). By memory and time, `gcloud` is the heavier
+  part: 101 to 102 MiB per child, a 2 s median and an 18 s p95, as those issues report.
+- The broker plan's first record, at 2 clusters during the first-run audits: 175 `kubectl`
+  commands ran for 180 s in total, and 43 `gcloud` commands for 204 s. So `gcloud` was 20% of the
+  commands but 53% of the slot time. The broker's CPU was throttled in 11% of its periods
+  [measured, broker plan, image `f8fc7905`, one 30-minute run].
+
+§8.1's runs settle CPU and slots for both tools at more fleet sizes.
 
 How the k8s-api-proxy runs [#3760 head, not main, `kube_proxy_manifests.go`]:
 
@@ -313,7 +342,16 @@ buffered `Secret` responses at once can reach the 512 MiB limit [predicted: 8 ×
 What this means for this design:
 
 - The exec tier is still needed for `gcloud` and the session pods, and the stateful/exec split
-  does not change.
+  does not change. After #4128's default-on step, `gcloud` alone keeps the tier at 2 or more
+  replicas: scaling its share linearly gives about 12 slots in use at 2,500 clusters, more than one
+  pod's 8 [predicted, from the 143-cluster split]. From then on, the tier's size depends mostly on
+  whether the change feeds in §6 take over the reconcile's cluster lists and `describe` calls and
+  the collectors' `gcloud` reads.
+- A per-target-cluster request limit belongs at the k8s-api-proxy. The fleet-scale requirements
+  draft asks for about 1 non-watch request per second per cluster, averaged over 5 minutes, and 5
+  in flight, with watches excluded, summed over every kube-agents component and replica. Only a
+  reverse proxy sees single requests; the broker sees whole commands. With N proxy replicas the
+  limit is split, by hashing clusters to replicas or by giving each replica 1/N.
 - The class (§4.1) and the reserve and cap rules (§4.2) should apply to both proxies, so a sweep
   cannot fill either one ahead of interactive work.
 - The footprint (§8.4) has two terms: exec replicas for `gcloud`, and k8s-api-proxy replicas for
@@ -324,6 +362,23 @@ What this means for this design:
   while it still runs as one pod.
 - #3760 also removes the shim's Python client from every `kubectl`, which is the caller-side cost
   #4107 measured (#4027). The 1.5 commands per second ceiling then holds for `gcloud` only.
+
+### 3.7 Later: one scaled broker
+
+This design keeps a stateful pod because two route groups need it (§3.1). A later step could
+drop the split and scale one broker, once both are gone:
+
+- **The content workspace is removed.** Its callers today: the fleet audit's remediation push and
+  its reads (`audit_report.py`, `_land_group_via_broker` and `detect_content_mode`), the
+  collectors' repository mirror (`collect.py`), the deprecation scan (`api_deprecation_scan.py`)
+  and `inspect-repository`. The `/v1/vcs` verbs cover managed repositories, but not two of its
+  uses: reads of repositories the install does not manage, or context repositories, and a
+  shallow clone, which the verbs refuse on purpose.
+- **The chat relays are made safe on N pods, or move out of the broker.**
+
+No issue tracks either step today. `CREDENTIAL_PROXY_CONTENT_WORKSPACE` already switches the
+workspace off (`credential_proxy.py:5405`), so a broker without it can be tested before any code
+is deleted.
 
 ## 4. Priority admission
 
@@ -532,9 +587,17 @@ the replica's own limit. This is why the design needs both the exec tier and the
 
 ## 9. Rollout
 
-0. **Raise the broker's CPU limit (#4106)** to at least 2 cores, the exec replica's limit (§3.3).
-   It is the first limit measured (§2.3), and it costs one value in the operator. On Autopilot it
-   raises the request too, so the footprint and the quota preflight grow with it.
+0. **Phase 0, useful at one replica:**
+   - **Raise the broker's CPU limit (#4106)** to at least 2 cores, the exec replica's limit
+     (§3.3). It is the first limit measured (§2.3), and it costs one value in the operator. On
+     Autopilot it raises the request too, so the footprint and the quota preflight grow with it.
+   - **Graceful shutdown and a PodDisruptionBudget.** Today `serve()` runs `serve_forever()` with
+     no SIGTERM handler, and the Deployment sets no `terminationGracePeriodSeconds` and no
+     `preStop`, so a pod stop drops the commands in flight. The broker gets a SIGTERM handler that
+     stops admitting (new requests get the 503 that §4.3's retry handles) and drains the commands
+     in flight; a `terminationGracePeriodSeconds` longer than the longest command it admits; and a
+     PodDisruptionBudget with `maxUnavailable: 1`. The stateful pod keeps `Recreate`, but drains
+     its relays on SIGTERM, so events are not lost.
 1. **Off by default.** New CR field `spec.deployment.credentialProxy.exec.replicas`. The value 0
    (the default) means no exec tier and no `CREDENTIAL_PROXY_EXEC_URL`, so every install behaves
    as today.
@@ -565,6 +628,10 @@ To revert, set replicas to 0. The shim falls back to `CREDENTIAL_PROXY_URL`.
   stays the default until a fleet needs it.
 - **A wrong class.** Interactive work without a turn token runs as background and waits longer.
   A copied turn token can use at most the interactive cap. Neither gains access.
+- **The k8s-api-proxy as a credential holder.** It runs as the broker's KSA, so it uses the same
+  Workload Identity GSA and mints tokens for every cluster. Once it carries most Kubernetes
+  traffic and scales out (§3.6), it needs a security review of its own, separate from the
+  broker's.
 - **Two addresses.** A caller that uses the wrong URL gets a 404 from the exec role, which is loud
   and easy to find in tests.
 - **Background starvation.** Interactive work goes first, within its cap of `admitted − 1`. A long
@@ -573,9 +640,10 @@ To revert, set replicas to 0. The shim falls back to `CREDENTIAL_PROXY_URL`.
 
 ## 11. Open questions
 
-1. Does any `/v1/exec` call refer to a content-workspace handle or a path in the stateful pod's
-   emptyDir? If yes, that call must stay on the stateful broker. (The code survey found the
-   workspace and the exec route on the same emptyDir; this needs a check per call site.)
+1. Closed: no `/v1/exec` call uses a content-workspace handle. `/v1/exec` accepts only `gcloud`
+   and `kubectl` (`EXEC_ROUTE_EXECUTABLES`, `credential_proxy.py:5439`, enforced at
+   `:9533-9547`), and no exec path takes a handle. The broker's own `git` in the workspace runs
+   through `execute_workspace_git` (`:6704`), a separate door that `/v1/exec` cannot reach.
 2. Are a reserve of `R = 2` and an interactive cap of `admitted − 1` right? The measured mix
    (§8.1) decides them.
 3. Do the dispatcher's profile workers reach the broker through the sandbox shim as the shell role?
@@ -599,3 +667,7 @@ To revert, set replicas to 0. The shim falls back to `CREDENTIAL_PROXY_URL`.
    effect recorded. With #4128's switch on, this holds for `gcloud` only (§3.6).
 9. How does the gateway mint the turn token (§4.1), and can #3889's per-task credential be it for
    chat turns as well as for profile workers?
+10. After #4128's default-on step, should `/v1/watcher/*` and `/v1/k8s/*` move to the
+    k8s-api-proxy? They do the same job (Kubernetes API reads under kube-agents' identity) and keep
+    no state that breaks on more than one pod (§3.1), so there would be one Kubernetes path instead
+    of two.
