@@ -2078,7 +2078,7 @@ scope_exclude_kubectl() { # <kubectl args>; against the install under test
 # (KUBEAGENTS_SCOPE_DECLARED); then the mounted file in a settled pod, which the
 # kubelet refreshes on its own clock.
 scope_exclude_settle() { # <label>
-  local label="$1" deadline=$((SECONDS + EVAL_SCOPE_SETTLE_SECONDS)) left gen generation observed workload="" kind want have pod="" attempt rc out=""
+  local label="$1" deadline=$((SECONDS + EVAL_SCOPE_SETTLE_SECONDS)) left gen generation observed workload="" kind want have pod="" attempt rc out="" summary
   while :; do
     gen="$(scope_exclude_kubectl get platformagent "${AGENT_SERVICE_NAME}" -o jsonpath='{.metadata.generation} {.status.observedGeneration}' 2>/dev/null)" || gen=""
     generation="" observed=""
@@ -2136,8 +2136,10 @@ scope_exclude_settle() { # <label>
     out="$(${bound[@]+"${bound[@]}"} kubectl --context "${AGENT_CLUSTER_CONTEXT}" -n "${TARGET_NAMESPACE}" exec "${pod}" -c "${EVAL_GATEWAY_CONTAINER}" -- \
       env HERMES_HOME="${EVAL_GATEWAY_HOME}" "${EVAL_GATEWAY_PYTHON}" "${EVAL_SCOPE_RECONCILE_SCRIPT}" --require-create-pass 2>&1)" || rc=$?
     if [ "${rc}" -eq 0 ]; then
-      # Its summary line, not its last: a notification it failed to post comes after.
-      echo "Scope exclusion (${label}): the gateway reads ${want}; reconcile: $(printf '%s\n' "${out}" | grep -F 'Done:' | tail -1)"
+      # Its summary line, not its last: a notification it failed to post can come after.
+      summary="$(printf '%s\n' "${out}" | grep -F 'Done:' | tail -1)" || summary=""
+      [ -n "${summary}" ] || summary="$(printf '%s\n' "${out}" | tail -1)"
+      echo "Scope exclusion (${label}): the gateway reads ${want}; reconcile: ${summary}"
       return 0
     fi
     if [ "${rc}" -eq "${EVAL_SCOPE_RECONCILE_BUSY_EXIT}" ] && [ "${SECONDS}" -lt "${deadline}" ]; then
