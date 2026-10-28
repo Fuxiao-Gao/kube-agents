@@ -546,15 +546,25 @@ class LatencyBlockTest(Harness):
         self.assertEqual(lines[-1], nightly_digest.FOOTER)
 
     def test_a_broad_slowdown_is_one_line_in_place_of_the_list(self):
-        names = [f"slow-{i}" for i in range(7)]
+        # Seven cases with a task.yaml and no expected_fail, all slow.
+        names = ["case-green", "case-maint", "case-noowner", "case-outsider", "case-red", "case-red-extended", "case-reviewer"]
         nights = [night(day, [timed(green(name), 100.0, 10.0) for name in names]) for day in range(13, 20)]
         nights.append(night(20, [timed(green(name), 400.0, 10.0) for name in names]))
-        doc = data(*nights, extra_cases=[(name, "capacity") for name in names])
-        lines = self.build(doc).lines
-        broad = [line for line in lines if line.startswith("🐢 *Broad slowdown*: 7 of 7 timed cases")]
+        lines = self.build(data(*nights)).lines
+        broad = [line for line in lines if line.startswith("🐢 *Broad slowdown*: 7 of 7 cases with a typical took at least 2× their typical agent time and 60 s more")]
         self.assertEqual(len(broad), 1)
         self.assertTrue(broad[0].endswith(PAGE))
         self.assertNotIn(nightly_digest.nightly_latency.SLOW_HEADING, lines)
+
+    def test_the_slow_list_leaves_out_the_cases_the_section_leaves_out(self):
+        # case-xfail is marked expected_fail; gone-case has no task.yaml.
+        names = ("case-green", "case-xfail", "gone-case")
+        nights = [night(day, [timed(green(name), 100.0, 10.0) for name in names]) for day in range(13, 20)]
+        nights.append(night(20, [timed(green(name), 400.0, 10.0) for name in names]))
+        lines = self.build(data(*nights, extra_cases=[("gone-case", "capacity")])).lines
+        slow = [line for line in lines if line.startswith("• ") and "→" in line]
+        self.assertEqual(len(slow), 1)
+        self.assertIn("case-green", slow[0])
 
     def test_a_failing_fallback_line_never_loses_the_digest(self):
         with mock.patch.object(post_health.nightly_latency, "night_line", side_effect=ValueError("boom")), contextlib.redirect_stderr(io.StringIO()):
@@ -568,7 +578,7 @@ class LatencyBlockTest(Harness):
         for key in ("running_parts", "missing_parts"):
             partial = [{**reports[0], key: ["main-b"]}, *reports[1:]]
             with mock.patch.object(post_health.nightly, "night_reports", return_value=partial):
-                self.assertTrue(post_health.nightly_latency_line(doc, NOW).endswith("(partial: over the parts on record)"))
+                self.assertTrue(post_health.nightly_latency_line(doc, NOW).endswith("(partial: over the cases on record)"))
         self.assertNotIn("partial", post_health.nightly_latency_line(doc, NOW))
 
     def test_the_one_line_fallback_carries_the_night_line(self):

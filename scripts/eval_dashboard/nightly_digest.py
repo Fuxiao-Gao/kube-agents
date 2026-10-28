@@ -290,13 +290,24 @@ class Builder:
         line = nightly_latency.night_line(nights)
         if not line:
             return []
-        slow, timed = nightly_latency.slow_cases(nights)
+        # The section's own rule: no case off the nightly matrix, with no
+        # task.yaml on this checkout, or marked expected_fail.
+        expected = set(nightly.expected_cases(self.data))
+        listed = {}
+        for each in nights[0].get("cases") or []:
+            case = each.get("case")
+            if not isinstance(case, str) or (expected and case not in expected):
+                continue
+            f = fields.get(case) or nightly_bugs.task_fields(case, self.repo_root)
+            if f and not f["expected_fail"]:
+                listed[case] = f
+        slow, timed = nightly_latency.slow_cases(nights, keep=set(listed))
         if nightly_latency.is_broad(slow, timed, LIST_MAX_LINES):
             return [line, nightly_latency.broad_text(slow, timed, self.page())]
         items = []
         for entry in slow:
             case = entry["case"]
-            f = fields.get(case) or nightly_bugs.task_fields(case, self.repo_root)
+            f = listed[case]
             _, name = self.domain_of(case, f)
             owner = self.owner_of(case, f, nightly_bugs.tracking_issue(self.open_issues, case))
             items.append(((-entry["ratio"], case), nightly_latency.slow_text(entry, name, self.who(owner))))

@@ -57,9 +57,16 @@ class NightLineTest(unittest.TestCase):
         line = nl.night_line(steady(1) + half + steady(3))
         self.assertIn("typical 10.0 s, 20.0 s", line)
         self.assertIn("(typical 100 s)", line)
-        self.assertFalse(line.endswith("(partial: over the parts on record)"))
+        self.assertFalse(line.endswith("(partial: over the cases on record)"))
         last = night([case("a", 120.0)], 10.0, 20.0, missing=["main-b"])
-        self.assertTrue(nl.night_line([last] + steady(7)).endswith("(partial: over the parts on record)"))
+        self.assertTrue(nl.night_line([last] + steady(7)).endswith("(partial: over the cases on record)"))
+
+    def test_a_part_cut_short_leaves_the_night_partial(self):
+        writers_cut = {**night([case("a", 900.0)], 90.0, 900.0), "parts": [{"part": "main", "truncated": False}, {"part": "writers", "truncated": True}]}
+        self.assertFalse(nl.whole(writers_cut))
+        line = nl.night_line(steady(1) + [writers_cut] * 4 + steady(3))
+        self.assertIn("(typical 100 s)", line)
+        self.assertTrue(nl.night_line([writers_cut] + steady(7)).endswith("(partial: over the cases on record)"))
 
     def test_only_the_newest_seven_earlier_nights_count(self):
         line = nl.night_line(steady(1) + steady(7, agent=100.0) + steady(10, agent=1000.0))
@@ -86,6 +93,11 @@ class SlowCasesTest(unittest.TestCase):
         # 10 s to 60 s is 6x but only 50 s more.
         nights = [night([case("a", 60.0)])] + [night([case("a", 10.0)]) for _ in range(7)]
         self.assertEqual(nl.slow_cases(nights), ([], 1))
+
+    def test_keep_limits_the_cases_judged_and_counted(self):
+        last = night([case("a", 400.0), case("b", 400.0), case("c", 100.0), case("d", 100.0)])
+        slow, timed = nl.slow_cases([last] + steady(7), keep={"b", "c"})
+        self.assertEqual(([s["case"] for s in slow], timed), (["b"], 2))
 
     def test_a_case_with_fewer_than_three_nights_has_no_typical(self):
         nights = [night([case("new", 900.0)]), night([case("new", 10.0)]), night([case("new", 10.0)])]

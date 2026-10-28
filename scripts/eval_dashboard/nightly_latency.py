@@ -73,7 +73,7 @@ CASE_AGENT_P50 = "agent_p50_s"
 
 LINE = "⏱ *Latency*: {turn1}{sep}{agent}{note}"
 CUT_NOTE = " (cut short: over the cases it ran)"
-PARTIAL_NOTE = " (partial: over the parts on record)"
+PARTIAL_NOTE = " (partial: over the cases on record)"
 TURN1_TEXT = "turn 1 p50 {p50}, p95 {p95} (target p95 < {target} s{typical})"
 TURN1_TYPICAL = "; typical {p50}, {p95}"
 TURN1_NOT_TIMED = "turn 1 not timed"
@@ -88,7 +88,8 @@ SLOW_HEADING = f"🐢 *Slow cases* (agent time at least {CASE_SPIKE_RATIO:g}× t
 SLOW_LINE = "{domain}: {case} {typical} → {value} ({ratio:.1f}×){sustained} · {owner}"
 SUSTAINED_TEXT = ", sustained {nights} nights"
 BROAD_LINE = (
-    "🐢 *Broad slowdown*: {slow} of {timed} timed cases took at least {ratio:g}× their typical agent time"
+    "🐢 *Broad slowdown*: {slow} of {timed} cases with a typical took at least {ratio:g}× their typical agent time"
+    f" and {CASE_SPIKE_FLOOR_S} s more"
     " — likely one cause (the model, the mode, quota), not one per case · {page}"
 )
 
@@ -109,8 +110,12 @@ def _number(value) -> float | None:
 
 
 def whole(night: dict) -> bool:
-    """A night with every part, none cut short: its numbers cover the matrix."""
-    return not (night.get("truncated") or night.get("missing_parts") or night.get("running_parts"))
+    """A night with every part, none cut short: its numbers cover the matrix.
+    The night's own ``truncated`` reads the main parts only, so each part's
+    flag is read too: a writers part cut short leaves the night partial."""
+    if night.get("truncated") or night.get("missing_parts") or night.get("running_parts"):
+        return False
+    return not any(part.get("truncated") for part in night.get("parts") or [])
 
 
 def median_case_agent(night: dict) -> float | None:
@@ -189,18 +194,19 @@ def _is_slow(value: float, base: float | None) -> bool:
     return bool(base) and value >= CASE_SPIKE_RATIO * base and value - base >= CASE_SPIKE_FLOOR_S
 
 
-def slow_cases(nights: list[dict]) -> tuple[list[dict], int]:
+def slow_cases(nights: list[dict], keep: set[str] | None = None) -> tuple[list[dict], int]:
     """``(slow, timed)`` for ``nights[0]``: each slow case as ``{case,
     value, typical, ratio, sustained}`` (``sustained`` the nights in
     a row it was slow, last night included), largest ratio first; ``timed``
-    the cases last night with timing and a typical."""
+    the cases last night with timing and a typical. With ``keep``, only the
+    cases it names are judged or counted."""
     if not nights:
         return [], 0
     history = _case_history(nights[1:])
     slow, timed = [], 0
     for case in nights[0].get("cases") or []:
         name, value = case.get("case"), _number(case.get(CASE_AGENT_P50))
-        if not isinstance(name, str) or value is None:
+        if not isinstance(name, str) or value is None or (keep is not None and name not in keep):
             continue
         past = history.get(name, [])
         base = typical(past)
