@@ -234,20 +234,33 @@ operator sets `CREDENTIAL_PROXY_EXEC_REPLICAS`, and the route reports
 `admitted × replicas` with the per-replica numbers beside it. It is a target, not a promise: a
 replica that is not ready lowers the real number until the rollout ends.
 
-### 3.6 Relation to the k8s-api-proxy (#3760)
+### 3.6 Relation to the k8s-api-proxy (#3760, epic #4128)
 
 #3760 adds a separate Kubernetes API proxy (its design: `docs/designs/kube-proxy.md` on that
-branch). If it merges, the split of the load changes:
+branch). Epic #4128 splits that work into six steps: CI and hosting (done), the core library, the
+image, the operator behind an opt-in switch that is off by default, the wiring of sandbox
+`kubectl` through the proxy (with the eval loop), and default on, which retires the broker's
+`kubectl` route. The required check and the release lines sit beside the first step.
+
+- **Until #4128's default-on step, the broker carries all `kubectl`.** The opt-in switch is off by
+  default, so every install keeps today's path until then. This design does not wait for #4128,
+  and #4128 does not wait for this design.
+- **The two efforts are independent in code.** Both change `credential_proxy_client.py` (the shim);
+  whichever merges second resolves that small conflict.
+- **The measurement plan sizes the broker twice** (§8.2): with the `kubectl` share, as installs run
+  until default on, and without it, as they run after.
+
+After default on, the split of the load changes:
 
 ```
-  sandbox kubectl (every profile) ──► k8s-api-proxy  × 1 pod   (#3760)
+  sandbox kubectl (every profile) ──► k8s-api-proxy  × 1 pod   (#3760, #4128)
   sandbox gcloud                  ──► exec tier      × N pods  (this design)
-  session pods' /v1/exec          ──► exec tier      × N pods  (unless #3760 extends to them)
+  session pods' /v1/exec          ──► exec tier      × N pods  (unless #4128 extends to them)
   relays, workspace, vcs/forge,   ──► stateful broker × 1 pod
   Cloud API relay
 ```
 
-What moves, as #3760 is written [code, #3760 head]:
+What moves, as #3760 is written [code, #3760 head]; #4128's wiring step may change it:
 
 - **All `kubectl` from the sandbox pod.** The sandbox image drops the `kubectl` wrapper and ships
   the real binary. `gcloud container clusters get-credentials` still runs on the broker, and the
@@ -291,6 +304,10 @@ What this means for this design:
   cannot fill either one ahead of interactive work.
 - The footprint (§8.4) has two terms: exec replicas for `gcloud`, and k8s-api-proxy replicas for
   `kubectl`.
+- #4128 states that each `kubectl` call through the broker starts a process of about 100 MiB,
+  which caps concurrency at a handful of commands; the budget doc measured about 116 MiB with the
+  auth plugin. The k8s-api-proxy starts no process per call, so it also raises `kubectl` capacity,
+  while it still runs as one pod.
 - #3760 also removes the shim's Python client from every `kubectl`, which is the caller-side cost
   #4107 measured (#4027). The 1.5 commands per second ceiling then holds for `gcloud` only.
 
@@ -403,19 +420,19 @@ The #3935 runner is the tool. The tiger team owns it, so the plan is a new plan 
 | CPU throttling                                                                                         | cAdvisor CFS throttled periods through GMP                                            | New in the runner                                 |
 | Per-replica balance                                                                                    | The same metrics per pod                                                              | New in the runner                                 |
 | Requests and slot-seconds by tool (`kubectl`, `gcloud`, other)                                         | The broker's `tool_execution_audit` lines                                             | New in the runner; splits the load §3.6 moves     |
-| k8s-api-proxy CPU, memory and in-flight requests                                                       | Cloud Monitoring; its `in_flight_requests` gauge (#3760)                              | New in the runner, on a #3760 build               |
+| k8s-api-proxy CPU, memory and in-flight requests                                                       | Cloud Monitoring; its `in_flight_requests` gauge (#3760, #4128)                       | New in the runner, with the proxy switched on     |
 
 ### 8.2 Points
 
-| Run set           | Points                                                                | Why                                                         |
-| ----------------- | --------------------------------------------------------------------- | ----------------------------------------------------------- |
-| Baseline, one pod | 2, 8, 16, 32 clusters, with a fleet audit that really runs            | Where waits and refusals start, and the sweep's share       |
-| Mixed concurrency | 8, 10, 12, 15 interactive questions during a sweep                    | Interactive waits behind background work, today and with §4 |
-| Vertical control  | Broker CPU raised, at 8 and 16 clusters (#4107 ran 4 CPU at 2 and 16) | CPU-bound or slot-bound                                     |
-| Autopilot         | One point at the 1 GiB clamp (budget admits 4)                        | The worst default                                           |
-| Mode              | One baseline point in `spec.mode: today`                              | Phase 1 covered `next` only                                 |
-| Exec tier         | 1, 2 and 3 replicas at 16 and 32 clusters                             | #4082 "Done when": the chosen shape at two or more sizes    |
-| `kubectl` split   | The baseline points again on a #3760 build                            | What leaves the broker, and the k8s-api-proxy's own load    |
+| Run set           | Points                                                                | Why                                                                            |
+| ----------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| Baseline, one pod | 2, 8, 16, 32 clusters, with a fleet audit that really runs            | Where waits and refusals start, and the sweep's share                          |
+| Mixed concurrency | 8, 10, 12, 15 interactive questions during a sweep                    | Interactive waits behind background work, today and with §4                    |
+| Vertical control  | Broker CPU raised, at 8 and 16 clusters (#4107 ran 4 CPU at 2 and 16) | CPU-bound or slot-bound                                                        |
+| Autopilot         | One point at the 1 GiB clamp (budget admits 4)                        | The worst default                                                              |
+| Mode              | One baseline point in `spec.mode: today`                              | Phase 1 covered `next` only                                                    |
+| Exec tier         | 1, 2 and 3 replicas at 16 and 32 clusters                             | #4082 "Done when": the chosen shape at two or more sizes                       |
+| `kubectl` split   | The baseline points again with #4128's switch on                      | The broker sized without the `kubectl` share, and the k8s-api-proxy's own load |
 
 Each point runs 3 times. The planned points are only a few times the Phase 1 run time [predicted],
 because most points reuse the fan-out and audit operations.
@@ -495,7 +512,7 @@ To revert, set replicas to 0. The shim falls back to `CREDENTIAL_PROXY_URL`.
 5. Kubeconfig without `gcloud` (§3.4): worth it at 2,500 clusters?
 6. Who owns `bench/scale/broker.yaml`: the tiger team, as part of Phase 2, with this doc as its
    requirements? To agree with them before §8 starts.
-7. For dshnayder, on #3760 (§3.6):
+7. For dshnayder, on #3760 and epic #4128 (§3.6):
    - How do the session pods run `kubectl` once the sandbox image has no wrapper? Do they move to
      the k8s-api-proxy, or keep `/v1/exec`?
    - Is there a reason for one replica and `Recreate`, or can the k8s-api-proxy run N replicas
@@ -506,4 +523,4 @@ To revert, set replicas to 0. The shim falls back to `CREDENTIAL_PROXY_URL`.
      passes") run, and with what numbers?
 8. #4027 caps the command path at about 1.5 commands per second in the sandbox. Until it is fixed,
    a measurement can show the caller's limit and not the broker's. §8 needs it fixed, or its
-   effect recorded. On a #3760 build this holds for `gcloud` only (§3.6).
+   effect recorded. With #4128's switch on, this holds for `gcloud` only (§3.6).
