@@ -300,8 +300,15 @@ type AgentProfileStatus struct {
 // +kubebuilder:validation:XValidation:rule="self.metadata.name.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')",message="AgentProfile name must be a dot-free DNS-1123 label: it is the addressee token on the task and directory subjects (its length is bounded by the next rule, per tier)"
 // `platform` is the Hermes bridge's addressee: a profile under that name would put a
 // second executor on a2a.tasks.platform.*. The platform persona as a profile is not a goal.
-// +kubebuilder:validation:XValidation:rule="self.metadata.name.size() <= (has(self.spec.allowedTiers) && self.spec.allowedTiers.exists(t, t == 'unattended') ? 44 : 50)",message="AgentProfile name is too long for its tiers: each tier's bus identity is profile-<name>-<tier>, which must fit one 63-character label, so a name is at most 50 characters, or 44 if allowedTiers includes unattended"
 // +kubebuilder:validation:XValidation:rule="self.metadata.name != 'platform'",message="AgentProfile name 'platform' is reserved: the Hermes bridge is the executor for that addressee"
+// The name bound ratchets: it refuses a create, or an update that newly breaks
+// it, but not an update to a profile that already broke it. A profile named
+// under 0.19.0's flat 55 would otherwise be refused every write after the
+// upgrade, its status and finalizer removal included, and hang Terminating.
+// The operator still drops such a profile from the identity map. The old
+// object's unattended test reads the set by size and index, not exists():
+// through the optional oldSelf, exists() blows the CEL cost budget.
+// +kubebuilder:validation:XValidation:rule="self.metadata.name.size() <= (has(self.spec.allowedTiers) && self.spec.allowedTiers.exists(t, t == 'unattended') ? 44 : 50) || (oldSelf.hasValue() && oldSelf.value().metadata.name.size() > ((has(oldSelf.value().spec.allowedTiers) && (size(oldSelf.value().spec.allowedTiers) == 2 || oldSelf.value().spec.allowedTiers[0] == 'unattended')) ? 44 : 50))",optionalOldSelf=true,message="AgentProfile name is too long for its tiers: each tier's bus identity is profile-<name>-<tier>, which must fit one 63-character label, so a name is at most 50 characters, or 44 if allowedTiers includes unattended"
 
 // AgentProfile is the Schema for the agentprofiles API.
 type AgentProfile struct {

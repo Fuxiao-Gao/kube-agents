@@ -420,16 +420,20 @@ spec:
                 by the next rule, per tier)"
               rule: self.metadata.name.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
             - message:
-                "AgentProfile name is too long for its tiers: each tier's bus
-                identity is profile-<name>-<tier>, which must fit one 63-character label,
-                so a name is at most 50 characters, or 44 if allowedTiers includes unattended"
-              rule:
-                "self.metadata.name.size() <= (has(self.spec.allowedTiers) && self.spec.allowedTiers.exists(t,
-                t == 'unattended') ? 44 : 50)"
-            - message:
                 "AgentProfile name 'platform' is reserved: the Hermes bridge
                 is the executor for that addressee"
               rule: self.metadata.name != 'platform'
+            - message:
+                "AgentProfile name is too long for its tiers: each tier's bus
+                identity is profile-<name>-<tier>, which must fit one 63-character label,
+                so a name is at most 50 characters, or 44 if allowedTiers includes unattended"
+              optionalOldSelf: true
+              rule:
+                "self.metadata.name.size() <= (has(self.spec.allowedTiers) && self.spec.allowedTiers.exists(t,
+                t == 'unattended') ? 44 : 50) || (oldSelf.hasValue() && oldSelf.value().metadata.name.size()
+                > ((has(oldSelf.value().spec.allowedTiers) && (size(oldSelf.value().spec.allowedTiers)
+                == 2 || oldSelf.value().spec.allowedTiers[0] == 'unattended')) ? 44
+                : 50))"
       served: true
       storage: true
       subresources:
