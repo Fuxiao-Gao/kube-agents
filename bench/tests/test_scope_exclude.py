@@ -1,0 +1,173 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import io
+import json
+from pathlib import Path
+
+import pytest
+
+from kube_agents_bench import scope_exclude
+
+ANNOTATION_PATH = "/metadata/annotations/bench.kubeagents.x-k8s.io~1scope-before-exclude"
+SEEDED_B = {"projectId": "pool-1", "location": "us-central1-b", "clusterName": "seeded-b"}
+SEEDED_D = {"projectId": "pool-1", "location": "us-central1-a", "clusterName": "seeded-d"}
+CONTEXT = (
+    "project=pool-1\nslot.crashloop-workload=a\n"
+    "cluster.b=seeded-b\nlocation.b=us-central1-b\ncluster.d=seeded-d\nlocation.d=us-central1-a\n"
+)
+
+
+def _task(tmp_path: Path, case: str, body: str) -> Path:
+    path = tmp_path / case / "task.yaml"
+    path.parent.mkdir()
+    path.write_text("id: x\n" + body, encoding="utf-8")
+    return path
+
+
+def _context(tmp_path: Path, text: str = CONTEXT) -> Path:
+    path = tmp_path / ".fleet-context"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _apply(cr: dict, ops: list[dict]) -> dict:
+    """A JSON patch applied the way the API server applies these ops."""
+    doc = json.loads(json.dumps(cr))
+    for op in ops:
+        *parents, last = [p.replace("~1", "/").replace("~0", "~") for p in op["path"].split("/")[1:]]
+        node = doc
+        for key in parents:
+            node = node[key]
+        if op["op"] == "add":
+            node[last] = op["value"]
+        elif op["op"] == "remove":
+            del node[last]
+        else:  # pragma: no cover - the module emits only add and remove
+            raise AssertionError(op)
+    return doc
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["scope_exclude: {slots: [b, d]}\n", "scope_exclude:\n  slots:\n    - b\n    - d\n"],
+)
+def test_every_yaml_layout_reads_the_same_slots(tmp_path, body):
+    assert scope_exclude.declared_slots(_task(tmp_path, "c", body)) == ["b", "d"]
+
+
+def test_an_undeclared_case_excludes_nothing(tmp_path):
+    assert scope_exclude.declared_slots(_task(tmp_path, "c", "owner: x\n")) == []
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["b", "[b]", "{slots: []}", "{slots: b}", "{slots: [B]}", "{slots: [bb]}", "{slots: [b, b]}", "{slots: [b], x: 1}", "null"],
+)
+def test_a_value_the_runner_cannot_resolve_fails_the_read(tmp_path, capsys, value):
+    task = _task(tmp_path, "bad", f"scope_exclude: {value}\n")
+    assert scope_exclude.main(["cases", str(task)]) == 1
+    assert str(task) in capsys.readouterr().err
+
+
+def test_cases_prints_only_the_declaring_tasks_in_order(tmp_path, capsys):
+    one = _task(tmp_path, "one", "scope_exclude: {slots: [b]}\n")
+    plain = _task(tmp_path, "plain", "owner: x\n")
+    two = _task(tmp_path, "two", "scope_exclude: {slots: [b, d]}\n")
+    assert scope_exclude.main(["cases", str(one), str(plain), str(two)]) == 0
+    assert capsys.readouterr().out.splitlines() == ["one b", "two b d"]
+
+
+def test_each_slot_resolves_through_the_fleet_context(tmp_path):
+    assert scope_exclude.excluded_clusters(_context(tmp_path), ["b", "d"]) == [SEEDED_B, SEEDED_D]
+
+
+@pytest.mark.parametrize("text", [CONTEXT.replace("location.b=us-central1-b\n", ""), CONTEXT.replace("project=pool-1\n", "")])
+def test_a_slot_the_context_does_not_resolve_is_an_error(tmp_path, text):
+    with pytest.raises(scope_exclude.ScopeExcludeError):
+        scope_exclude.excluded_clusters(_context(tmp_path, text), ["b"])
+
+
+def test_a_cr_without_scope_gets_the_exclusion_and_comes_back_without_one():
+    cr = {"metadata": {"name": "platform-agent"}, "spec": {"mode": "next"}}
+    patched = _apply(cr, scope_exclude.patch_ops(cr, [SEEDED_B]))
+    assert patched["spec"]["scope"] == {"exclude": {"clusters": [SEEDED_B]}}
+    assert patched["metadata"]["annotations"][scope_exclude.ANNOTATION] == "null"
+    assert _apply(patched, scope_exclude.restore_ops(patched)) == {
+        "metadata": {"name": "platform-agent", "annotations": {}},
+        "spec": {"mode": "next"},
+    }
+
+
+def test_a_declared_scope_keeps_its_own_exclusions_and_comes_back_as_it_was():
+    own = {"projectId": "pool-1", "location": "us-east1", "clusterName": "scratch"}
+    scope = {"projects": ["pool-2"], "exclude": {"projects": ["*-sandbox"], "clusters": [own, SEEDED_B]}}
+    cr = {"metadata": {"annotations": {"keep": "me"}}, "spec": {"scope": scope}}
+    patched = _apply(cr, scope_exclude.patch_ops(cr, [SEEDED_B, SEEDED_D]))
+    assert patched["spec"]["scope"]["exclude"] == {"projects": ["*-sandbox"], "clusters": [own, SEEDED_B, SEEDED_D]}
+    assert patched["spec"]["scope"]["projects"] == ["pool-2"]
+    restored = _apply(patched, scope_exclude.restore_ops(patched))
+    assert restored == cr
+
+
+def test_a_patch_over_a_leftover_starts_from_the_saved_scope():
+    cr = {"metadata": {}, "spec": {}}
+    first = _apply(cr, scope_exclude.patch_ops(cr, [SEEDED_D]))
+    second = _apply(first, scope_exclude.patch_ops(first, [SEEDED_B]))
+    # The leftover's seeded-d is not carried into the next case's exclusion.
+    assert second["spec"]["scope"] == {"exclude": {"clusters": [SEEDED_B]}}
+    assert second["metadata"]["annotations"][scope_exclude.ANNOTATION] == "null"
+    assert "scope" not in _apply(second, scope_exclude.restore_ops(second))["spec"]
+
+
+def test_nothing_saved_means_nothing_to_restore(capsys, monkeypatch):
+    cr = {"metadata": {"annotations": {}}, "spec": {"scope": {"exclude": {"clusters": [SEEDED_B]}}}}
+    assert scope_exclude.restore_ops(cr) == []
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(cr)))
+    assert scope_exclude.main(["restore"]) == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_the_annotation_path_escapes_the_slash():
+    ops = scope_exclude.patch_ops({"metadata": {"annotations": {"a": "b"}}, "spec": {}}, [SEEDED_B])
+    assert [op["path"] for op in ops] == [ANNOTATION_PATH, "/spec/scope"]
+
+
+def test_a_saved_scope_that_is_not_json_fails_loudly():
+    cr = {"metadata": {"annotations": {scope_exclude.ANNOTATION: "{"}}, "spec": {}}
+    with pytest.raises(scope_exclude.ScopeExcludeError):
+        scope_exclude.restore_ops(cr)
+
+
+def test_the_cr_and_the_rendered_file_compare_equal_when_they_agree(capsys, monkeypatch):
+    cr = {"spec": {"scope": {"exclude": {"clusters": [SEEDED_D, SEEDED_B]}}}}
+    rendered = {"present": True, "projects": [], "exclude": {"projects": [], "clusters": [SEEDED_B, SEEDED_D]}}
+    lines = []
+    for doc in (cr, rendered):
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(doc)))
+        assert scope_exclude.main(["clusters"]) == 0
+        lines.append(capsys.readouterr().out)
+    assert lines[0] == lines[1]
+    # And an unexcluded install reads as an empty list on both sides.
+    for doc in ({"spec": {}}, {"present": False, "exclude": {"projects": [], "clusters": []}}):
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(doc)))
+        assert scope_exclude.main(["clusters"]) == 0
+        assert capsys.readouterr().out == "[]\n"
+
+
+def test_patch_cli_prints_the_ops(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"metadata": {}, "spec": {}})))
+    assert scope_exclude.main(["patch", "--fleet-context", str(_context(tmp_path)), "--slots", "b"]) == 0
+    ops = json.loads(capsys.readouterr().out)
+    assert ops[-1] == {"op": "add", "path": "/spec/scope", "value": {"exclude": {"clusters": [SEEDED_B]}}}

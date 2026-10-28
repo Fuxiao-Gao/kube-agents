@@ -258,6 +258,22 @@ readonly EVAL_RESUME_AUDITS_POD_WAIT_SECONDS=20
 readonly EVAL_PAUSE_AUDITS_POD_POLL_SECONDS=5
 # The bound on one exec that reads a gateway pod's PID 1 (ready_gateway_pod).
 readonly EVAL_PAUSE_AUDITS_PROBE_TIMEOUT=20s
+# scope_exclude_settle (the per-case scope exclusion, #3213): how long a scope
+# edit may take to reach the pod -- the operator's reconcile, the gateway's roll
+# (the scope rides in the config hash) and the kubelet's refresh of the mounted
+# file -- and how often it looks; where the operator mounts the rendered scope
+# (scopeDir and scopeConfigKey in platformagent_manifests.go); and the Cluster
+# Agent reconcile run once the pod reads it, so a profile is pruned or
+# re-created now rather than at the hourly job's next tick. Its
+# --require-create-pass exit 4 is another run holding the lock, which is waited
+# out; the reconcile lists every cluster in scope, minutes on a large project.
+readonly EVAL_SCOPE_SETTLE_SECONDS=900
+readonly EVAL_SCOPE_POLL_SECONDS=10
+readonly EVAL_SCOPE_FILE="/etc/kube-agents/scope.json"
+readonly EVAL_SCOPE_RECONCILE_SCRIPT="/opt/data/scripts/cluster_agent_reconcile.py"
+readonly EVAL_SCOPE_RECONCILE_TIMEOUT_SECONDS=600
+readonly EVAL_SCOPE_RECONCILE_ATTEMPTS=5
+readonly EVAL_SCOPE_RECONCILE_BUSY_EXIT=4
 # What a unit's lock deadline allows past its delegation timeout, for the
 # stack, the verifier and the state writes around the run.
 readonly UNIT_LOCK_ALLOWANCE_SECONDS=600
@@ -804,6 +820,8 @@ profile_and_dump_on_exit() {
   collect_credential_proxy_evidence
   # Defined further down; a run that died before then paused nothing.
   declare -F scheduled_audits >/dev/null && scheduled_audits resume "exit"
+  # Without the wait: the next lease's preflight waits for it instead.
+  declare -F scope_exclude_restore >/dev/null && scope_exclude_restore "exit"
   profile_report "${exit_code}"
   (exit "${exit_code}")
   dump_prow_artifacts_on_failure
@@ -2003,6 +2021,142 @@ ready_gateway_pod() { # <context> <namespace> [<wait seconds>]
   done
 }
 
+# The per-case scope exclusion (#3213). A case that declares
+# `scope_exclude: {slots: [...]}` grades an install whose
+# spec.scope.exclude.clusters names those slots' clusters. The fan-out runs its
+# repetitions alone, after every other unit (unit_phase 2): a scope edit rolls
+# the gateway, which would cut every unit beside it, and the reconcile deletes an
+# excluded cluster's Cluster Agent profile, which a case on that slot would miss.
+# bench/kube_agents_bench/scope_exclude.py builds each patch and keeps the scope
+# it replaced on the CR, so a restore needs only the CR: after the case's
+# repetitions, from the EXIT trap, and at lease time (below, before the audits
+# pause), which repairs a project that a run killed past its grace left
+# excluded. A CI install renders no scope block (platformAgent.scope is null), so
+# the next deploy does not undo an edit. Pinned to AGENT_CLUSTER_CONTEXT and
+# refused for a context that does not name PROJECT_ID, as wait_platform_runs is.
+scope_exclude_target() { # <label> -> 0 when the install may be patched
+  local label="$1" ctx="${AGENT_CLUSTER_CONTEXT:-}"
+  if [ -z "${PROJECT_ID:-}" ] || [ -z "${ctx}" ] || [ -z "${TARGET_NAMESPACE:-}" ] || ! command -v kubectl >/dev/null 2>&1; then
+    echo "WARNING: Scope exclusion (${label}): skipped, PROJECT_ID, AGENT_CLUSTER_CONTEXT, TARGET_NAMESPACE or kubectl is missing" >&2
+    return 1
+  fi
+  case "${ctx}" in
+    "gke_${PROJECT_ID}_"*) return 0 ;;
+  esac
+  echo "WARNING: Scope exclusion (${label}): skipped, AGENT_CLUSTER_CONTEXT=${ctx} does not name PROJECT_ID=${PROJECT_ID}" >&2
+  return 1
+}
+
+# A bare python3, not the bench virtualenv: the lease preflight and the EXIT
+# trap run it, and the patch, restore and clusters subcommands need no package.
+scope_exclude_helper() { # <subcommand> [args]; stdin and stdout pass through
+  python3 "${SCRIPT_DIR}/../bench/kube_agents_bench/scope_exclude.py" "$@"
+}
+
+scope_exclude_kubectl() { # <kubectl args>; against the install under test
+  kubectl --context "${AGENT_CLUSTER_CONTEXT}" -n "${TARGET_NAMESPACE}" --request-timeout="${EVAL_SANDBOX_EXEC_TIMEOUT}" "$@"
+}
+
+# Until the pod reads the scope the CR declares, then one reconcile run. The CR's
+# observedGeneration first, so the rollout read is of the workload the operator
+# wrote for this edit; then the gateway's rollout; then the mounted file in a
+# settled pod, which the kubelet refreshes on its own clock.
+scope_exclude_settle() { # <label>
+  local label="$1" deadline=$((SECONDS + EVAL_SCOPE_SETTLE_SECONDS)) left gen generation observed workload="" kind want have pod="" attempt rc out=""
+  while :; do
+    gen="$(scope_exclude_kubectl get platformagent "${AGENT_SERVICE_NAME}" -o jsonpath='{.metadata.generation} {.status.observedGeneration}' 2>/dev/null)" || gen=""
+    generation="" observed=""
+    read -r generation observed <<<"${gen}"
+    [ -n "${generation}" ] && [ "${generation}" = "${observed}" ] && break
+    if [ "${SECONDS}" -ge "${deadline}" ]; then
+      echo "WARNING: Scope exclusion (${label}): the operator has not observed the edit after ${EVAL_SCOPE_SETTLE_SECONDS}s (generation/observed: ${gen:-unreadable})" >&2
+      return 1
+    fi
+    sleep "${EVAL_SCOPE_POLL_SECONDS}"
+  done
+  for kind in deployment statefulset; do
+    if scope_exclude_kubectl get "${kind}/${AGENT_SERVICE_NAME}-gateway" -o name >/dev/null 2>&1; then
+      workload="${kind}/${AGENT_SERVICE_NAME}-gateway"
+      break
+    fi
+  done
+  left=$((deadline - SECONDS))
+  if [ -z "${workload}" ] || [ "${left}" -le 0 ] \
+      || ! out="$(kubectl --context "${AGENT_CLUSTER_CONTEXT}" -n "${TARGET_NAMESPACE}" rollout status "${workload}" --timeout="${left}s" 2>&1)"; then
+    echo "WARNING: Scope exclusion (${label}): the gateway did not roll out within ${EVAL_SCOPE_SETTLE_SECONDS}s: ${out:-no ${AGENT_SERVICE_NAME}-gateway workload}" >&2
+    return 1
+  fi
+  want="$(scope_exclude_kubectl get platformagent "${AGENT_SERVICE_NAME}" -o json | scope_exclude_helper clusters)" || want=""
+  while :; do
+    left=$((deadline - SECONDS))
+    [ "${left}" -gt 0 ] || left=0
+    have=""
+    if pod="$(ready_gateway_pod "${AGENT_CLUSTER_CONTEXT}" "${TARGET_NAMESPACE}" "${left}")"; then
+      have="$(scope_exclude_kubectl exec "${pod}" -c "${EVAL_GATEWAY_CONTAINER}" -- cat "${EVAL_SCOPE_FILE}" 2>/dev/null | scope_exclude_helper clusters 2>/dev/null)" || have=""
+    fi
+    [ -n "${want}" ] && [ "${have}" = "${want}" ] && break
+    if [ "${SECONDS}" -ge "${deadline}" ]; then
+      echo "WARNING: Scope exclusion (${label}): ${EVAL_SCOPE_FILE} in the gateway still reads ${have:-nothing} after ${EVAL_SCOPE_SETTLE_SECONDS}s, not the CR's ${want:-unreadable}" >&2
+      return 1
+    fi
+    sleep "${EVAL_SCOPE_POLL_SECONDS}"
+  done
+  local bound=(timeout --foreground "${EVAL_SCOPE_RECONCILE_TIMEOUT_SECONDS}")
+  command -v timeout >/dev/null 2>&1 || bound=()
+  for attempt in $(seq 1 "${EVAL_SCOPE_RECONCILE_ATTEMPTS}"); do
+    rc=0
+    out="$(${bound[@]+"${bound[@]}"} kubectl --context "${AGENT_CLUSTER_CONTEXT}" -n "${TARGET_NAMESPACE}" exec "${pod}" -c "${EVAL_GATEWAY_CONTAINER}" -- \
+      env HERMES_HOME="${EVAL_GATEWAY_HOME}" "${EVAL_GATEWAY_PYTHON}" "${EVAL_SCOPE_RECONCILE_SCRIPT}" --require-create-pass 2>&1)" || rc=$?
+    if [ "${rc}" -eq 0 ]; then
+      echo "Scope exclusion (${label}): the gateway reads ${want}; reconcile: $(printf '%s\n' "${out}" | tail -1)"
+      return 0
+    fi
+    echo "WARNING: Scope exclusion (${label}): reconcile attempt ${attempt} exited ${rc}: $(printf '%s\n' "${out}" | tail -1)" >&2
+    sleep "${EVAL_SCOPE_POLL_SECONDS}"
+    [ "${rc}" -eq "${EVAL_SCOPE_RECONCILE_BUSY_EXIT}" ] || pod="$(ready_gateway_pod "${AGENT_CLUSTER_CONTEXT}" "${TARGET_NAMESPACE}" "${EVAL_PAUSE_AUDITS_POD_WAIT_SECONDS}")" || pod=""
+  done
+  return 1
+}
+
+# Exclude the slots' clusters for one case, and wait until the pod and the Cluster
+# Agent profiles reflect it. Non-zero means the case must not run.
+scope_exclude_apply() { # <case> <slot>...
+  local name="$1" context ops
+  shift
+  scope_exclude_target "${name}" || return 1
+  context="${BENCH_FLEET_KUBECONFIG_DIR:-}/.fleet-context"
+  if [ -z "${BENCH_FLEET_KUBECONFIG_DIR:-}" ] || [ ! -s "${context}" ]; then
+    echo "WARNING: Scope exclusion (${name}): no .fleet-context under BENCH_FLEET_KUBECONFIG_DIR=${BENCH_FLEET_KUBECONFIG_DIR:-unset}, so slot(s) $* resolve to no cluster" >&2
+    return 1
+  fi
+  if ! ops="$(scope_exclude_kubectl get platformagent "${AGENT_SERVICE_NAME}" -o json | scope_exclude_helper patch --fleet-context "${context}" --slots "$@")" \
+      || ! scope_exclude_kubectl patch platformagent "${AGENT_SERVICE_NAME}" --type json -p "${ops}" >/dev/null; then
+    echo "WARNING: Scope exclusion (${name}): could not patch platformagent/${AGENT_SERVICE_NAME}" >&2
+    return 1
+  fi
+  echo "Scope exclusion (${name}): platformagent/${AGENT_SERVICE_NAME} now excludes slot(s) $*"
+  scope_exclude_settle "${name}"
+}
+
+# Put back the scope a patch saved, when one is saved. With `settle`, wait as the
+# apply does, so the excluded clusters' profiles are re-created before anything
+# else runs; the EXIT trap passes nothing and leaves that to the hourly reconcile.
+scope_exclude_restore() { # <label> [settle]
+  local label="$1" settle="${2:-}" ops
+  scope_exclude_target "${label}" 2>/dev/null || return 0
+  if ! ops="$(scope_exclude_kubectl get platformagent "${AGENT_SERVICE_NAME}" -o json | scope_exclude_helper restore)"; then
+    echo "WARNING: Scope exclusion (${label}): could not read platformagent/${AGENT_SERVICE_NAME} to restore its scope" >&2
+    return 1
+  fi
+  [ -n "${ops}" ] || return 0
+  if ! scope_exclude_kubectl patch platformagent "${AGENT_SERVICE_NAME}" --type json -p "${ops}" >/dev/null; then
+    echo "WARNING: Scope exclusion (${label}): could not restore the scope of platformagent/${AGENT_SERVICE_NAME}; the next lease's preflight tries again" >&2
+    return 1
+  fi
+  echo "Scope exclusion (${label}): restored the scope platformagent/${AGENT_SERVICE_NAME} had before an exclusion"
+  [ -z "${settle}" ] || scope_exclude_settle "${label}"
+}
+
 if [ "${EVAL_FORGE_KIND}" = "gitlab" ]; then
   EVAL_LEDGER_REPO="$(eval_gitlab_project "${PROJECT_ID:-}" 2>/dev/null)" || EVAL_LEDGER_REPO=""
 else
@@ -2011,6 +2165,13 @@ fi
 reset_audit_ledgers "lease"
 reset_agent_pulls "lease" || echo "WARNING: Agent pulls reset (lease): the repository is not clean; every unit of a case that requests a pull request runs its own reset first and does not run when that fails too." >&2
 probe_gitlab_ledger_path "lease" || exit 1
+# A scope a killed run left excluded (scope_exclude_restore, above), put back
+# before anything is graded. A restore that does not settle stops the run: every
+# case on the excluded slots would grade an install without their Cluster Agent.
+scope_exclude_restore "lease" settle || {
+  echo "ERROR: Scope exclusion (lease): an earlier run's exclusion could not be undone; stopping the run (infrastructure, not a case result)" >&2
+  exit 1
+}
 scheduled_audits pause "lease"
 
 # For opentofu provider
@@ -3581,6 +3742,16 @@ if ! DECLARED_STREAMS="$(cd "${BENCH_DIR}" && uv run python -m kube_agents_bench
   echo "ERROR: could not read the matrix's audit_streams (kube_agents_bench.audit_streams, above); the fan-out cannot tell which stream locks each unit holds, so the run does not start." >&2
   exit 1
 fi
+# The cases that exclude seeded slots from the install's scope, one
+# `<case> <slot>...` line each (scope_exclude_apply, #3213). unit_phase puts them
+# in a phase of their own, after every other unit; a file that will not read
+# stops the run, since its case would run beside units its scope edit cuts.
+if ! SCOPE_EXCLUDE_CASES="$(cd "${BENCH_DIR}" && uv run python -m kube_agents_bench.scope_exclude cases "${TASKS[@]}")"; then
+  echo "ERROR: could not read the matrix's scope_exclude (kube_agents_bench.scope_exclude, above); the fan-out cannot tell which cases edit the install's scope, so the run does not start." >&2
+  exit 1
+fi
+SCOPE_EXCLUDE_NAMES="$(printf '%s\n' "${SCOPE_EXCLUDE_CASES}" | awk 'NF { printf "%s%s", sep, $1; sep = "," }')"
+[ -z "${SCOPE_EXCLUDE_NAMES}" ] || echo "cases that exclude seeded slots from the install's scope, run alone after every other unit: ${SCOPE_EXCLUDE_NAMES}"
 for TASK in "${TASKS[@]}"; do
   TASK_NAME="$(basename "$(dirname "${TASK}")")"
   TASK_NAMES+=("${TASK_NAME}")
@@ -4319,7 +4490,14 @@ scheduled_audits pause "fan-out"
 # grades"): unattributed there in the first phase, and charged to the unit
 # in the second, whose window is exclusive (a requesting case's and a stopped
 # ask's alike).
-unit_phase() { # <task-name> -> 1 for a case that requests a pull request or a stopped ask, 0 otherwise
+#
+# A case that excludes seeded slots from the install's scope (SCOPE_EXCLUDE_NAMES)
+# is phase 2, run after both and alone, each case between its own scope edit and
+# restore (scope_exclude_apply); it takes 2 even when it also writes.
+unit_phase() { # <task-name> -> 2 for a scope-excluding case, 1 for a case that requests a pull request or a stopped ask, 0 otherwise
+  case ",${SCOPE_EXCLUDE_NAMES:-}," in
+    *",$1,"*) echo 2; return ;;
+  esac
   case ",${INJECT_LANE_REQUESTING:-},${STOPPED_ASK_CASES:-}," in
     *",$1,"*) echo 1 ;;
     *) echo 0 ;;
@@ -4448,7 +4626,16 @@ EOF_UNIT_QUEUE
   done
 }
 
-profile_begin "task fan-out: $((UNIT_TOTAL + WRITER_TOTAL)) units, parallelism=${EVAL_TASK_PARALLELISM}"
+# Phase 2's cases, each one's repetitions run alone between its scope edit and
+# the restore. Read into an array, not looped over with `read`: a background
+# unit would inherit the loop's stdin.
+SCOPE_EXCLUDE_LINES=()
+while IFS= read -r SCOPE_LINE; do
+  [ -z "${SCOPE_LINE}" ] || SCOPE_EXCLUDE_LINES+=("${SCOPE_LINE}")
+done <<<"${SCOPE_EXCLUDE_CASES:-}"
+SCOPE_TOTAL=$(( ${#SCOPE_EXCLUDE_LINES[@]} * EVAL_REPETITIONS ))
+
+profile_begin "task fan-out: $((UNIT_TOTAL + WRITER_TOTAL + SCOPE_TOTAL)) units, parallelism=${EVAL_TASK_PARALLELISM}"
 launch_units "${UNIT_QUEUE}" "${EVAL_TASK_PARALLELISM}" "${EVAL_UNIT_LAUNCH_STAGGER_SECONDS}"
 wait
 if [ "${WRITER_TOTAL}" -gt 0 ]; then
@@ -4456,6 +4643,34 @@ if [ "${WRITER_TOTAL}" -gt 0 ]; then
   launch_units "${UNIT_QUEUE_WRITERS}" 1 "${WRITER_LAUNCH_PAUSE:-${EVAL_GITHUB_WRITE_SETTLE_SECONDS}}"
   wait
 fi
+# A scope edit that does not take effect records the case's repetitions as
+# infrastructure rather than grading an install without the exclusion. A case
+# that also writes keeps the writer pause before each repetition.
+for SCOPE_LINE in ${SCOPE_EXCLUDE_LINES[@]+"${SCOPE_EXCLUDE_LINES[@]}"}; do
+  read -r SCOPE_CASE SCOPE_SLOTS <<<"${SCOPE_LINE}"
+  SCOPE_IDX=""
+  for i in "${!TASK_NAMES[@]}"; do
+    [ "${TASK_NAMES[i]}" = "${SCOPE_CASE}" ] && SCOPE_IDX="${i}" && break
+  done
+  [ -n "${SCOPE_IDX}" ] || continue
+  SCOPE_PAUSE="${EVAL_UNIT_LAUNCH_STAGGER_SECONDS}"
+  case ",${INJECT_LANE_REQUESTING:-},${STOPPED_ASK_CASES:-}," in
+    *",${SCOPE_CASE},"*) SCOPE_PAUSE="${WRITER_LAUNCH_PAUSE:-${EVAL_GITHUB_WRITE_SETTLE_SECONDS}}" ;;
+  esac
+  echo ">>> [$(date -u +'%Y-%m-%dT%H:%M:%SZ')] every other unit is done; launching the ${EVAL_REPETITIONS} repetition(s) of ${SCOPE_CASE} alone, with slot(s) ${SCOPE_SLOTS} excluded from the install's scope"
+  # shellcheck disable=SC2086 # slot letters, one argument each
+  if scope_exclude_apply "${SCOPE_CASE}" ${SCOPE_SLOTS}; then
+    launch_units "$(for REP in $(seq 1 "${EVAL_REPETITIONS}"); do printf '%s 0 %s\n' "${REP}" "${SCOPE_IDX}"; done)" 1 "${SCOPE_PAUSE}"
+    wait
+  else
+    for REP in $(seq 1 "${EVAL_REPETITIONS}"); do
+      skip_unit "${TASKS[SCOPE_IDX]}" "${SCOPE_CASE}" "${REP}" "" "" "not run: its scope exclusion did not take effect" \
+        "scope-exclude: slot(s) ${SCOPE_SLOTS} could not be excluded from the install's scope"
+    done
+  fi
+  scope_exclude_restore "${SCOPE_CASE}" settle \
+    || echo "WARNING: Scope exclusion (${SCOPE_CASE}): the restore did not settle; the next lease's preflight repeats it" >&2
+done
 
 # ─── What the run left on GitHub (#2079) ─────────────────────────────────────
 # On both lanes, once every unit is done: every pull request and branch

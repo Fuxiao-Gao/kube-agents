@@ -141,6 +141,20 @@ unit on the stream, which waits for it first (`wait_platform_runs`), so an audit
 run beside the case's runs and grade their ledger. `oobe-first-run-audits` carries the four it
 starts. devops-bench ignores the key.
 
+`scope_exclude` is for a case whose precondition is an install that leaves some seeded
+clusters out of its scope: `scope_exclude: {slots: [b]}` names catalogue slots, never
+cluster names, so the case runs unchanged on every pool project. The runner
+(`hack/ci-eval-pr.sh`, `scope_exclude_apply`) runs the case's repetitions alone, after every
+other unit, because a scope edit rolls the gateway and the Cluster Agent reconcile deletes an
+excluded cluster's profile. Before them it adds each slot's cluster, read from the fleet's
+`.fleet-context`, to the PlatformAgent's `spec.scope.exclude.clusters`, waits until the pod
+reads the new scope, and runs the reconcile once. After them it puts the scope back and runs the
+reconcile again to re-create the profiles. The scope it replaced is saved on the CR
+(`bench/kube_agents_bench/scope_exclude.py`), so the EXIT trap and the next lease can restore it
+after a run that died first. A repetition whose exclusion did not take effect is recorded as
+infrastructure. The validator refuses a slot the catalogue does not declare and a list that
+excludes every slot. devops-bench ignores the key.
+
 The runner pauses most of the Platform Agent's clock-started audits at lease time and again
 right before the fan-out (`scheduled_audits`, #3020), so their scheduled runs can't write to the GitOps
 repository in the middle of an eval and be charged to whichever cases are running. It leaves the
