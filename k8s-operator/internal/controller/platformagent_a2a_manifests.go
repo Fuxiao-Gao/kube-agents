@@ -4059,7 +4059,25 @@ func a2aTasksReserve(agent *agentv1alpha1.PlatformAgent) int {
 // stream sized at the floor holds a default install fine, and failing it for
 // being below a floor it was never going to be below is a false alarm.
 func a2aTasksConsumerBudget(agent *agentv1alpha1.PlatformAgent) int {
-	return resolveA2AMaxSessions(agent)*a2aSessionConsumersPerSession + a2aTasksReserve(agent)
+	return resolveA2AMaxSessions(agent)*a2aSessionConsumersPerSession + a2aTasksReserve(agent) + a2aProfileDurableAllowance()
+}
+
+// a2aProfileDurablesAllowed is the AgentProfile durables the TASKS budget
+// carries once there is a dispatcher to read them (#3655): one per (profile,
+// tier, kind), so 16 profiles with both tiers. Profiles are not bounded by
+// the CRD, so this is an allowance, not a count: a profile past it gets no
+// durables (the create is refused at the stream's cap) and its CardPublished
+// condition says why. A sizing knob replaces it when the budget work lands.
+const a2aProfileDurablesAllowed = 16 * 2 * 2
+
+// a2aProfileDurableAllowance is a2aProfileDurablesAllowed when this operator
+// renders a dispatcher, and nothing otherwise, so an install without one
+// sizes TASKS exactly as before.
+func a2aProfileDurableAllowance() int {
+	if a2aDispatcherEnabled() {
+		return a2aProfileDurablesAllowed
+	}
+	return 0
 }
 
 // a2aTasksMaxConsumers is what a fresh TASKS stream is created with.

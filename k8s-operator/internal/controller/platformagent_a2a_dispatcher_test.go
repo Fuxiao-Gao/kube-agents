@@ -246,3 +246,15 @@ func TestRemovingTheDispatcherImageRemovesTheDispatcher(t *testing.T) {
 		t.Errorf("an unlabelled Role under the dispatcher's name was deleted: %v", err)
 	}
 }
+
+// With a dispatcher the TASKS budget carries the profile durables'
+// allowance; without one it is what it was.
+func TestTheTasksBudgetCarriesTheProfileDurablesWithADispatcher(t *testing.T) {
+	agent := a2aTestAgent()
+	t.Setenv(a2aDispatcherImageEnvVar, "")
+	without := a2aTasksConsumerBudget(agent)
+	withDispatcher(t)
+	if got := a2aTasksConsumerBudget(agent); got != without+a2aProfileDurablesAllowed {
+		t.Errorf("budget with a dispatcher = %d, want %d + %d", got, without, a2aProfileDurablesAllowed)
+	}
+}
