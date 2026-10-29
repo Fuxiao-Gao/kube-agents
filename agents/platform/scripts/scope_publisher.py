@@ -123,6 +123,7 @@ KUBE_DEFAULT_PORT = "443"
 KUBE_API_TIMEOUT_SECONDS = 30
 CONFIGMAP_PATH = "/api/v1/namespaces/{namespace}/configmaps/{name}"
 MERGE_PATCH_CONTENT_TYPE = "application/merge-patch+json"
+JSON_CONTENT_TYPE = "application/json"
 EXIT_WRITTEN = 0
 EXIT_NOT_WRITTEN = 1
 # The sources a row can come from: the publisher writes rows for container and selector
@@ -131,7 +132,7 @@ EXIT_NOT_WRITTEN = 1
 ROW_EXCLUDED_VIAS = (rec.VIA_MANAGEMENT, rec.VIA_EXPLICIT)
 # The outcomes `_resolve_projects` gives a member a source listed this run: None for a
 # selector member it named, `ok` for a container member. These are probed. Any other
-# outcome is a member carried from a failed source, which keeps its previous row, or a
+# outcome is a member every one of whose sources failed, which keeps its previous row, or a
 # number a Metrics Scope listed that this run could not name, whose row takes that outcome.
 LISTED_OUTCOMES = (None, rec.OUTCOME_OK)
 
@@ -194,7 +195,7 @@ def _kube_request(method: str, namespace: str, name: str, body: dict | None = No
         host = f"[{host}]"
     url = f"https://{host}:{port}" + CONFIGMAP_PATH.format(namespace=namespace, name=name)
     headers = {"Authorization": f"Bearer {KUBE_TOKEN_FILE.read_text(encoding='utf-8').strip()}",
-               "Accept": "application/json"}
+               "Accept": JSON_CONTENT_TYPE}
     data = None
     if body is not None:
         data = json.dumps(body, separators=(",", ":")).encode("utf-8")
@@ -400,10 +401,11 @@ def build_document(declared: dict, management: str | None, previous: dict | None
             _, outcome = probes[entry[ROW_ID]]
             if outcome == rec.OUTCOME_OK:
                 confirmed = resolved_at
-        elif failed_sources.intersection(entry[ROW_VIA]):
+        elif failed_sources.issuperset(entry[ROW_VIA]):
             outcome = before.get(ROW_OUTCOME) or entry[ROW_OUTCOME]
         else:
-            # Its sources answered, and the Metrics Scope's number could not be named.
+            # A source that answered placed it: a Metrics Scope listed its number, which could
+            # not be named.
             outcome = entry[ROW_OUTCOME]
         row = {ROW_ID: entry[ROW_ID], ROW_VIA: entry[ROW_VIA], ROW_OUTCOME: outcome}
         if isinstance(confirmed, str):

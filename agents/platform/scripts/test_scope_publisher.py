@@ -630,6 +630,17 @@ class BuildDocumentTest(unittest.TestCase):
                                                  "outcome": "denied", "confirmedAt": PREVIOUS_TIME}])
         self.assertEqual(self._probed(broker), [])
 
+    def test_a_number_a_failed_folder_carries_takes_the_naming_outcome_when_the_metrics_scope_answers(self):
+        # Carried only when every source in its via failed: here the Metrics Scope answered.
+        previous = {"v": 1, "resolvedAt": PREVIOUS_TIME, "state": "ok", "numbers": {"111": "mon-proj-a"},
+                    "projects": [{"id": "mon-proj-a", "via": [FOLDER_A, "metricsScopes/scope-project"],
+                                  "outcome": "ok", "confirmedAt": PREVIOUS_TIME}]}
+        broker = FakeBroker(scopes={"scope-project": ["111"]},
+                            fail={"111": "ERROR: PERMISSION_DENIED", FOLDER_A: "connection reset by peer"})
+        document = self._build(broker, _scope(folders=["111111111111"], metricsScopes=["scope-project"]), previous)
+        self.assertEqual(document["projects"], [{"id": "mon-proj-a", "via": [FOLDER_A, "metricsScopes/scope-project"],
+                                                 "outcome": "denied", "confirmedAt": PREVIOUS_TIME}])
+
     def test_a_source_that_answers_empty_restamps_the_document(self):
         # A folder with no clusters today, and a Shared VPC host with no service projects,
         # answered: that is not a failed lookup.
