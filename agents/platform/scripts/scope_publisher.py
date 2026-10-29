@@ -39,8 +39,8 @@ from pathlib import Path
 import cluster_agent_reconcile as rec
 from credential_proxy_client import EXIT_SECURITY_POLICY_BLOCKED
 
-# The operator's environment for the Job (platformagent_a2a_manifests.go). The scope file is
-# the reconcile's own variable, rendered from the same `<name>-config` ConfigMap.
+# The Job's environment, which the operator renders for it. The scope file is the
+# reconcile's own variable, rendered from the same `<name>-config` ConfigMap.
 SCOPE_FILE_ENV = rec.SCOPE_FILE_ENV
 CONFIGMAP_ENV = "KUBEAGENTS_RESOLVED_SCOPE_CONFIGMAP"
 NAMESPACE_ENV = "POD_NAMESPACE"
@@ -131,7 +131,8 @@ EXIT_NOT_WRITTEN = 1
 ROW_EXCLUDED_VIAS = (rec.VIA_MANAGEMENT, rec.VIA_EXPLICIT)
 # The outcomes `_resolve_projects` gives a member a source listed this run: None for a
 # selector member it named, `ok` for a container member. These are probed. Any other
-# outcome is a member carried from a failed source, which keeps its previous row.
+# outcome is a member carried from a failed source, which keeps its previous row, or a
+# number a Metrics Scope listed that this run could not name, whose row takes that outcome.
 LISTED_OUTCOMES = (None, rec.OUTCOME_OK)
 
 
@@ -219,7 +220,33 @@ def parse_document(raw) -> dict | None:
     if (not isinstance(document, dict) or document.get(DOC_VERSION) != SCHEMA_VERSION
             or not isinstance(document.get(DOC_PROJECTS), list)):
         return None
-    return document
+    # Only well-formed fields go on: a malformed one would otherwise reach the next document
+    # as it is, or stop every later run, until someone edited the ConfigMap by hand.
+    clean = {key: document[key] for key in (DOC_VERSION, DOC_RESOLVED_AT, DOC_MEMBER_HASH, DOC_STATE)
+             if isinstance(document.get(key), (int, str))}
+    clean[DOC_EXCLUDED] = [p for p in (document.get(DOC_EXCLUDED) if isinstance(document.get(DOC_EXCLUDED), list)
+                                       else []) if isinstance(p, str)]
+    for key in (DOC_PROJECTS, DOC_CARRIED):
+        clean[key] = [_clean_row(row) for row in (document.get(key) if isinstance(document.get(key), list) else [])
+                      if _clean_row(row)]
+    numbers = document.get(DOC_NUMBERS)
+    clean[DOC_NUMBERS] = ({n: p for n, p in numbers.items() if isinstance(n, str) and isinstance(p, str)}
+                          if isinstance(numbers, dict) else {})
+    # The two optional keys stay out when empty, as in the documents this program writes.
+    for key in (DOC_CARRIED, DOC_NUMBERS):
+        if not clean[key]:
+            del clean[key]
+    return clean
+
+
+def _clean_row(row) -> dict | None:
+    """A row or carried entry with its known fields, or None when its id, via or outcome is malformed."""
+    if not (isinstance(row, dict) and isinstance(row.get(ROW_ID), str) and isinstance(row.get(ROW_OUTCOME), str)
+            and isinstance(row.get(ROW_VIA), list) and all(isinstance(v, str) for v in row[ROW_VIA])):
+        return None
+    clean = {key: row[key] for key in (ROW_ID, ROW_VIA, ROW_OUTCOME)}
+    clean.update({key: row[key] for key in (ROW_CONFIRMED_AT, ROW_NUMBER) if isinstance(row.get(key), str)})
+    return clean
 
 
 def read_previous(namespace: str, name: str) -> tuple[dict | None, str | None]:
@@ -364,6 +391,7 @@ def build_document(declared: dict, management: str | None, previous: dict | None
     rows_before = {row[ROW_ID]: row for row in (previous or {}).get(DOC_PROJECTS, [])
                    if isinstance(row, dict) and isinstance(row.get(ROW_ID), str)}
     resolved_at = _now()
+    failed_sources = {source for source, (found, _) in groups.items() if found is None}
     rows = []
     for entry in sorted(members, key=lambda e: e[ROW_ID]):
         before = rows_before.get(entry[ROW_ID], {})
@@ -372,8 +400,11 @@ def build_document(declared: dict, management: str | None, previous: dict | None
             _, outcome = probes[entry[ROW_ID]]
             if outcome == rec.OUTCOME_OK:
                 confirmed = resolved_at
-        else:
+        elif failed_sources.intersection(entry[ROW_VIA]):
             outcome = before.get(ROW_OUTCOME) or entry[ROW_OUTCOME]
+        else:
+            # Its sources answered, and the Metrics Scope's number could not be named.
+            outcome = entry[ROW_OUTCOME]
         row = {ROW_ID: entry[ROW_ID], ROW_VIA: entry[ROW_VIA], ROW_OUTCOME: outcome}
         if isinstance(confirmed, str):
             row[ROW_CONFIRMED_AT] = confirmed
@@ -401,11 +432,11 @@ def build_document(declared: dict, management: str | None, previous: dict | None
         # Every source lookup failed (a broker that refuses the `scope` caller, for one): the
         # run learned nothing, so it does not restamp the document. A short outage then
         # changes nothing before the bound; one that lasts lets the document go stale, which
-        # the gateway refuses and the operator reports. With no earlier time to keep, the run
-        # has nothing it could publish as resolved.
+        # the gateway refuses and the operator reports. Only an `ok` document's time is a time
+        # a run resolved; with none to keep, the run has nothing it could publish as resolved.
         kept = (previous or {}).get(DOC_RESOLVED_AT)
-        if not isinstance(kept, str):
-            log(f"every source lookup failed and there is no earlier resolvedAt; publishing {STATE_ERROR}.")
+        if (previous or {}).get(DOC_STATE) != STATE_OK or not isinstance(kept, str):
+            log(f"every source lookup failed and no earlier run resolved; publishing {STATE_ERROR}.")
             return error_document(declared, previous)
         log(f"every source lookup failed; keeping resolvedAt {kept} from the last run that resolved.")
         document[DOC_RESOLVED_AT] = kept

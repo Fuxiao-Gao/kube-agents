@@ -41,8 +41,8 @@ MEMBER_HASH_VECTOR_CANONICAL = (
     '"organizations":[],"projects":["team-a","team-b"],"sharedVpcHosts":["host-project-1"]}'
 )
 MEMBER_HASH_VECTOR_HASH = "sha256:078c09284502aeccfafc4e819358684d7b3938b6f0e6b8204967114a3eaf8118"
-# The gateway's own two vectors (a2a/gateway/testdata/resolved-scope-member-hash.json holds
-# all three).
+# Two more vectors, written on the Go side; the Go tests of the operator and gateway changes
+# pin all three.
 MEMBER_HASH_GATEWAY_VECTORS = (
     ('{"present":true,"projects":["p2","p1","p1"],"folders":["123"],"organizations":[],'
      '"sharedVpcHosts":["host-a"],"metricsScopes":["scope-p"],"maxProjects":100,'
@@ -290,6 +290,20 @@ class DocumentTest(unittest.TestCase):
         self.assertEqual(too_large, {"v": 1, "resolvedAt": "2026-11-02T14:15:03Z",
                                      "memberHash": MEMBER_HASH_VECTOR_HASH, "state": pub.STATE_TOO_LARGE,
                                      "excludedProjects": [], "projects": []})
+
+    def test_a_previous_document_keeps_only_well_formed_fields(self):
+        raw = json.dumps({"v": 1, "resolvedAt": "t", "state": "ok", "excludedProjects": "legacy-1",
+                          "numbers": {"111": "mon-proj-a", "222": 5},
+                          "projects": [{"id": "team-a", "via": [FOLDER_A], "outcome": "ok", "extra": 1},
+                                       {"id": "team-x", "via": [FOLDER_A]},
+                                       {"id": "team-y", "via": FOLDER_A, "outcome": "ok"}],
+                          "carried": [{"id": "999", "via": ["metricsScopes/s"], "outcome": "denied", "number": "999"},
+                                      {"id": 5, "via": [], "outcome": "ok"}]})
+        self.assertEqual(pub.parse_document(raw), {
+            "v": 1, "resolvedAt": "t", "state": "ok", "excludedProjects": [],
+            "projects": [{"id": "team-a", "via": [FOLDER_A], "outcome": "ok"}],
+            "carried": [{"id": "999", "via": ["metricsScopes/s"], "outcome": "denied", "number": "999"}],
+            "numbers": {"111": "mon-proj-a"}})
 
     def test_a_previous_document_this_run_cannot_use_reads_as_none(self):
         good = json.dumps(self._document([]))
@@ -594,6 +608,28 @@ class BuildDocumentTest(unittest.TestCase):
         self.assertEqual((document["state"], document["projects"], document["memberHash"]),
                          (pub.STATE_ERROR, [], pub.member_hash(declared)))
 
+    def test_every_source_failing_after_an_error_or_too_large_document_stays_error(self):
+        broker = FakeBroker(fail={FOLDER_A: "caller could not be authenticated"})
+        declared = _scope(folders=["111111111111"])
+        first = self._build(broker, declared)
+        self.assertEqual(first["state"], pub.STATE_ERROR)
+        too_large = {"v": 1, "resolvedAt": PREVIOUS_TIME, "state": "too-large", "excludedProjects": [], "projects": []}
+        for previous in (first, too_large):
+            document = self._build(FakeBroker(fail={FOLDER_A: "caller could not be authenticated"}), declared, previous)
+            self.assertEqual(document["state"], pub.STATE_ERROR, previous["state"])
+
+    def test_a_number_the_metrics_scope_lists_but_cannot_name_takes_the_naming_outcome(self):
+        # The source answered, so this is not a carried row: the naming call's outcome is the
+        # row's, as in the reconcile, and confirmedAt does not advance.
+        previous = {"v": 1, "resolvedAt": PREVIOUS_TIME, "state": "ok", "numbers": {"111": "mon-proj-a"},
+                    "projects": [{"id": "mon-proj-a", "via": ["metricsScopes/scope-project"], "outcome": "ok",
+                                  "confirmedAt": PREVIOUS_TIME}]}
+        broker = FakeBroker(scopes={"scope-project": ["111"]}, fail={"111": "ERROR: PERMISSION_DENIED"})
+        document = self._build(broker, _scope(metricsScopes=["scope-project"]), previous)
+        self.assertEqual(document["projects"], [{"id": "mon-proj-a", "via": ["metricsScopes/scope-project"],
+                                                 "outcome": "denied", "confirmedAt": PREVIOUS_TIME}])
+        self.assertEqual(self._probed(broker), [])
+
     def test_a_source_that_answers_empty_restamps_the_document(self):
         # A folder with no clusters today, and a Shared VPC host with no service projects,
         # answered: that is not a failed lookup.
@@ -717,6 +753,13 @@ class MainTest(unittest.TestCase):
                 code, document, _ = self._main(env=env, broker=FakeBroker(assets=assets))
                 self.assertEqual((code, document["state"]), (pub.EXIT_WRITTEN, pub.STATE_OK))
                 self.assertEqual([row["id"] for row in document["projects"]], want, (cap, env))
+
+    def test_an_error_run_over_a_malformed_previous_row_writes_and_exits_0(self):
+        self.scope_file.write_text("{not json")
+        raw = json.dumps({"v": 1, "resolvedAt": PREVIOUS_TIME, "state": "ok",
+                          "projects": [{"id": "x-project", "via": [FOLDER_A]}]})
+        code, document, _ = self._main(read={"return_value": (pub.parse_document(raw), "42")})
+        self.assertEqual((code, document["state"], document["projects"]), (pub.EXIT_WRITTEN, pub.STATE_ERROR, []))
 
     def test_a_configmap_that_cannot_be_read_or_written_exits_non_zero(self):
         code, _, written = self._main(read={"side_effect": urllib.error.URLError("no route")})
