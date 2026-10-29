@@ -9977,9 +9977,14 @@ class VcsRouteTest(unittest.TestCase):
         self.assertTrue(vcs_broker.WRITE_VERBS <= routes)
         self.assertEqual({"capabilities"}, set(vcs_broker.UNGATED_VERBS))
         self.assertFalse(vcs_broker.UNGATED_VERBS & vcs_broker.WRITE_VERBS)
+        # The verb that picks its credential by role: off the managed list,
+        # never a write, and not the ungated one.
+        self.assertEqual({"snapshot"}, set(vcs_broker.ROLE_SELECTED_VERBS))
+        self.assertFalse(vcs_broker.ROLE_SELECTED_VERBS & vcs_broker.WRITE_VERBS)
+        self.assertFalse(vcs_broker.ROLE_SELECTED_VERBS & vcs_broker.UNGATED_VERBS)
         unclassified = routes - vcs_broker.WRITE_VERBS
         self.assertEqual(
-            {"capabilities", "clone", "identity", "proposal-list", "proposal-view",
+            {"capabilities", "clone", "snapshot", "identity", "proposal-list", "proposal-view",
              "proposal-commits", "issue-list", "issue-view", "branch-view"},
             unclassified,
             "a new verb must be classified as a read or a write",
@@ -10101,6 +10106,219 @@ class VcsRouteTest(unittest.TestCase):
         overlapping.workspace_dir = self.executor.workspace_dir
         with self.assertRaises(RuntimeError):
             credential_proxy.build_vcs_broker(overlapping)
+
+
+class SnapshotRouteTest(unittest.TestCase):
+    """`POST /v1/vcs/snapshot` through the broker `build_vcs_broker` wires: the
+    route gate, the role, and the exact config each role puts on the clone."""
+
+    HELPER_CLEARED = ("credential.helper", "")
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.base = Path(self.temp_dir.name)
+        self.executor = CommandExecutor(
+            timeout_seconds=10,
+            max_output_bytes=1 << 16,
+            state_dir=str(self.base / "state"),
+        )
+        self.executor.executables["git"] = shutil.which("git") or "/usr/bin/git"
+        self.managed: set[str] = set()
+        self.context: set[str] = set()
+        self.lists_readable = True
+        self.refreshed: list[tuple[str, str]] = []
+        self.minted: list[tuple[str, str]] = []
+        self.mint_answer: object = "minted-read-token"
+        self.git: list[tuple[list[str], tuple]] = []
+
+        def lists(keys):
+            def read():
+                if not self.lists_readable:
+                    raise RuntimeError("kubectl exited 1")
+                return frozenset(keys)
+            return read
+
+        def mint(provider, repository):
+            self.minted.append((provider, repository))
+            if isinstance(self.mint_answer, Exception):
+                raise self.mint_answer
+            return self.mint_answer
+
+        def execute(argv, **kwargs):
+            if Path(argv[0]).name == "git":
+                self.git.append((list(argv), tuple(kwargs.get("extra_config", ()))))
+            # The clone fails: what is under test is what it was handed.
+            return credential_proxy.ExecutionResult(
+                exit_code=128, stdout="", stderr="fatal: stopped by the test",
+                duration_ms=1, truncated=False, timed_out=False,
+            )
+
+        self.executor.refresh_forge_credential = lambda provider, repository: self.refreshed.append(
+            (provider, repository)
+        )
+        self.executor.mint_read_credential = mint
+        for patcher in (
+            mock.patch.object(credential_proxy, "managed_repositories", side_effect=lambda: lists(self.managed)()),
+            mock.patch.object(credential_proxy, "context_repositories", side_effect=lambda: lists(self.context)()),
+            mock.patch.object(self.executor, "_execute", side_effect=execute),
+            mock.patch.object(credential_proxy, "warn_on_credential_reach"),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def broker(self, forges_config: dict | None = None):
+        environment = {}
+        if forges_config is not None:
+            path = self.base / "forges.json"
+            path.write_text(json.dumps(forges_config))
+            environment["VCS_FORGES_CONFIG"] = str(path)
+        with mock.patch.dict(os.environ, environment):
+            if forges_config is None:
+                os.environ.pop("VCS_FORGES_CONFIG", None)
+            return credential_proxy.build_vcs_broker(self.executor)
+
+    def post(self, body, broker=None):
+        handler = CredentialProxyHandler.__new__(CredentialProxyHandler)
+        handler.vcs = broker or self.broker()
+        handler.executor = self.executor
+        handler.max_request_bytes = 1 << 20
+        encoded = json.dumps(body).encode()
+        handler.headers = {"Content-Length": str(len(encoded))}
+        handler.rfile = io.BytesIO(encoded)
+        handler.path = "/v1/vcs/snapshot"
+        replies = []
+        handler._json = lambda status, payload: replies.append((status, payload))
+        handler._handle_vcs_post()
+        return replies[0]
+
+    def clone_config(self) -> tuple:
+        (config,) = [config for argv, config in self.git if argv[1] == "clone"]
+        return config
+
+    def clone_argv(self) -> list[str]:
+        (argv,) = [argv for argv, _config in self.git if argv[1] == "clone"]
+        return argv
+
+    def assert_reached_the_clone(self, status, payload):
+        # Past the route gate and into git: an unmanaged repository is not
+        # refused here, and the stub's failure comes back as a git failure.
+        self.assertEqual((HTTPStatus.BAD_GATEWAY, "GIT_FAILED"), (status, payload.get("code")))
+
+    def test_an_unregistered_repository_clones_with_the_helper_cleared_and_nothing_else(self):
+        self.managed = {"github:github.com/acme/managed"}
+        status, payload = self.post({"repository": "https://github.com/acme/upstream"})
+        self.assert_reached_the_clone(status, payload)
+        self.assertEqual((self.HELPER_CLEARED,), self.clone_config())
+        self.assertEqual(([], []), (self.refreshed, self.minted))
+        self.assertIn("https://github.com/acme/upstream.git", self.clone_argv())
+
+    def test_unreadable_lists_clone_as_an_unregistered_repository(self):
+        self.lists_readable = False
+        status, payload = self.post({"repository": "https://github.com/acme/infra"})
+        self.assert_reached_the_clone(status, payload)
+        self.assertEqual((self.HELPER_CLEARED,), self.clone_config())
+        self.assertEqual(([], []), (self.refreshed, self.minted))
+
+    def test_a_context_repository_clones_on_the_minted_read_token_with_the_helper_cleared(self):
+        self.context = {"github:github.com/acme/tf-live"}
+        status, payload = self.post({"repository": "https://github.com/acme/tf-live"})
+        self.assert_reached_the_clone(status, payload)
+        basic = base64.b64encode(b"x-access-token:minted-read-token").decode("ascii")
+        self.assertEqual(
+            (("http.https://github.com/.extraheader", f"AUTHORIZATION: basic {basic}"), self.HELPER_CLEARED),
+            self.clone_config(),
+        )
+        self.assertEqual([("github", "acme/tf-live")], self.minted)
+        self.assertEqual([], self.refreshed)
+
+    def test_a_context_repository_whose_mint_fails_clones_with_no_credential(self):
+        self.context = {"github:github.com/acme/tf-live"}
+        self.mint_answer = RuntimeError("read-only credential mint failed")
+        status, payload = self.post({"repository": "https://github.com/acme/tf-live"})
+        self.assert_reached_the_clone(status, payload)
+        self.assertEqual((self.HELPER_CLEARED,), self.clone_config())
+        self.assertEqual([], self.refreshed)
+
+    def test_a_managed_repository_rides_the_managed_credential(self):
+        # On github.com that is the ambient helper the CLI installed: no
+        # config of its own, and the credential made current first.
+        self.managed = {"github:github.com/acme/infra"}
+        self.context = {"github:github.com/acme/infra"}
+        status, payload = self.post({"repository": "https://github.com/acme/infra"})
+        self.assert_reached_the_clone(status, payload)
+        self.assertEqual((), self.clone_config())
+        self.assertEqual([("github", "acme/infra")], self.refreshed)
+        self.assertEqual([], self.minted)
+
+    def test_a_host_this_install_does_not_serve_is_refused_before_any_git(self):
+        status, payload = self.post({"repository": "https://git.example.invalid/acme/infra"})
+        self.assertEqual((HTTPStatus.NOT_IMPLEMENTED, "FORGE_UNSUPPORTED"), (status, payload.get("code")))
+        self.assertEqual([], self.git)
+
+    def test_a_bare_name_on_an_install_with_no_github_forge_reads_github_com_with_no_credential(self):
+        token = self.base / "token"
+        token.write_text("glpat-SENTINEL-must-never-appear")
+        broker = self.broker({"forges": [
+            {"provider": "gitlab", "host": "gitlab.com", "tokenPath": str(token), "allowedPaths": ["acme"]},
+        ]})
+        self.managed = {"gitlab:gitlab.com/acme/infra"}
+        status, payload = self.post({"repository": "acme/infra"}, broker)
+        self.assert_reached_the_clone(status, payload)
+        self.assertIn("https://github.com/acme/infra.git", self.clone_argv())
+        self.assertEqual((self.HELPER_CLEARED,), self.clone_config())
+        self.assertNotIn("glpat", json.dumps(self.git))
+        # A name with its host still goes to that host's forge, by the registry.
+        self.git.clear()
+        status, payload = self.post({"repository": "gitlab.com/acme/other"}, broker)
+        self.assert_reached_the_clone(status, payload)
+        self.assertIn("https://gitlab.com/acme/other.git", self.clone_argv())
+        self.assertEqual((self.HELPER_CLEARED,), self.clone_config())
+
+    def test_the_fallback_applies_only_to_a_bare_name_on_an_install_with_no_github_forge(self):
+        github = self.broker()
+        self.assertIsNone(github.bare_name_source("acme/infra"))
+        self.assertIsNone(credential_proxy.snapshot_bare_name_fallback("github.com/acme", ()))
+        self.assertIsNone(credential_proxy.snapshot_bare_name_fallback("gitlab.com/acme/infra", ()))
+        self.assertEqual(
+            ("github", "acme/infra", "https://github.com/acme/infra.git"),
+            credential_proxy.snapshot_bare_name_fallback("acme/infra.git", ()),
+        )
+
+
+class CredentialHelperClearTest(unittest.TestCase):
+    """The claim the snapshot's helper clear rests on, proven with real git."""
+
+    def test_an_empty_helper_in_the_config_layer_resets_a_url_scoped_helper_from_the_global_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            global_file = Path(tmp) / ".gitconfig"
+            global_file.write_text(
+                '[credential "https://github.com"]\n'
+                '\thelper = "!f() { echo username=ambient; echo password=from-the-global-file; }; f"\n'
+            )
+            environment = {
+                "PATH": os.environ.get("PATH", ""),
+                "HOME": tmp,
+                "GIT_CONFIG_GLOBAL": str(global_file),
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_TERMINAL_PROMPT": "0",
+            }
+            request = "protocol=https\nhost=github.com\npath=acme/infra.git\n\n"
+
+            def fill(layer):
+                return subprocess.run(
+                    ["git", "credential", "fill"], input=request, capture_output=True, text=True,
+                    env={**environment, **credential_proxy._git_forced_config_environment(layer)},
+                )
+
+            # Without the clear, the global file's helper answers.
+            ambient = fill(())
+            self.assertEqual(0, ambient.returncode, ambient.stderr)
+            self.assertIn("password=from-the-global-file", ambient.stdout)
+            # With it, in the same layer the broker builds, nothing answers.
+            cleared = fill((vcs_broker.HELPER_CLEARED,))
+            self.assertNotEqual(0, cleared.returncode)
+            self.assertNotIn("from-the-global-file", cleared.stdout + cleared.stderr)
 
 
 class ContentWorkspaceOnGitLabTest(unittest.TestCase):
@@ -12603,7 +12821,7 @@ class MCPVcsVerbGateTest(unittest.TestCase):
     def test_every_write_verb_and_every_unlisted_verb_is_refused_for_mcp(self):
         verbs = (
             set(vcs_broker.WRITE_VERBS)
-            | {"clone", "identity", "branch-view", "branch-delete"}
+            | {"clone", "snapshot", "identity", "branch-view", "branch-delete"}
             | (set(vcs_broker.VCS_VERBS) - credential_proxy.ROLE_VCS_VERBS[credential_proxy.CALLER_ROLE_MCP])
         )
         self.assertTrue(vcs_broker.WRITE_VERBS <= verbs)
@@ -12706,6 +12924,15 @@ class RoleVcsVerbsTableTest(unittest.TestCase):
                     credential_proxy._validate_role_vcs_verbs(
                         {credential_proxy.CALLER_ROLE_MCP: frozenset({"proposal-view", verb})}
                     )
+
+    def test_a_role_selected_verb_in_the_mcp_entry_is_refused(self):
+        # `snapshot` reads repositories nobody registered and clones into the
+        # broker; the MCP pod answers callers outside the cluster.
+        for verb in sorted(vcs_broker.ROLE_SELECTED_VERBS):
+            with self.subTest(verb=verb), self.assertRaises(ValueError):
+                credential_proxy._validate_role_vcs_verbs(
+                    {credential_proxy.CALLER_ROLE_MCP: frozenset({"proposal-view", verb})}
+                )
 
     def test_a_bare_string_unknown_verb_or_unknown_role_is_refused(self):
         with self.assertRaises(TypeError):
@@ -14093,6 +14320,24 @@ class ReadCredentialMintTest(unittest.TestCase):
         (argv,) = executor.calls
         self.assertTrue(argv[0].endswith("/github_token_refresh.py"), argv)
         self.assertEqual(["--read-only", "acme/tf-live"], argv[1:])
+
+    def test_a_vcs_request_s_reservation_covers_the_mint_and_nothing_else_is_exempt(self):
+        # Under a `snapshot`, the request's reservation covers the helper, as
+        # it covers the write mint; anywhere else -- the content workspace,
+        # under its store lock -- the mint runs on the workspace's fixed term.
+        token = "ghs_" + "C" * 36
+        for reserved, exempt in ((True, False), (False, True)):
+            with self.subTest(reserved=reserved):
+                executor = self._executor(self._result(0, stdout=token))
+                executor._request_budget.reserved = reserved
+                seen = []
+                executor.execute_internal = lambda argv: seen.append(
+                    getattr(executor._request_budget, "exempt", False)
+                ) or self._result(0, stdout=token)
+                with mock.patch.object(credential_proxy, "repository_role", return_value="context"):
+                    self.assertEqual(token, executor.mint_read_credential("github", "acme/tf-live"))
+                self.assertEqual([exempt], seen)
+                self.assertFalse(getattr(executor._request_budget, "exempt", False))
 
     def test_the_flag_is_the_one_the_helper_parses(self):
         # Two copies of one string, kept in step here because the broker

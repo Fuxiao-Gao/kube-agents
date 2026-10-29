@@ -686,6 +686,15 @@ single-branch. The two ceilings — `CREDENTIAL_PROXY_MAX_CLONE_BYTES` (256 MiB
 of working tree) and `CREDENTIAL_PROXY_MAX_BUNDLE_BYTES` (64 MiB of bundle, both
 directions) — say so in their refusals.
 
+`snapshot` clones with `--depth 1` and has no boundary problem, because no
+history leaves the broker. It runs `git archive` on the one revision of a bare,
+single-branch clone and sends the tree as a tar. A tar has no commits, so it
+has no parent for the receiver to miss, and the answer says `history: "none"`.
+The clone stays under `CREDENTIAL_PROXY_MAX_CLONE_BYTES`, and the tar under
+`CREDENTIAL_PROXY_MAX_SNAPSHOT_BYTES` (32 MiB, refused as `SNAPSHOT_TOO_LARGE`).
+The tar is smaller than the bundle ceiling because the answer is base64 inside
+one JSON body, and the broker holds several copies of it.
+
 ### One git in the sandbox
 
 The sandbox has exactly one git: the real binary at `/opt/vcs/libexec/git`,
@@ -874,6 +883,7 @@ another for no property gained.
 | ------------------------------------ | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | `capabilities`                       | `{repository}`                                                       | `{forge, repo, proposalNoun, verbs, acknowledge, labels, missing, baseBranch, fileUrl?}` |
 | `clone`                              | `{repository, branch?}`                                              | `{forge, repo, branch, revision, size, bundleBase64, baseBranch}`                        |
+| `snapshot`                           | `{repository, ref?, paths?}`                                         | `{forge, repo, role, ref, revision, size, archiveBase64, history: "none"}`               |
 | `publish`                            | `{repository, branch, target, baseRevision, bundleBase64, advance?}` | `{forge, repo, branch, revision}`                                                        |
 | `proposal-create`                    | `{repository, source, target, title, body?, draft?}`                 | `{proposal}`                                                                             |
 | `proposal-list`                      | `{repository, state?, limit?, page?, labels?, source?, target?}`     | `{proposals, count, truncated}`                                                          |
@@ -3334,7 +3344,9 @@ and only on a repository the install manages.
 
 `clone` pulls a whole branch's history, which is the wrong shape for a one-off
 read of a large upstream repository, and there is no shallow option to make it
-cheaper.
+cheaper. `snapshot` is the one-off read: one revision's tree, with no history
+(see the end of this section). A tree larger than its ceiling is refused, and
+`paths` is the size control that works.
 
 Throttling is legible to the agent and only partly to an operator.
 [Where the error contract splits](#where-the-error-contract-splits) puts the
@@ -3391,21 +3403,39 @@ case that will arrive first — are named in
 ---
 
 **Reads of repositories the install does not manage.** The broker refuses every
-verb but `capabilities` at the route for a repository the install does not
-manage, reads included, so the managed list is a visibility control as well as
-a write one on every forge, whatever its credential strategy. A token an
+verb but `capabilities` and `snapshot` at the route for a repository the install
+does not manage, reads included, so the managed list is a visibility control as
+well as a write one on every forge, whatever its credential strategy. A token an
 administrator stored is one token for every repository it can see, so nothing
-downstream of the route would refuse on its behalf. The intent that reading a
-repository this install does not write to should work — a public upstream, read
-with no credential — is real and not served. Opening those reads needs a
-credential-less path — a clone with no token, a read API call with
-none — that the provider can take when the repository is public, which is a
-change to the credential strategy and not to the verbs, and is not designed
-here.
+downstream of the route would refuse on its behalf.
+
+`snapshot` is the read that does not take that gate. The route still resolves
+the repository, so the host allowlist holds, and the verb chooses the
+credential by the repository's role in the broker's ConfigMap:
+
+| Role                                      | Credential on the clone                                                           |
+| ----------------------------------------- | --------------------------------------------------------------------------------- |
+| managed                                   | The forge's managed credential, made current as `clone` makes it current.         |
+| context                                   | `read_credential(repo)`, never the write token, with `credential.helper` cleared. |
+| unregistered, or the lists cannot be read | None, with `credential.helper` cleared.                                           |
+
+The clear goes into the same per-invocation config layer as the credential. An
+empty `credential.helper` there resets every helper git read before it,
+including a URL-scoped one in the global file, so a clone that must not ride
+the ambient write credential cannot fall back to it. A private repository that
+nobody registered therefore fails as `GIT_FAILED` instead of being read on a
+token that reaches more than the install lists. The clone is bare and one
+revision deep, and nothing is checked out. `git archive` does not write a
+`.git` path, and `vcs_client.snapshot` refuses one again on unpack (in any
+case), together with absolute paths, `..`, links out of the tree and device
+files. A bare `owner/name` on an install with no GitHub forge is read from
+github.com with no credential, as the content workspace reads it, because
+github.com is not in that install's host table and a URL cannot name it. The
+MCP role cannot call `snapshot`. The verb is reachable to the `shell` role and
+lists itself in `capabilities`; no skill calls it yet.
 
 **Registered context repositories** are the one unmanaged read the install does
-grant a credential for, and the shape is the credential-strategy change above
-for one case. A repository under `context_repos` is read for declared intent and
+grant a credential for. A repository under `context_repos` is read for declared intent and
 never written, and it is usually private. The broker's content-mode `open`
 resolves the repository's registered role from the ConfigMap — `managed`,
 `context`, or neither, decided by the broker and never by a forge — and for a
@@ -3422,9 +3452,9 @@ sets its reach, a project or a group. The broker still presents it only for a
 registered context repository inside the forge's `allowedPaths`. A forge without a read-only
 credential answers `NoCredential` and the clone proceeds as before.
 The write gate does not consult the role, so a context repository stays refused
-by every `/v1/vcs` verb but `capabilities`, by `commit` and `push`, and by the
-refresh route; the verbs' credential-less read path for public repositories
-remains open as above.
+by every `/v1/vcs` verb but `capabilities` and `snapshot`, by `commit` and
+`push`, and by the refresh route. `snapshot` presents the same read-only
+credential, minted under the request's own memory reservation.
 
 ## 12. Open questions
 

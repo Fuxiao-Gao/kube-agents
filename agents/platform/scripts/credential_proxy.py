@@ -1060,7 +1060,8 @@ def executable_permitted(role: str, executable: str) -> bool:
 # `capabilities` (ungated by the managed list, so it would resolve any
 # repository the registry knows), `branch-view` and `identity` (the forge
 # credential's own login and reach, which the MCP pod has no use for), and
-# `clone` (fills the broker's disk on a caller's say-so).
+# `clone` and `snapshot` (fill the broker's disk on a caller's say-so, and
+# `snapshot` reads repositories this install does not manage).
 ROLE_VCS_VERBS: dict[str, frozenset[str]] = {
     CALLER_ROLE_MCP: frozenset({"proposal-view"}),
 }
@@ -1104,6 +1105,15 @@ def _validate_role_vcs_verbs(table: dict[str, frozenset[str]]) -> None:
     if writes:
         raise ValueError(
             f"ROLE_VCS_VERBS[{CALLER_ROLE_MCP!r}]: {', '.join(sorted(writes))} writes to the forge"
+        )
+    # A role-selected verb reads repositories nobody registered and clones into
+    # the broker on the caller's say-so, which is wider than a read of a managed
+    # repository.
+    unlisted = table.get(CALLER_ROLE_MCP, frozenset()) & vcs_broker.ROLE_SELECTED_VERBS
+    if unlisted:
+        raise ValueError(
+            f"ROLE_VCS_VERBS[{CALLER_ROLE_MCP!r}]: {', '.join(sorted(unlisted))} reads "
+            "repositories this install does not manage"
         )
 
 
@@ -1428,10 +1438,11 @@ REFRESH_YIELDED_BUDGET_WAIT_TEXT = (
 
 # What `repository_role` answers. `managed` is a repository in `managed_repos`,
 # whatever else it is in; `context` is one in `context_repos` alone; the third
-# is neither. Only the content workspace's clone reads the answer.
-ROLE_MANAGED = "managed"
-ROLE_CONTEXT = "context"
-ROLE_UNREGISTERED = "unregistered"
+# is neither. The content workspace's clone and the vcs `snapshot` verb read
+# the answer, and the values are the broker's, so the two cannot drift.
+ROLE_MANAGED = vcs_broker.ROLE_MANAGED
+ROLE_CONTEXT = vcs_broker.ROLE_CONTEXT
+ROLE_UNREGISTERED = vcs_broker.ROLE_UNREGISTERED
 
 _managed_repository_cache: tuple[float, frozenset[str]] | None = None
 _managed_repository_lock = threading.Lock()
@@ -1563,10 +1574,11 @@ def repository_role(repository: str, forge: providers.Forge | None = None) -> st
 
     Managed wins. A repository in both lists is one the install writes to, and
     the write path must see it exactly as it would without the second entry.
-    Consulted by the content workspace to decide what credential a clone gets,
-    and by nothing that gates a write: `repository_is_managed` stays the only
-    question `commit`, `push`, the API routes and the refresh route ask, and
-    `ROLE_CONTEXT` is not an answer any of them accepts.
+    Consulted by the content workspace and the vcs `snapshot` verb to decide
+    what credential a clone gets, and by nothing that gates a write:
+    `repository_is_managed` stays the only question `commit`, `push`, the API
+    routes and the refresh route ask, and `ROLE_CONTEXT` is not an answer any
+    of them accepts.
     """
     if repository_is_managed(repository, forge):
         return ROLE_MANAGED
@@ -1795,6 +1807,40 @@ def _is_bare_name(repository: object) -> bool:
     import content_workspace
 
     return isinstance(repository, str) and content_workspace.is_bare_github_name(repository)
+
+
+def snapshot_bare_name_fallback(
+    repository: object, forges: tuple[providers.Forge, ...]
+) -> tuple[str, str, str] | None:
+    """Where the vcs `snapshot` reads a bare `owner/name` on an install with no GitHub forge.
+
+    `(forge label, repository, clone URL)` for github.com, read with no
+    credential and the helper cleared, or None when this does not apply: the
+    name has a host, or ``forges`` (the broker's own) has a GitHub forge.
+
+    This keeps what the content workspace does today, which `inspect-repository`
+    relies on: a bare name is GitHub's (`is_bare_github_name`). The other
+    choice, a refusal, was not taken. On such an install github.com is not in
+    the host table, so the bare name is the only way to name a public GitHub
+    repository there, and a refusal would take that read away. The host
+    allowlist exists to stop a credential from reaching a host nobody
+    configured, and this clone carries none; the answer names `github` as the
+    forge, so a caller can see where it read. Without this, the registry would
+    read the name as the install's one forge, which is a different host.
+    """
+    if not _is_bare_name(repository):
+        return None
+    if any(forge.name == CONTENT_WORKSPACE_PROVIDER for forge in forges):
+        return None
+    ref = repo_ref.try_parse(repository)
+    if ref is None or ref.host or len(ref.segments) != repo_ref.GITHUB_PATH_DEPTH:
+        return None
+    path = "/".join(ref.segments)
+    return (
+        CONTENT_WORKSPACE_PROVIDER,
+        path,
+        f"https://{repo_ref.GITHUB_CANONICAL_HOST}/{path}.git",
+    )
 
 
 def _workspace_locate(repository: str) -> tuple[str, str]:
@@ -4169,8 +4215,12 @@ VCS_SCRATCH_DIR = "vcs"
 # other way to read a bundle is `fetch <path>`, which is the `file` transport
 # `GIT_ALLOW_PROTOCOL` refuses everywhere for reasons the executor environment
 # spells out.
+#
+# `archive` is on it for one caller: `snapshot` writes one revision's tree as a
+# tar, to a file in its scratch directory (`--output`), from a bare clone.
 VCS_GIT_SUBCOMMANDS = frozenset(
     {
+        "archive",
         "bundle",
         "checkout",
         "clone",
@@ -4187,13 +4237,20 @@ VCS_GIT_SUBCOMMANDS = frozenset(
 )
 
 
+# The broker's own git subcommands that no caller's argv may name. `archive`
+# takes `--output=<path>` and `--remote=<url>`, and only `snapshot` issues it,
+# with a path and a revision the broker chose, so it stays off the `/v1/exec`
+# argument gate below.
+VCS_ONLY_GIT_SUBCOMMANDS = frozenset({"archive"})
+
+
 def _allowed_git_subcommands() -> frozenset[str]:
     from content_workspace import WORKSPACE_GIT_SUBCOMMANDS
 
     return (
         GIT_MUTATING_SUBCOMMANDS
         | GIT_READ_SUBCOMMANDS
-        | VCS_GIT_SUBCOMMANDS
+        | (VCS_GIT_SUBCOMMANDS - VCS_ONLY_GIT_SUBCOMMANDS)
         | WORKSPACE_GIT_SUBCOMMANDS
         | frozenset({"config"})
     )
@@ -4201,9 +4258,9 @@ def _allowed_git_subcommands() -> frozenset[str]:
 
 # The closed set of subcommands the product and its skills issue: the union of
 # the four git verb sets this module already tracks (`GIT_MUTATING_SUBCOMMANDS`,
-# `GIT_READ_SUBCOMMANDS`, `VCS_GIT_SUBCOMMANDS`, and `WORKSPACE_GIT_SUBCOMMANDS`)
-# plus `config` (whose own `_git_config_violation` gate restricts writes to
-# `ALLOWED_GIT_CONFIG_KEYS`). A verb outside this union is refused. On the
+# `GIT_READ_SUBCOMMANDS`, `VCS_GIT_SUBCOMMANDS` less `VCS_ONLY_GIT_SUBCOMMANDS`,
+# and `WORKSPACE_GIT_SUBCOMMANDS`) plus `config` (whose own
+# `_git_config_violation` gate restricts writes to `ALLOWED_GIT_CONFIG_KEYS`). A verb outside this union is refused. On the
 # `/v1/exec` path the check runs after `resolve_git_command` has expanded a
 # repository-local alias, so an alias is judged by what it expands to rather
 # than refused for being one.
@@ -7350,9 +7407,14 @@ class CommandExecutor:
             raise PermissionError(
                 f"{repository} is not a context repository of this install"
             )
-        # Reached only from the store's `open` and `commit`, under its lock:
-        # the fixed workspace term covers it, as it does the store's git.
-        with self._outside_budget():
+        budget = getattr(self, "_request_budget", None)
+        covered_by_request = getattr(budget, "reserved", False) or getattr(budget, "exempt", False)
+        with contextlib.ExitStack() as admission:
+            # A vcs `snapshot`'s reservation covers the helper, as it covers
+            # the write mint; the content workspace's `open` and `commit`, under
+            # the store's lock, run on the workspace's fixed term.
+            if not covered_by_request and budget is not None:
+                admission.enter_context(self._outside_budget())
             result = self._run_forge_helper(
                 provider, helper, [FORGE_READ_ONLY_FLAG, repository], "read-only credential mint"
             )
@@ -8299,6 +8361,11 @@ def build_vcs_broker(
         refresh=executor.refresh_forge_credential,
         mint_write=executor.mint_write_credential,
         drop_write=executor.drop_write_credential,
+        # The read-only token a context repository's `snapshot` presents, and
+        # the role that decides whether it is asked for at all.
+        mint=executor.mint_read_credential,
+        repository_role=lambda forge, repo: repository_role(repo, forge),
+        bare_name_fallback=snapshot_bare_name_fallback,
         base_branch=base_branch,
         http_timeout=executor.timeout_seconds,
         http_max_bytes=executor.max_output_bytes,
@@ -11117,7 +11184,17 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
                 # repository by URL. Resolving here also rejects a host this
                 # install serves no credential for before the verb is entered,
                 # which is the same order `/v1/forge/refresh` uses.
-                if verb not in vcs_broker.UNGATED_VERBS:
+                #
+                # A role-selected verb (`vcs_broker.ROLE_SELECTED_VERBS`) is
+                # resolved and not compared: it chooses its credential by the
+                # repository's role itself. A bare name it reads from a host
+                # outside the table, with no credential
+                # (`snapshot_bare_name_fallback`), is not resolved here at all.
+                role_selected = verb in vcs_broker.ROLE_SELECTED_VERBS
+                resolves = verb not in vcs_broker.UNGATED_VERBS and not (
+                    role_selected and self.vcs.bare_name_source(payload.get("repository")) is not None
+                )
+                if resolves:
                     try:
                         forge, repository = self.vcs.registry.resolve(payload.get("repository"))
                     except providers.WorkspaceError as exc:
@@ -11130,7 +11207,7 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
                         return TOOL_STATUS_BLOCKED if refused else TOOL_STATUS_ERROR
                     if not isinstance(forge, providers.StubForge):
                         self.vcs_provider = forge.name
-                    if not self._repository_is_permitted(repository, forge):
+                    if not role_selected and not self._repository_is_permitted(repository, forge):
                         # Refused on the managed list, or the list itself could
                         # not be read: the first is a refusal, the second a fault.
                         if self.repository_refusal_status == HTTPStatus.SERVICE_UNAVAILABLE:

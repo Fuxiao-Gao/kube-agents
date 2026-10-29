@@ -108,9 +108,9 @@ LABEL_FIELDS: tuple[str, ...] = ("labels", "labelsAdd", "labelsRemove", "exclude
 
 # `branch-view` and `branch-delete` are the broker's rather than a forge's for the
 # reason `publish` is: which refs a remote holds, and removing one, is git
-# against a URL on every forge.
+# against a URL on every forge. `snapshot` is git against a URL too.
 BROKER_VERBS: tuple[str, ...] = (
-    "capabilities", "clone", "publish", "identity", "branch-view", "branch-delete",
+    "capabilities", "clone", "snapshot", "publish", "identity", "branch-view", "branch-delete",
 )
 
 

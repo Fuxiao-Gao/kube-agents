@@ -17,7 +17,8 @@ the two facts `publish()` proves its revisions against.
 
 The operations mirror the command line: `capabilities`, `clone`, `branch`,
 `commit`, `publish`, `discard`, `forge(verb, payload)` for the collaboration
-verbs, and `local(session, args, verb)` for a read. Each returns the JSON the
+verbs, and `local(session, args, verb)` for a read. `snapshot` is the one that
+is not a working copy: one revision's files, with no history. Each returns the JSON the
 command line would have printed and raises `VcsError` where it would have
 printed one.
 """
@@ -26,11 +27,14 @@ from __future__ import annotations
 
 import base64
 import functools
+import io
 import json
 import os
+import posixpath
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import urllib.error
@@ -82,6 +86,25 @@ AUTHOR_EMAIL = os.environ.get(
 # ceilings and would refuse a larger payload anyway; refusing here means the
 # caller is told before anything is sent.
 MAX_BUNDLE_BYTES = 64 << 20
+
+# The most a `snapshot` may unpack to, summed over its regular files. The
+# broker caps the tar it sends (32 MiB by default) and an uncompressed tar is
+# no smaller than its files, so this is the second bound and not the first:
+# it holds if the broker's ceiling is raised, or the tar is not the broker's.
+SNAPSHOT_MAX_UNPACKED_BYTES = 64 << 20
+
+# The codes `snapshot` refuses with on this side: a tar member it will not
+# write, a tree over the unpacked ceiling, a destination that is not empty.
+SNAPSHOT_MEMBER_REFUSED = "SNAPSHOT_MEMBER_REFUSED"
+SNAPSHOT_TOO_LARGE = "SNAPSHOT_TOO_LARGE"
+DESTINATION_NOT_EMPTY = "DESTINATION_NOT_EMPTY"
+
+# The name a path component must never fold to: a `.git` written into the
+# sandbox is a repository config some later git would read.
+DOTGIT = ".git"
+# What Windows strips from the end of a name before it opens it; folded away
+# before the `.git` comparison, as git's own NTFS check does.
+DOTGIT_TRAILING = ". "
 
 # How many untracked files the refusal below names before it counts the rest.
 # Enough that the caller can see what it is being asked about -- a stray report
@@ -905,6 +928,137 @@ def clone(
         # is no truncated case for a caller to have to notice.
         "history": "complete",
         "remotes": [],
+    }
+
+
+def _is_dotgit(component: str) -> bool:
+    return component.rstrip(DOTGIT_TRAILING).casefold() == DOTGIT
+
+
+def _member_refused(name: str, reason: str) -> VcsError:
+    return VcsError(
+        f"the snapshot holds {name!r}, {reason}; nothing was unpacked",
+        code=SNAPSHOT_MEMBER_REFUSED,
+    )
+
+
+def _inside(path: str) -> bool:
+    """Whether the normalised relative `path` stays inside the tree it is relative to."""
+    return path != ".." and not path.startswith("../")
+
+
+def _check_snapshot_members(members: list[tarfile.TarInfo], max_bytes: int) -> tuple[int, int]:
+    """Refuse the tar unless every member is safe to write. Answers (files, bytes).
+
+    Checked before anything is written, so a refusal leaves nothing behind.
+    `extractall(filter="data")` repeats most of this as it writes; these
+    checks do not depend on it, and they add the `.git` refusal and the
+    ceiling, which it does not have.
+    """
+    files = total = 0
+    for member in members:
+        name = member.name
+        if name.startswith("/"):
+            raise _member_refused(name, "an absolute path")
+        parts = [part for part in name.split("/") if part not in ("", ".")]
+        if not parts:
+            raise _member_refused(name, "which names no path in the tree")
+        if ".." in parts:
+            raise _member_refused(name, "a path with a `..` component")
+        if any(_is_dotgit(part) for part in parts):
+            raise _member_refused(name, "a path with a `.git` component")
+        if member.issym() or member.islnk():
+            target = member.linkname
+            if not target or target.startswith("/"):
+                raise _member_refused(name, "a link with an absolute or empty target")
+            # A symbolic link resolves from its own directory; a hard link
+            # names another member, from the top of the tree.
+            start = posixpath.dirname("/".join(parts)) if member.issym() else ""
+            resolved = posixpath.normpath(posixpath.join(start, target))
+            if not _inside(resolved):
+                raise _member_refused(name, "a link that points out of the tree")
+            if any(_is_dotgit(part) for part in resolved.split("/")):
+                raise _member_refused(name, "a link into a `.git` path")
+        elif member.isreg():
+            files += 1
+            total += member.size
+            if total > max_bytes:
+                raise VcsError(
+                    f"the snapshot unpacks to more than {max_bytes} bytes; name "
+                    "`paths` to take part of the tree",
+                    code=SNAPSHOT_TOO_LARGE,
+                )
+        elif not member.isdir():
+            raise _member_refused(name, "a device file, a FIFO or another special file")
+    return files, total
+
+
+def snapshot(
+    repository: str,
+    ref: str | None = None,
+    paths: list[str] | None = None,
+    *,
+    into: str | Path,
+    max_bytes: int = SNAPSHOT_MAX_UNPACKED_BYTES,
+) -> dict:
+    """One revision's files, unpacked into `into`, with no history and no `.git`.
+
+    One call to the broker, which clones one revision, writes its tree as a
+    tar and deletes its scratch directory before it answers. It serves a
+    repository of any role -- managed, context, or one nobody registered --
+    and chooses the credential by that role itself.
+
+    `into` must be absent or an empty directory. The tar is checked whole
+    before anything is written (`_check_snapshot_members`), unpacked with
+    `tarfile`'s `data` filter into a fresh directory beside `into`, and moved
+    into place, so a refusal leaves nothing behind.
+    """
+    destination = Path(into)
+    if destination.is_symlink() or (
+        destination.exists() and (not destination.is_dir() or any(destination.iterdir()))
+    ):
+        raise VcsError(
+            f"{destination} is not an empty directory; a snapshot unpacks only into one",
+            code=DESTINATION_NOT_EMPTY,
+        )
+    payload: dict = {"repository": repository}
+    if ref:
+        payload["ref"] = ref
+    if paths:
+        payload["paths"] = list(paths)
+    answer = call("snapshot", payload)
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(dir=str(destination.parent), prefix=f".{destination.name}."))
+    try:
+        try:
+            with tarfile.open(fileobj=io.BytesIO(base64.b64decode(answer["archiveBase64"])), mode="r:") as archive:
+                members = archive.getmembers()
+                files, total = _check_snapshot_members(members, max_bytes)
+                archive.extractall(str(staging), members=members, filter="data")
+        except tarfile.TarError as exc:
+            raise VcsError(
+                f"the snapshot could not be unpacked safely: {exc}",
+                code=SNAPSHOT_MEMBER_REFUSED,
+            ) from exc
+        if destination.exists():
+            destination.rmdir()
+        os.replace(staging, destination)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return {
+        "forge": answer["forge"],
+        "repo": answer["repo"],
+        "role": answer.get("role"),
+        "ref": answer.get("ref"),
+        "revision": answer["revision"],
+        "path": str(destination),
+        "files": files,
+        "bytes": total,
+        "archiveBytes": answer["size"],
+        # A tar carries no history: there is nothing here for git to read.
+        "history": answer.get("history"),
     }
 
 
