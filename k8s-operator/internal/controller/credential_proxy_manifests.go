@@ -348,7 +348,7 @@ func buildCredentialProxyService(agent *agentv1alpha1.PlatformAgent) *corev1.Ser
 // buildCredentialProxyDeployment is buildCredentialProxyDeploymentForPlugins
 // with no plugins.
 func buildCredentialProxyDeployment(agent *agentv1alpha1.PlatformAgent, policyHash string) *appsv1.Deployment {
-	return buildCredentialProxyDeploymentForPlugins(agent, policyHash, nil, true)
+	return buildCredentialProxyDeploymentForPlugins(agent, policyHash, nil, allBrokerCallersOwned)
 }
 
 // buildCredentialProxyDeploymentForPlugins renders the standalone proxy pod.
@@ -370,7 +370,7 @@ func buildCredentialProxyDeployment(agent *agentv1alpha1.PlatformAgent, policyHa
 // The AgentPlugins resolved for the agent reach the container's environment
 // (buildCredentialProxyEnvForPlugins); buildCredentialProxyDeployment is this
 // with none.
-func buildCredentialProxyDeploymentForPlugins(agent *agentv1alpha1.PlatformAgent, policyHash string, agentPlugins []*agentv1alpha1.AgentPlugin, mcpIdentityOwned bool) *appsv1.Deployment {
+func buildCredentialProxyDeploymentForPlugins(agent *agentv1alpha1.PlatformAgent, policyHash string, agentPlugins []*agentv1alpha1.AgentPlugin, owned brokerCallerOwnership) *appsv1.Deployment {
 	saName := agent.Name
 	if agent.Spec.Security != nil && agent.Spec.Security.ServiceAccountName != "" {
 		saName = agent.Spec.Security.ServiceAccountName
@@ -429,7 +429,7 @@ func buildCredentialProxyDeploymentForPlugins(agent *agentv1alpha1.PlatformAgent
 					Affinity:         affinity,
 					NodeSelector:     nodeSelector,
 					Tolerations:      tolerations,
-					Containers:       []corev1.Container{buildCredentialProxyContainerForPlugins(agent, agentPlugins, mcpIdentityOwned)},
+					Containers:       []corev1.Container{buildCredentialProxyContainerForPlugins(agent, agentPlugins, owned)},
 					Volumes:          buildCredentialProxyRuntimeVolumes(agent),
 				},
 			},
@@ -443,7 +443,7 @@ func buildCredentialProxyDeploymentForPlugins(agent *agentv1alpha1.PlatformAgent
 // buildCredentialProxyContainer is buildCredentialProxyContainerForPlugins with
 // no plugins.
 func buildCredentialProxyContainer(agent *agentv1alpha1.PlatformAgent) corev1.Container {
-	return buildCredentialProxyContainerForPlugins(agent, nil, true)
+	return buildCredentialProxyContainerForPlugins(agent, nil, allBrokerCallersOwned)
 }
 
 // buildCredentialProxyContainerForPlugins is the credential half of the old sidecar: Envoy
@@ -454,7 +454,7 @@ func buildCredentialProxyContainer(agent *agentv1alpha1.PlatformAgent) corev1.Co
 // One variant, because the broker has one placement: a Deployment of its own.
 // It shares no pod with the agent, which holds the credentials it mints from,
 // and no pod with the sandbox, which runs model-authored code.
-func buildCredentialProxyContainerForPlugins(agent *agentv1alpha1.PlatformAgent, agentPlugins []*agentv1alpha1.AgentPlugin, mcpIdentityOwned bool) corev1.Container {
+func buildCredentialProxyContainerForPlugins(agent *agentv1alpha1.PlatformAgent, agentPlugins []*agentv1alpha1.AgentPlugin, owned brokerCallerOwnership) corev1.Container {
 	pullPolicy := corev1.PullAlways
 	if agent.Spec.Deployment != nil && agent.Spec.Deployment.ImagePullPolicy != nil {
 		pullPolicy = *agent.Spec.Deployment.ImagePullPolicy
@@ -463,7 +463,7 @@ func buildCredentialProxyContainerForPlugins(agent *agentv1alpha1.PlatformAgent,
 	// buildCredentialProxyEnv. 0.0.0.0 because both callers arrive over the
 	// Service — the sandbox's wrapped CLIs and the gateway's chat relays, which
 	// are hosted in this same process, and one listener serves both.
-	envVars := buildCredentialProxyEnvForPlugins(agent, agentPlugins, mcpIdentityOwned)
+	envVars := buildCredentialProxyEnvForPlugins(agent, agentPlugins, owned)
 	volumeMounts := buildCredentialProxyVolumeMounts(agent)
 	securityContext := &corev1.SecurityContext{
 		AllowPrivilegeEscalation: ptr.To(false), ReadOnlyRootFilesystem: ptr.To(true), Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
@@ -565,6 +565,9 @@ func buildCredentialProxyVolumeMounts(agent *agentv1alpha1.PlatformAgent) []core
 			SubPath:   scopedSAPoolKey,
 			ReadOnly:  true,
 		})
+	}
+	if scopePublisherRendered(agent) {
+		mounts = append(mounts, scopeConfigMount())
 	}
 	return append(mounts, buildVCSForgesVolumeMounts(agent)...)
 }
@@ -684,6 +687,9 @@ func buildCredentialProxyNetworkPolicy(agent *agentv1alpha1.PlatformAgent) *netw
 	// The MCP server's pod, under its flag, on the same condition as its
 	// place on allowedBrokerCallers (a2aMCPBrokerPeers).
 	callers = append(callers, a2aMCPBrokerPeers(agent)...)
+	// The scope publisher's pods, while the broker confers the scope role,
+	// beside their place on allowedBrokerCallers (scopeBrokerPeers).
+	callers = append(callers, scopeBrokerPeers(agent)...)
 	np := &networkingv1.NetworkPolicy{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "networking.k8s.io/v1", Kind: "NetworkPolicy"},
 		ObjectMeta: metav1.ObjectMeta{Name: credentialProxyName(agent), Namespace: agent.Namespace},
@@ -782,6 +788,11 @@ func buildCredentialProxyRuntimeVolumes(agent *agentv1alpha1.PlatformAgent) []co
 		}
 	}
 	volumes = append(volumes, buildGitopsStateVolume(agent))
+	// The scope declaration under mode next, which the broker reads on every
+	// scope call to bound the role's arguments (CREDENTIAL_PROXY_SCOPE_FILE).
+	if scopePublisherRendered(agent) {
+		volumes = append(volumes, scopeConfigVolume(agent))
+	}
 	volumes = append(volumes, buildVCSForgesVolumes(agent)...)
 	return append(volumes, buildCredentialProxyFederationVolume(agent)...)
 }
