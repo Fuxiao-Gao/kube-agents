@@ -153,11 +153,39 @@ class ShapeTest(unittest.TestCase):
 
     def test_no_refusal_message_carries_a_stderr_marker_the_publisher_classifies(self):
         # The publisher keeps the reconcile's stderr classification; a refusal
-        # must not read as an IAM deny or a disabled API.
-        refusals = [scope_policy.argv_refusal(argv)[0] for argv in ([*ASSET_SEARCH, "--quiet"], ["gcloud", "x"], [*SHARED_VPC, "--project", "x"])]
+        # must not read as an IAM deny or a disabled API. Every message the
+        # check can answer with, against every marker the reconcile reads.
+        import cluster_agent_reconcile
+
+        markers = (
+            "PERMISSION_DENIED", "403", "does not have permission", "Permission denied",
+            "SERVICE_DISABLED", "accessNotConfigured", "API has not been used", "is not enabled", "has not been enabled",
+        )
+        # A marker the reconcile adds later must be added here too.
+        self.assertLessEqual(
+            {*cluster_agent_reconcile._DENIED_MARKERS, *cluster_agent_reconcile._API_DISABLED_MARKERS}, set(markers)
+        )
+        window = scope_policy.MemberWindow()
+        with tempfile.TemporaryDirectory() as directory:
+            scope_file = str(Path(directory) / "scope.json")
+            missing = str(Path(directory) / "missing.json")
+            Path(scope_file).write_text(json.dumps(DECLARATION), encoding="utf-8")
+            refusals = [
+                scope_policy.argv_refusal([*ASSET_SEARCH, "--quiet"])[0],
+                scope_policy.argv_refusal(["gcloud", "x"])[0],
+                scope_policy.argv_refusal([*SHARED_VPC, "--project", "x"])[0],
+                scope_policy.check(ASSET_SEARCH, extras=True, scope_file=scope_file, window=window)[0],
+                scope_policy.check(ASSET_SEARCH, extras=False, scope_file=missing, window=window)[0],
+                scope_policy.check(CLUSTERS_LIST, extras=False, scope_file=scope_file, window=window)[0],
+            ]
+        self.assertEqual(
+            {scope_policy.RULE_SCOPE_ARGV, scope_policy.RULE_SCOPE_REQUEST, scope_policy.RULE_SCOPE_ARGUMENT},
+            {refusal.rule for refusal in refusals},
+        )
         for refusal in refusals:
-            for marker in ("403", "Permission denied", "PERMISSION_DENIED", "is not enabled"):
-                self.assertNotIn(marker, refusal.message)
+            for marker in markers:
+                with self.subTest(message=refusal.message, marker=marker):
+                    self.assertNotIn(marker, refusal.message)
 
 
 class ArgumentTest(ScopeFileTestCase):
@@ -303,6 +331,10 @@ class MembersNamedTest(unittest.TestCase):
             (scope_policy.SHAPE_ASSET_SEARCH, "not json", (scope_policy.KIND_PROJECTS, set())),
             (scope_policy.SHAPE_ASSET_SEARCH, "{}", (scope_policy.KIND_PROJECTS, set())),
             (scope_policy.SHAPE_METRICS_SCOPE, "[]", (scope_policy.KIND_NUMBERS, set())),
+            # A monitoredProjects that is not a list is skipped, not iterated.
+            (scope_policy.SHAPE_METRICS_SCOPE, '{"monitoredProjects": 7}', (scope_policy.KIND_NUMBERS, set())),
+            (scope_policy.SHAPE_METRICS_SCOPE, '{"monitoredProjects": true}', (scope_policy.KIND_NUMBERS, set())),
+            (scope_policy.SHAPE_METRICS_SCOPE, '{"monitoredProjects": "x"}', (scope_policy.KIND_NUMBERS, set())),
             (scope_policy.SHAPE_CLUSTERS_LIST, "c1 us-central1\n", (scope_policy.KIND_PROJECTS, set())),
         ):
             with self.subTest(shape=shape, stdout=stdout[:40]):

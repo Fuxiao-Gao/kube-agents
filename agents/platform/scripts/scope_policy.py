@@ -285,7 +285,7 @@ def members_named(shape: str, stdout: str) -> tuple[str, set[str]]:
     if shape == SHAPE_METRICS_SCOPE:
         rows = parsed.get(FIELD_MONITORED_PROJECTS) if isinstance(parsed, dict) else None
         names = (
-            _MONITORED_PROJECT_NAME.match(row[FIELD_NAME]) for row in rows or []
+            _MONITORED_PROJECT_NAME.match(row[FIELD_NAME]) for row in (rows if isinstance(rows, list) else [])
             if isinstance(row, dict) and isinstance(row.get(FIELD_NAME), str)
         )
         # Numbers only: a Metrics Scope member opens `projects describe`,
