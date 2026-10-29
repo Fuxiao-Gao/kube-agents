@@ -49,7 +49,7 @@ const (
 	dataVolumeReasonNearlyFull = "NearlyFull"
 	dataVolumeReasonHasSpace   = "HasSpace"
 
-	dataVolumeNearlyFullHint = "Remove unused cluster profiles, or ask an admin to enlarge it."
+	dataVolumeNearlyFullHint = "Remove unused cluster profiles, or ask an admin to raise spec.storage.size on the PlatformAgent."
 
 	// dataVolumeNewerField keys the byte fields' pruning record: a served CRD
 	// from before this release prunes them, and without the record every poll

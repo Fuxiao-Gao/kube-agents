@@ -11902,7 +11902,7 @@ class TestDataVolumeWarning(unittest.TestCase):
         self.assertEqual(
             message,
             "The agent's data volume is 90% full (9.0 of 10.0 GiB). "
-            "Remove unused cluster profiles, or ask an admin to enlarge it.",
+            "Remove unused cluster profiles, or ask an admin to raise spec.storage.size on the PlatformAgent.",
         )
 
         # Above the lower line it stays quiet, however long it sits there.

@@ -115,7 +115,7 @@ DATA_VOLUME_WARN_PERCENT = 90
 DATA_VOLUME_REARM_PERCENT = 85
 DATA_VOLUME_WARNING = (
     "The agent's data volume is {percent}% full ({used:.1f} of {total:.1f} GiB). "
-    "Remove unused cluster profiles, or ask an admin to enlarge it."
+    "Remove unused cluster profiles, or ask an admin to raise spec.storage.size on the PlatformAgent."
 )
 BYTES_PER_GIB = 1 << 30
 
