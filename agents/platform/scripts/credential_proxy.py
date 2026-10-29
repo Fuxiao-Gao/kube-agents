@@ -996,6 +996,8 @@ DEFAULT_CREDENTIAL_PROXY_MCP_AUDIENCE = "kubeagents-credential-proxy-mcp"
 # it to them. Bound to its callers both ways, and conferred to nobody when no
 # callers are named, as the mcp audience is.
 DEFAULT_CREDENTIAL_PROXY_SCOPE_AUDIENCE = "kubeagents-credential-proxy-scope"
+SCOPE_AUDIENCE_ENV = "CREDENTIAL_PROXY_SCOPE_AUDIENCE"
+SCOPE_CALLERS_ENV = "CREDENTIAL_PROXY_SCOPE_CALLERS"
 
 # The roles a caller can hold, named by which Pod holds them.
 CALLER_ROLE_SHELL = "shell"
@@ -2523,7 +2525,7 @@ def build_authenticator() -> NullAuthenticator | ServiceAccountAuthenticator:
     # meaning: unset confers the scope role to nobody.
     scope_callers = frozenset(
         caller.strip()
-        for caller in os.getenv("CREDENTIAL_PROXY_SCOPE_CALLERS", "").split(",")
+        for caller in os.getenv(SCOPE_CALLERS_ENV, "").split(",")
         if caller.strip()
     )
     if chat_audience and chat_audience != shell_audience:
@@ -2592,7 +2594,7 @@ def build_authenticator() -> NullAuthenticator | ServiceAccountAuthenticator:
                 )
         # The scope publisher's audience, read raw and refused on a collision
         # for the mcp audience's reasons.
-        scope_audience = os.getenv("CREDENTIAL_PROXY_SCOPE_AUDIENCE", "").strip()
+        scope_audience = os.getenv(SCOPE_AUDIENCE_ENV, "").strip()
         if scope_audience and scope_audience in audience_roles:
             LOGGER.warning(
                 "CREDENTIAL_PROXY_SCOPE_AUDIENCE equals the %s audience; the scope "
@@ -2629,7 +2631,7 @@ def build_authenticator() -> NullAuthenticator | ServiceAccountAuthenticator:
                 "is not; the mcp role only exists once the chat audience split does, "
                 "so the mcp audience is ignored"
             )
-        if os.getenv("CREDENTIAL_PROXY_SCOPE_AUDIENCE", "").strip():
+        if os.getenv(SCOPE_AUDIENCE_ENV, "").strip():
             LOGGER.warning(
                 "CREDENTIAL_PROXY_SCOPE_AUDIENCE is set but CREDENTIAL_PROXY_CHAT_AUDIENCE "
                 "is not; the scope role only exists once the chat audience split does, "

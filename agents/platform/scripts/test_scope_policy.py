@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -65,7 +67,7 @@ class ScopeFileTestCase(unittest.TestCase):
 
 
 class ShapeTest(unittest.TestCase):
-    """The argv is one of five shapes, token for token (bnaylor's condition 2a)."""
+    """The argv is one of five shapes, token for token."""
 
     def test_each_shape_matches_with_its_argument(self):
         for argv, want in (
@@ -89,7 +91,7 @@ class ShapeTest(unittest.TestCase):
                     self.assertEqual(scope_policy.RULE_SCOPE_ARGV, refusal.rule)
                     self.assertIn(flag, refusal.message)
 
-    def test_bnaylors_flags_are_all_named(self):
+    def test_the_identity_configuration_and_logging_flags_are_all_named(self):
         for flag in (
             "--impersonate-service-account", "--flags-file", "--access-token-file",
             "--configuration", "--log-http", "--verbosity", "--account", "--billing-project", "--quiet",
@@ -251,6 +253,40 @@ METRICS_OUTPUT = json.dumps({
 })
 
 
+class ReconcileCommandsTest(unittest.TestCase):
+    """The five shapes are the commands cluster_agent_reconcile.py sends.
+
+    The publisher calls the reconcile's own lookups through the broker, so a
+    format or flag edited on one side alone would refuse every publisher call.
+    """
+
+    def captured_argv(self, call):
+        import cluster_agent_reconcile
+
+        captured = []
+
+        def run(cmd, **kwargs):
+            captured.append(cmd)
+            raise subprocess.CalledProcessError(1, cmd, output="", stderr="stub")
+
+        with mock.patch.object(cluster_agent_reconcile.sandbox_exec, "run", side_effect=run), \
+                mock.patch.object(cluster_agent_reconcile, "log"):
+            call(cluster_agent_reconcile)
+        self.assertEqual(1, len(captured), captured)
+        return captured[0]
+
+    def test_each_reconcile_lookup_is_a_shape(self):
+        for call, want in (
+            (lambda r: r._list_project("p-one"), (scope_policy.SHAPE_CLUSTERS_LIST, "p-one")),
+            (lambda r: r._search_container("folders/111"), (scope_policy.SHAPE_ASSET_SEARCH, "folders/111")),
+            (lambda r: r._resolve_selector("sharedVpcHosts/host-proj"), (scope_policy.SHAPE_SHARED_VPC, "host-proj")),
+            (lambda r: r._resolve_selector("metricsScopes/scoping-proj"), (scope_policy.SHAPE_METRICS_SCOPE, "scoping-proj")),
+            (lambda r: r._project_id_of("123456"), (scope_policy.SHAPE_PROJECT_NUMBER, "123456")),
+        ):
+            with self.subTest(want=want):
+                self.assertEqual(want, scope_policy.match_shape(self.captured_argv(call)))
+
+
 class MembersNamedTest(unittest.TestCase):
     """What each lookup's stdout adds to the member window."""
 
@@ -258,8 +294,8 @@ class MembersNamedTest(unittest.TestCase):
         for shape, stdout, want in (
             (scope_policy.SHAPE_ASSET_SEARCH, ASSET_OUTPUT, (scope_policy.KIND_PROJECTS, {"p-one", "p-two"})),
             (scope_policy.SHAPE_SHARED_VPC, XPN_OUTPUT, (scope_policy.KIND_PROJECTS, {"svc-one"})),
-            # Numbers only: the contract admits a Metrics Scope member to the
-            # naming call, never straight to the probe.
+            # Numbers only: a Metrics Scope member opens the naming call,
+            # never the probe.
             (scope_policy.SHAPE_METRICS_SCOPE, METRICS_OUTPUT, (scope_policy.KIND_NUMBERS, {"123456"})),
             (scope_policy.SHAPE_PROJECT_NUMBER, "named-proj\n", (scope_policy.KIND_PROJECTS, {"named-proj"})),
             # A legacy domain-scoped ID cannot be probed.
@@ -355,6 +391,9 @@ class MemberWindowTest(ScopeFileTestCase):
         self.clock.now += scope_policy.MEMBER_WINDOW_SECONDS
         self.window.record(scope_policy.KIND_PROJECTS, {"b-1"}, declaration)
         self.assertTrue(self.window.holds(scope_policy.KIND_PROJECTS, "b-1", declaration.digest))
+
+    def test_the_window_outlasts_the_longest_publisher_run(self):
+        self.assertEqual(5 * 60 * 60, scope_policy.MEMBER_WINDOW_SECONDS)
 
     def test_the_cap_is_a_fixed_memory_bound_not_max_projects(self):
         self.assertEqual(5000, scope_policy.MEMBER_WINDOW_CAP)

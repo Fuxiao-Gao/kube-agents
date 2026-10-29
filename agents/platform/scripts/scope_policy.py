@@ -45,11 +45,13 @@ from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
 SCOPE_FILE_ENV = "CREDENTIAL_PROXY_SCOPE_FILE"
-# How long a member a lookup returned may be probed (contract §5).
+# How long a member a lookup returned may be probed. The publisher runs every
+# lookup before its first probe, and a run at maxProjects 5000 can take about
+# 4.2 hours, so the window outlasts the longest run.
 SECONDS_PER_HOUR = 60 * 60
-MEMBER_WINDOW_SECONDS = 2 * SECONDS_PER_HOUR
+MEMBER_WINDOW_SECONDS = 5 * SECONDS_PER_HOUR
 # How many project IDs, and separately how many numbers, the window holds: the
-# CRD's maximum for spec.scope.maxProjects, as a fixed memory bound (contract §5).
+# CRD's maximum for spec.scope.maxProjects, as a fixed memory bound.
 MEMBER_WINDOW_CAP = 5000
 
 RULE_SCOPE_ARGV = "caller.scope-argv"
@@ -72,11 +74,16 @@ REFUSED_FLAGS = (
 )
 PROJECT_FLAG = "--project"
 
-# The argument patterns (contract §5). None of them can start with `-`, so an
+# The argument patterns. None of them can start with `-`, so an
 # argument is never read as a flag.
 _PROJECT = re.compile(r"\A[a-z0-9][a-z0-9-]*\Z")
 _NUMBER = re.compile(r"\A[0-9]{1,20}\Z")
 CONTAINER_KIND_FOLDERS = "folders"
+# The scope.json keys this module reads.
+DECLARATION_FOLDERS = CONTAINER_KIND_FOLDERS
+DECLARATION_ORGANIZATIONS = "organizations"
+DECLARATION_SHARED_VPC_HOSTS = "sharedVpcHosts"
+DECLARATION_METRICS_SCOPES = "metricsScopes"
 _CONTAINER = re.compile(r"\A(?P<kind>folders|organizations)/(?P<id>[0-9]{1,20})\Z")
 
 SHAPE_CLUSTERS_LIST = "clusters-list"
@@ -97,8 +104,9 @@ class _Slot(NamedTuple):
 
 
 # The five shapes, copied token for token from cluster_agent_reconcile.py
-# (lines 423, 622, 674, 677, 745 when this was written) and pinned in the
-# #4119 contract §5. The publisher sends exactly these.
+# (`_list_project`, `_search_container`, `_resolve_selector` and
+# `_project_id_of`; test_scope_policy holds the two in step). The publisher
+# sends exactly these.
 SHAPES: dict[str, tuple[str | _Slot, ...]] = {
     SHAPE_CLUSTERS_LIST: (
         "gcloud", "container", "clusters", "list", PROJECT_FLAG, _Slot(""),
@@ -135,6 +143,12 @@ _ASSET_NAME = re.compile(
 )
 _MONITORED_PROJECT_NAME = re.compile(r"\Alocations/global/metricsScopes/[^/]+/projects/(?P<project>[^/]+)\Z")
 XPN_RESOURCE_TYPE_PROJECT = "PROJECT"
+# The output fields the lookups' --format projections keep.
+FIELD_NAME = "name"
+FIELD_ID = "id"
+FIELD_TYPE = "type"
+FIELD_MONITORED_PROJECTS = "monitoredProjects"
+EMPTY_JSON = "null"
 
 KIND_PROJECTS = "projects"
 KIND_NUMBERS = "numbers"
@@ -174,10 +188,10 @@ def load_declaration(path: str) -> Declaration:
         raise ValueError("scope.json is not an object")
     return Declaration(
         digest=hashlib.sha256(raw).hexdigest(),
-        folders=_string_set(document, "folders"),
-        organizations=_string_set(document, "organizations"),
-        shared_vpc_hosts=_string_set(document, "sharedVpcHosts"),
-        metrics_scopes=_string_set(document, "metricsScopes"),
+        folders=_string_set(document, DECLARATION_FOLDERS),
+        organizations=_string_set(document, DECLARATION_ORGANIZATIONS),
+        shared_vpc_hosts=_string_set(document, DECLARATION_SHARED_VPC_HOSTS),
+        metrics_scopes=_string_set(document, DECLARATION_METRICS_SCOPES),
     )
 
 
@@ -250,28 +264,31 @@ def members_named(shape: str, stdout: str) -> tuple[str, set[str]]:
         project = stdout.strip()
         return KIND_PROJECTS, {project} if _PROJECT.match(project) else set()
     try:
-        parsed = json.loads(stdout or "null")
+        parsed = json.loads(stdout or EMPTY_JSON)
     except ValueError:
         return KIND_PROJECTS, set()
     if shape == SHAPE_ASSET_SEARCH:
         rows = parsed if isinstance(parsed, list) else []
-        names = (_ASSET_NAME.match(row["name"]) for row in rows if isinstance(row, dict) and isinstance(row.get("name"), str))
+        names = (
+            _ASSET_NAME.match(row[FIELD_NAME]) for row in rows
+            if isinstance(row, dict) and isinstance(row.get(FIELD_NAME), str)
+        )
         return KIND_PROJECTS, {m["project"] for m in names if m and _PROJECT.match(m["project"])}
     if shape == SHAPE_SHARED_VPC:
         rows = parsed if isinstance(parsed, list) else []
         return KIND_PROJECTS, {
-            row["id"] for row in rows
-            if isinstance(row, dict) and row.get("type") == XPN_RESOURCE_TYPE_PROJECT
-            and isinstance(row.get("id"), str) and _PROJECT.match(row["id"])
+            row[FIELD_ID] for row in rows
+            if isinstance(row, dict) and row.get(FIELD_TYPE) == XPN_RESOURCE_TYPE_PROJECT
+            and isinstance(row.get(FIELD_ID), str) and _PROJECT.match(row[FIELD_ID])
         }
     if shape == SHAPE_METRICS_SCOPE:
-        rows = parsed.get("monitoredProjects") if isinstance(parsed, dict) else None
+        rows = parsed.get(FIELD_MONITORED_PROJECTS) if isinstance(parsed, dict) else None
         names = (
-            _MONITORED_PROJECT_NAME.match(row["name"]) for row in rows or []
-            if isinstance(row, dict) and isinstance(row.get("name"), str)
+            _MONITORED_PROJECT_NAME.match(row[FIELD_NAME]) for row in rows or []
+            if isinstance(row, dict) and isinstance(row.get(FIELD_NAME), str)
         )
-        # Numbers only: the contract admits a Metrics Scope member to
-        # `projects describe`, not to the probe, which takes the ID it returns.
+        # Numbers only: a Metrics Scope member opens `projects describe`,
+        # never the probe, which takes the ID that call returns.
         return KIND_NUMBERS, {m["project"] for m in names if m and _NUMBER.match(m["project"])}
     return KIND_PROJECTS, set()
 
