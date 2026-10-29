@@ -1014,7 +1014,8 @@ const (
 	// moves the config hash and rolls the pod (docs/designs/multi-project-scope.md §5).
 	scopeConfigKey = "scope.json"
 
-	// scopeVolumeName projects scopeConfigKey into scopeDir for the agent container. The
+	// scopeVolumeName projects scopeConfigKey into scopeDir for the agent container (and,
+	// under mode next, for the scope publisher, and into brokerScopeDir for the broker). The
 	// volume is marked optional so a ConfigMap written by an older operator, which has no
 	// such key, still mounts (as an empty directory) instead of holding the pod in
 	// ContainerCreating during a roll; the reader treats the missing file as "no render",

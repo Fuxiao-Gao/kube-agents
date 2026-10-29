@@ -567,7 +567,7 @@ func buildCredentialProxyVolumeMounts(agent *agentv1alpha1.PlatformAgent) []core
 		})
 	}
 	if scopePublisherRendered(agent) {
-		mounts = append(mounts, scopeConfigMount())
+		mounts = append(mounts, scopeConfigMount(brokerScopeDir))
 	}
 	return append(mounts, buildVCSForgesVolumeMounts(agent)...)
 }

@@ -156,6 +156,19 @@ func TestTheScopePublisherJob(t *testing.T) {
 	if !strings.HasPrefix(job.Name, "test-agent-scope-publisher-") || len(job.Name) != len("test-agent-scope-publisher-")+scopeJobSuffixLength {
 		t.Errorf("Job name %q", job.Name)
 	}
+	// A long agent name keeps the Job name within a label value, and two
+	// agents that share the shortened prefix still get different names.
+	long := agent.DeepCopy()
+	long.Name = strings.Repeat("a", 50)
+	longName := buildScopePublisherJob(long, start, hash).Name
+	if len(longName) > 63 || strings.Contains(longName, "--") {
+		t.Errorf("Job name for a 50-character agent = %q (%d characters)", longName, len(longName))
+	}
+	other := long.DeepCopy()
+	other.Name = strings.Repeat("a", 49) + "b"
+	if buildScopePublisherJob(other, start, hash).Name == longName {
+		t.Error("two long agent names that share the shortened prefix share a Job name")
+	}
 	if other := buildScopePublisherJob(agent, start.Add(time.Second), hash); other.Name == job.Name {
 		t.Error("two runs at different times share a name")
 	}
@@ -174,6 +187,13 @@ func TestTheScopePublisherJob(t *testing.T) {
 	}
 
 	pod := job.Spec.Template.Spec
+	if pod.SecurityContext.RunAsUser == nil || *pod.SecurityContext.RunAsUser != sandboxUID ||
+		pod.SecurityContext.FSGroup == nil || *pod.SecurityContext.FSGroup != agentFSGroup {
+		t.Errorf("pod security context %+v, want the broker's UID and group", pod.SecurityContext)
+	}
+	if len(pod.ImagePullSecrets) != len(resolveImagePullSecrets(agent.Spec.Deployment)) {
+		t.Errorf("pull secrets %v, want the agent image's", pod.ImagePullSecrets)
+	}
 	if pod.ServiceAccountName != "test-agent-scope-publisher" || pod.RestartPolicy != corev1.RestartPolicyNever ||
 		pod.AutomountServiceAccountToken == nil || *pod.AutomountServiceAccountToken {
 		t.Errorf("pod SA %q, restart %q, automount %v", pod.ServiceAccountName, pod.RestartPolicy, pod.AutomountServiceAccountToken)
@@ -217,6 +237,10 @@ func TestTheScopePublisherJob(t *testing.T) {
 	}
 	if c.SecurityContext == nil || c.SecurityContext.AllowPrivilegeEscalation == nil || *c.SecurityContext.AllowPrivilegeEscalation {
 		t.Errorf("container security context %+v", c.SecurityContext)
+	}
+	if c.Resources.Requests.Memory().String() != "192Mi" || c.Resources.Limits.Memory().String() != "512Mi" ||
+		c.Resources.Requests.Cpu().String() != "50m" || c.Resources.Limits.Cpu().String() != "500m" {
+		t.Errorf("resources %+v", c.Resources)
 	}
 
 	// No harness block: the env is rendered empty, as the gateway's is.
@@ -352,12 +376,12 @@ func TestTheBrokerConfersTheScopeRoleOnlyBehindTheGatewayPodPolicy(t *testing.T)
 			c := deployment.Spec.Template.Spec.Containers[0]
 
 			file, found := brokerEnvValue(c.Env, "CREDENTIAL_PROXY_SCOPE_FILE")
-			if found != tc.want.file || (found && file != "/etc/kube-agents/scope.json") {
+			if found != tc.want.file || (found && file != "/etc/kube-agents/scope/scope.json") {
 				t.Errorf("CREDENTIAL_PROXY_SCOPE_FILE = %q (found %v), want rendered %v", file, found, tc.want.file)
 			}
 			mounted := false
 			for _, m := range c.VolumeMounts {
-				if m.Name == scopeVolumeName && m.MountPath == "/etc/kube-agents" && m.ReadOnly && m.SubPath == "" {
+				if m.Name == scopeVolumeName && m.MountPath == "/etc/kube-agents/scope" && m.ReadOnly && m.SubPath == "" {
 					mounted = true
 				}
 			}
@@ -369,6 +393,13 @@ func TestTheBrokerConfersTheScopeRoleOnlyBehindTheGatewayPodPolicy(t *testing.T)
 			}
 			if mounted != tc.want.file || volume != tc.want.file {
 				t.Errorf("declaration mounted %v, volume %v, want %v", mounted, volume, tc.want.file)
+			}
+			// Beside the forge CA mounts, never above them: a mount point
+			// inside a read-only ConfigMap volume cannot be created.
+			for _, m := range c.VolumeMounts {
+				if m.Name != scopeVolumeName && strings.HasPrefix(m.MountPath, brokerScopeDir+"/") {
+					t.Errorf("mount %s sits inside the declaration's read-only volume", m.MountPath)
+				}
 			}
 
 			audience, audienceFound := brokerEnvValue(c.Env, "CREDENTIAL_PROXY_SCOPE_AUDIENCE")
@@ -484,6 +515,7 @@ func TestReconcileScopePublisher(t *testing.T) {
 	}
 
 	t.Run("a folder scope starts one Job and reads the ConfigMap", func(t *testing.T) {
+		t.Setenv(a2aGatewayPodPolicyEnvVar, "true")
 		agent := scopePublisherAgent()
 		r, cl := scopePublisherReconciler(t, agent)
 		outcome, err := r.reconcileScopePublisher(ctx, agent, now)
@@ -507,7 +539,25 @@ func TestReconcileScopePublisher(t *testing.T) {
 		}
 	})
 
+	t.Run("without the gateway pod policy no Job runs and the condition says why", func(t *testing.T) {
+		t.Setenv(a2aGatewayPodPolicyEnvVar, "")
+		agent := scopePublisherAgent()
+		r, cl := scopePublisherReconciler(t, agent)
+		outcome, err := r.reconcileScopePublisher(ctx, agent, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertStatic(t, cl, agent)
+		if jobs := scopePublisherJobs(t, cl, agent); len(jobs) != 0 {
+			t.Errorf("Jobs = %d with the scope role not conferred, want none", len(jobs))
+		}
+		if outcome.condition == nil || outcome.condition.Status != metav1.ConditionFalse || outcome.condition.Reason != "ScopeRoleNotConferred" {
+			t.Errorf("condition %+v, want False/ScopeRoleNotConferred", outcome.condition)
+		}
+	})
+
 	t.Run("a scope with nothing to resolve renders the objects, no Job and no condition", func(t *testing.T) {
+		t.Setenv(a2aGatewayPodPolicyEnvVar, "true")
 		agent := scopePublisherAgent()
 		agent.Spec.Scope = &agentv1alpha1.ScopeSpec{Projects: []string{"team-a"}}
 		r, cl := scopePublisherReconciler(t, agent)
@@ -525,6 +575,7 @@ func TestReconcileScopePublisher(t *testing.T) {
 	})
 
 	t.Run("an unowned ServiceAccount under the name is not adopted and runs no Job", func(t *testing.T) {
+		t.Setenv(a2aGatewayPodPolicyEnvVar, "true")
 		agent := scopePublisherAgent()
 		squatter := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: scopePublisherName(agent), Namespace: agent.Namespace}}
 		r, cl := scopePublisherReconciler(t, agent, squatter)
@@ -532,8 +583,13 @@ func TestReconcileScopePublisher(t *testing.T) {
 		if err != nil || owned {
 			t.Fatalf("scopePublisherIdentityOwned = %v, %v; want false", owned, err)
 		}
-		if _, err := r.reconcileScopePublisher(ctx, agent, now); err != nil {
+		outcome, err := r.reconcileScopePublisher(ctx, agent, now)
+		if err != nil {
 			t.Fatal(err)
+		}
+		if outcome.condition == nil || outcome.condition.Reason != "UnownedServiceAccount" ||
+			!strings.Contains(outcome.condition.Message, scopePublisherName(agent)) {
+			t.Errorf("condition %+v, want UnownedServiceAccount naming the account", outcome.condition)
 		}
 		sa := &corev1.ServiceAccount{}
 		if err := cl.Get(ctx, client.ObjectKeyFromObject(squatter), sa); err != nil || len(sa.OwnerReferences) != 0 {
@@ -558,6 +614,7 @@ func TestReconcileScopePublisher(t *testing.T) {
 	})
 
 	t.Run("the teardown removes every owned object", func(t *testing.T) {
+		t.Setenv(a2aGatewayPodPolicyEnvVar, "true")
 		agent := scopePublisherAgent()
 		r, cl := scopePublisherReconciler(t, agent)
 		if _, err := r.reconcileScopePublisher(ctx, agent, now); err != nil {
@@ -581,6 +638,7 @@ func TestReconcileScopePublisher(t *testing.T) {
 // Through the stack: reconcileA2A renders the publisher and carries its
 // condition out, and the flip to today (cleanupA2A) takes it all away.
 func TestTheScopePublisherComesAndGoesWithTheStack(t *testing.T) {
+	t.Setenv(a2aGatewayPodPolicyEnvVar, "true")
 	ctx := context.Background()
 	agent := a2aTestAgent()
 	agent.Spec.Scope = &agentv1alpha1.ScopeSpec{Folders: []string{"111111111111"}}

@@ -27,6 +27,7 @@ import (
 	"path"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -37,6 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -48,8 +50,8 @@ import (
 // The scope publisher: under mode next, a Job the operator starts resolves
 // the folder, organization, Shared VPC and Metrics Scope members of
 // spec.scope through the credential broker's `scope` role, and writes the
-// result into one ConfigMap the A2A gateway reads before it admits a task
-// whose target project scope.json does not list explicitly. The Job runs
+// result into one ConfigMap, for the A2A gateway to read before it admits a
+// task whose target project scope.json does not list explicitly. The Job runs
 // agents/platform/scripts/scope_publisher.py; the names, the document,
 // memberHash, the Job's env and the schedule below are the two sides of one
 // interface, and a change to one is a change to both.
@@ -103,6 +105,21 @@ const (
 	credentialProxyScopeAudienceEnvVar = "CREDENTIAL_PROXY_SCOPE_AUDIENCE" // #nosec G101 -- Environment variable name, not a credential
 	credentialProxyScopeCallersEnvVar  = "CREDENTIAL_PROXY_SCOPE_CALLERS"  // #nosec G101 -- Environment variable name, not a credential
 	credentialProxyScopeFileEnvVar     = "CREDENTIAL_PROXY_SCOPE_FILE"
+	// brokerScopeDir is where the broker mounts the declaration: a directory
+	// of its own beside forgeCADir rather than scopeDir, because the forge CA
+	// Secrets mount under scopeDir in the broker, and the runtime cannot
+	// create a mount point inside a read-only ConfigMap volume.
+	brokerScopeDir = "/etc/kube-agents/scope"
+
+	// The publisher container's requests and limits, as every next-stack
+	// pod has them (a2aNATSCPURequest says why). Sized from the script's
+	// measured use: about 180Mi at its usual peak and about 250Mi with four
+	// lookups near the broker's output cap; the CPU is mostly waiting on
+	// the broker.
+	scopePublisherCPURequest    = "50m"
+	scopePublisherMemoryRequest = "192Mi"
+	scopePublisherCPULimit      = "500m"
+	scopePublisherMemoryLimit   = "512Mi"
 
 	// The API server's address and ports for the publisher's egress, as the
 	// agent's own policy allows them (buildNetworkPolicy): the in-cluster
@@ -163,6 +180,11 @@ const (
 	scopeResolvedReasonMismatch = "HashMismatch"
 	scopeResolvedReasonTooLarge = "TooLarge"
 	scopeResolvedReasonError    = "Error"
+	// The two reasons no publisher Job runs for: the publisher's
+	// ServiceAccount name is held by somebody else, or the broker does not
+	// confer the scope role (scopeBrokerRoleEnabled).
+	scopeResolvedReasonUnowned      = "UnownedServiceAccount"
+	scopeResolvedReasonNotConferred = "ScopeRoleNotConferred"
 )
 
 // scopeResolvedConfigMapName is the resolved-scope ConfigMap's name.
@@ -432,15 +454,25 @@ func scopeConfigVolume(agent *agentv1alpha1.PlatformAgent) corev1.Volume {
 	}
 }
 
-func scopeConfigMount() corev1.VolumeMount {
-	return corev1.VolumeMount{Name: scopeVolumeName, MountPath: scopeDir, ReadOnly: true}
+// scopeConfigMount mounts scopeConfigVolume at dir: scopeDir in the
+// publisher, brokerScopeDir in the broker.
+func scopeConfigMount(dir string) corev1.VolumeMount {
+	return corev1.VolumeMount{Name: scopeVolumeName, MountPath: dir, ReadOnly: true}
 }
 
 // scopePublisherJobName is the Job's name for a run started at start for
-// memberHash: a short hash of the two, so names never repeat.
+// memberHash: a short hash of the agent, the start and the hash, so names
+// never repeat. The Job controller copies the name into a pod label value,
+// which holds at most 63 characters, so a long agent name shortens the
+// prefix and the hash keeps two such agents apart.
 func scopePublisherJobName(agent *agentv1alpha1.PlatformAgent, start time.Time, memberHash string) string {
-	sum := sha256.Sum256([]byte(start.UTC().Format(time.RFC3339Nano) + "|" + memberHash))
-	return scopePublisherName(agent) + "-" + hex.EncodeToString(sum[:])[:scopeJobSuffixLength]
+	sum := sha256.Sum256([]byte(agent.Name + "|" + start.UTC().Format(time.RFC3339Nano) + "|" + memberHash))
+	suffix := hex.EncodeToString(sum[:])[:scopeJobSuffixLength]
+	prefix := scopePublisherName(agent)
+	if limit := validation.DNS1123LabelMaxLength - len(suffix) - 1; len(prefix) > limit {
+		prefix = strings.TrimRight(prefix[:limit], "-")
+	}
+	return prefix + "-" + suffix
 }
 
 // buildScopePublisherJob is one publisher run: the agent
@@ -468,10 +500,18 @@ func buildScopePublisherJob(agent *agentv1alpha1.PlatformAgent, start time.Time,
 					RestartPolicy:                corev1.RestartPolicyNever,
 					ServiceAccountName:           scopePublisherName(agent),
 					AutomountServiceAccountToken: ptr.To(false),
+					// The agent image's UID and group, as the broker runs it:
+					// the image names its user, which RunAsNonRoot cannot
+					// check, and the group makes the 0400 projected tokens
+					// readable.
 					SecurityContext: &corev1.PodSecurityContext{
-						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+						FSGroup:        ptr.To(agentFSGroup),
+						RunAsUser:      ptr.To(sandboxUID),
 						RunAsNonRoot:   ptr.To(true),
+						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 					},
+					// The agent image's pull identity, as the broker's.
+					ImagePullSecrets: resolveImagePullSecrets(agent.Spec.Deployment),
 					Volumes: []corev1.Volume{
 						scopeConfigVolume(agent),
 						// The default-audience token and the cluster CA at the
@@ -506,11 +546,13 @@ func buildScopePublisherJob(agent *agentv1alpha1.PlatformAgent, start time.Time,
 							{Name: scopePublisherManagementProjectEnvVar, Value: scopeManagementProject(agent)},
 						},
 						VolumeMounts: []corev1.VolumeMount{
-							scopeConfigMount(),
+							scopeConfigMount(scopeDir),
 							{Name: buildEventWatcherTokenVolume().Name, MountPath: kubeAPIAccessMountPath, ReadOnly: true},
 							{Name: scopePublisherBrokerTokenVolume, MountPath: scopePublisherBrokerTokenMountDir, ReadOnly: true},
 						},
 						SecurityContext: hardenedSecurityContext(),
+						Resources: a2aResources(scopePublisherCPURequest, scopePublisherMemoryRequest,
+							scopePublisherCPULimit, scopePublisherMemoryLimit),
 					}},
 				},
 			},
@@ -632,7 +674,7 @@ func scopeResolvedCondition(agent *agentv1alpha1.PlatformAgent, data map[string]
 		condition.Message = fmt.Sprintf("the resolved scope at %s has a state this operator does not know (%q)", doc.ResolvedAt, doc.State)
 	case doc.MemberHash != scopeMemberHash(agent):
 		condition.Reason = scopeResolvedReasonMismatch
-		condition.Message = fmt.Sprintf("the resolved scope at %s is for an earlier spec.scope; a publisher run for the current one has started", doc.ResolvedAt)
+		condition.Message = fmt.Sprintf("the resolved scope at %s is for an earlier spec.scope; a publisher run for the current one starts once no run is active", doc.ResolvedAt)
 	case now.Sub(resolvedAt) > bound:
 		condition.Reason = scopeResolvedReasonStale
 		condition.Message = fmt.Sprintf("the resolved scope was written at %s, longer ago than the %s bound; the scope publisher is not keeping it fresh", doc.ResolvedAt, bound)
@@ -643,6 +685,18 @@ func scopeResolvedCondition(agent *agentv1alpha1.PlatformAgent, data map[string]
 		return condition, resolvedAt.Add(bound).Sub(now)
 	}
 	return condition, 0
+}
+
+// scopeNotRunCondition is the ScopeResolved condition when no publisher Job
+// may run: False, with the reason and message that say why.
+func scopeNotRunCondition(agent *agentv1alpha1.PlatformAgent, reason, message string) *metav1.Condition {
+	return &metav1.Condition{
+		Type:               scopeResolvedConditionType,
+		Status:             metav1.ConditionFalse,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: agent.Generation,
+	}
 }
 
 // scopePublisherIdentityOwned is whether the publisher's ServiceAccount is
@@ -675,7 +729,7 @@ func scopeBrokerEnv(agent *agentv1alpha1.PlatformAgent, owned bool) []corev1.Env
 	if !scopePublisherRendered(agent) {
 		return nil
 	}
-	env := []corev1.EnvVar{{Name: credentialProxyScopeFileEnvVar, Value: path.Join(scopeDir, scopeFileName)}}
+	env := []corev1.EnvVar{{Name: credentialProxyScopeFileEnvVar, Value: path.Join(brokerScopeDir, scopeFileName)}}
 	if scopeBrokerRoleEnabled(agent) && owned {
 		env = append(env,
 			corev1.EnvVar{Name: credentialProxyScopeAudienceEnvVar, Value: credentialProxyScopeAudience},
@@ -736,33 +790,40 @@ func (r *PlatformAgentReconciler) reconcileScopePublisher(ctx context.Context, a
 	if !scopeHasResolvableMembers(agent) {
 		return scopePublisherOutcome{}, nil
 	}
-
-	outcome := scopePublisherOutcome{requeue: scopePublishInterval}
-	if owned {
-		var jobs batchv1.JobList
-		if err := r.a2aReader().List(ctx, &jobs, client.InNamespace(agent.Namespace), client.MatchingLabels(scopePublisherPodLabels(agent))); err != nil {
-			return scopePublisherOutcome{}, fmt.Errorf("failed to list scope publisher Jobs: %w", err)
-		}
-		mine := make([]batchv1.Job, 0, len(jobs.Items))
-		for i := range jobs.Items {
-			if metav1.IsControlledBy(&jobs.Items[i], agent) {
-				mine = append(mine, jobs.Items[i])
-			}
-		}
-		memberHash := scopeMemberHash(agent)
-		decision := decideScopePublish(mine, memberHash, now)
-		if decision.start {
-			job := buildScopePublisherJob(agent, now, memberHash)
-			if err := ctrl.SetControllerReference(agent, job, r.Scheme); err != nil {
-				return scopePublisherOutcome{}, err
-			}
-			withCommonLabels(job, agent)
-			if err := r.Create(ctx, job); err != nil && !apierrors.IsAlreadyExists(err) {
-				return scopePublisherOutcome{}, fmt.Errorf("failed to create scope publisher Job: %w", err)
-			}
-		}
-		outcome.requeue = decision.requeue
+	// No Job where the broker would refuse it, and the condition says
+	// which of the two stops it rather than reading Missing for ever.
+	if !owned {
+		return scopePublisherOutcome{condition: scopeNotRunCondition(agent, scopeResolvedReasonUnowned,
+			fmt.Sprintf("a ServiceAccount named %s exists that this PlatformAgent does not control, so no scope publisher runs; delete it", scopePublisherName(agent)))}, nil
 	}
+	if !scopeBrokerRoleEnabled(agent) {
+		return scopePublisherOutcome{condition: scopeNotRunCondition(agent, scopeResolvedReasonNotConferred,
+			"the broker confers the scope role only on an install whose chart renders the kube-agents-a2a-gateway-pod admission policy, so no scope publisher runs")}, nil
+	}
+
+	var jobs batchv1.JobList
+	if err := r.a2aReader().List(ctx, &jobs, client.InNamespace(agent.Namespace), client.MatchingLabels(scopePublisherPodLabels(agent))); err != nil {
+		return scopePublisherOutcome{}, fmt.Errorf("failed to list scope publisher Jobs: %w", err)
+	}
+	mine := make([]batchv1.Job, 0, len(jobs.Items))
+	for i := range jobs.Items {
+		if metav1.IsControlledBy(&jobs.Items[i], agent) {
+			mine = append(mine, jobs.Items[i])
+		}
+	}
+	memberHash := scopeMemberHash(agent)
+	decision := decideScopePublish(mine, memberHash, now)
+	if decision.start {
+		job := buildScopePublisherJob(agent, now, memberHash)
+		if err := ctrl.SetControllerReference(agent, job, r.Scheme); err != nil {
+			return scopePublisherOutcome{}, err
+		}
+		withCommonLabels(job, agent)
+		if err := r.Create(ctx, job); err != nil && !apierrors.IsAlreadyExists(err) {
+			return scopePublisherOutcome{}, fmt.Errorf("failed to create scope publisher Job: %w", err)
+		}
+	}
+	outcome := scopePublisherOutcome{requeue: decision.requeue}
 
 	cm := &corev1.ConfigMap{}
 	var data map[string]string
@@ -787,7 +848,13 @@ func (r *PlatformAgentReconciler) removeScopePublisher(ctx context.Context, agen
 		return fmt.Errorf("failed to list scope publisher Jobs: %w", err)
 	}
 	for i := range jobs.Items {
-		if err := r.deleteA2AObjectIfOwned(ctx, agent, &jobs.Items[i], r.a2aReader(), nil); err != nil {
+		job := &jobs.Items[i]
+		if job.DeletionTimestamp != nil || !metav1.IsControlledBy(job, agent) {
+			continue
+		}
+		// Background, as deleteA2AProvisionJobs: a Job deleted with no
+		// policy orphans its pod.
+		if err := client.IgnoreNotFound(r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground))); err != nil {
 			return fmt.Errorf("failed to delete scope publisher Job: %w", err)
 		}
 	}
