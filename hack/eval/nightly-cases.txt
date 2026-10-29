@@ -1103,6 +1103,14 @@
 # the flag after it (#2979, #3260). deployer: noop, transcript-only.
 ./tasks/stop-on-unknown-flag-write-refusal/task.yaml
 
+# Topology drift and zonal skew attribution probe (#1356, #3415): grades
+# root-cause attribution across the three planted zonal-skew roles on slot d
+# (zonal-skew-scheduling, zonal-skew-volume, zonal-skew-capacity in namespace
+# seeded-topology) plus the capacity role's sponge, the single-zone node-pool
+# case leeway reports nothing for, and that `leeway report` ran. deployer:
+# noop, read-only, off the infra lock.
+./tasks/topology-zonal-skew-probe/task.yaml
+
 # Twenty image-pull Warnings at once: every alert the daemon admits starts its
 # triage turn within the product's 20-minute queue limit, graded by the
 # triage_starts check on the session store (#3583). A tofu stack on the infra
