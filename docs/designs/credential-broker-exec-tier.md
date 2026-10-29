@@ -73,7 +73,7 @@ What changes, side by side:
 | Chat relays, workspace, vcs/forge, watchers | The one broker pod                           | Same pod, unchanged                                                                                                                     |
 | Cloud API relay (`/v1/gcp/`)                | The one broker pod                           | Same pod as a first step; it takes no slot and can move later (open question 4)                                                         |
 | How callers reach commands                  | `CREDENTIAL_PROXY_URL`                       | **NEW:** `CREDENTIAL_PROXY_EXEC_URL`; if it is not set, as today                                                                        |
-| Upgrade of the command path                 | `Recreate`: commands stop during the restart | `RollingUpdate` with a drain on SIGTERM and a PDB (§9 step 0): no outage                                                                |
+| Upgrade of the command path                 | `Recreate`: commands stop during the restart | `RollingUpdate` with a long drain, a PDB at N ≥ 2 (§9 step 0): no outage at N ≥ 2; the stateful pod keeps `Recreate` (30 s drain)       |
 | Identity and permissions                    | One KSA / GSA                                | Same KSA / GSA, no new IAM                                                                                                              |
 | Code                                        | `credential_proxy.py`                        | Same file and image, with `CREDENTIAL_PROXY_ROLE=exec` on the new pods                                                                  |
 
@@ -111,7 +111,7 @@ and each caller routes to the right one.**
 
   **The broker cannot tell interactive work from background work today.**
 
-### 2.2 What blocks more replicas [single-pod doc §2 and §3, 2026-10-08 spike]
+### 2.2 What blocks more replicas [doc, `credential-proxy-single-pod.md` §2 and §3]
 
 | Route             | State                                                             | Two replicas behind one Service                                                                |
 | ----------------- | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
@@ -146,12 +146,12 @@ pull request reports them [measured, #4107]:
 - **Waits.** Commands waited 30 to 60 s at 16 clusters (audits together) and at 22 clusters
   (onboarding), next to the 60 s refusal bound. No command was refused yet.
 - **Memory.** 1.5 GiB at 16 clusters and 1.8 GiB at 22, against the 2 GiB limit.
-- **The command path.** With no model call, workers in the sandbox ran
+- **The command path, measured before #4104.** With no model call, workers in the sandbox ran
   `kubectl get pods --all-namespaces` through the shim. Throughput stopped at about 1.5 commands
   per second from 4 workers, with the sandbox shell at its 2 cores and the broker near 0.8 cores
   with a median wait of 0.1 s. Each command cost 0.8 to 1 s of shell CPU in the shim's Python
-  client (#4027). So past a few commands at once, the caller side limits the path before the
-  broker does.
+  client (#4027). So past a few commands at once, the caller side limited the path before the
+  broker did. #4104 has since fixed #4027 on `main`; §8.3 has the run after the fix.
 
 §8 uses #4107's runner features (`proxy_load`, raised limits).
 
@@ -184,7 +184,7 @@ event, ack and nack routes. The rest stay on it as a first step, not because the
   (`platformagent_manifests.go:4587-4597`). The consumer moved to the A2A gateway; the Pub/Sub pull
   and its receipt map did not. So the stateful pod stays in both modes.
 - **Slack leaves the broker only in `next` mode with Slack on and Chat off**
-  (`a2aSlackArmed`, `platformagent_a2a_manifests.go:1400-1401`). With both on, Slack stays on the
+  (`a2aSlackArmed`, `platformagent_a2a_manifests.go:1398-1399`). With both on, Slack stays on the
   broker's relay.
 - **The watchers keep no broker state.** The event watcher and the drift detector run in the
   gateway pod's `agent-api-auth` sidecar (`platformagent_manifests.go:4154-4161`), and the gateway
@@ -224,41 +224,48 @@ shim always takes the fallback and nothing reports it.
 
 - A second Deployment, `<agent>-credential-proxy-exec`, and Service, port 8765. Replicas from a new
   CR field (§9). Strategy `RollingUpdate`: no exec call keeps state across calls (§11, question
-  1, closed), and step 0's drain on SIGTERM and PodDisruptionBudget (§9) let a rollout finish the
-  commands in flight. This also removes the exec outage during an upgrade.
+  1, closed). Step 0's long drain on SIGTERM (§9) lets a stopping replica finish the commands in
+  flight, while `RollingUpdate` keeps another replica serving. This removes the exec outage
+  during an upgrade at 2 or more replicas. A PodDisruptionBudget, set only when replicas are 2 or
+  more, guards voluntary evictions such as a node drain; it has no part in a rollout.
 - Same KSA, so the same Workload Identity GSA and the same grants. No new IAM.
 - Own selector and labels. The exec pods do not reuse `credentialProxySelector`
   (`credential_proxy_manifests.go`), so today's Service does not send chat and workspace calls
   to them, where they would get a 404. They do not carry `kubeagents.x-k8s.io/has-credential-proxy`,
   which opens the github-token-minter to a pod. The exec builder mounts no forge credentials and no
   Slack tokens, so scaling out makes no copies of secrets that exec never uses.
-- Resources per replica: requests 1 CPU / 2 GiB, limits 2 CPU / 2 GiB. Today's broker requests
-  500m CPU / 1 GiB with limits 1 CPU / 2 GiB [code, `credential_proxy_manifests.go:140-149`]. The
-  2 GiB request is the minimum from §4.2, and the 2-CPU limit follows step 0 (§9). On Autopilot
-  without bursting the operator's limits are set equal to the requests
-  (`credential_proxy_manifests.go`, the comment at the memory request), so a 1-CPU request would
-  mean a 1-CPU limit. There the operator sets the request to the intended limit: 2 CPU / 2 GiB.
-  The slot cap and the memory budget stay per replica.
+- Resources per replica, on every cluster mode: requests 2 CPU / 2 GiB, limits 2 CPU / 2 GiB.
+  Today's broker requests 500m CPU / 1 GiB with limits 1 CPU / 2 GiB [code,
+  `credential_proxy_manifests.go:140-149`]. The 2 GiB request is the minimum from §4.2, and the
+  2-CPU limit follows step 0 (§9). The CPU request equals the limit, so the scheduler reserves
+  the 2 cores that §8.4's CPU term plans with. On Autopilot without bursting the operator already
+  sets limits equal to requests, so the same values hold there. The slot cap and the memory
+  budget stay per replica.
 - A NetworkPolicy target for the exec tier: ingress on 8765 from the sandbox, from session pods
   only under the cluster-view flag (the condition the stateful broker has today), and the metrics
   port from GMP. The egress rules that select the broker's pod labels also need the exec tier as a
   peer: the sandbox (`shell_sandbox_manifests.go`) and session pods
   (`platformagent_a2a_manifests.go`). The agent pod gets no egress to it, because `/v1/exec`
   admits only the shell and session roles.
-- The chart's footprint and the quota preflight add N × the exec replica's requests: 1 CPU /
-  2 GiB each on Standard, and 2 CPU / 2 GiB on Autopilot, where the request equals the limit.
+- The chart's footprint and the quota preflight add N × the exec replica's requests: 2 CPU /
+  2 GiB each, on every cluster mode.
 
 ### 3.4 Identity and tokens per replica
 
 - **Google access tokens:** each replica gets its own from the metadata server through Workload
   Identity. No coordination is needed.
 - **Managed kubeconfigs:** each replica fills its own cache, and keeps a kubeconfig until the pod
-  restarts (`_ensure_managed_kubeconfig`, `credential_proxy.py:7878`). A cluster costs up to N−1
-  extra cold `get-credentials` per pod lifetime. The `get-credentials` calls that callers send
+  restarts (`_ensure_managed_kubeconfig`, `credential_proxy.py:7878`). A cold fill runs two
+  `gcloud` children: a `describe` (`_endpoint_decision`) and then `get-credentials`. So a cluster
+  costs up to N−1 extra cold fills per pod lifetime. The `get-credentials` calls that callers send
   each land on one replica, so they do not multiply. After a rollout the caches fill lazily, as
   clusters are read; a sweep that starts right after a rollout turns that into a burst.
-  [predicted] At 2,500 clusters and 4 replicas the fill is about 10,000 `get-credentials`. Open
-  question 5: build the kubeconfig from the cluster's endpoint and CA without `gcloud`.
+  [predicted] At §8.4's 1,000 clusters and about 28 replicas, a sweep that reaches every cluster
+  on every replica runs up to 1,000 × 28 × 2 = 56,000 `gcloud` children after each rollout. At
+  1.6 to 2.0 broker core-seconds each (§8.3), that is about 90,000 to 112,000 core-seconds across
+  the tier: 3,200 to 4,000 per replica, or 27 to 33 minutes of a replica's 2 cores. So open
+  question 5 (build the kubeconfig from the cluster's endpoint and CA without `gcloud`) must be
+  decided before default on (§9 step 4).
 - **Scoped service account tokens:** with the scoped service account pool on
   (`scoped_sa_pool.py`), each replica keeps its own token cache, so token mints grow N times.
 - **TokenReview cache:** per replica; one extra review per caller per replica. Small.
@@ -266,12 +273,14 @@ shim always takes the fallback and nothing reports it.
 
 ### 3.5 Capacity the tier reports
 
-The admission route `GET /v1/exec/admission` (#4084) reports what one pod admits, and the sweeps
-size their pools from it. Behind a Service,
-one replica answers. With N replicas it must report the tier, or the sweeps under-read by N. The
-operator sets `CREDENTIAL_PROXY_EXEC_REPLICAS`, and the route reports `B × replicas` as what a
-sweep may use (the background share, §4.2), with `admitted × replicas` and the per-replica numbers
-beside it. A sweep sized to `admitted × replicas` would run past its share. It is a target, not a promise: a
+The admission route `GET /v1/exec/admission`, as proposed in #4084 (not on `main`), will report
+what one pod admits, and the sweeps will size their pools from it. Behind a Service, one replica
+answers. With N replicas it must report the tier, or the sweeps under-read by N. The operator
+writes the replica count to a ConfigMap that the exec pods mount, and the route reads it on each
+request. A scale change then does not change the pod template, so it does not restart the tier
+and refill its caches (§3.4). The route reports `B × replicas` as what a sweep may use (the
+background share, §4.2), with `admitted × replicas` and the per-replica numbers beside it. A
+sweep sized to `admitted × replicas` would run past its share. It is a target, not a promise: a
 replica that is not ready lowers the real number until the rollout ends.
 
 ### 3.6 Relation to the k8s-api-proxy (#3760, epic #4128)
@@ -328,7 +337,9 @@ How the load splits between them:
   commands but 53% of the slot time. The broker's CPU was throttled in 11% of its periods
   [measured, #4242, image `f8fc7905`, one 30-minute run].
 
-§8.3 has the split for every audit run at 2 and 8 clusters; the larger fleet sizes are not measured yet.
+§8.3 has the split for every audit run at 2 and 8 clusters. At 8 clusters `gcloud` was 15 to 35%
+of the commands and 37 to 47% of the slot time, less than the 53% at 2 clusters. The larger fleet
+sizes are not measured yet.
 
 How the k8s-api-proxy runs [#3760 head, not main, `kube_proxy_manifests.go`]:
 
@@ -350,8 +361,12 @@ What this means for this design:
 
 - The exec tier is still needed for `gcloud` and the session pods, and the stateful/exec split
   does not change. After #4128's default-on step, `gcloud` alone keeps the tier at 2 or more
-  replicas: scaling its share linearly gives about 12 slots in use at 2,500 clusters, more than one
-  pod's 8 [predicted, from the 143-cluster split]. From then on, the tier's size depends mostly on
+  replicas. [predicted] The 2-CPU run at 8 clusters (§8.3) spent 1,840 `gcloud` slot-seconds,
+  about 230 per cluster for one audit round. With one round per hour, 2,500 clusters need about
+  2,500 × 230 / 3,600 ≈ 160 `gcloud` slots, which is about 27 replicas at `B = 6`. The
+  143-cluster split gives about 12 slots at 2,500 clusters, but only as a lower bound: that steady
+  state used the 2 s median as the mean, and the #4242 audits measured `gcloud` means of 4.7 to
+  17 s. From then on, the tier's size depends mostly on
   whether the change feeds in §6 take over the reconcile's cluster lists and `describe` calls and
   the collectors' `gcloud` reads.
 - A per-target-cluster request limit belongs at the k8s-api-proxy. The fleet-scale requirements
@@ -367,9 +382,11 @@ What this means for this design:
   which caps concurrency at a handful of commands; the budget doc measured about 116 MiB with the
   auth plugin. The k8s-api-proxy starts no process per call, so it also raises `kubectl` capacity,
   while it still runs as one pod.
-- #3760 also removes the shim's Python client from every `kubectl`, which is the caller-side cost
-  #4107 measured (#4027). For `gcloud` the broker's CPU binds first: about 0.45 commands per second
-  at 1 CPU (§8.3), well below the 1.5 per second caller ceiling.
+- #3760 also removes the shim's Python client from every `kubectl`. Before #4104 fixed #4027,
+  that client cost 0.8 to 1 s of shell CPU per command (§2.3); after the fix, §8.3 measured
+  about 0.24 s. For `gcloud` the broker's CPU binds first: 0.38 to 0.47 commands per second at
+  1 CPU (§8.3). The caller ceiling after the fix is not measured, because the `kubectl` load ran
+  only 1 at once.
 
 ### 3.7 Later: one scaled broker
 
@@ -384,9 +401,11 @@ drop the split and scale one broker, once both are gone:
   shallow clone, which the verbs refuse on purpose.
 - **The chat relays are made safe on N pods, or move out of the broker.**
 
-No issue tracks either step today. `CREDENTIAL_PROXY_CONTENT_WORKSPACE` already switches the
-workspace off (`credential_proxy.py:5405`), so a broker without it can be tested before any code
-is deleted.
+No issue tracks either step today. `CREDENTIAL_PROXY_CONTENT_WORKSPACE` switches the workspace
+off in the broker (`credential_proxy.py:5405`). But on an operator install the operator pins the
+flag to `1` and has no field to change it (`platformagent_manifests.go:4499-4540`). So a test of a
+broker without the workspace needs an operator change. While the flag is off, the fleet audit's
+remediation push and the other workspace callers above fail.
 
 ## 4. Priority admission
 
@@ -432,7 +451,12 @@ caller presents, and nothing the caller can set alone changes it.
   the limit then equals that request, so the budget admits 9, the slot cap holds it to 8, and
   `B = 6` on every cluster mode.
 - The memory budget applies to both classes as it does today.
-- The wait histogram and the refusal counter get a `class` label.
+- The reserve guarantees admission, not CPU time. CPU binds first (§8.3), so an interactive
+  command in a reserved slot still shares the replica's CPU with up to `B` background children.
+  So the broker runs the children of background commands at a lower CPU weight (a nice value),
+  and interactive children win the CPU under contention. A per-class child cgroup instead of nice
+  is open question 11.
+- The wait histogram, the refusal counter and the command duration histogram get a `class` label.
 
 ### 4.3 Across replicas
 
@@ -441,9 +465,10 @@ There is no shared queue. Each replica runs §4.2 on its own share of the traffi
 - The shim opens one connection per call, and kube-proxy balances per connection [measured, spike:
   69/51 over two pods]. So each replica gets about 1/N of each class.
 - New: the shim retries a `503 CREDENTIAL_PROXY_BUSY` once. The retry is a new connection, so it
-  usually reaches another replica. It does not retry a dropped connection
-  (`BrokerDisconnected`), because the command may have run. `CREDENTIAL_PROXY_BUSY` is raised
-  only at admission, before the command starts, so a retry never runs a command twice.
+  reaches another replica with probability (N−1)/N: half the time at 2 replicas. It does not
+  retry a dropped connection (`BrokerDisconnected`), because the command may have run.
+  `CREDENTIAL_PROXY_BUSY` is raised only at admission, before the command starts, so a retry
+  never runs a command twice.
 - The retry has costs. After a full 60 s wait it makes the worst case about 120 s, and when every
   replica is saturated it only adds load. §8 measures whether it helps; if not, it is dropped.
 - The session cap of 2 is per replica, so the tier admits `2 × N` session commands. They also
@@ -494,6 +519,9 @@ What a reader does:
   clusters is stale, the sweep reports "cache stale" instead.
 - The cache fills itself through the exec tier or its own feeds. Its live reads count as
   `background`.
+- Which one fills it decides the sizing (§8.4). Change feeds that do not use the exec tier (Cloud
+  Asset Inventory or Admin Activity) can fill clusters, node pools and versions. Workload metadata
+  filled through the exec tier at hourly freshness adds back close to one sweep round per hour.
 
 ## 7. Option 2: brokers per profile or per project
 
@@ -520,33 +548,35 @@ count, and changes the operator, the NetworkPolicy and the audit.
 ## 8. Measurement plan
 
 The #3935 runner is the tool. The tiger team owns it, so the plan is a new plan file,
-`bench/scale/broker.yaml`, run as part of #3753 Phase 2. This document owns what it measures. The
+`bench/scale/broker.yaml` on #4242, run as part of #3753 Phase 2. This document owns what it measures. The
 first run, on 2026-10-28, is in #4242: 32 runs at 2 and 8 clusters on a `spec.mode: next` install,
 with an agent image that has the #3933 fix (`f8fc7905`) and the broker at 1 CPU / 2 GiB, slot cap 8.
 
 ### 8.1 Metrics to add
 
-| Metric                                                                                                 | Source                                                                                                                               | Status                                                                                                                              |
-| ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
-| Slots in use (peak) and admitted                                                                       | `kubeagents_credential_proxy_slots_in_use` gauge [code], as Managed Prometheus stores it (30 s scrape); `/v1/exec/admission` (#4084) | Read by the runner (#4242). The 2026-10-28 cluster stored no Managed Prometheus series for the gauge, so those records have no peak |
-| Wait p50 and p95, refusals, **by class**                                                               | Wait histogram with a new `class` label                                                                                              | Needs §4                                                                                                                            |
-| Traffic mix: requests and slot-seconds by caller (sweep, reconcile, stall watch, interactive, session) | Audit lines with the class, and a caller name from the shim (caller-supplied, outside `principal`)                                   | New                                                                                                                                 |
-| CPU throttling                                                                                         | The proxy container's cgroup `cpu.stat`, before and after each run                                                                   | Measured (#4242)                                                                                                                    |
-| Per-replica balance                                                                                    | The same metrics per pod                                                                                                             | New in the runner                                                                                                                   |
-| Requests and slot-seconds by tool (`kubectl`, `gcloud`, other)                                         | The broker's command duration histogram, by its `tool` label                                                                         | Measured (#4242); splits the load §3.6 moves                                                                                        |
-| k8s-api-proxy CPU, memory and in-flight requests                                                       | Cloud Monitoring; its `in_flight_requests` gauge (#3760, #4128)                                                                      | New in the runner, with the proxy switched on                                                                                       |
+| Metric                                                                                                 | Source                                                                                                                                   | Status                                                                                                                              |
+| ------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Slots in use (peak) and admitted                                                                       | `kubeagents_credential_proxy_slots_in_use` gauge [code], as Managed Prometheus stores it (30 s scrape); `/v1/exec/admission` (#4084)     | Read by the runner (#4242). The 2026-10-28 cluster stored no Managed Prometheus series for the gauge, so those records have no peak |
+| Wait p50 and p95, refusals, **by class**                                                               | Wait histogram with a new `class` label                                                                                                  | Needs §4                                                                                                                            |
+| Command duration p50 and p95 **by class**                                                              | The broker's command duration histogram with a new `class` label; shows whether the nice value (§4.2) protects interactive run time      | Needs §4                                                                                                                            |
+| Requests and CPU by route: `/v1/gcp/`, the other non-exec routes, and exec                             | `kubeagents_credential_proxy_requests_total` by its `endpoint` label; exec CPU from the per-tool command time and §8.3's CPU per command | New; gives the stateful pod its sizing term (§8.4, open question 4)                                                                 |
+| Traffic mix: requests and slot-seconds by caller (sweep, reconcile, stall watch, interactive, session) | Audit lines with the class, and a caller name from the shim (caller-supplied, outside `principal`)                                       | New                                                                                                                                 |
+| CPU throttling                                                                                         | The proxy container's cgroup `cpu.stat`, before and after each run                                                                       | Measured (#4242)                                                                                                                    |
+| Per-replica balance                                                                                    | The same metrics per pod                                                                                                                 | New in the runner                                                                                                                   |
+| Requests and slot-seconds by tool (`kubectl`, `gcloud`, other)                                         | The broker's command duration histogram, by its `tool` label                                                                             | Measured (#4242); splits the load §3.6 moves                                                                                        |
+| k8s-api-proxy CPU, memory and in-flight requests                                                       | Cloud Monitoring; its `in_flight_requests` gauge (#3760, #4128)                                                                          | New in the runner, with the proxy switched on                                                                                       |
 
 ### 8.2 Points
 
-| Run set           | Points                                                                                                    | Why                                                                            | Status                                                                |
-| ----------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ | --------------------------------------------------------------------- |
-| Baseline, one pod | 2, 8, 16, 32 clusters, with a fleet audit that really runs                                                | Where waits and refusals start, and the sweep's share                          | 2 and 8 measured, 3 runs each (#4242); 16 and 32 not yet              |
-| Mixed concurrency | 8, 10, 12, 15 interactive questions during a sweep                                                        | Interactive waits behind background work, today and with §4                    | Measured at 8 clusters, 3 runs each, without a parallel sweep (#4242) |
-| Vertical control  | Broker CPU at 2 cores at 8 clusters (`bench/scale/broker-proxy-raised.yaml`); #4107 ran 4 CPU at 2 and 16 | CPU-bound or slot-bound                                                        | Measured, 1 run (#4242)                                               |
-| Autopilot         | One point at the 1 GiB clamp (budget admits 4)                                                            | The worst default                                                              | Not yet                                                               |
-| Mode              | One baseline point in `spec.mode: today`                                                                  | Phase 1 covered `next` only                                                    | Not yet                                                               |
-| Exec tier         | 1, 2 and 3 replicas at 16 and 32 clusters                                                                 | #4082 "Done when": the chosen shape at two or more sizes                       | Not yet; needs the tier                                               |
-| `kubectl` split   | The baseline points again with #4128's switch on                                                          | The broker sized without the `kubectl` share, and the k8s-api-proxy's own load | Not yet; needs #4128                                                  |
+| Run set           | Points                                                                                                             | Why                                                                                       | Status                                                                                                              |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Baseline, one pod | 2, 8, 16, 32 clusters, with a fleet audit that really runs                                                         | Where waits and refusals start, and the sweep's share                                     | 2 and 8 measured, 3 runs each (#4242); 16 and 32 not yet                                                            |
+| Mixed concurrency | 8, 10, 12, 15 interactive questions during a sweep; interactive command time under a background `gcloud` sweep     | Interactive waits and run time behind background work, today and with §4 (the nice value) | Questions measured at 8 clusters, 3 runs each, without a parallel sweep (#4242); command time under a sweep not yet |
+| Vertical control  | Broker CPU at 2 cores at 8 clusters (`bench/scale/broker-proxy-raised.yaml` on #4242); #4107 ran 4 CPU at 2 and 16 | CPU-bound or slot-bound                                                                   | Measured, 1 run (#4242)                                                                                             |
+| Autopilot         | One point at the 1 GiB clamp (budget admits 4)                                                                     | The worst default                                                                         | Not yet                                                                                                             |
+| Mode              | One baseline point in `spec.mode: today`                                                                           | Phase 1 covered `next` only                                                               | Not yet                                                                                                             |
+| Exec tier         | 1, 2 and 3 replicas at 16 and 32 clusters                                                                          | #4082 "Done when": the chosen shape at two or more sizes                                  | Not yet; needs the tier                                                                                             |
+| `kubectl` split   | The baseline points again with #4128's switch on                                                                   | The broker sized without the `kubectl` share, and the k8s-api-proxy's own load            | Not yet; needs #4128                                                                                                |
 
 Each point runs 3 times, except where the status says otherwise: the first run cut the `gcloud`
 load levels and the 2-CPU control to 1 run each, to fit its time limit.
@@ -557,18 +587,18 @@ The fleet audits ran: the image has the #3933 fix, so no audit cancelled. In two
 cannot write, because the experiment install has no GitOps repository. All numbers are [measured,
 #4242], with the broker at 1 CPU unless a line says 2 CPU.
 
-| Point                                 | Result                                                                                                                                                                                                                                                                                                                                    |
-| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Audits, 2 clusters (3 × 30 min)       | 158 to 218 commands. `gcloud`: 20 to 26% of the commands, 53 to 62% of the slot time. 0.2 to 0.5 slots in use on average. CPU throttled in 11 to 13% of periods. Wait p50 0.1 s, max 2.5 s. No refusals.                                                                                                                                  |
-| Audits, 8 clusters (3 × 30 min)       | Runs 1 and 2: 773 to 790 commands, 4.4 to 4.6 slots in use on average, mean command time 10.3 to 10.5 s, CPU throttled in 72 to 74% of periods, wait p50 5 s, max in the 60 s bucket. Run 3 was lighter (cause not confirmed): 511 commands, 1.9 slots, 6.7 s, 37% throttled, wait p50 0.1 s, max 30 s. No refusals. Memory peak 716 MiB. |
-| Audits, 8 clusters, **2 CPU** (1 run) | 893 commands. Mean command time 4.4 s. 2.2 slots in use. CPU peak 2.1 (at the new limit), mean 0.88 cores; throttled in 42% of periods. Wait max 30 s. Memory peak 680 MiB. One job was still running at the end of the window.                                                                                                           |
-| `gcloud` load, 1 / 4 / 8 / 16 at once | 0.4 / 0.47 / 0.43 / 0.35 commands per second; p50 2.5 / 8.5 / 18 / 45 s. From 4 at once, about 95% of CPU periods are throttled. At 16 at once the wait p50 is 30 s, so the 8 slots bind there. The 4, 8 and 16 levels ran once each; the 16 run overlapped 19 outside commands.                                                          |
-| `kubectl` load, 1 at once             | 1.5 commands per second, p50 0.6 s, as #4107 measured (1 clean run; 2 more overlapped other work).                                                                                                                                                                                                                                        |
-| Questions at once, 8 clusters         | 8 and 10: no refusals, answers in 3 to 10 minutes; most of these runs also met model-provider 429s. 12: 2 to 3 refused per run. 15: 5 refused per run (`429 Too many concurrent runs`). The broker stays almost idle.                                                                                                                     |
+| Point                                 | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Audits, 2 clusters (3 × 30 min)       | 158 to 218 commands. `gcloud`: 20 to 26% of the commands, 53 to 62% of the slot time. 0.2 to 0.5 slots in use on average. CPU throttled in 11 to 13% of periods. Wait p50 0.1 s, max 2.5 s. No refusals.                                                                                                                                                                                                                                                                                               |
+| Audits, 8 clusters (3 × 30 min)       | Runs 1 and 2: 773 to 790 commands, 4.4 to 4.6 slots in use on average, mean command time 10.3 to 10.5 s, CPU throttled in 72 to 74% of periods, wait p50 5 s, max in the 60 s bucket. `gcloud`: 199 and 200 commands (25 to 26%), 3,296 and 3,460 slot-seconds (40 to 43% of the slot time). Run 3 was lighter (cause not confirmed): 511 commands, 1.9 slots, 6.7 s, 37% throttled, wait p50 0.1 s, max 30 s; `gcloud` 77 commands (15%), 1,252 slot-seconds (37%). No refusals. Memory peak 716 MiB. |
+| Audits, 8 clusters, **2 CPU** (1 run) | 893 commands. Mean command time 4.4 s. 2.2 slots in use. `gcloud`: 315 commands (35%), 1,840 slot-seconds (47% of the slot time). CPU peak 2.1 (at the new limit), mean 0.88 cores; throttled in 42% of periods. Wait max 30 s. Memory peak 680 MiB. One job was still running at the end of the window.                                                                                                                                                                                               |
+| `gcloud` load, 1 / 4 / 8 / 16 at once | Levels 1 to 8: 0.38 / 0.47 / 0.43 commands per second; p50 2.5 / 8.5 / 18 s. From 4 at once, about 95% of CPU periods are throttled. The 4 and 8 levels ran once each. The 16 level (0.35 per second, p50 45 s, wait p50 30 s) comes from a run that the runner excluded, because 19 outside commands overlapped it, so it is not clean. It suggests that the 8 slots bind at 16.                                                                                                                      |
+| `kubectl` load, 1 at once             | 1.5 commands per second, bound by latency (p50 0.6 s), with the sandbox shell at about 0.36 cores (1 clean run; 2 more overlapped other work). Before #4104 fixed #4027, #4107 got 0.7 to 0.8 per second at 1 at once.                                                                                                                                                                                                                                                                                 |
+| Questions at once, 8 clusters         | 8 and 10: no refusals, answers in 3 to 10 minutes; most of these runs also met model-provider 429s. 12: 2 to 3 refused per run. 15: 5 refused per run (`429 Too many concurrent runs`). The broker stays almost idle.                                                                                                                                                                                                                                                                                  |
 
 What they mean for this design:
 
-- **One CPU is the first limit, not the slots.** `gcloud` throughput stays flat at about 0.45 per second from 4 at once. This supports the CPU raise as step 0 (§9) and the CPU term in §8.4.
+- **One CPU is the first limit, not the slots.** `gcloud` throughput stays flat at 0.38 to 0.47 per second from 1 to 8 at once, while the p50 grows from 2.5 to 18 s. This supports the CPU raise as step 0 (§9) and the CPU term in §8.4.
 - **A 2-CPU limit more than halves the command time** at 8 clusters. The broker reached that limit at peak (mean 0.88 cores, 42% of periods throttled), so at peak it needs more than 2 cores at 8 clusters.
 - **`gcloud` is the load that stays on the exec tier** (§3.6). Per command it costs about 5 times the broker CPU of `kubectl` (about 1.6 to 2.0 against about 0.34 core-seconds).
 - **Interactive bursts meet the agent's 10 run slots first** (#3724), as §2.3 said.
@@ -594,31 +624,53 @@ minute at about 3 s each with the broker at 4 CPU (about 1.8 slots in use), agai
 at 17 s with 1 CPU [measured, #4107]. Slot-minutes per cluster therefore depend on CPU. So the
 CPU-limit raise (#4106) is step 0 (§9), and the slot terms are taken after it.
 
-The worked example takes an exec replica with a 2-CPU limit (§3.3) and a 1,000-cluster audit round in
-one hour. Its base is the measured 8-cluster run at 2 CPU (§8.3) [measured, #4242]: about 8.2
-slot-minutes and about 200 broker core-seconds per cluster for one audit round. #4107's two
-16-cluster points are kept for comparison.
+The worked example takes an exec replica with a 2-CPU request and limit (§3.3) and a 1,000-cluster
+audit round in one hour. Its base is the measured 8-cluster run at 2 CPU (§8.3) [measured, #4242]:
+about 8.2 slot-minutes and about 200 broker core-seconds per cluster for one audit round. #4107's
+two 16-cluster points are kept for comparison [measured, #4107]. Every row's CPU term uses one
+basis: the mean core-seconds per cluster, which is the broker container's CPU seconds in the
+30-minute run divided by its clusters.
 
-| Base                          | Slot-minutes per cluster | Background slots | Slot term (`B = 6`) | CPU term (2 CPU per replica)                           | Replicas     |
-| ----------------------------- | ------------------------ | ---------------- | ------------------- | ------------------------------------------------------ | ------------ |
-| **8 clusters, 2 CPU (#4242)** | about 8.2                | about 137        | 23                  | about 200 core-seconds per cluster: about 56 cores, 28 | **about 28** |
-| 16 clusters, 4 CPU (#4107)    | about 3.4                | about 57         | 10                  | 2.5 cores for 1.8 slots in use: about 79 cores, 40     | about 40     |
-| 16 clusters, 1 CPU (#4107)    | about 12                 | about 202        | 34                  | 1 core for 6.4 slots in use: about 32 cores, 16        | about 34     |
+| Base (1,000 clusters)         | Slot-minutes per cluster | Background slots | Slot term (`B = 6`) | CPU term (mean core-seconds per cluster; 2 CPU per replica)                                                             | Replicas     |
+| ----------------------------- | ------------------------ | ---------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------- | ------------ |
+| **8 clusters, 2 CPU (#4242)** | about 8.2                | about 136        | 23                  | about 200 core-seconds per cluster: about 55 cores, 28. Peak basis: 2.1 cores per 2.2 slots in use, about 132 cores, 66 | **about 28** |
+| 16 clusters, 4 CPU (#4107)    | about 3.4                | about 57         | 10                  | about 101 core-seconds per cluster: about 28 cores, 15                                                                  | about 15     |
+| 16 clusters, 1 CPU (#4107)    | about 12                 | about 202        | 34                  | about 106 core-seconds per cluster (at its 1-CPU limit): about 29 cores, 15                                             | about 34     |
 
-[predicted] So about 28 replicas without a cache, and about 6 if the cache takes 80% of the sweep's
-reads (an assumption). These are floors, for three reasons:
+The headline uses the mean basis. The two raised-limit runs disagree by about 2× per cluster:
+about 200 core-seconds at 8 clusters and 2 CPU against about 101 at 16 clusters and 4 CPU. So one
+30-minute window is not a stable per-cluster cost.
+
+[predicted] The same formula and the #4242 base at the other two sizes, linear in clusters, with
+one round per hour:
+
+| Clusters | Background slots | Slot term (`B = 6`) | CPU cores (mean basis) | CPU term | Replicas without a cache | Replicas with the cache, if feeds supply the fill |
+| -------- | ---------------- | ------------------- | ---------------------- | -------- | ------------------------ | ------------------------------------------------- |
+| 250      | about 34         | 6                   | about 14               | 7        | about 7                  | about 2                                           |
+| 1,000    | about 136        | 23                  | about 55               | 28       | about 28                 | about 6                                           |
+| 2,500    | about 340        | 57                  | about 139              | 70       | about 70                 | about 14                                          |
+
+[predicted] So about 28 replicas at 1,000 clusters without a cache. With the cache it is about 6
+if feeds supply the fill, up to about the uncached figure if the exec tier fills workload
+metadata. The 6 assumes that the cache takes 80% of the sweep's reads (an assumption), and that
+change feeds that do not use the exec tier (Cloud Asset Inventory or Admin Activity, for
+clusters, node pools and versions) fill it. Workload metadata filled through the exec tier at
+hourly freshness (§6) adds back close to one round per hour. These are floors, for three reasons:
 
 - one audit job was still running at the end of the 30-minute window, so 8.2 slot-minutes and 200
   core-seconds are a lower bound for a full round;
 - the CPU term plans each replica at its full 2 cores on average, while the measured broker was
-  throttled in 42% of its periods at 44% average use, so the peak needs more;
+  throttled in 42% of its periods at 44% average use, so the peak needs more (about 66 replicas
+  on the peak basis);
 - these are averages, and the peak is higher.
 
-It is also a straight line from 8 clusters to 1,000, from one run whose broker reached its 2-CPU
-limit at peak, so it is an order of magnitude, not a size. The CPU term sets the
-count, as before. The core-seconds come from the whole broker, which also runs the Cloud API relay
-and the other routes, so they overstate exec's share. The 16- and 32-cluster points and the exec
-tier runs (§8.2) replace it. This is why the design needs both the exec tier and the cache contract.
+It is also a straight line from 8 clusters to 1,000 and 2,500, from one run whose broker reached
+its 2-CPU limit at peak, so it is an order of magnitude, not a size. The CPU term sets the count,
+as before. The core-seconds come from the whole broker, which also runs the Cloud API relay and
+the other routes, so they overstate exec's share. The stateful pod has no sizing term yet; the
+per-route request and CPU measure in §8.1 gives it. The 16- and 32-cluster points and the exec
+tier runs (§8.2) replace these numbers. This is why the design needs both the exec tier and the
+cache contract.
 
 ## 9. Rollout
 
@@ -629,13 +681,19 @@ tier runs (§8.2) replace it. This is why the design needs both the exec tier an
      nothing there: the operator raises the broker's CPU request with its limit, and the footprint
      and the quota preflight count that.
      Because it is one operator value, it is the fastest single relief for current installs.
-   - **Graceful shutdown and a PodDisruptionBudget.** Today `serve()` runs `serve_forever()` with
-     no SIGTERM handler, and the Deployment sets no `terminationGracePeriodSeconds` and no
-     `preStop`, so a pod stop drops the commands in flight. The broker gets a SIGTERM handler that
-     stops admitting (new requests get the 503 that §4.3's retry handles) and drains the commands
-     in flight; a `terminationGracePeriodSeconds` longer than the longest command it admits; and a
-     PodDisruptionBudget with `maxUnavailable: 1`. The stateful pod keeps `Recreate`, but drains
-     its relays on SIGTERM, so events are not lost.
+   - **Graceful shutdown.** Today `serve()` runs `serve_forever()` with no SIGTERM handler, and
+     the Deployment sets no `terminationGracePeriodSeconds` and no `preStop`, so a pod stop drops
+     the commands in flight. The broker gets a SIGTERM handler that stops admitting (new requests
+     get the 503 that §4.3's retry handles) and drains the commands in flight. The drain depends
+     on the Deployment:
+     - On the single pod, which keeps `Recreate`, Kubernetes ends the old pod before it starts
+       the new one, so every route is down while the pod drains. There the drain is short and
+       bounded: it finishes commands for up to 30 s, then ends the rest. The pod drains its relays
+       in the same window, so events are not lost.
+     - On the exec tier, `RollingUpdate` keeps another replica serving, so the drain is long: a
+       `terminationGracePeriodSeconds` longer than the longest command it admits. A
+       PodDisruptionBudget with `maxUnavailable: 1` applies only when replicas are 2 or more; at 1
+       replica it protects nothing.
 1. **Off by default.** New CR field `spec.deployment.credentialProxy.exec.replicas`. The value 0
    (the default) means no exec tier and no `CREDENTIAL_PROXY_EXEC_URL`, so every install behaves
    as today.
@@ -649,9 +707,10 @@ tier runs (§8.2) replace it. This is why the design needs both the exec tier an
 5. **Then** mark `credential-proxy-single-pod.md` superseded. It already points here.
 
 The cache contract (§6) is not needed to ship the tier, and its work can run in parallel with steps
-1 to 3. The footprint in §8.4 assumes it, though: about 6 replicas with the cache against about 28
-without, for a 1,000-cluster round in one hour [predicted, and floors: §8.4]. So for large fleets
-the cache must land before default on (step 4).
+1 to 3. The footprint in §8.4 assumes it, though. For a 1,000-cluster round in one hour it is about
+28 replicas without the cache. With the cache it is about 6 if feeds supply the fill, up to about
+the uncached figure if the exec tier fills workload metadata [predicted, and floors: §8.4]. So for
+large fleets the cache, and the feeds that fill it, must land before default on (step 4).
 
 Do not add new work to the stateful pod beyond phase 0. §3.7 can remove most of its routes later:
 the content workspace, and the chat relays if they become safe on N pods.
@@ -669,9 +728,9 @@ To revert, set replicas to 0. The shim falls back to `CREDENTIAL_PROXY_URL`.
   replica can fill it while another is idle. The retry in §4.3 and the per-replica metrics in §8.1
   are the checks.
 - **Caches filled N times.** More cold `get-credentials` (§3.4) and more TokenReviews.
-- **Footprint.** Each replica adds 1 CPU and 2 GiB to the requests on Standard, and 2 CPU and
-  2 GiB on Autopilot, where the operator sets the request to the intended limit (§3.3). On small installs, 0 replicas
-  stays the default until a fleet needs it.
+- **Footprint.** Each replica adds 2 CPU and 2 GiB to the requests on every cluster mode; the
+  request equals the limit (§3.3). On small installs, 0 replicas stays the default until a
+  fleet needs it.
 - **A wrong class.** Once the turn token exists, interactive work without one runs as background
   and waits longer.
   A copied turn token can use at most the interactive cap. Neither gains access.
@@ -695,9 +754,12 @@ To revert, set replicas to 0. The shim falls back to `CREDENTIAL_PROXY_URL`.
    (§8.1) decides them.
 3. Do the dispatcher's profile workers reach the broker through the sandbox shim as the shell role?
    This was not checked.
-4. Should the Cloud API relay move to the exec tier? It takes no slot today, and the measurements
-   show whether it matters.
-5. Kubeconfig without `gcloud` (§3.4): worth it at 2,500 clusters?
+4. Should the Cloud API relay move to the exec tier? It takes no slot today. The per-route request
+   and CPU measure (§8.1) answers it: it gives the stateful pod's CPU at each fleet size (§8.4),
+   and so the size at which that pod becomes the bottleneck.
+5. Kubeconfig without `gcloud` (§3.4): to decide before default on (§9 step 4). At about 28
+   replicas and 1,000 clusters, the cold fill after each rollout runs up to 56,000 `gcloud`
+   children.
 6. Who owns `bench/scale/broker.yaml`: the tiger team, as part of Phase 2, with this doc as its
    requirements? The first run (#4242) used it; to agree with them before the 16- and 32-cluster runs.
 7. For dshnayder, on #3760 and epic #4128 (§3.6):
@@ -709,12 +771,14 @@ To revert, set replicas to 0. The shim falls back to `CREDENTIAL_PROXY_URL`.
      concurrent requests for the buffered `Secret` responses?
    - Did the concurrency and memory benchmark in its design ("16 parallel multi-cluster listing
      passes") run, and with what numbers?
-8. #4027 caps the command path at about 1.5 commands per second in the sandbox. Until it is fixed,
-   a measurement can show the caller's limit and not the broker's. §8 needs it fixed, or its
-   effect recorded. With #4128's switch on, this holds for `gcloud` only (§3.6).
+8. Closed: #4027 capped the command path at about 1.5 commands per second in the sandbox. #4104
+   (merge `37a9829b`) fixed it on `main`, and the #4242 image `f8fc7905` has the fix. The caller
+   ceiling after the fix is not measured (§3.6).
 9. How does the gateway mint the turn token (§4.1), and can #3889's per-task credential be it for
    chat turns as well as for profile workers?
 10. After #4128's default-on step, should `/v1/watcher/*` and `/v1/k8s/*` move to the
     k8s-api-proxy? They do the same job (Kubernetes API reads under kube-agents' identity) and keep
     no state that breaks on more than one pod (§3.1), so there would be one Kubernetes path instead
     of two.
+11. Should background children run in a per-class child cgroup with a lower CPU weight, instead
+    of at a nice value (§4.2)?
