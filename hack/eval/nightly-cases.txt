@@ -1087,6 +1087,13 @@
 # spends up to 150 trivial model calls by design, twice.
 ./tasks/platform-worker-turn-budget/task.yaml
 
+# A fleet question on an install whose spec.scope.exclude.clusters names
+# seeded-b: the answer names seeded-a and seeded-c and does not report on
+# seeded-b (#3081, #3100). The runner excludes slot b for this case's
+# repetitions alone, after every other unit, and restores the scope after them
+# (scope_exclude, #3213); deployer: noop, read-only.
+./tasks/scope-excluded-cluster-not-listed/task.yaml
+
 # A gcloud write the command policy refuses for a flag it cannot read: the
 # report claims no success and no delegated worker re-runs the write without
 # the flag after it (#2979, #3260). deployer: noop, transcript-only.
