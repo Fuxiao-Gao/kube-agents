@@ -76,10 +76,12 @@ from typing import Any, Callable, Mapping
 from providers import (
     CliTransport,
     HttpTransport,
+    BrokeredCredential,
     Forge,
     ForgeUnsupported,
     IdentityUnknown,
     MAX_PAGE_SIZE,
+    NoCredential,
     Registry,
     Transport,
     pinned_base,
@@ -91,6 +93,50 @@ from providers import (
 )
 from providers.credentials import CREDENTIAL_HELPER_KEY
 from workspace_paths import WorkspaceError, validate_path
+
+#: The key in a forge's credentials Secret that holds its read-only token.
+FORGE_READ_TOKEN_KEY = "read-token"
+
+
+def holds_stored_token(forge: Forge) -> bool:
+    """Whether ``forge`` presents a stored token rather than a minted one.
+
+    A brokered credential is minted per repository and installed for git by
+    the CLI, so the broker's own clones of a managed repository ride it
+    ambiently. A forge whose credential is neither brokered nor absent has
+    nothing ambient behind it, and its clones carry the credential themselves.
+    """
+    credential = getattr(forge, "credential", None)
+    return credential is not None and not isinstance(credential, (BrokeredCredential, NoCredential))
+
+
+def warn_without_read_token(forge: Forge, credential: Any, where: str) -> None:
+    """Say why a context repository's clone presents no credential.
+
+    Only for a forge whose stored token can write: it offers a read-only
+    token only through the `read-token` key, and without one the
+    clone reads a public repository and a private one refuses it. The log line
+    is the operator's only sign of which half is wrong.
+    """
+    if not isinstance(credential, NoCredential) or not holds_stored_token(forge):
+        return
+    if not getattr(forge, "read_token_path", ""):
+        # The forges file came from an operator older than the read token, so
+        # no change to the Secret can help until the operator is upgraded.
+        LOGGER.warning(
+            "%s role=context: the broker's config names no readTokenPath for the "
+            "%s forge (an operator older than the read-only token rendered it), so "
+            "the clone presents none; a private repository will refuse it",
+            where, forge.name,
+        )
+        return
+    LOGGER.warning(
+        "%s role=context: the %s forge has no usable read-only token (key %s in "
+        "its credentials Secret: missing, unreadable, empty, or not one line of "
+        "printable ASCII) and its stored token can write, so the clone presents "
+        "none; a private repository will refuse it",
+        where, forge.name, FORGE_READ_TOKEN_KEY,
+    )
 
 LOGGER = logging.getLogger("credential-proxy.vcs")
 
@@ -1069,6 +1115,7 @@ class VcsBroker:
             return role, bound.git
         if role == ROLE_CONTEXT:
             credential = forge.read_credential(repo)
+            warn_without_read_token(forge, credential, f"snapshot credential repo={repo}")
             credential.ensure(repo)
             config = tuple(credential.git_config(repo))
             if HELPER_CLEARED not in config:

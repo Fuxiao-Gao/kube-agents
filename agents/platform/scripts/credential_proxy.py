@@ -91,7 +91,7 @@ from credential_proxy_client import (  # noqa: F401  (re-export)
 LOGGER = logging.getLogger("credential-proxy")
 # The optional key, in the Secret a forge's credentialsRef names, that holds
 # its read-only token. Named in the log when a context clone presents none.
-FORGE_READ_TOKEN_KEY = "read-token"
+FORGE_READ_TOKEN_KEY = vcs_broker.FORGE_READ_TOKEN_KEY
 SLACK_EVENT_QUEUE_MAXSIZE = 1000
 SLACK_ERROR_DIAGNOSTIC_FIELDS = ("ok", "error", "needed", "provided")
 
@@ -1662,42 +1662,13 @@ def read_credential_for(registry: providers.Registry, repository: str) -> provid
     # credential, which reads a public repository and refuses a private one
     # at the clone.
     credential = forge.read_credential(repo)
-    if isinstance(credential, providers.NoCredential) and _holds_stored_token(forge):
-        if not getattr(forge, "read_token_path", ""):
-            # The forge was given no read-token path: the forges file came
-            # from an operator older than the read token, so no change to the
-            # Secret can help until the operator is upgraded.
-            LOGGER.warning(
-                "content workspace open repo=%s role=context: the broker's "
-                "config names no readTokenPath for the %s forge (an operator "
-                "older than the read-only token rendered it), so the clone "
-                "presents none; a private repository will refuse it",
-                repository, forge.name,
-            )
-            return credential
-        LOGGER.warning(
-            "content workspace open repo=%s role=context: the %s forge has no "
-            "usable read-only token (key %s in its credentials Secret: missing, "
-            "unreadable, empty, or not one line of printable ASCII) and its stored "
-            "token can write, so the clone presents none; a private repository "
-            "will refuse it",
-            repository, forge.name, FORGE_READ_TOKEN_KEY,
-        )
+    vcs_broker.warn_without_read_token(forge, credential, f"content workspace open repo={repository}")
     return credential
 
 
 def _holds_stored_token(forge: providers.Forge) -> bool:
-    """Whether ``forge`` presents a stored token rather than a minted one.
-
-    GitHub's is brokered: minted per repository, and installed for git by the
-    CLI, so the broker's own clones of a managed repository ride it ambiently.
-    A forge whose credential is neither brokered nor absent has nothing ambient
-    behind it, and its clones carry the credential themselves.
-    """
-    credential = getattr(forge, "credential", None)
-    return credential is not None and not isinstance(
-        credential, (providers.BrokeredCredential, providers.NoCredential)
-    )
+    """Whether ``forge`` presents a stored token rather than a minted one."""
+    return vcs_broker.holds_stored_token(forge)
 
 
 #: The forge a bare `owner/name` means to the content workspace. A
