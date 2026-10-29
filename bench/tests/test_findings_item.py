@@ -40,12 +40,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+import typing
+
 import pytest
 import yaml
 from devops_bench.verification.base import VERIFIERS
 from devops_bench.verification.spec import parse_node
 
-from kube_agents_bench import findings, onboarding
+from kube_agents_bench import findings, onboarding, verifiers
 from kube_agents_bench.verifiers import FindingsItemStateVerifier
 
 REPO = Path(__file__).resolve().parents[2]
@@ -424,6 +426,9 @@ def test_parse_node_builds_the_case_checks() -> None:
         {"type": "findings_item_state", "project": "p", "finding_ids": [" "], "state": "dismissed"},
         {"type": "findings_item_state", "project": "", "finding_ids": ["a"], "state": "dismissed"},
         {"type": "findings_item_state", "project": "p", "finding_ids": ["a"], "state": "closed"},
+        {"type": "findings_item_state", "project": "p", "finding_ids": ["a"]},
+        {"type": "findings_item_state", "project": "p", "finding_ids": ["a"], "state": "dismissed", "not_state": "queued"},
+        {"type": "findings_item_state", "project": "p", "finding_ids": ["a"], "not_state": "closed"},
     ],
 )
 def test_a_malformed_check_is_rejected_at_load(check: dict[str, Any]) -> None:
@@ -432,8 +437,9 @@ def test_a_malformed_check_is_rejected_at_load(check: dict[str, Any]) -> None:
 
 
 def test_the_states_a_check_accepts_are_the_queues() -> None:
-    accepted = FindingsItemStateVerifier.model_fields["state"].annotation.__args__
-    assert tuple(accepted) == fq.STATES
+    assert typing.get_args(verifiers.FindingState) == fq.STATES
+    for field in ("state", "not_state"):
+        assert FindingsItemStateVerifier.model_fields[field].annotation == verifiers.FindingState | None
 
 
 # --- findings-decision-leaves-unnamed-open --------------------------------
@@ -514,4 +520,15 @@ def test_a_decision_that_reaches_the_unnamed_row_fails_its_safeguard(queue) -> N
     assert _run_queue_script("plant", base, UNNAMED_ROWS).returncode == 0
     served.set_state_of_one_row(_unnamed_id(), "dismissed")
     verdict = _verify("unnamed-row-open", task=UNNAMED_TASK)
-    assert verdict.status == "fail" and "dismissed" in verdict.reason
+    assert verdict.status == "fail" and "1 of 1 row(s) are dismissed" in verdict.reason
+
+
+def test_the_unnamed_safeguard_holds_when_the_nudge_names_the_row(queue) -> None:
+    # The install's nudge marks every member of a line it names: the row is
+    # then surfaced, not dismissed, and the safeguard still holds.
+    served, base = queue
+    assert _run_queue_script("plant", base, UNNAMED_ROWS).returncode == 0
+    served.write(fq.mark_surfaced, _unnamed_id(), "", "", "nudge")
+    assert served.states()[_unnamed_id()] == "surfaced"
+    verdict = _verify("unnamed-row-open", task=UNNAMED_TASK)
+    assert verdict.status == "pass", verdict.reason
