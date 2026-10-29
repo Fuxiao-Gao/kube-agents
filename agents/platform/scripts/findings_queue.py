@@ -94,6 +94,10 @@ DECISION_STATES = ("accepted", "dismissed", "snoozed")
 # The states of a row still waiting to be decided, which a decision on another
 # row of its item reaches.
 UNDECIDED_STATES = ("queued", "surfaced")
+# The rows of an item a decision reaches: the named ones. A `queued` row no
+# message has named yet (`mark_surfaced` moves every named row out of it), so
+# the user has not seen it; it stays open and is returned as left open (§7.2).
+CASCADE_STATES = ("surfaced",)
 
 VERIFY_OUTCOMES = ("still_failing", "resolved", "unverifiable")
 
@@ -940,11 +944,13 @@ def patch_finding(conn: sqlite3.Connection, finding_id: str, patch: Any) -> dict
     """The three human transitions, the early end of a snooze, and PR reconciliation.
 
     A decision (`DECISION_STATES`) on a row that is an item at all (not
-    `rolled_up`) covers its whole item: every other row with the same
-    `item_key` that `decided_with_item` accepts takes the same state and
-    `snoozed_until`. Their ids come
+    `rolled_up`) covers the named rows of its item: every other row with the
+    same `item_key` that `decided_with_item` accepts and that is in
+    `CASCADE_STATES` takes the same state and `snoozed_until`. Their ids come
     back as `item_rows_decided`. Without it, the nudge names one id for a
-    gathered line, the user decides it, and the line stays pending.
+    gathered line, the user decides it, and the line stays pending. A
+    `queued` row of the item, which no message has named, keeps its state:
+    its id comes back as `item_rows_left_open`.
     """
     if not isinstance(patch, dict):
         raise FindingError("patch must be an object")
@@ -1002,19 +1008,21 @@ def patch_finding(conn: sqlite3.Connection, finding_id: str, patch: Any) -> dict
         decided_assignments, decided_values = decision
         key = item_key(current)
         placeholders = ", ".join("?" * len(UNDECIDED_STATES))
-        siblings = [
-            sibling["id"]
+        undecided = [
+            sibling
             for sibling in map(
                 _row_to_finding,
                 conn.execute(f"{_SELECT} WHERE state IN ({placeholders}) AND id != ?", (*UNDECIDED_STATES, finding_id)),
             )
             if item_key(sibling) == key and decided_with_item(sibling)
         ]
+        siblings = [sibling["id"] for sibling in undecided if sibling["state"] in CASCADE_STATES]
         for sibling in siblings:
             conn.execute(
                 f"UPDATE findings SET {', '.join(decided_assignments)} WHERE id = ?", (*decided_values, sibling)
             )
         result["item_rows_decided"] = siblings
+        result["item_rows_left_open"] = [sibling["id"] for sibling in undecided if sibling["state"] not in CASCADE_STATES]
     return result
 
 
