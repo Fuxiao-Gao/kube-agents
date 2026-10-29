@@ -25,9 +25,11 @@ cut short, and a symbolic link that would point out of the tree comes back in
 `skipped` with the reason. A tool that quietly returns nine tenths of a
 repository is worse than one that fails, because the analysis reads as complete.
 
-On an install with no broker, or a broker older than the snapshot verb, `clone`
-falls back to a leased checkout on the shared volume — the arrangement that
-predates this script — and reports `"mode": "directory"`.
+On an install with no broker, `clone` falls back to a leased checkout on the
+shared volume — the arrangement that predates this script — and reports
+`"mode": "directory"`. A broker older than the snapshot verb is an error, not a
+fallback: the sandbox's `git` has no transport, so that checkout cannot work
+there, and the broker's answer says which image to roll forward.
 """
 
 from __future__ import annotations
@@ -96,6 +98,30 @@ def prepare_destination(into: Path, force: bool) -> Path:
     return into
 
 
+def copy_over(staging: Path, into: Path) -> None:
+    """Copy a checked snapshot over `into`; an entry already there gives way.
+
+    `--force` adds a second `--prefix` to a tree, and the two can overlap.
+    `copytree` cannot replace a symbolic link that is already there, and it
+    writes a file or a directory through one. So each name the snapshot holds
+    is removed from `into` first, unless both are directories.
+    """
+    for root, dirs, files in os.walk(staging):
+        for name in dirs + files:
+            new = Path(root) / name
+            old = into / new.relative_to(staging)
+            old_is_dir = old.is_dir() and not old.is_symlink()
+            if not old_is_dir and not old.is_symlink() and not old.exists():
+                continue
+            if old_is_dir and new.is_dir() and not new.is_symlink():
+                continue
+            if old_is_dir:
+                shutil.rmtree(old)
+            else:
+                old.unlink()
+    shutil.copytree(staging, into, symlinks=True, dirs_exist_ok=True)
+
+
 def clone_content(args) -> int:
     """Take one snapshot into a fresh directory, check it, then copy it into place.
 
@@ -120,9 +146,10 @@ def clone_content(args) -> int:
             # as a listing of the prefix would have been. The refusal carries
             # the revision the broker read, so the caller still has the commit.
             print(json.dumps({
-                "mode": "content", "repo": args.repo, "base": args.ref, "sha": exc.revision or "",
-                "into": str(into), "written": 0, "bytes": 0, "skipped": [],
-                "stopped": None, "complete": True, "missing": args.prefix,
+                "mode": "content", "forge": None, "repo": args.repo, "role": None,
+                "base": args.ref, "sha": exc.revision or "", "into": str(into),
+                "written": 0, "bytes": 0, "skipped": [], "stopped": None,
+                "complete": True, "history": "none", "missing": args.prefix,
             }))
             return 0
         if copy["files"] > args.max_files:
@@ -131,7 +158,7 @@ def clone_content(args) -> int:
                 f"{args.max_files}. Nothing was written. Name a --prefix to "
                 "take part of the tree."
             )
-        shutil.copytree(staging, into, symlinks=True, dirs_exist_ok=True)
+        copy_over(staging, into)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     print(json.dumps({
@@ -194,12 +221,7 @@ def clone_directory(args) -> int:
 def handle_clone(args) -> int:
     if not os.environ.get(vcs_client.BROKER_ENDPOINT_VAR, "").strip():
         return clone_directory(args)
-    try:
-        return clone_content(args)
-    except vcs_client.VcsError as exc:
-        if exc.code != vcs_client.BROKER_ROUTE_UNSUPPORTED:
-            raise
-        return clone_directory(args)
+    return clone_content(args)
 
 
 def _runner(cmd: list, *, cwd=None, check: bool = True):
@@ -254,6 +276,11 @@ def main() -> int:
         if exc.code == vcs_client.SNAPSHOT_TOO_LARGE:
             answer["hint"] = "Name a --prefix to take part of the tree."
         print(json.dumps(answer), file=sys.stderr)
+        return 1
+    except OSError as exc:
+        # The copy into `--into` failed part way: a name taken by something
+        # the snapshot cannot replace, or a full disk.
+        print(json.dumps({"error": f"the copy into the destination failed: {exc}"}), file=sys.stderr)
         return 1
 
 

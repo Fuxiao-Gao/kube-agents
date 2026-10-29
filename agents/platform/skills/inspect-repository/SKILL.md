@@ -64,7 +64,8 @@ copies; take the parts again.
   not exist under another name.
 - **Read `complete` and `skipped` before you conclude anything.** `skipped`
   lists symbolic links that were not written, each with the reason; the file
-  the link names is still there under its own path. A copy of one `--prefix`
+  the link names is not copied. If it is in the repository, take it with its own
+  `--prefix`. A copy of one `--prefix`
   is a copy of part of a repository: "the repository does not contain X" is not
   a claim it supports.
 - **Do not run `git` against what lands.** There is no repository there, on
@@ -85,6 +86,6 @@ copies; take the parts again.
 | `--depth`                   | Accepted and not needed: a snapshot is always one revision        |
 | `--lease`                   | Directory mode only: the lease the leased checkout is taken under |
 
-On an install with no broker, or a broker older than the snapshot verb, `clone`
+On an install with no broker, `clone`
 reports `"mode": "directory"` and hands back a leased checkout on the shared
 volume. Read the files in that checkout directly and do not commit in it.

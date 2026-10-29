@@ -2840,8 +2840,9 @@ no way to know that reading somebody else's code is still possible. Its `clone` 
 one revision through the broker's stateless `snapshot` verb (`/v1/vcs/snapshot`) and unpacks it
 into a scratch directory; what lands is source with no repository around it, which is the same
 property the write path has for the same reason. A repository over the snapshot ceiling is
-refused whole, and `--prefix` takes part of it. With no broker, or a broker older than the verb,
-`clone` falls back to the leased checkout and says `"mode": "directory"`.
+refused whole, and `--prefix` takes part of it. With no broker, `clone` falls back to
+the leased checkout and says `"mode": "directory"`. A broker older than the verb is an error that
+names the image to roll forward, because the sandbox's `git` has no transport for that checkout.
 
 What content-passing does not remove is the volume itself. The clone path still needs it, so
 the mount stays until the last skill has migrated and directory mode is deleted; the

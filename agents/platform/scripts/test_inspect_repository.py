@@ -176,6 +176,34 @@ class TestClone(InspectRepositoryTestCase):
             ["README.md", "cmd/main.go", "cmd/serve.go"],
         )
 
+    def test_force_replaces_a_symbolic_link_that_is_already_there(self):
+        """The fleet audit takes `.kube-agents`, then the whole tree, into one directory."""
+        (self.seed / ".kube-agents").mkdir()
+        (self.seed / ".kube-agents" / "real.yaml").write_text("intent: one\n")
+        os.symlink("real.yaml", self.seed / ".kube-agents" / "intent.yaml")
+        self._git(self.seed, "add", "-A")
+        self._git(self.seed, "commit", "--quiet", "-m", "intent")
+        self.revision = self._git(self.seed, "rev-parse", "HEAD").stdout.strip()
+        into = self.tmp / "copy"
+        self.run_command(["clone", "--repo", "acme/public", "--into", str(into), "--prefix", ".kube-agents"])
+        result = self.run_command(["clone", "--repo", "acme/public", "--into", str(into), "--force"])
+        self.assertEqual(result["sha"], self.revision)
+        link = into / ".kube-agents" / "intent.yaml"
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.readlink(link), "real.yaml")
+        self.assertEqual((into / "cmd" / "main.go").read_text(), "func main() { serve() }\n")
+
+    def test_force_does_not_write_through_a_link_in_the_destination(self):
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        into = self.tmp / "copy"
+        into.mkdir()
+        os.symlink(str(outside), into / "cmd")
+        self.run_command(["clone", "--repo", "acme/public", "--into", str(into), "--force"])
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertFalse((into / "cmd").is_symlink())
+        self.assertTrue((into / "cmd" / "main.go").is_file())
+
     def test_a_non_empty_destination_is_refused_without_force(self):
         into = self.tmp / "copy"
         into.mkdir()
@@ -262,7 +290,8 @@ class TestDirectoryFallback(InspectRepositoryTestCase):
         self.assertTrue(result["depthIgnored"])
         self.assertEqual(self.calls, [])
 
-    def test_a_broker_older_than_the_snapshot_verb_falls_back_too(self):
+    def test_a_broker_older_than_the_snapshot_verb_is_an_error_not_a_fallback(self):
+        """The sandbox's git has no transport, so the leased checkout cannot work there."""
         cloned = {}
 
         def old_broker(verb, payload):
@@ -270,12 +299,14 @@ class TestDirectoryFallback(InspectRepositoryTestCase):
                 "this broker does not serve `snapshot`", code=vcs_client.BROKER_ROUTE_UNSUPPORTED
             )
 
-        with patch.object(vcs_client, "call", old_broker), self.ensure(cloned):
-            result = self.run_command(
+        with patch.object(vcs_client, "call", old_broker), self.ensure(cloned), self.assertRaises(
+            vcs_client.VcsError
+        ) as caught:
+            inspect_repository.dispatch(
                 ["clone", "--repo", "acme/public", "--into", str(self.tmp / "copy"), "--lease", "l1"]
             )
-        self.assertEqual(result["mode"], "directory")
-        self.assertEqual(cloned["repo"], "acme/public")
+        self.assertEqual(caught.exception.code, vcs_client.BROKER_ROUTE_UNSUPPORTED)
+        self.assertEqual(cloned, {})
 
     def test_another_refusal_does_not_fall_back(self):
         def refusing(verb, payload):

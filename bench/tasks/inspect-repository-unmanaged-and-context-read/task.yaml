@@ -1,5 +1,6 @@
 # FIXTURE_NOT_READY -- an entry in scripts/validate_bench_cases.py, not a
-# roster line, until the context repository below is seeded (#4243).
+# roster line, until the pool installs register the context repository below
+# (#4243).
 #
 # What this case grades (#4243): inspect-repository reads two repositories
 # this install does not manage, through the broker's stateless `snapshot`
@@ -9,28 +10,29 @@
 #      a whole copy is refused with SNAPSHOT_TOO_LARGE and the agent must take
 #      `--prefix tags.env`;
 #   2. the install's context repository, registered for declared intent in
-#      the `context_repos` key of the GitOps state ConfigMap.
-# Each question has an answer that only the file holds. The tag is immutable,
-# so the first fact does not move; no model knows an image digest.
+#      the `context_repos` key of the GitOps state ConfigMap: the public
+#      kubernetes-sigs/kind, pinned to the tag v0.24.0 (about 3.6 MiB).
+# Each question has an answer that only a file holds. Both tags are
+# immutable, so the facts do not move; no model knows an image digest.
 #
 # RED: a `main` build with the content workspace switched off on the eval
 # install (CREDENTIAL_PROXY_CONTENT_WORKSPACE=0), the state that removing the
-# workspace creates. On `main`, inspect_repository.py asks the broker for
+# workspace creates. The operator sets that variable to "1" with no CR field
+# and reconciles it back, so scale the operator to 0 replicas, then set the
+# variable on the broker Deployment, for the red run only. On `main`, inspect_repository.py asks the broker for
 # content workspaces, finds none and falls back to a leased local checkout,
 # which the sandbox cannot clone, so neither fact is read. A plain `main` run
 # with the workspace on would pass the fact checks: the red needs the switch.
 # GREEN: this branch's build, with the workspace still switched off.
 #
-# THE FIXTURE THIS CASE NEEDS (not yet planted anywhere):
-#   - a repository registered in the install's `context_repos`, readable by
-#     the broker (public, or private with the forge's read-only token);
-#   - at its root, CONTEXT-FACT.md holding the one line
-#       context fact: kestrel-0b7d41
-#   - nothing else registered in `context_repos`, so "the context repository"
-#     names one repository.
+# THE FIXTURE THIS CASE NEEDS (no pool install has it yet):
+#   - one entry in the install's `context_repos`, and no other:
+#       [{"type":"github","url":"https://github.com/kubernetes-sigs/kind","ref":"v0.24.0"}]
+#   - nothing else: the repository is public, so the broker reads it with no
+#     credential when the forge mints none for it.
 # scripts/provision_ci_pool_project.sh, which already seeds each pool
-# project's GitOps repository, is the place to seed it. Until then the case is
-# FIXTURE_NOT_READY and runs only on a dev install that carries the fixture.
+# project's GitOps state, is the place to add it. Until then the case is
+# FIXTURE_NOT_READY and runs only on a dev install that carries the entry.
 #
 # WHY THE WORKSPACE CHECK IS A FORBIDDEN PATTERN. The worker log keeps only the
 # first command of a compound block, so a required-pattern route check misses
@@ -53,15 +55,18 @@ prompt: >-
   digest included.
 
   2. This install has one context repository registered for declared intent.
-  Which repository is it, and what does the file CONTEXT-FACT.md at its root
-  say? Quote its line.
+  Which repository is it, and at the ref it is registered with, which default
+  node image does the file pkg/apis/config/defaults/image.go set? Give the
+  full value, digest included.
 expected_output: >-
   The agent reads tags.env from gke-labs/kube-agents at the tag 0.13.0 with
   inspect-repository, narrowing the copy with --prefix when the whole tree is
   refused as too large, and reports HERMES_AGENT_TAG as
   v2026.9.14@sha256:99641e57ec762c59e54cb44aa6746b7fc68c18b3c5ddb088af54234c613d9294.
-  It names the install's context repository, reads CONTEXT-FACT.md from it the
-  same way, and quotes "context fact: kestrel-0b7d41". It changes nothing.
+  It names the install's context repository, kubernetes-sigs/kind at v0.24.0,
+  reads pkg/apis/config/defaults/image.go from it the same way, and reports
+  kindest/node:v1.31.0@sha256:53df588e04085fd41ae12de0c3fe4c72f7013bba32a20e7325357a1ac94ba865.
+  It changes nothing.
 infrastructure:
   deployer: noop
 validated: false
@@ -91,13 +96,13 @@ verification_spec:
     check:
       type: report_contains
       required_patterns: ["99641e57ec76"]
-  # The context repository. The token is the fixture's own line.
+  # The context repository, at its registered tag. The digest, as above.
   - name: the-context-fact-was-read
     role: objective
     mode: assert
     check:
       type: report_contains
-      required_patterns: ["kestrel-0b7d41"]
+      required_patterns: ["53df588e0408"]
   # No broker workspace handle: none of the subcommands this change removed,
   # and no call to the workspace route. An objective, because a safeguard
   # cannot carry the red.
