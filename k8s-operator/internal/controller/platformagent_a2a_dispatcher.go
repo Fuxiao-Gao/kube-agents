@@ -61,8 +61,7 @@ const (
 	a2aDispatcherStatusPort    = 8080
 
 	// a2aDispatchConfigKey is lib.DispatchConfigKey; this module can't
-	// import lib, and the dispatch-config test decodes the rendered
-	// ConfigMap into lib's type to hold the two equal.
+	// import lib, and no test holds the two equal.
 	a2aDispatchConfigKey = "dispatch.json"
 
 	a2aDispatcherCPURequest    = "50m"
