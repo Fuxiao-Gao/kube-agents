@@ -1138,7 +1138,14 @@ not be silent about it.
   arrival order per artifact, which is stream order for an executor that appends to one artifact
   id, present as `[]` when the executor called nothing and absent when no stream was
   read, because the relay never posts that artifact and this is the harness's only view of it, newest 1000 entries when a run has more, with `activityDropped` counting the rest)
-  and the progress artifact's latest line (`progress`); plus the conversation's A2A `contextId`
+  and the progress artifact's latest line (`progress`), and, on a read that asks for it (`usage=chain`), the chain's cost (`childUsage`, the chain's
+  child tasks' usage artifacts summed; `usagePartial` when a link's stream could not be read, so
+  the sums are short of it; and `usage`, the usage
+  artifact's parts summed over the task and, for a delegation chain's root, every wake that
+  continued it, apart from the children; each absent when none of its turns published usage;
+  each executor publishes a turn's before its terminal, so a read that shows the
+  root final carries all of it); plus the
+  conversation's A2A `contextId`
   from its record (absent when there is no record; the bridge's `api` executor names its Hermes
   session after it, which is how the harness finds the kanban cards a turn filed), the
   conversation's last post, the
