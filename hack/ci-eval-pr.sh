@@ -2159,6 +2159,13 @@ scope_exclude_settle() { # <label>
   return 1
 }
 
+# The slot list as the messages print it: a trailing +<n> token is the case's
+# absent count (kube_agents_bench.scope_exclude), not a slot.
+scope_slots_shown() { # <slot>... [+<n>]
+  local slots="$*"
+  printf '%s' "${slots/ +/, absent: }"
+}
+
 # Exclude the slots' clusters for one case (and, after a +<n> token, n absent
 # ones), and wait until the pod and the Cluster Agent profiles reflect it.
 # Non-zero means the case must not run.
@@ -2167,7 +2174,7 @@ scope_exclude_apply() { # <case> <slot>... [+<n>]
   shift
   scope_exclude_target "${name}" || return 1
   if [ -z "${BENCH_FLEET_KUBECONFIG_DIR:-}" ] || [ ! -s "${BENCH_FLEET_KUBECONFIG_DIR}/.fleet-context" ]; then
-    echo "WARNING: Scope exclusion (${name}): no .fleet-context under BENCH_FLEET_KUBECONFIG_DIR=${BENCH_FLEET_KUBECONFIG_DIR:-unset}, so slot(s) $* resolve to no cluster" >&2
+    echo "WARNING: Scope exclusion (${name}): no .fleet-context under BENCH_FLEET_KUBECONFIG_DIR=${BENCH_FLEET_KUBECONFIG_DIR:-unset}, so slot(s) $(scope_slots_shown "$@") resolve to no cluster" >&2
     return 1
   fi
   if ! ops="$(scope_exclude_cr | scope_exclude_helper patch --fleet-dir "${BENCH_FLEET_KUBECONFIG_DIR}" --slots "$@")" \
@@ -2175,8 +2182,7 @@ scope_exclude_apply() { # <case> <slot>... [+<n>]
     echo "WARNING: Scope exclusion (${name}): could not patch platformagent/${AGENT_SERVICE_NAME}" >&2
     return 1
   fi
-  local shown="$*"
-  echo "Scope exclusion (${name}): platformagent/${AGENT_SERVICE_NAME} now excludes slot(s) ${shown/ +/, absent: }"
+  echo "Scope exclusion (${name}): platformagent/${AGENT_SERVICE_NAME} now excludes slot(s) $(scope_slots_shown "$@")"
   scope_exclude_settle "${name}"
 }
 
@@ -4742,7 +4748,7 @@ for SCOPE_LINE in ${SCOPE_EXCLUDE_LINES[@]+"${SCOPE_EXCLUDE_LINES[@]}"}; do
   case ",${INJECT_LANE_REQUESTING:-},${STOPPED_ASK_CASES:-}," in
     *",${SCOPE_CASE},"*) SCOPE_PAUSE="${WRITER_LAUNCH_PAUSE:-${EVAL_GITHUB_WRITE_SETTLE_SECONDS}}" ;;
   esac
-  echo ">>> [$(date -u +'%Y-%m-%dT%H:%M:%SZ')] every other unit is done; launching the ${EVAL_REPETITIONS} repetition(s) of ${SCOPE_CASE} alone, with slot(s) ${SCOPE_SLOTS/ +/, absent: } excluded from the install's scope"
+  echo ">>> [$(date -u +'%Y-%m-%dT%H:%M:%SZ')] every other unit is done; launching the ${EVAL_REPETITIONS} repetition(s) of ${SCOPE_CASE} alone, with slot(s) $(scope_slots_shown "${SCOPE_SLOTS}") excluded from the install's scope"
   # shellcheck disable=SC2086 # slot letters and an optional +<n> absent count, one argument each
   if scope_exclude_apply "${SCOPE_CASE}" ${SCOPE_SLOTS}; then
     launch_units "$(for REP in $(seq 1 "${EVAL_REPETITIONS}"); do printf '%s 0 %s\n' "${REP}" "${SCOPE_IDX}"; done)" 1 "${SCOPE_PAUSE}"
@@ -4755,7 +4761,7 @@ for SCOPE_LINE in ${SCOPE_EXCLUDE_LINES[@]+"${SCOPE_EXCLUDE_LINES[@]}"}; do
   else
     for REP in $(seq 1 "${EVAL_REPETITIONS}"); do
       skip_unit "${TASKS[SCOPE_IDX]}" "${SCOPE_CASE}" "${REP}" "" "" "not run: its scope exclusion did not take effect" \
-        "scope-exclude: slot(s) ${SCOPE_SLOTS/ +/, absent: } could not be excluded from the install's scope"
+        "scope-exclude: slot(s) $(scope_slots_shown "${SCOPE_SLOTS}") could not be excluded from the install's scope"
     done
   fi
   scope_exclude_restore "${SCOPE_CASE}" settle \

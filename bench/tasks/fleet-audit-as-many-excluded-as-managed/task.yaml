@@ -23,10 +23,14 @@
 # fleet_scope read ("the fleet is its projects, less every cluster it lists in
 # excluded_clusters").
 #
-# THE OBJECTIVES: a compliance-audit report finished after the run started is
-# in the report store; the worker ran `audit_report.py start` for the stream;
-# and the answer does not say the audit was cancelled or the managed clusters
-# are excluded. A cancel, before or after `start`, leaves no fresh report.
+# THE OBJECTIVES: a compliance-audit report that finished after the run
+# started is in the report store and carries the debug-binding finding, which
+# the rbac-overgrant fixture plants on slot a, a managed cluster here; and the
+# worker ran `audit_report.py start` for the stream. A cancel, before or after
+# `start`, leaves no fresh report; an audit that read every managed cluster as
+# excluded and swept nothing stores one without that finding. No check reads
+# the answer's wording: a negated sentence ("none of the managed clusters are
+# excluded") would match any such pattern on a correct answer.
 #
 # READ A RED before counting it as #3933 evidence. #3933 is an answer that
 # cancels because it reads the managed clusters as excluded. A red with no
@@ -46,7 +50,7 @@ infrastructure:
   deployer: noop
 scope_exclude: { slots: [b, d], absent: 1 }
 audit_streams: [compliance-audit]
-fixtures: []
+fixtures: [rbac-overgrant]
 validated: false
 
 # Slug per docs/designs/domains.yaml.
@@ -59,6 +63,7 @@ verification_spec:
     check:
       type: audit_report_stored
       audit: compliance-audit
+      required_finding_phrases: ["debug-binding"]
   - name: the-audit-ran
     role: objective
     mode: assert
@@ -68,14 +73,3 @@ verification_spec:
         - script: audit_report.py
           flags: [start]
           word_patterns: ["(?:^|=)compliance-audit$"]
-  - name: the-answer-does-not-cancel
-    role: objective
-    mode: assert
-    check:
-      type: report_contains
-      forbidden_patterns:
-        [
-          '\baudit (?:(?:was|has been|is|got) )?cancel+ed',
-          '\bcancel+(?:ed|ing) the (?:fleet |compliance )?audit',
-          'managed clusters? (?:is|are|was|were|has been|have been) (?:\w+ )?excluded',
-        ]

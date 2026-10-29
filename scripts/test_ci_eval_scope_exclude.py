@@ -45,7 +45,7 @@ ENV = textwrap.dedent(
     """
 )
 
-FUNCTIONS = ["scope_exclude_target", "scope_exclude_helper", "scope_exclude_kubectl", "scope_exclude_cr", "scope_exclude_apply", "scope_exclude_restore"]
+FUNCTIONS = ["scope_slots_shown", "scope_exclude_target", "scope_exclude_helper", "scope_exclude_kubectl", "scope_exclude_cr", "scope_exclude_apply", "scope_exclude_restore"]
 
 
 def run_bash(body: str, cwd: str) -> subprocess.CompletedProcess:
@@ -359,7 +359,7 @@ class WiringTest(unittest.TestCase):
         self.assertLess(launch, log)
         self.assertLess(log, restore)
         # A scope edit that did not take effect records each repetition as infrastructure.
-        self.assertIn('"scope-exclude: slot(s) ${SCOPE_SLOTS/ +/, absent: } could not be excluded', body)
+        self.assertIn('"scope-exclude: slot(s) $(scope_slots_shown "${SCOPE_SLOTS}") could not be excluded', body)
 
 
 if __name__ == "__main__":
