@@ -130,10 +130,14 @@ class GatewayStatusTest(unittest.TestCase):
         self.assertEqual(commands, [["gcloud", "auth", "application-default", "print-access-token"]])
 
     def test_without_adc_the_token_comes_from_gcloud(self):
-        token, commands = self._token((1, "", "no ADC configured"), (0, "ya29.user\n", ""))
+        with patch("sys.stderr", io.StringIO()) as err:
+            token, commands = self._token((1, "", "no ADC configured"), (0, "ya29.user\n", ""))
         self.assertEqual(token, "ya29.user")
+        self.assertIn("token from gcloud auth print-access-token after gcloud auth application-default print-access-token exited 1: no ADC configured", err.getvalue())
+        self.assertNotIn("ya29", err.getvalue())
         self.assertEqual(commands[1], ["gcloud", "auth", "print-access-token"])
-        token, _ = self._token(OSError("gcloud not found"), (0, "ya29.user\n", ""))
+        with patch("sys.stderr", io.StringIO()):
+            token, _ = self._token(OSError("gcloud not found"), (0, "ya29.user\n", ""))
         self.assertEqual(token, "ya29.user")
 
     def test_no_token_at_all_fails_the_apply_naming_both(self):

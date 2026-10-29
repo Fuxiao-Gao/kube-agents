@@ -35,7 +35,8 @@ from datetime import datetime, timezone
 
 HOST_ENV = "K8S_HOST"
 # The access token, tried in order: Application Default Credentials first,
-# the identity the stack's kubernetes provider uses, then gcloud's own login.
+# which the google provider also resolves when no credential variable is set,
+# then gcloud's own login.
 # Either is the reconciler's service account in CI. On a workstation the two
 # can differ, and gcloud's user token can be one the GKE API refuses (401).
 TOKEN_COMMANDS = (
@@ -118,6 +119,9 @@ def access_token() -> str:
             failures.append(f"{' '.join(command)} failed: {exc}")
             continue
         if done.returncode == 0 and done.stdout.strip():
+            if failures:
+                # Say which token is in use: a later refusal then names it.
+                sys.stderr.write(f"gateway_status: token from {' '.join(command)} after {'; '.join(failures)}\n")
             return done.stdout.strip()
         failures.append(f"{' '.join(command)} exited {done.returncode}: {done.stderr.strip()}")
     raise SystemExit("gateway_status: no access token; " + "; ".join(failures))
