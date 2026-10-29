@@ -344,9 +344,14 @@ func TestTheScopeResolvedCondition(t *testing.T) {
 	// cannot push the message past the CRD's limit and fail every status
 	// write.
 	huge := strings.Repeat("x", 40<<10)
+	// RFC 3339 parses any number of fractional-second digits, so a
+	// resolvedAt that parses can be as long as one that does not.
+	longFraction := now.Add(-time.Minute).Format("2006-01-02T15:04:05") + "." + strings.Repeat("0", 40<<10) + "Z"
 	for name, data := range map[string]map[string]string{
 		"state":      doc(huge, hash, time.Minute),
 		"resolvedAt": {scopeResolvedDataKey: `{"v":1,"resolvedAt":"` + huge + `","state":"ok"}`},
+		"parsable resolvedAt": {scopeResolvedDataKey: `{"v":1,"resolvedAt":"` + longFraction +
+			`","memberHash":"` + hash + `","state":"ok"}`},
 	} {
 		if got, _ := scopeResolvedCondition(agent, data, now); len(got.Message) > 512 {
 			t.Errorf("a 40 KiB %s gives a %d-byte message", name, len(got.Message))
@@ -387,6 +392,7 @@ func TestTheBrokerConfersTheScopeRoleOnlyBehindTheGatewayPodPolicy(t *testing.T)
 		{"next, policy 1", ptr.To("next"), "1", allBrokerCallersOwned, want{file: true}},
 		{"next, policy true", ptr.To("next"), "true", allBrokerCallersOwned, want{file: true, role: true, peer: true}},
 		{"next, policy true, account not ours", ptr.To("next"), "true", brokerCallerOwnership{mcp: true}, want{file: true, peer: true}},
+		{"next, policy true, nothing to resolve", ptr.To("next"), "true", allBrokerCallersOwned, want{file: true}},
 		{"today, policy true", nil, "true", allBrokerCallersOwned, want{}},
 	}
 	for _, tc := range cases {
@@ -394,6 +400,9 @@ func TestTheBrokerConfersTheScopeRoleOnlyBehindTheGatewayPodPolicy(t *testing.T)
 			t.Setenv(a2aGatewayPodPolicyEnvVar, tc.policy)
 			agent := scopePublisherAgent()
 			agent.Spec.Mode = tc.mode
+			if strings.HasSuffix(tc.name, "nothing to resolve") {
+				agent.Spec.Scope = &agentv1alpha1.ScopeSpec{Projects: []string{"team-a"}}
+			}
 			deployment := buildCredentialProxyDeploymentForPlugins(agent, "hash", nil, tc.owned)
 			c := deployment.Spec.Template.Spec.Containers[0]
 

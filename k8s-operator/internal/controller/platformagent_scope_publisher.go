@@ -674,26 +674,29 @@ func scopeResolvedCondition(agent *agentv1alpha1.PlatformAgent, data map[string]
 		return condition, 0
 	}
 	bound := scopeFreshnessBound(scopeMaxProjects(agent))
+	// The parsed time, rendered again: RFC 3339 admits any number of
+	// fractional-second digits, so doc.ResolvedAt itself has no length bound.
+	stamp := resolvedAt.UTC().Format(time.RFC3339)
 	switch {
 	case doc.State == scopeStateTooLarge:
 		condition.Reason = scopeResolvedReasonTooLarge
-		condition.Message = fmt.Sprintf("the resolved scope at %s was larger than the ConfigMap allows, so it lists no project", doc.ResolvedAt)
+		condition.Message = fmt.Sprintf("the resolved scope at %s was larger than the ConfigMap allows, so it lists no project", stamp)
 	case doc.State == scopeStateError:
 		condition.Reason = scopeResolvedReasonError
-		condition.Message = fmt.Sprintf("the scope publisher could not resolve the scope (run at %s); see the publisher Job's log", doc.ResolvedAt)
+		condition.Message = fmt.Sprintf("the scope publisher could not resolve the scope (run at %s); see the publisher Job's log", stamp)
 	case doc.State != scopeStateOK:
 		condition.Reason = scopeResolvedReasonMissing
-		condition.Message = fmt.Sprintf("the resolved scope at %s has a state this operator does not know (%q)", doc.ResolvedAt, truncateToValidUTF8(doc.State, scopeDocumentQuoteLimit))
+		condition.Message = fmt.Sprintf("the resolved scope at %s has a state this operator does not know (%q)", stamp, truncateToValidUTF8(doc.State, scopeDocumentQuoteLimit))
 	case doc.MemberHash != scopeMemberHash(agent):
 		condition.Reason = scopeResolvedReasonMismatch
-		condition.Message = fmt.Sprintf("the resolved scope at %s is for an earlier spec.scope; a publisher run for the current one starts once no run is active", doc.ResolvedAt)
+		condition.Message = fmt.Sprintf("the resolved scope at %s is for an earlier spec.scope; a run for it starts when no run is active: at once if none has run for it yet, else within 15 minutes of the last start", stamp)
 	case now.Sub(resolvedAt) > bound:
 		condition.Reason = scopeResolvedReasonStale
-		condition.Message = fmt.Sprintf("the resolved scope was written at %s, longer ago than the %s bound; the scope publisher is not keeping it fresh", doc.ResolvedAt, bound)
+		condition.Message = fmt.Sprintf("the resolved scope was written at %s, longer ago than the %s bound; the scope publisher is not keeping it fresh", stamp, bound)
 	default:
 		condition.Status = metav1.ConditionTrue
 		condition.Reason = scopeResolvedReasonResolved
-		condition.Message = fmt.Sprintf("resolved at %s", doc.ResolvedAt)
+		condition.Message = fmt.Sprintf("resolved at %s", stamp)
 		return condition, resolvedAt.Add(bound).Sub(now)
 	}
 	return condition, 0
@@ -733,16 +736,15 @@ func (r *PlatformAgentReconciler) scopePublisherIdentityOwned(ctx context.Contex
 
 // scopeBrokerEnv is the broker's side of the publisher. Under mode next the
 // declaration's path, which the scope role reads to bound every argument;
-// while the role is conferred (scopeBrokerRoleEnabled) and the publisher's
-// account is this PlatformAgent's, the audience and the publisher's username
-// bound to it both ways, as a2aMCPBrokerEnv binds the mcp role. Without the
+// while a publisher may run (scopePublisherMayRun), the audience and the
+// publisher's username bound to it both ways, as a2aMCPBrokerEnv binds the mcp role. Without the
 // pair the broker confers the scope role to nobody.
 func scopeBrokerEnv(agent *agentv1alpha1.PlatformAgent, owned bool) []corev1.EnvVar {
 	if !scopePublisherRendered(agent) {
 		return nil
 	}
 	env := []corev1.EnvVar{{Name: credentialProxyScopeFileEnvVar, Value: path.Join(brokerScopeDir, scopeFileName)}}
-	if scopeBrokerRoleEnabled(agent) && owned {
+	if scopePublisherMayRun(agent, owned) {
 		env = append(env,
 			corev1.EnvVar{Name: credentialProxyScopeAudienceEnvVar, Value: credentialProxyScopeAudience},
 			corev1.EnvVar{Name: credentialProxyScopeCallersEnvVar, Value: scopePublisherBrokerCaller(agent)},
@@ -752,10 +754,12 @@ func scopeBrokerEnv(agent *agentv1alpha1.PlatformAgent, owned bool) []corev1.Env
 }
 
 // scopeBrokerPeers is the publisher's pods as a peer of the broker's ingress
-// fence, on the credentialed port, while the role is conferred; nothing
-// otherwise, so the fence admits exactly what it did.
+// fence, on the credentialed port, while the role is conferred and the scope
+// declares something to resolve; nothing otherwise, so the fence admits
+// exactly what it did. Ownership is not read here: the caller list above
+// refuses an account this PlatformAgent does not hold.
 func scopeBrokerPeers(agent *agentv1alpha1.PlatformAgent) []networkingv1.NetworkPolicyPeer {
-	if !scopeBrokerRoleEnabled(agent) {
+	if !scopeBrokerRoleEnabled(agent) || !scopeHasResolvableMembers(agent) {
 		return nil
 	}
 	return []networkingv1.NetworkPolicyPeer{{PodSelector: &metav1.LabelSelector{MatchLabels: scopePublisherPodLabels(agent)}}}

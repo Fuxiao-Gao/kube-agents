@@ -252,12 +252,12 @@ func allowedBrokerCallers(agent *agentv1alpha1.PlatformAgent, owned brokerCaller
 	if a2aMCPBrokerEnabled(agent) && owned.mcp {
 		callers = append(callers, a2aMCPBrokerCaller(agent))
 	}
-	// The scope publisher's ServiceAccount, while the broker confers the
-	// scope role (scopeBrokerRoleEnabled: mode next and the gateway pod
-	// admission policy rendered) and only for an account this PlatformAgent
-	// owns. Held to the scope role by CREDENTIAL_PROXY_SCOPE_CALLERS, which
-	// scopeBrokerEnv renders beside it.
-	if scopeBrokerRoleEnabled(agent) && owned.scope {
+	// The scope publisher's ServiceAccount, only while a publisher may run
+	// (scopePublisherMayRun: something to resolve, an account this
+	// PlatformAgent owns, and the scope role conferred), so the broker never
+	// names an account the operator does not hold. Held to the scope role by
+	// CREDENTIAL_PROXY_SCOPE_CALLERS, which scopeBrokerEnv renders beside it.
+	if scopePublisherMayRun(agent, owned.scope) {
 		callers = append(callers, scopePublisherBrokerCaller(agent))
 	}
 	return strings.Join(callers, ",")
