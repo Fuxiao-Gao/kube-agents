@@ -867,6 +867,37 @@ class WorkingCopyTest(unittest.TestCase):
         self.assertNotIn("..", folded["path"])
         self.assertFalse((work / "x").exists())
 
+    @unittest.skipIf(os.geteuid() == 0, "root ignores the mode bits this test relies on")
+    def test_a_destination_that_cannot_be_created_is_refused_before_the_broker_is_asked(self):
+        a_file = Path(self.tmp.name) / "a-file"
+        a_file.write_text("mine\n")
+        read_only = Path(self.tmp.name) / "read-only"
+        read_only.mkdir()
+        read_only.chmod(0o500)
+        self.addCleanup(read_only.chmod, 0o700)
+        asked = mock.Mock()
+        for target in (a_file / "sub", read_only / "absent", read_only / "deeper" / "absent"):
+            with self.subTest(target=target), mock.patch.object(vcs_client, "call", asked):
+                with self.assertRaises(vcs_client.VcsError) as caught:
+                    vcs_client.clone("acme/infra", destination=target)
+                self.assertIn("cannot be created", str(caught.exception))
+        asked.assert_not_called()
+        self.assertEqual(list(read_only.iterdir()), [])
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores the mode bits this test relies on")
+    def test_a_destination_that_cannot_be_listed_is_refused_before_the_broker_is_asked(self):
+        locked = Path(self.tmp.name) / "locked"
+        locked.mkdir()
+        locked.chmod(0o000)
+        self.addCleanup(locked.chmod, 0o700)
+        asked = mock.Mock()
+        with mock.patch.object(vcs_client, "call", asked):
+            with self.assertRaises(vcs_client.VcsError) as caught:
+                vcs_client.clone("acme/infra", destination=locked)
+        self.assertIn("cannot be read", str(caught.exception))
+        asked.assert_not_called()
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores the mode bits this test relies on")
     def test_the_bundle_is_staged_under_the_root_not_beside_the_destination(self):
         parent = Path(self.tmp.name) / "read-only"
         (parent / "mount").mkdir(parents=True)

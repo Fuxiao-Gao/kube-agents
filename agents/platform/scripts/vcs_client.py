@@ -83,6 +83,9 @@ AUTHOR_EMAIL = os.environ.get(
 # caller is told before anything is sent.
 MAX_BUNDLE_BYTES = 64 << 20
 
+# The suffix of the temporary file a bundle passes through on this side.
+BUNDLE_SUFFIX = ".bundle"
+
 # How many untracked files the refusal below names before it counts the rest.
 # Enough that the caller can see what it is being asked about -- a stray report
 # beside two manifests -- and few enough that a copy someone ran a build in
@@ -836,10 +839,18 @@ def clone(
             occupied = destination.is_symlink() or (
                 destination.exists() and (not destination.is_dir() or any(destination.iterdir()))
             )
+            # What `mkdir` and git will write into: the destination itself, or
+            # its nearest ancestor that exists. Checked here, so a path that
+            # cannot be created costs no broker clone.
+            ancestor = destination
+            while not ancestor.exists():
+                ancestor = ancestor.parent
         except OSError as error:
             raise VcsError(f"{destination} cannot be read: {error}") from error
         if occupied:
             raise VcsError(f"{destination} is not an empty directory. Clone into an empty or absent directory.")
+        if not ancestor.is_dir() or not os.access(ancestor, os.W_OK | os.X_OK):
+            raise VcsError(f"{destination} cannot be created: {ancestor} is not a writable directory.")
     payload: dict = {"repository": repository}
     if branch:
         payload["branch"] = branch
@@ -866,7 +877,7 @@ def clone(
     # Under the scratch root, not beside a caller's destination: the bundle is
     # the full history, and the caller's directory may not be writable.
     ROOT.mkdir(parents=True, exist_ok=True)
-    handle, name = tempfile.mkstemp(dir=str(ROOT), suffix=".bundle")
+    handle, name = tempfile.mkstemp(dir=str(ROOT), suffix=BUNDLE_SUFFIX)
     bundle_file = Path(name)
     try:
         with os.fdopen(handle, "wb") as stream:
@@ -1190,7 +1201,7 @@ def publish(
             "with `--advance`."
         )
 
-    handle, name = tempfile.mkstemp(dir=str(ROOT), suffix=".bundle")
+    handle, name = tempfile.mkstemp(dir=str(ROOT), suffix=BUNDLE_SUFFIX)
     bundle_file = Path(name)
     os.close(handle)
     try:
