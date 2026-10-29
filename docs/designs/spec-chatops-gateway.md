@@ -648,7 +648,11 @@ leaves the record as it was:
    that takes no target refuses one.
 2. **Scope.** The target is checked against the install's `spec.scope`, from the `scope.json`
    the operator mounts into the gateway pod (`A2A_SCOPE_FILE`), read per task. An exclusion
-   refuses. A declared project list admits only its projects. Under a folder or organization
+   refuses, and `exclude.projects` matches as the reconcile does: an ID or a shell-style glob
+   over IDs, with a project number matching only an equal entry. The install's own project
+   (`A2A_MANAGEMENT_PROJECT`, from `spec.harness.projectId`) is always in scope, and an
+   `exclude.projects` entry matching it is ignored. A declared project list admits only its
+   projects. Under a folder or organization
    scope the gateway can't resolve membership yet, so a target whose project the list
    doesn't name is refused: "not excluded" isn't "in scope". An install that declares no scope
    (`present: false`) draws no boundary, as the platform agent reads it, so only exclusions

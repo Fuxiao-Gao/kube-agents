@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -354,19 +355,29 @@ func loadScope(path string) (*scopeDeclaration, error) {
 // boundary, as the platform agent reads it, so only exclusions apply. A nil
 // declaration (no file rendered, or one that didn't parse) refuses every
 // target.
-func checkTargetScope(decl *scopeDeclaration, t clusterTarget) error {
+func checkTargetScope(decl *scopeDeclaration, management string, t clusterTarget) error {
 	if decl == nil {
 		return refused(noticeTargetUnconfirmed, t)
 	}
-	if slices.Contains(decl.Exclude.Projects, t.Project) {
-		return refused(noticeTargetExcluded, t)
+	// The management project is always in scope, and an exclude.projects
+	// entry matching it is ignored, as the reconcile does. Its own
+	// clusters can still be excluded by name below.
+	isManagement := management != "" && t.Project == management
+	if !isManagement {
+		excluded, err := projectExcluded(t.Project, decl.Exclude.Projects)
+		if err != nil {
+			return refused(noticeTargetUnconfirmed, t)
+		}
+		if excluded {
+			return refused(noticeTargetExcluded, t)
+		}
 	}
 	for _, c := range decl.Exclude.Clusters {
 		if c.ProjectID == t.Project && c.Location == t.Location && c.ClusterName == t.Cluster {
 			return refused(noticeTargetExcluded, t)
 		}
 	}
-	if !decl.Present {
+	if !decl.Present || isManagement {
 		return nil
 	}
 	if slices.Contains(decl.Projects, t.Project) {
@@ -376,6 +387,102 @@ func checkTargetScope(decl *scopeDeclaration, t clusterTarget) error {
 		return refused(noticeTargetUnconfirmed, t)
 	}
 	return refused(noticeTargetOutOfScope, t)
+}
+
+// projectExcluded matches a project against exclude.projects as the
+// reconcile's _excluded_by does: an entry is a project ID or a shell-style
+// glob over IDs, and an all-digit project (a number) matches only an equal
+// entry. An entry that can't be compiled is an error, so the caller refuses
+// rather than admitting a project the entry may have meant to drop.
+func projectExcluded(project string, patterns []string) (bool, error) {
+	if isProjectNumber(project) {
+		return slices.Contains(patterns, project), nil
+	}
+	for _, pattern := range patterns {
+		re, err := regexp.Compile(fnmatchRegexp(pattern))
+		if err != nil {
+			return false, fmt.Errorf("exclude.projects entry %q: %w", pattern, err)
+		}
+		if re.MatchString(project) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func isProjectNumber(project string) bool {
+	if project == "" {
+		return false
+	}
+	for _, r := range project {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// fnmatchRegexp translates a shell-style glob to an anchored regexp the way
+// Python's fnmatch.translate does: * and ? match any run and any one
+// character, [seq] and [!seq] are sets, a ] first in a set is literal, and a
+// [ with no closing ] is a literal [.
+func fnmatchRegexp(pattern string) string {
+	var b strings.Builder
+	b.WriteString("^(?s:")
+	runes := []rune(pattern)
+	for i := 0; i < len(runes); i++ {
+		switch c := runes[i]; c {
+		case '*':
+			b.WriteString(".*")
+			for i+1 < len(runes) && runes[i+1] == '*' {
+				i++
+			}
+		case '?':
+			b.WriteString(".")
+		case '[':
+			j := i + 1
+			if j < len(runes) && runes[j] == '!' {
+				j++
+			}
+			if j < len(runes) && runes[j] == ']' {
+				j++
+			}
+			for j < len(runes) && runes[j] != ']' {
+				j++
+			}
+			if j >= len(runes) {
+				b.WriteString(`\[`)
+				continue
+			}
+			set := runes[i+1 : j]
+			i = j
+			switch {
+			case len(set) == 0:
+				b.WriteString(`[^\x00-\x{10FFFF}]`)
+			case len(set) == 1 && set[0] == '!':
+				b.WriteString(".")
+			default:
+				b.WriteString("[")
+				k := 0
+				if set[0] == '!' {
+					b.WriteString("^")
+					k = 1
+				}
+				for ; k < len(set); k++ {
+					switch set[k] {
+					case '\\', '[', '^':
+						b.WriteString(`\`)
+					}
+					b.WriteRune(set[k])
+				}
+				b.WriteString("]")
+			}
+		default:
+			b.WriteString(regexp.QuoteMeta(string(c)))
+		}
+	}
+	b.WriteString(")$")
+	return b.String()
 }
 
 // requesterTier is the tier a profile task runs at for this requester, until
@@ -411,7 +518,7 @@ func (g *Gateway) profileRouteFor(addressee string, params map[string]string, ti
 		g.log.Warn("scope file unreadable; refusing the target", "path", g.cfg.ScopeFile, "err", err)
 		decl = nil
 	}
-	if err := checkTargetScope(decl, *target); err != nil {
+	if err := checkTargetScope(decl, g.cfg.ManagementProject, *target); err != nil {
 		return nil, err
 	}
 	if route.Params == nil {
