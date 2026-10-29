@@ -58,14 +58,20 @@ copies; take the parts again.
 
 ## Rules
 
+- **Read a repository only through `clone`.** Do not download its files from
+  the forge's raw, codeload or API hosts (`raw.githubusercontent.com`,
+  `api.github.com`), with `curl` or a script, and do not run `git clone`. A
+  direct download skips the install's host allowlist and the checks `clone`
+  makes on every file, and it can read a different revision than the one you
+  report. If `clone` fails, report its error.
 - **Never invent a path.** Name a `--prefix` that the repository's layout, a
   README, or an earlier copy showed you. A prefix that names nothing at that
   commit gives `written: 0` and `missing`; it is not proof that the code does
   not exist under another name.
 - **Read `complete` and `skipped` before you conclude anything.** `skipped`
-  lists symbolic links that were not written, each with the reason; the file
-  the link names is not copied. If it is in the repository, take it with its own
-  `--prefix`. A copy of one `--prefix`
+  lists what was not written, each with the reason: a symbolic link (the file it
+  names is not copied; if it is in the repository, take it with its own
+  `--prefix`), or a directory laid out as a bare repository. A copy of one `--prefix`
   is a copy of part of a repository: "the repository does not contain X" is not
   a claim it supports.
 - **Do not run `git` against what lands.** There is no repository there, on
