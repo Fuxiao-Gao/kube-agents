@@ -3900,6 +3900,13 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(whole["revision"], caught.exception.fields.get("revision"))
         self.assertEqual([], list(self.scratch.iterdir()))
 
+    def test_a_path_too_long_for_a_command_line_is_refused_before_the_clone(self):
+        for paths in (["a" * 4097], ["d/" + "b" * 1000 + str(i) for i in range(70)]):
+            with self.subTest(count=len(paths)), self.assertRaises(WorkspaceError) as caught:
+                self.broker.snapshot({"repository": self.REPOSITORY, "paths": paths})
+            self.assertEqual(400, caught.exception.status)
+        self.assertFalse([argv for argv, _ in self.calls if argv[1] == "clone"])
+
     def test_a_path_that_is_not_repository_relative_is_refused(self):
         for paths in (["../x"], ["/etc/passwd"], [".git/config"], ["a/./b"], [], "README.md", [3], ["x"] * 257):
             with self.subTest(paths=paths), self.assertRaises(WorkspaceError) as caught:
@@ -4195,9 +4202,10 @@ class RouteTableTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.broker = VcsBroker(Path(self.tmp.name) / "scratch", git_runner=git_runner)
 
-    def test_the_table_covers_exactly_what_capabilities_advertises(self):
+    def test_the_table_covers_every_broker_and_collaboration_verb(self):
         # Two lists of verb names in one module is two lists that can disagree;
-        # this is the test that notices.
+        # this is the test that notices. `capabilities` advertises the table
+        # less `LIBRARY_VERBS`, which test_a_served_forge_lists_every_verb checks.
         self.assertEqual(
             sorted(route_table(self.broker)),
             sorted({*BROKER_VERBS, *COLLABORATION_VERBS}),

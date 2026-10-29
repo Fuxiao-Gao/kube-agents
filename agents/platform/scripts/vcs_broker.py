@@ -94,51 +94,9 @@ from providers import (
 from providers.credentials import CREDENTIAL_HELPER_KEY
 from workspace_paths import WorkspaceError, validate_path
 
+LOGGER = logging.getLogger("credential-proxy.vcs")
 #: The key in a forge's credentials Secret that holds its read-only token.
 FORGE_READ_TOKEN_KEY = "read-token"
-
-
-def holds_stored_token(forge: Forge) -> bool:
-    """Whether ``forge`` presents a stored token rather than a minted one.
-
-    A brokered credential is minted per repository and installed for git by
-    the CLI, so the broker's own clones of a managed repository ride it
-    ambiently. A forge whose credential is neither brokered nor absent has
-    nothing ambient behind it, and its clones carry the credential themselves.
-    """
-    credential = getattr(forge, "credential", None)
-    return credential is not None and not isinstance(credential, (BrokeredCredential, NoCredential))
-
-
-def warn_without_read_token(forge: Forge, credential: Any, where: str) -> None:
-    """Say why a context repository's clone presents no credential.
-
-    Only for a forge whose stored token can write: it offers a read-only
-    token only through the `read-token` key, and without one the
-    clone reads a public repository and a private one refuses it. The log line
-    is the operator's only sign of which half is wrong.
-    """
-    if not isinstance(credential, NoCredential) or not holds_stored_token(forge):
-        return
-    if not getattr(forge, "read_token_path", ""):
-        # The forges file came from an operator older than the read token, so
-        # no change to the Secret can help until the operator is upgraded.
-        LOGGER.warning(
-            "%s role=context: the broker's config names no readTokenPath for the "
-            "%s forge (an operator older than the read-only token rendered it), so "
-            "the clone presents none; a private repository will refuse it",
-            where, forge.name,
-        )
-        return
-    LOGGER.warning(
-        "%s role=context: the %s forge has no usable read-only token (key %s in "
-        "its credentials Secret: missing, unreadable, empty, or not one line of "
-        "printable ASCII) and its stored token can write, so the clone presents "
-        "none; a private repository will refuse it",
-        where, forge.name, FORGE_READ_TOKEN_KEY,
-    )
-
-LOGGER = logging.getLogger("credential-proxy.vcs")
 
 # The same shape of ceiling `content_workspace` applies, for the same reason:
 # the broker's scratch volume is an emptyDir sized for manifests, and a
@@ -234,6 +192,10 @@ SNAPSHOT_ARCHIVE_FILE = "snapshot.tar"
 SNAPSHOT_HISTORY = "none"
 # The most `paths` one snapshot request may name. Each is one argv entry.
 MAX_SNAPSHOT_PATHS = 256
+# A path entry, and all of them joined: well under the kernel's limits on one
+# argument (128 KiB) and on a command line, so git always starts.
+MAX_SNAPSHOT_PATH_BYTES = 4096
+MAX_SNAPSHOT_PATHS_BYTES = 64 << 10
 # A full object ID, SHA-1 or SHA-256. `ref` names a branch or a tag:
 # `clone --branch` takes no revision, so one is refused by name rather than
 # left to fail as a git error.
@@ -422,6 +384,47 @@ def _tar_bytes(listing: str) -> int:
     return _padded(total + TAR_END_BYTES, TAR_RECORD_BYTES)
 
 
+def holds_stored_token(forge: Forge) -> bool:
+    """Whether ``forge`` presents a stored token rather than a minted one.
+
+    A brokered credential is minted per repository and installed for git by
+    the CLI, so the broker's own clones of a managed repository ride it
+    ambiently. A forge whose credential is neither brokered nor absent has
+    nothing ambient behind it, and its clones carry the credential themselves.
+    """
+    credential = getattr(forge, "credential", None)
+    return credential is not None and not isinstance(credential, (BrokeredCredential, NoCredential))
+
+
+def warn_without_read_token(forge: Forge, credential: Any, where: str) -> None:
+    """Say why a context repository's clone presents no credential.
+
+    Only for a forge whose stored token can write: it offers a read-only
+    token only through the `read-token` key, and without one the
+    clone reads a public repository and a private one refuses it. The log line
+    is the operator's only sign of which half is wrong.
+    """
+    if not isinstance(credential, NoCredential) or not holds_stored_token(forge):
+        return
+    if not getattr(forge, "read_token_path", ""):
+        # The forges file came from an operator older than the read token, so
+        # no change to the Secret can help until the operator is upgraded.
+        LOGGER.warning(
+            "%s role=context: the broker's config names no readTokenPath for the "
+            "%s forge (an operator older than the read-only token rendered it), so "
+            "the clone presents none; a private repository will refuse it",
+            where, forge.name,
+        )
+        return
+    LOGGER.warning(
+        "%s role=context: the %s forge has no usable read-only token (key %s in "
+        "its credentials Secret: missing, unreadable, empty, or not one line of "
+        "printable ASCII) and its stored token can write, so the clone presents "
+        "none; a private repository will refuse it",
+        where, forge.name, FORGE_READ_TOKEN_KEY,
+    )
+
+
 def _snapshot_paths(raw: Any) -> list[str]:
     """`paths` of a snapshot request: literal repository-relative names, or none.
 
@@ -435,7 +438,14 @@ def _snapshot_paths(raw: Any) -> list[str]:
         raise WorkspaceError("paths must be a non-empty list of repository-relative paths")
     if len(raw) > MAX_SNAPSHOT_PATHS:
         raise WorkspaceError(f"paths names more than {MAX_SNAPSHOT_PATHS} entries")
-    return [validate_path(path) for path in raw]
+    paths = [validate_path(path) for path in raw]
+    # Checked here, before the clone: the names end up on git's command line,
+    # where the kernel refuses an argument or a total past its limits.
+    if any(len(path.encode()) > MAX_SNAPSHOT_PATH_BYTES for path in paths):
+        raise WorkspaceError(f"a path in `paths` is longer than {MAX_SNAPSHOT_PATH_BYTES} bytes")
+    if sum(len(path.encode()) + 1 for path in paths) > MAX_SNAPSHOT_PATHS_BYTES:
+        raise WorkspaceError(f"`paths` is longer than {MAX_SNAPSHOT_PATHS_BYTES} bytes in total")
+    return paths
 
 
 class Binding:

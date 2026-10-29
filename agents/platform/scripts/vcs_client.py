@@ -1167,7 +1167,8 @@ def snapshot(
         "path": str(destination),
         "files": files,
         "bytes": total,
-        # Symbolic links that were not written, each with the reason.
+        # What was not written, each with the reason: unsafe symbolic links,
+        # bare-repository layouts and hard links into them.
         "skipped": skipped,
         "archiveBytes": answer["size"],
         # A tar carries no history: there is nothing here for git to read.

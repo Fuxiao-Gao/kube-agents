@@ -1797,7 +1797,9 @@ def snapshot_bare_name_fallback(
       as `clone` would, and not on github.com, where the same name can belong
       to anyone. With a host the registry resolves it even when the install
       has more than one forge;
-    - no GitHub forge, and the lists cannot be read: None, for the registry;
+    - no GitHub forge, and the lists cannot be read: None, for the registry,
+      which reads the name on the install's one forge and refuses it when the
+      install has more than one;
     - no GitHub forge, and nobody registered the name:
       `(forge label, repository, clone URL)` for github.com, read with no
       credential and the helper cleared.
@@ -1824,7 +1826,8 @@ def snapshot_bare_name_fallback(
         except Exception as exc:  # noqa: BLE001 - not known to be unregistered
             LOGGER.warning(
                 "snapshot repo=%s: the repository lists could not be read type=%s; "
-                "reading the name on this install's forge and not on %s",
+                "leaving the name to the registry (read on the install's one forge, "
+                "refused when it has more than one) and not reading it on %s",
                 path, type(exc).__name__, repo_ref.GITHUB_CANONICAL_HOST,
             )
             return None
