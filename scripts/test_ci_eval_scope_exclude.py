@@ -136,6 +136,7 @@ class ApplyRestoreTest(unittest.TestCase):
         # `cases` prints `b +1`; the runner splices it into scope_exclude_apply as is.
         result, ops = self.run_functions({"metadata": {}, "spec": {}}, "scope_exclude_apply case-x b +1; echo rc=$?")
         self.assertIn("rc=0", result.stdout, result.stderr)
+        self.assertIn("now excludes slot(s) b, absent: 1", result.stdout)
         absent = {**SEEDED_B, "clusterName": "seeded-e"}
         self.assertEqual(ops[0][-1], {"op": "add", "path": "/spec/scope", "value": {"exclude": {"clusters": [SEEDED_B, absent]}}})
 

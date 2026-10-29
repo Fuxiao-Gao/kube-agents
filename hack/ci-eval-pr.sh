@@ -2159,9 +2159,10 @@ scope_exclude_settle() { # <label>
   return 1
 }
 
-# Exclude the slots' clusters for one case, and wait until the pod and the Cluster
-# Agent profiles reflect it. Non-zero means the case must not run.
-scope_exclude_apply() { # <case> <slot>...
+# Exclude the slots' clusters for one case (and, after a +<n> token, n absent
+# ones), and wait until the pod and the Cluster Agent profiles reflect it.
+# Non-zero means the case must not run.
+scope_exclude_apply() { # <case> <slot>... [+<n>]
   local name="$1" ops
   shift
   scope_exclude_target "${name}" || return 1
@@ -2174,7 +2175,8 @@ scope_exclude_apply() { # <case> <slot>...
     echo "WARNING: Scope exclusion (${name}): could not patch platformagent/${AGENT_SERVICE_NAME}" >&2
     return 1
   fi
-  echo "Scope exclusion (${name}): platformagent/${AGENT_SERVICE_NAME} now excludes slot(s) $*"
+  local shown="$*"
+  echo "Scope exclusion (${name}): platformagent/${AGENT_SERVICE_NAME} now excludes slot(s) ${shown/ +/, absent: }"
   scope_exclude_settle "${name}"
 }
 

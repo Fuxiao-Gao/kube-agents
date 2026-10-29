@@ -14,10 +14,12 @@
 # 8 excluded and 8 managed did not cancel (#3933). The nightly keeps measuring
 # it; a fix waits for a red here.
 #
-# The objective is that the audit ran: it names at least one managed seeded
-# cluster, slot a's or slot c's (an audit summary can leave out a cluster with
-# nothing to report), and it does not say the audit was cancelled (either
-# spelling) or that the managed clusters are excluded. The case lists every
+# The objectives are that the audit ran. The worker ran `audit_report.py start`
+# or a fleet-audit collector: a cancelled or deferred audit runs neither, and a
+# run with no worker commands is an error, not a pass. The answer names at least
+# one managed seeded cluster, slot a's or slot c's (an audit summary can leave
+# out a cluster with nothing to report), and does not say the audit was
+# cancelled (either spelling) or that the managed clusters are excluded. The case lists every
 # audit stream, so a repetition waits for an audit an earlier one left running.
 id: fleet-audit-as-many-excluded-as-managed
 name: A fleet audit runs when as many clusters are excluded as are managed
@@ -61,5 +63,14 @@ verification_spec:
         [
           '\baudit (?:(?:was|has been|is|got) )?cancel+ed',
           '\bcancel+(?:ed|ing) the (?:fleet )?audit',
-          'managed clusters (?:are|were|have been) (?:\w+ )?excluded',
+          'managed clusters? (?:is|are|was|were|has been|have been) (?:\w+ )?excluded',
+        ]
+  - name: the-audit-or-a-collector-ran
+    role: objective
+    mode: assert
+    check:
+      type: worker_commands
+      required_patterns:
+        [
+          '\baudit_report\.py\s+start\b|\b(?:collect|fleet_drift|fleet_health|fleet_stockout|fleet_waste|patch_readiness|upgrade_retrospective)\.py\b',
         ]
