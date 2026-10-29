@@ -21,7 +21,7 @@ Number labels used in this document:
 - **[code]**: read from `main` (file and line).
 - **[predicted]**: arithmetic from a stated assumption. It is not a measurement.
 - **[doc, file]**: read from another design document, not from code.
-- **[#3760 head, not main]**: read from the head of #3760, not from `main`.
+- **[#3760 head, not main]**: read from the head of #3760.
 
 ## 1. The shape in one picture
 
@@ -216,7 +216,9 @@ base and makes a wrong route fail loudly.
 | Gateway relays, watchers                        | Their own URL variables                                                                        | Unchanged                                                                                          |
 
 The fallback means an exec tier that is off, or a new shim against an old operator, behaves as
-today. The sandbox forwards only the variable names in `SANDBOX_FORWARDED_ENV_NAMES`
+today. The shim also falls back when it cannot connect to the exec URL (no TCP connection, for
+example a Service with no endpoints). No request reached a broker then, so nothing ran, by the
+same reason as §4.3's retry. The sandbox forwards only the variable names in `SANDBOX_FORWARDED_ENV_NAMES`
 (`deploy/sandbox/entrypoint.sh`), so `CREDENTIAL_PROXY_EXEC_URL` is added there. Without that, the
 shim always takes the fallback and nothing reports it.
 
@@ -234,12 +236,19 @@ shim always takes the fallback and nothing reports it.
   to them, where they would get a 404. They do not carry `kubeagents.x-k8s.io/has-credential-proxy`,
   which opens the github-token-minter to a pod. The exec builder mounts no forge credentials and no
   Slack tokens, so scaling out makes no copies of secrets that exec never uses.
-- Two more consumers select today's broker labels, so each needs an exec-tier target. The chart's
-  broker PodMonitoring (and its ServiceMonitor and VMPodScrape forms) gets a second scrape target
-  for the exec pods [code, `platform-agent-monitoring.yaml:81-88`]. The operator's usage-counter
-  poller gets a second target group for them [code, `usage_counters_poller.go:646`]. Without these,
-  nothing scrapes the tier that runs every `/v1/exec`: §8.1's slots gauge and per-replica series,
-  and the `toolExecutionsTotal` usage counter, would miss it.
+- Every chart or operator object that selects today's broker labels (`app: <agent>-credential-proxy`
+  or `kubeagents.x-k8s.io/component: credential-proxy`) gets an exec-tier counterpart. The builder
+  finds them by a search for both labels. On `main` they are:
+  - the broker PodMonitoring and its ServiceMonitor and VMPodScrape forms [code,
+    `platform-agent-monitoring.yaml:81-88`];
+  - the `<agent>-cred-metrics` Service that the ServiceMonitor selects [code, `:194-205`];
+  - the `<agent>-cred-mon-netpol` NetworkPolicy that opens port 8766 to a scraper outside GMP, when
+    `platformAgent.monitoringScraperNamespace` is set [code, `:415-434`];
+  - the operator's usage-counter poller [code, `usage_counters_poller.go:646`].
+
+  Without these, nothing scrapes the tier that runs every `/v1/exec`: §8.1's slots gauge and
+  per-replica series, and the `toolExecutionsTotal` usage counter, would miss it.
+
 - Resources per replica, on every cluster mode: requests 2 CPU / 2 GiB, limits 2 CPU / 2 GiB.
   Today's broker requests 500m CPU / 1 GiB with limits 1 CPU / 2 GiB [code,
   `credential_proxy_manifests.go:140-149`]. The 2 GiB request is the minimum from §4.2, and the
@@ -261,7 +270,10 @@ shim always takes the fallback and nothing reports it.
 - **Google access tokens:** each replica gets its own from the metadata server through Workload
   Identity. No coordination is needed.
 - **Managed kubeconfigs:** each replica fills its own cache, and keeps a kubeconfig until the pod
-  restarts (`_ensure_managed_kubeconfig`, `credential_proxy.py:7878`). A cold fill runs two
+  restarts (`_ensure_managed_kubeconfig`, `credential_proxy.py:7878`). The exception is a file
+  written after a failed `describe`: it is provisional, and the replica fills it again after 60 s
+  (`PROVISIONAL_RETRY_SECONDS`). So while a cluster's `describe` fails, each replica refetches it
+  once a minute while requests for it arrive. A cold fill runs two
   `gcloud` children: a `describe` (`_endpoint_decision`) and then `get-credentials`. So a cluster
   costs up to N−1 extra cold fills per pod lifetime. The `get-credentials` calls that callers send
   each land on one replica, so they do not multiply. After a rollout the caches fill lazily, as
@@ -300,8 +312,8 @@ image, the operator behind an opt-in switch that is off by default, the wiring o
 - **Until #4128's default-on step, the broker carries all `kubectl`.** The opt-in switch is off by
   default, so every install keeps today's path until then. This design does not wait for #4128,
   and #4128 does not wait for this design.
-- **The two efforts are independent in code.** Both change `credential_proxy_client.py` (the shim);
-  whichever merges second resolves that small conflict.
+- **The two efforts are independent in code.** Both change `credential_proxy_client.py` (the shim),
+  so the second change resolves that small conflict.
 - **The measurement plan sizes the broker twice** (§8.2): with the `kubectl` share, as installs run
   until default on, and without it, as they run after.
 
@@ -438,7 +450,10 @@ caller presents, and nothing the caller can set alone changes it.
   `LC_*` and `HERMES_PROFILE_HOME` (`deploy/sandbox/sshd_config`), so a cron variable would not
   reach the shim, and a header that any command can set is not a claim.
 - A turn token that a command copies can use at most the interactive cap (§4.2). It gains no
-  access.
+  access. A copy is possible: the fleet audits run as the same `agent` account in the same
+  container as chat turns, so a command can read a concurrent session's `/proc/<pid>/environ`. So
+  the class protects chat latency only against work that does not read another session's
+  environment. Open question 12 asks how to bind the token to something a copy cannot supply.
 
 ### 4.2 The rule, per replica
 
@@ -736,7 +751,11 @@ exec URL, and its shim calls the stateful pod; a 404 there would break every com
 leaves the stateful broker one release after default on, when no supported sandbox image lacks
 `CREDENTIAL_PROXY_EXEC_URL`.
 
-To revert, set replicas to 0. The shim falls back to `CREDENTIAL_PROXY_URL`.
+To revert, set replicas to 0. The shim falls back to `CREDENTIAL_PROXY_URL`. The sandbox reads
+`CREDENTIAL_PROXY_EXEC_URL` only when its pod starts (`sshd`'s `SetEnv`), so a change between 0 and
+N replicas restarts the sandbox pod and ends its open sessions. Until that restart, the shim's
+connect fallback (§3.2) sends commands to the stateful pod. The same holds when the tier is turned
+on: the sandbox restarts with the variable before an exec replica is ready.
 
 ## 10. Risks
 
@@ -751,7 +770,8 @@ To revert, set replicas to 0. The shim falls back to `CREDENTIAL_PROXY_URL`.
   fleet needs it.
 - **A wrong class.** Once the turn token exists, interactive work without one runs as background
   and waits longer.
-  A copied turn token can use at most the interactive cap. Neither gains access.
+  A copied turn token can use at most the interactive cap. Neither gains access. A sweep can copy a
+  turn token from `/proc` (§4.1) and then go ahead of the turn it copied it from.
 - **The k8s-api-proxy as a credential holder.** It runs as the broker's KSA, so it uses the same
   Workload Identity GSA and mints tokens for every cluster. Once it carries most Kubernetes
   traffic and scales out (§3.6), it needs a security review of its own, separate from the
@@ -777,7 +797,7 @@ To revert, set replicas to 0. The shim falls back to `CREDENTIAL_PROXY_URL`.
    and so the size at which that pod becomes the bottleneck.
 5. Kubeconfig without `gcloud` (§3.4): to decide before default on (§9 step 4). At about 28
    replicas and 1,000 clusters, the cold fill after each rollout runs up to 56,000 `gcloud`
-   children.
+   children. A cluster whose `describe` keeps failing adds two children per replica each minute.
 6. Who owns `bench/scale/broker.yaml`: the tiger team, as part of Phase 2, with this doc as its
    requirements? The first run (#4242) used it; to agree with them before the 16- and 32-cluster runs.
 7. For dshnayder, on #3760 and epic #4128 (§3.6):
@@ -800,3 +820,5 @@ To revert, set replicas to 0. The shim falls back to `CREDENTIAL_PROXY_URL`.
     of two.
 11. Should background children run in a per-class child cgroup with a lower CPU weight, instead
     of at a nice value (§4.2)?
+12. How does the broker bind a turn token to its turn, so that a command in the same sandbox that
+    copies it from `/proc` cannot present it (§4.1)?
