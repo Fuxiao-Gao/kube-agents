@@ -2736,7 +2736,7 @@ infra_lock_exempt() { # <task-name>
 # from the others, so this lock does.
 unit_state_lock() { # <task-name>
   case "$1" in
-    oobe-first-run-audits | bootstrap-discovery-fanout | bootstrap-inventory-ranking-delivery | bootstrap-inventory-posture-scope) echo "onboarding" ;;
+    oobe-first-run-audits | bootstrap-discovery-fanout | bootstrap-discovery-capped | bootstrap-inventory-ranking-delivery | bootstrap-inventory-posture-scope) echo "onboarding" ;;
   esac
 }
 
@@ -3287,6 +3287,11 @@ unit_cost_hint() {
     # agent turn is a board read. About 960s a repetition on a dev install on
     # 2026-10-05; 340-520s when it waited only for the fan-out (2026-09-28).
     bootstrap-discovery-fanout) echo 1000 ;;
+    # The same stack and wait under a first-run card cap of 2 (#3702): fewer
+    # Cluster Agent cards, and the sweep's own worker audits the rest, so the
+    # wait shifts to that worker rather than shrinking. Unmeasured; priced
+    # with the fan-out.
+    bootstrap-discovery-capped) echo 1000 ;;
     # Tofu too: the plant files one card and waits for its worker to run the
     # prioritization SOP and end its run (up to the stack's run_wait, 900s),
     # and the agent turn is a board read. Unmeasured; priced below the band
