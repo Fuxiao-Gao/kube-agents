@@ -11853,15 +11853,6 @@ class TestTriageStartBurst(unittest.TestCase):
         self.assertEqual(len(probe_timeouts), 0, "the readiness request timed out during the burst")
 
 
-if __name__ == "__main__":
-    # Clean up temp database file on exit
-    try:
-        unittest.main()
-    finally:
-        if os.path.exists(temp_db_path):
-            os.remove(temp_db_path)
-
-
 class TestDataVolumeWarning(unittest.TestCase):
     """The home-channel warning when the data volume fills: once per crossing
     of DATA_VOLUME_WARN_PERCENT, re-armed below DATA_VOLUME_REARM_PERCENT."""
@@ -11960,3 +11951,12 @@ class TestDataVolumeWarning(unittest.TestCase):
         self.assertGreater(total, 0)
         self.assertLessEqual(free, total)
         self.assertIsNone(session_kv_server._data_volume_usage("/nonexistent/data-volume"))
+
+
+if __name__ == "__main__":
+    # Clean up temp database file on exit
+    try:
+        unittest.main()
+    finally:
+        if os.path.exists(temp_db_path):
+            os.remove(temp_db_path)

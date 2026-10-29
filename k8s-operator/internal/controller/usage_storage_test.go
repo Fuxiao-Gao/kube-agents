@@ -28,7 +28,7 @@ import (
 	agentv1alpha1 "github.com/gke-labs/kube-agents/k8s-operator/api/v1alpha1"
 )
 
-// A 10 GiB volume, the operator's default size, in hundredths.
+// A 10 GiB volume, in hundredths.
 const (
 	testVolume  = int64(10) << 30
 	testPercent = testVolume / 100

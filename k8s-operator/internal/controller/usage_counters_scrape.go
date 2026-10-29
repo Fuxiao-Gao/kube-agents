@@ -542,8 +542,9 @@ func foldUsageBody(body io.Reader, counters []string) (usageReading, error) {
 // usageDataVolumeReading turns the data volume series a body carried into a
 // reading, or nil when it carried neither kind, only one, or a pair no statfs
 // produces (free past total, or a size past int64). Nil rather than a failed
-// scrape, so a bad volume pair costs the volume fields and not the counters
-// and cluster gauges read from the same body.
+// scrape, so such a pair costs the volume fields and not the counters and
+// cluster gauges read from the same body. A NaN or negative sample fails the
+// whole scrape in foldUsageBody's sample check, as it does for any series.
 func usageDataVolumeReading(volume map[string]float64) *usageDataVolume {
 	total, hasTotal := volume[dataVolumeKindTotal]
 	free, hasFree := volume[dataVolumeKindFree]

@@ -1052,7 +1052,8 @@ predates `status.usage` they accumulate in the `<name>-usage-counters` ConfigMap
 first patch after this release's CRD is applied. Under a served CRD at a previous schema, which has
 `status.usage` without the fields added later (the two cluster gauges,
 `remediationsMergedTotal`, `chatMessagesInboundTotal`, `toolExecutionsBlockedTotal`, `brokerFailuresTotal`, `chatTurnsErroredTotal`, `backgroundTasksGaveUpTotal`, `negativeFeedbackTotal`, `remediationsClosedUnmergedTotal` and `lastHumanActiveTime`), the first-schema counters keep landing and the newer fields are probed
-again every five minutes until this release's CRD is applied.
+again every five minutes until this release's CRD is applied. `storageStatus.capacityBytes` and `freeBytes` follow the same rule under a
+served CRD that predates them.
 
 These condition types appear in `conditions`; only `Ready` is always present:
 
