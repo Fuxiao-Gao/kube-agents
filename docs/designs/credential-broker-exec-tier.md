@@ -20,6 +20,8 @@ Number labels used in this document:
 - **[measured]**: from a run, with its source.
 - **[code]**: read from `main` (file and line).
 - **[predicted]**: arithmetic from a stated assumption. It is not a measurement.
+- **[doc, file]**: read from another design document, not from code.
+- **[#3760 head, not main]**: read from that pull request's head, which has not merged.
 
 ## 1. The shape in one picture
 
@@ -63,17 +65,20 @@ PROPOSED: commands get their own tier
 
 What changes, side by side:
 
-|                                             | Today                                        | Proposed                                                                        |
-| ------------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------- |
-| Who runs commands                           | The one broker pod                           | **NEW:** the exec tier, N pods                                                  |
-| Command capacity                            | 8 slots in total                             | **8 slots × N**                                                                 |
-| Priority                                    | None: one first-in, first-out queue          | **NEW:** 2 classes the broker sets from the token; background ≤ admitted − 2    |
-| Chat relays, workspace, vcs/forge, watchers | The one broker pod                           | Same pod, unchanged                                                             |
-| Cloud API relay (`/v1/gcp/`)                | The one broker pod                           | Same pod as a first step; it takes no slot and can move later (open question 4) |
-| How callers reach commands                  | `CREDENTIAL_PROXY_URL`                       | **NEW:** `CREDENTIAL_PROXY_EXEC_URL`; if it is not set, as today                |
-| Upgrade of the command path                 | `Recreate`: commands stop during the restart | `RollingUpdate` with a drain on SIGTERM and a PDB (§9 step 0): no outage        |
-| Identity and permissions                    | One KSA / GSA                                | Same KSA / GSA, no new IAM                                                      |
-| Code                                        | `credential_proxy.py`                        | Same file and image, with `CREDENTIAL_PROXY_ROLE=exec` on the new pods          |
+|                                             | Today                                        | Proposed                                                                                                                                |
+| ------------------------------------------- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| Who runs commands                           | The one broker pod                           | **NEW:** the exec tier, N pods                                                                                                          |
+| Command capacity                            | 8 slots in total                             | **8 slots × N**                                                                                                                         |
+| Priority                                    | None: one first-in, first-out queue          | **NEW:** 2 classes the broker sets from the token, for the shell role only once the turn token exists (§4.1); background ≤ admitted − 2 |
+| Chat relays, workspace, vcs/forge, watchers | The one broker pod                           | Same pod, unchanged                                                                                                                     |
+| Cloud API relay (`/v1/gcp/`)                | The one broker pod                           | Same pod as a first step; it takes no slot and can move later (open question 4)                                                         |
+| How callers reach commands                  | `CREDENTIAL_PROXY_URL`                       | **NEW:** `CREDENTIAL_PROXY_EXEC_URL`; if it is not set, as today                                                                        |
+| Upgrade of the command path                 | `Recreate`: commands stop during the restart | `RollingUpdate` with a drain on SIGTERM and a PDB (§9 step 0): no outage                                                                |
+| Identity and permissions                    | One KSA / GSA                                | Same KSA / GSA, no new IAM                                                                                                              |
+| Code                                        | `credential_proxy.py`                        | Same file and image, with `CREDENTIAL_PROXY_ROLE=exec` on the new pods                                                                  |
+
+The shell-role classes in the picture apply only once the turn token exists (§4.1, open question
+9). Until then, shell-role requests keep today's single queue.
 
 Later, with a fleet cache (§6, contract only in this round): fleet-wide sweeps read the cache
 first, and fall back to the exec tier when the cache is stale or missing.
@@ -206,8 +211,8 @@ base and makes a wrong route fail loudly.
 | Sandbox shim, `execute()`                       | `CREDENTIAL_PROXY_URL`                                                                         | `CREDENTIAL_PROXY_EXEC_URL` when set, else `CREDENTIAL_PROXY_URL`                                  |
 | Sandbox shim, `Workspace`, vcs, forge           | `CREDENTIAL_PROXY_URL`                                                                         | Unchanged                                                                                          |
 | Session pods (under the cluster-view flag only) | `CREDENTIAL_PROXY_URL`, from the gateway's `A2A_CREDENTIAL_PROXY_URL` (`a2a/gateway/spawn.go`) | Also get `CREDENTIAL_PROXY_EXEC_URL`, through a new `A2A_CREDENTIAL_PROXY_EXEC_URL` on the gateway |
-| Fleet audits (agent cron jobs)                  | The model's shell, then the shim                                                               | Same path; background by default, so the broker needs nothing from the caller (§4)                 |
-| Watches, reconcile                              | Through `sandbox_exec` and the shim                                                            | Same path; background by default (§4)                                                              |
+| Fleet audits (agent cron jobs)                  | The model's shell, then the shim                                                               | Same path; background by default once the turn token exists (§4.1); until then, today's queue      |
+| Watches, reconcile                              | Through `sandbox_exec` and the shim                                                            | Same path; background by default once the turn token exists (§4.1); until then, today's queue      |
 | Gateway relays, watchers                        | Their own URL variables                                                                        | Unchanged                                                                                          |
 
 The fallback means an exec tier that is off, or a new shim against an old operator, behaves as
@@ -230,7 +235,9 @@ shim always takes the fallback and nothing reports it.
 - Resources per replica: requests 1 CPU / 2 GiB, limits 2 CPU / 2 GiB. Today's broker requests
   500m CPU / 1 GiB with limits 1 CPU / 2 GiB [code, `credential_proxy_manifests.go:140-149`]. The
   2 GiB request is the minimum from §4.2, and the 2-CPU limit follows step 0 (§9). On Autopilot
-  without bursting the limit is clamped to the request, so there the request is 2 CPU / 2 GiB.
+  without bursting the operator's limits are set equal to the requests
+  (`credential_proxy_manifests.go`, the comment at the memory request), so a 1-CPU request would
+  mean a 1-CPU limit. There the operator sets the request to the intended limit: 2 CPU / 2 GiB.
   The slot cap and the memory budget stay per replica.
 - A NetworkPolicy target for the exec tier: ingress on 8765 from the sandbox, from session pods
   only under the cluster-view flag (the condition the stateful broker has today), and the metrics
@@ -387,8 +394,9 @@ is deleted.
 Each exec request has a class: `interactive` or `background`. The broker sets it from what the
 caller presents, and nothing the caller can set alone changes it.
 
-- A shell-role request is `background` by default. The fleet audits, the watches and the
-  reconcile need nothing from their callers.
+- Once the turn token exists (open question 9), a shell-role request is `background` by default,
+  and the fleet audits, the watches and the reconcile need nothing from their callers. Until then
+  the shell role keeps today's single queue (the next bullets).
 - A request is `interactive` only with a claim minted outside the sandbox: a session pod's own
   token (the session role), or a short-lived turn token that the agent's gateway mints for a chat
   turn. The sandbox session receives the turn token at its start, the way it receives
@@ -410,7 +418,8 @@ caller presents, and nothing the caller can set alone changes it.
 
 - Background work may hold at most `B = admitted − R` of a replica's admissions, where `admitted`
   is the smaller of the slot cap and what the memory budget admits. The proposal is `R = 2`:
-  6 of 8 at the 2 GiB default, 2 of 4 on Autopilot at 1 GiB. The reserve is budget room as well
+  6 of 8 at the 2 GiB default, and 2 of 4 on Autopilot at a 1 GiB request, without the 2 GiB
+  minimum below. The reserve is budget room as well
   as slots, so a background child cannot take the memory an interactive request needs. This is
   like the session cap of 2 today, but it reserves capacity instead of only limiting it.
 - Interactive work may hold at most `I = admitted − 1`, so one admission is always free for
@@ -453,6 +462,8 @@ carries the principal and the pod. The design adds:
 - the shim's existing `requestId`, reused on a retry, so a retry on another replica is one request
   in the log. The caller supplies it, so it goes in a field of its own and stays out of
   `principal`.
+- the shim's caller name, for the traffic mix (§8.1). The caller supplies it too, so it is a field
+  of its own, outside `principal`, and nothing trusts it.
 
 Today's lines carry no target cluster. The broker parses a target only for `kubectl` (its
 `kubeconfigContext`), so the line can carry that one where it exists.
@@ -516,7 +527,7 @@ The #3935 runner is the tool. The tiger team owns it, so the plan is a new plan 
 | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------ |
 | Slots in use (peak) and admitted                                                                       | `kubeagents_credential_proxy_slots_in_use` gauge [code], as Managed Prometheus stores it (30 s scrape); `/v1/exec/admission` (#4084) | Read by the broker plan's runner                             |
 | Wait p50 and p95, refusals, **by class**                                                               | Wait histogram with a new `class` label                                                                                              | Needs §4                                                     |
-| Traffic mix: requests and slot-seconds by caller (sweep, reconcile, stall watch, interactive, session) | Audit lines with the class and a caller name from the shim                                                                           | New                                                          |
+| Traffic mix: requests and slot-seconds by caller (sweep, reconcile, stall watch, interactive, session) | Audit lines with the class, and a caller name from the shim (caller-supplied, outside `principal`)                                   | New                                                          |
 | CPU throttling                                                                                         | The proxy container's cgroup `cpu.stat`, before and after each run                                                                   | Read by the broker plan's runner                             |
 | Per-replica balance                                                                                    | The same metrics per pod                                                                                                             | New in the runner                                            |
 | Requests and slot-seconds by tool (`kubectl`, `gcloud`, other)                                         | The broker's command duration histogram, by its `tool` label                                                                         | Read by the broker plan's runner; splits the load §3.6 moves |
@@ -524,15 +535,15 @@ The #3935 runner is the tool. The tiger team owns it, so the plan is a new plan 
 
 ### 8.2 Points
 
-| Run set           | Points                                                                | Why                                                                            |
-| ----------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| Baseline, one pod | 2, 8, 16, 32 clusters, with a fleet audit that really runs            | Where waits and refusals start, and the sweep's share                          |
-| Mixed concurrency | 8, 10, 12, 15 interactive questions during a sweep                    | Interactive waits behind background work, today and with §4                    |
-| Vertical control  | Broker CPU raised, at 8 and 16 clusters (#4107 ran 4 CPU at 2 and 16) | CPU-bound or slot-bound                                                        |
-| Autopilot         | One point at the 1 GiB clamp (budget admits 4)                        | The worst default                                                              |
-| Mode              | One baseline point in `spec.mode: today`                              | Phase 1 covered `next` only                                                    |
-| Exec tier         | 1, 2 and 3 replicas at 16 and 32 clusters                             | #4082 "Done when": the chosen shape at two or more sizes                       |
-| `kubectl` split   | The baseline points again with #4128's switch on                      | The broker sized without the `kubectl` share, and the k8s-api-proxy's own load |
+| Run set           | Points                                                                                                    | Why                                                                            |
+| ----------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| Baseline, one pod | 2, 8, 16, 32 clusters, with a fleet audit that really runs                                                | Where waits and refusals start, and the sweep's share                          |
+| Mixed concurrency | 8, 10, 12, 15 interactive questions during a sweep                                                        | Interactive waits behind background work, today and with §4                    |
+| Vertical control  | Broker CPU at 2 cores at 8 clusters (`bench/scale/broker-proxy-raised.yaml`); #4107 ran 4 CPU at 2 and 16 | CPU-bound or slot-bound                                                        |
+| Autopilot         | One point at the 1 GiB clamp (budget admits 4)                                                            | The worst default                                                              |
+| Mode              | One baseline point in `spec.mode: today`                                                                  | Phase 1 covered `next` only                                                    |
+| Exec tier         | 1, 2 and 3 replicas at 16 and 32 clusters                                                                 | #4082 "Done when": the chosen shape at two or more sizes                       |
+| `kubectl` split   | The baseline points again with #4128's switch on                                                          | The broker sized without the `kubectl` share, and the k8s-api-proxy's own load |
 
 Each point runs 3 times. The planned points are only a few times the Phase 1 run time [predicted],
 because most points reuse the fan-out and audit operations.
@@ -576,7 +587,7 @@ neither is at 2 CPU, so the example gives both:
 | #4107's 16-cluster audit window | Slot-minutes per cluster | Background slots | Slot term (`B = 6`) | CPU term (2 CPU per replica)                       | Replicas |
 | ------------------------------- | ------------------------ | ---------------- | ------------------- | -------------------------------------------------- | -------- |
 | 4 CPU: 1,077 commands × 3.0 s   | about 3.4                | about 57         | 10                  | 2.5 cores for 1.8 slots in use: about 79 cores, 40 | about 40 |
-| 1 CPU: 674 commands × 17.3 s    | about 12                 | about 202        | 34                  | 1 core for 6.5 slots in use: about 31 cores, 16    | about 34 |
+| 1 CPU: 674 commands × 17.3 s    | about 12                 | about 202        | 34                  | 1 core for 6.4 slots in use: about 32 cores, 16    | about 34 |
 
 So the CPU term or the slower commands set the count, not the slots alone: about 34 to 40
 replicas without a cache. If the cache takes 80% of the sweep's reads (an assumption), that becomes
@@ -590,7 +601,9 @@ the replica's own limit. This is why the design needs both the exec tier and the
 0. **Phase 0, useful at one replica:**
    - **Raise the broker's CPU limit (#4106)** to at least 2 cores, the exec replica's limit
      (§3.3). It is the first limit measured (§2.3), and it costs one value in the operator. On
-     Autopilot it raises the request too, so the footprint and the quota preflight grow with it.
+     Autopilot without bursting the limit equals the request, so raising the limit alone does
+     nothing there: the operator raises the broker's CPU request with its limit, and the footprint
+     and the quota preflight count that.
      Because it is one operator value, it is the fastest single relief for current installs.
    - **Graceful shutdown and a PodDisruptionBudget.** Today `serve()` runs `serve_forever()` with
      no SIGTERM handler, and the Deployment sets no `terminationGracePeriodSeconds` and no
@@ -633,9 +646,10 @@ To revert, set replicas to 0. The shim falls back to `CREDENTIAL_PROXY_URL`.
   are the checks.
 - **Caches filled N times.** More cold `get-credentials` (§3.4) and more TokenReviews.
 - **Footprint.** Each replica adds 1 CPU and 2 GiB to the requests on Standard, and 2 CPU and
-  2 GiB on Autopilot, where the request equals the limit (§3.3). On small installs, 0 replicas
+  2 GiB on Autopilot, where the operator sets the request to the intended limit (§3.3). On small installs, 0 replicas
   stays the default until a fleet needs it.
-- **A wrong class.** Interactive work without a turn token runs as background and waits longer.
+- **A wrong class.** Once the turn token exists, interactive work without one runs as background
+  and waits longer.
   A copied turn token can use at most the interactive cap. Neither gains access.
 - **The k8s-api-proxy as a credential holder.** It runs as the broker's KSA, so it uses the same
   Workload Identity GSA and mints tokens for every cluster. Once it carries most Kubernetes
