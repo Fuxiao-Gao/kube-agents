@@ -263,7 +263,9 @@ func TestTheOperatorsDispatchConfigDecodesAndValidates(t *testing.T) {
 
 // The durable the operator makes and the pool labels it renders (its
 // fixture, written by the operator's tests) agree with this package's
-// constants, and the durable passes SubscribeHeld's checks: the operator
+// constants, and the durable passes SubscribeHeld's config checks (its
+// intake check still takes the .in class on this tree; the dispatcher's PR
+// moves it to the submission shape). The operator
 // can't import lib, so this is what holds its copies of the held mark, the
 // AckWait and the labels equal to these. The two tamper lists aren't
 // compared; a drift makes the dispatcher refuse to bind, which fails safe.
