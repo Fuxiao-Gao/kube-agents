@@ -953,9 +953,12 @@ class VcsBroker:
             written = git(clone_dir, *argv, check=False)
             if written.returncode != 0:
                 if paths and PATHSPEC_NO_MATCH in (written.stderr or ""):
+                    # The revision goes with the refusal: a caller that asked
+                    # for an optional folder still learns which commit it read.
                     raise WorkspaceError(
                         f"a path in `paths` names nothing in {repo} at {target}",
                         code="PATH_NOT_FOUND",
+                        revision=revision,
                     )
                 raise subprocess.CalledProcessError(
                     written.returncode, argv, written.stdout, written.stderr

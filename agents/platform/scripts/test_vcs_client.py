@@ -194,6 +194,18 @@ class ForgeCallTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, "PROTECTED_BRANCH")
         self.assertEqual(caught.exception.as_json(), {"error": "no", "code": "PROTECTED_BRANCH", "detail": "d"})
 
+    def test_a_path_refusal_keeps_the_revision_the_broker_read(self):
+        error = vcs_client.credential_proxy_client.WorkspaceRequestError(
+            "refused", payload={"error": "no", "code": "PATH_NOT_FOUND", "revision": "a" * 40}
+        )
+        with mock.patch.dict(os.environ, {"CREDENTIAL_PROXY_URL": "http://127.0.0.1:1"}), mock.patch.object(
+            vcs_client.credential_proxy_client, "vcs_call", side_effect=error
+        ):
+            with self.assertRaises(vcs_client.VcsError) as caught:
+                vcs_client.call("snapshot", {})
+        self.assertEqual(caught.exception.revision, "a" * 40)
+        self.assertEqual(caught.exception.as_json()["revision"], "a" * 40)
+
 
     def test_a_broker_too_old_for_a_verb_is_not_a_broker_that_is_down(self):
         """The shape an old credential-proxy actually answers with.

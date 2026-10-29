@@ -3895,6 +3895,8 @@ class SnapshotTest(unittest.TestCase):
         with self.assertRaises(WorkspaceError) as caught:
             self.broker.snapshot({"repository": self.REPOSITORY, "paths": ["*.md"]})
         self.assertEqual((400, "PATH_NOT_FOUND"), (caught.exception.status, caught.exception.fields.get("code")))
+        whole = self.broker.snapshot({"repository": self.REPOSITORY})
+        self.assertEqual(whole["revision"], caught.exception.fields.get("revision"))
         self.assertEqual([], list(self.scratch.iterdir()))
 
     def test_a_path_that_is_not_repository_relative_is_refused(self):

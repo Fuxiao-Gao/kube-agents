@@ -136,10 +136,14 @@ class VcsError(RuntimeError):
     handing the agent a decision keyed on a field it never receives.
     """
 
-    def __init__(self, message: str, *, code: str | None = None, detail: str | None = None):
+    def __init__(
+        self, message: str, *, code: str | None = None, detail: str | None = None, revision: str | None = None
+    ):
         super().__init__(message)
         self.code = code or None
         self.detail = detail or None
+        # The commit the broker read, on a refusal that has one (`PATH_NOT_FOUND`).
+        self.revision = revision or None
 
     def as_json(self) -> dict:
         answer = {"error": str(self)}
@@ -147,6 +151,8 @@ class VcsError(RuntimeError):
             answer["code"] = self.code
         if self.detail:
             answer["detail"] = self.detail
+        if self.revision:
+            answer["revision"] = self.revision
         return answer
 
 
@@ -315,6 +321,7 @@ def _call(verb: str, payload: dict) -> dict:
             payload.get("error", str(exc)),
             code=code,
             detail=payload.get("detail"),
+            revision=payload.get("revision"),
         ) from exc
     except credential_proxy_client.TokenUnavailable as exc:
         # The projected token is missing or empty -- the kubelet mid-rewrite,
