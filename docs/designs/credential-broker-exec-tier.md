@@ -689,7 +689,8 @@ cache contract.
      - On the single pod, which keeps `Recreate`, Kubernetes ends the old pod before it starts
        the new one, so every route is down while the pod drains. There the drain is short and
        bounded: it finishes commands for up to 30 s, then ends the rest. The pod drains its relays
-       in the same window, so events are not lost.
+       in the same window, and its `terminationGracePeriodSeconds` is 45 s, so the kubelet does
+       not kill it before the drain and the exit end, and events are not lost.
      - On the exec tier, `RollingUpdate` keeps another replica serving, so the drain is long: a
        `terminationGracePeriodSeconds` longer than the longest command it admits. A
        PodDisruptionBudget with `maxUnavailable: 1` applies only when replicas are 2 or more; at 1
@@ -727,7 +728,9 @@ To revert, set replicas to 0. The shim falls back to `CREDENTIAL_PROXY_URL`.
 - **Uneven load.** Per-connection balancing is not per-load balancing. Long `kubectl` reads on one
   replica can fill it while another is idle. The retry in §4.3 and the per-replica metrics in §8.1
   are the checks.
-- **Caches filled N times.** More cold `get-credentials` (§3.4) and more TokenReviews.
+- **Caches filled N times.** More cold fills, each a `describe` and a `get-credentials` (§3.4),
+  and more TokenReviews. Open question 5 (a kubeconfig without `gcloud`) must be decided before
+  default on.
 - **Footprint.** Each replica adds 2 CPU and 2 GiB to the requests on every cluster mode; the
   request equals the limit (§3.3). On small installs, 0 replicas stays the default until a
   fleet needs it.
