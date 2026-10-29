@@ -1,6 +1,6 @@
 # The Credential Broker Scales Out: an Exec Tier Beside One Stateful Broker
 
-> **STATUS — Draft for review. First measurement run in §8.3 (#4242); 16 and 32 clusters and the exec tier are not measured yet.**
+> **STATUS — proposal; not implemented.** The first measurement run is in §8.3. 16 and 32 clusters and the exec tier are not measured yet.
 > Nothing is built. This document proposes how the credential broker grows past one pod. It is
 > meant to replace [`credential-proxy-single-pod.md`](credential-proxy-single-pod.md) once the
 > measurements in §8 exist and the design is reviewed. Issue: #4082. Partner: the sizing tiger
@@ -21,7 +21,7 @@ Number labels used in this document:
 - **[code]**: read from `main` (file and line).
 - **[predicted]**: arithmetic from a stated assumption. It is not a measurement.
 - **[doc, file]**: read from another design document, not from code.
-- **[#3760 head, not main]**: read from that pull request's head, which has not merged.
+- **[#3760 head, not main]**: read from the head of #3760, not from `main`.
 
 ## 1. The shape in one picture
 
@@ -234,6 +234,12 @@ shim always takes the fallback and nothing reports it.
   to them, where they would get a 404. They do not carry `kubeagents.x-k8s.io/has-credential-proxy`,
   which opens the github-token-minter to a pod. The exec builder mounts no forge credentials and no
   Slack tokens, so scaling out makes no copies of secrets that exec never uses.
+- Two more consumers select today's broker labels, so each needs an exec-tier target. The chart's
+  broker PodMonitoring (and its ServiceMonitor and VMPodScrape forms) gets a second scrape target
+  for the exec pods [code, `platform-agent-monitoring.yaml:81-88`]. The operator's usage-counter
+  poller gets a second target group for them [code, `usage_counters_poller.go:646`]. Without these,
+  nothing scrapes the tier that runs every `/v1/exec`: §8.1's slots gauge and per-replica series,
+  and the `toolExecutionsTotal` usage counter, would miss it.
 - Resources per replica, on every cluster mode: requests 2 CPU / 2 GiB, limits 2 CPU / 2 GiB.
   Today's broker requests 500m CPU / 1 GiB with limits 1 CPU / 2 GiB [code,
   `credential_proxy_manifests.go:140-149`]. The 2 GiB request is the minimum from §4.2, and the
@@ -469,6 +475,10 @@ There is no shared queue. Each replica runs §4.2 on its own share of the traffi
   retry a dropped connection (`BrokerDisconnected`), because the command may have run.
   `CREDENTIAL_PROXY_BUSY` is raised only at admission, before the command starts, so a retry
   never runs a command twice.
+- The retry skips a refusal at the session cap. Today that refusal uses the same code, so that the
+  model reports it and does not retry [code, `credential_proxy.py`, `SessionSlots`]. The busy reply
+  therefore gets a `bound` field with the bound that the broker already counts (`slot`, `budget`,
+  `session` and others) [code, `ADMISSION_BOUND_*`]. The shim retries only `slot` and `budget`.
 - The retry has costs. After a full 60 s wait it makes the worst case about 120 s, and when every
   replica is saturated it only adds load. §8 measures whether it helps; if not, it is dropped.
 - The session cap of 2 is per replica, so the tier admits `2 × N` session commands. They also
@@ -594,7 +604,7 @@ cannot write, because the experiment install has no GitOps repository. All numbe
 | Audits, 8 clusters, **2 CPU** (1 run) | 893 commands. Mean command time 4.4 s. 2.2 slots in use. `gcloud`: 315 commands (35%), 1,840 slot-seconds (47% of the slot time). CPU peak 2.1 (at the new limit), mean 0.88 cores; throttled in 42% of periods. Wait max 30 s. Memory peak 680 MiB. One job was still running at the end of the window.                                                                                                                                                                                               |
 | `gcloud` load, 1 / 4 / 8 / 16 at once | Levels 1 to 8: 0.38 / 0.47 / 0.43 commands per second; p50 2.5 / 8.5 / 18 s. From 4 at once, about 95% of CPU periods are throttled. The 4 and 8 levels ran once each. The 16 level (0.35 per second, p50 45 s, wait p50 30 s) comes from a run that the runner excluded, because 19 outside commands overlapped it, so it is not clean. It suggests that the 8 slots bind at 16.                                                                                                                      |
 | `kubectl` load, 1 at once             | 1.5 commands per second, bound by latency (p50 0.6 s), with the sandbox shell at about 0.36 cores (1 clean run; 2 more overlapped other work). Before #4104 fixed #4027, #4107 got 0.7 to 0.8 per second at 1 at once.                                                                                                                                                                                                                                                                                 |
-| Questions at once, 8 clusters         | 8 and 10: no refusals, answers in 3 to 10 minutes; most of these runs also met model-provider 429s. 12: 2 to 3 refused per run. 15: 5 refused per run (`429 Too many concurrent runs`). The broker stays almost idle.                                                                                                                                                                                                                                                                                  |
+| Questions at once, 8 clusters         | 8 and 10: no refusals, answers in 3 to 10 minutes; most of these runs also met model-provider 429s. 12: 2 to 3 refused per run. 15: 5 refused per run (`429 Too many concurrent runs`). The broker stays almost idle: 0.53 slots or fewer in use on average.                                                                                                                                                                                                                                           |
 
 What they mean for this design:
 
@@ -636,6 +646,11 @@ basis: the mean core-seconds per cluster, which is the broker container's CPU se
 | **8 clusters, 2 CPU (#4242)** | about 8.2                | about 136        | 23                  | about 200 core-seconds per cluster: about 55 cores, 28. Peak basis: 2.1 cores per 2.2 slots in use, about 132 cores, 66 | **about 28** |
 | 16 clusters, 4 CPU (#4107)    | about 3.4                | about 57         | 10                  | about 101 core-seconds per cluster: about 28 cores, 15                                                                  | about 15     |
 | 16 clusters, 1 CPU (#4107)    | about 12                 | about 202        | 34                  | about 106 core-seconds per cluster (at its 1-CPU limit): about 29 cores, 15                                             | about 34     |
+
+The tables fill two of the formula's terms: the background slot term and the CPU term. The
+interactive, reconcile and stall-watch slots are taken as zero: at 8 clusters, 8 to 15 questions at
+once kept the broker at 0.53 slots or fewer on average (§8.3). The all-slots term is then the
+background slots over 8 admitted per replica, about 17 at 1,000 clusters, under the CPU term.
 
 The headline uses the mean basis. The two raised-limit runs disagree by about 2× per cluster:
 about 200 core-seconds at 8 clusters and 2 CPU against about 101 at 16 clusters and 4 CPU. So one
