@@ -15,9 +15,10 @@
 # it; a fix waits for a red here.
 #
 # The objective is that the audit ran: it names at least one managed seeded
-# cluster, seeded-a or seeded-c (an audit summary can leave out a cluster with
-# nothing to report), and it does not say the audit was cancelled or that the
-# managed clusters are excluded.
+# cluster, slot a's or slot c's (an audit summary can leave out a cluster with
+# nothing to report), and it does not say the audit was cancelled (either
+# spelling) or that the managed clusters are excluded. The case lists every
+# audit stream, so a repetition waits for an audit an earlier one left running.
 id: fleet-audit-as-many-excluded-as-managed
 name: A fleet audit runs when as many clusters are excluded as are managed
 prompt: >-
@@ -31,6 +32,18 @@ expected_output: >-
 infrastructure:
   deployer: noop
 scope_exclude: { slots: [b, d], absent: 1 }
+audit_streams:
+  [
+    compliance-audit,
+    obtainability-audit,
+    security-patch-orchestrator,
+    fleet-wide-cost-analysis,
+    fleet-consistency-drift,
+    ai-security-audit,
+    stockout-prevention,
+    gcp-networking-fabric-audit,
+    gce-compute-fleet-audit,
+  ]
 fixtures: []
 validated: false
 
@@ -43,12 +56,10 @@ verification_spec:
     mode: assert
     check:
       type: report_contains
-      any_of_phrases: ["seeded-a", "seeded-c"]
-      forbidden_phrases:
+      any_of_patterns: ["{cluster:a}", "{cluster:c}"]
+      forbidden_patterns:
         [
-          "audit was cancelled",
-          "audit cancelled",
-          "audit is cancelled",
-          "cancelled the audit",
-          "managed clusters are explicitly excluded",
+          '\baudit (?:(?:was|has been|is|got) )?cancel+ed',
+          '\bcancel+(?:ed|ing) the (?:fleet )?audit',
+          'managed clusters (?:are|were|have been) (?:\w+ )?excluded',
         ]

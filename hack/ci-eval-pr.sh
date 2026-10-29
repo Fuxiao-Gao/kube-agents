@@ -3819,7 +3819,8 @@ if ! DECLARED_STREAMS="$(cd "${BENCH_DIR}" && uv run python -m kube_agents_bench
   exit 1
 fi
 # The cases that exclude seeded slots from the install's scope, one
-# `<case> <slot>...` line each (scope_exclude_apply, #3213). unit_phase puts them
+# `<case> <slot>... [+<n>]` line each, `+<n>` the case's absent count
+# (scope_exclude_apply, #3213). unit_phase puts them
 # in a phase of their own, after every other unit; a file that will not read
 # stops the run, since its case would run beside units its scope edit cuts.
 if ! SCOPE_EXCLUDE_CASES="$(cd "${BENCH_DIR}" && uv run python -m kube_agents_bench.scope_exclude cases "${TASKS[@]}")"; then
@@ -4739,7 +4740,7 @@ for SCOPE_LINE in ${SCOPE_EXCLUDE_LINES[@]+"${SCOPE_EXCLUDE_LINES[@]}"}; do
     *",${SCOPE_CASE},"*) SCOPE_PAUSE="${WRITER_LAUNCH_PAUSE:-${EVAL_GITHUB_WRITE_SETTLE_SECONDS}}" ;;
   esac
   echo ">>> [$(date -u +'%Y-%m-%dT%H:%M:%SZ')] every other unit is done; launching the ${EVAL_REPETITIONS} repetition(s) of ${SCOPE_CASE} alone, with slot(s) ${SCOPE_SLOTS} excluded from the install's scope"
-  # shellcheck disable=SC2086 # slot letters, one argument each
+  # shellcheck disable=SC2086 # slot letters and an optional +<n> absent count, one argument each
   if scope_exclude_apply "${SCOPE_CASE}" ${SCOPE_SLOTS}; then
     launch_units "$(for REP in $(seq 1 "${EVAL_REPETITIONS}"); do printf '%s 0 %s\n' "${REP}" "${SCOPE_IDX}"; done)" 1 "${SCOPE_PAUSE}"
     wait

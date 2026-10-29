@@ -132,6 +132,13 @@ class ApplyRestoreTest(unittest.TestCase):
         self.assertEqual(len(ops), 1)
         self.assertEqual(ops[0][-1], {"op": "add", "path": "/spec/scope", "value": {"exclude": {"clusters": [SEEDED_B]}}})
 
+    def test_apply_passes_the_absent_count_through_to_the_patch(self):
+        # `cases` prints `b +1`; the runner splices it into scope_exclude_apply as is.
+        result, ops = self.run_functions({"metadata": {}, "spec": {}}, "scope_exclude_apply case-x b +1; echo rc=$?")
+        self.assertIn("rc=0", result.stdout, result.stderr)
+        absent = {**SEEDED_B, "clusterName": "seeded-e"}
+        self.assertEqual(ops[0][-1], {"op": "add", "path": "/spec/scope", "value": {"exclude": {"clusters": [SEEDED_B, absent]}}})
+
     def test_apply_without_the_fleet_context_patches_nothing(self):
         result, ops = self.run_functions({"metadata": {}, "spec": {}}, "scope_exclude_apply case-x b; echo rc=$?", context=None)
         self.assertIn("rc=1", result.stdout)
