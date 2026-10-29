@@ -3792,7 +3792,8 @@ unit_delegation_timeout() {
     fleet-audit-unchanged-finding-keeps-wording) echo 3000 ;;
     upgrades-master-behind-offered-elsewhere | upgrades-audit-reports-upgrade-blocked) echo 3000 ;;
     obtainability-planted-orphan-service) echo 3000 ;;
-    # A full fleet audit, every stream: 834 s and 1310 s on a dev install (#3933).
+    # A compliance-audit run on a pool install; a multi-stream audit took
+    # 834 s and 1310 s on a dev install (#3933), so the wait is the audit band's.
     fleet-audit-as-many-excluded-as-managed) echo 3000 ;;
     # Two attempts of about 150 trivial calls each before the card settles; the
     # default would cut the second attempt on a slow night and grade the
@@ -4741,7 +4742,7 @@ for SCOPE_LINE in ${SCOPE_EXCLUDE_LINES[@]+"${SCOPE_EXCLUDE_LINES[@]}"}; do
   case ",${INJECT_LANE_REQUESTING:-},${STOPPED_ASK_CASES:-}," in
     *",${SCOPE_CASE},"*) SCOPE_PAUSE="${WRITER_LAUNCH_PAUSE:-${EVAL_GITHUB_WRITE_SETTLE_SECONDS}}" ;;
   esac
-  echo ">>> [$(date -u +'%Y-%m-%dT%H:%M:%SZ')] every other unit is done; launching the ${EVAL_REPETITIONS} repetition(s) of ${SCOPE_CASE} alone, with slot(s) ${SCOPE_SLOTS} excluded from the install's scope"
+  echo ">>> [$(date -u +'%Y-%m-%dT%H:%M:%SZ')] every other unit is done; launching the ${EVAL_REPETITIONS} repetition(s) of ${SCOPE_CASE} alone, with slot(s) ${SCOPE_SLOTS/ +/, absent: } excluded from the install's scope"
   # shellcheck disable=SC2086 # slot letters and an optional +<n> absent count, one argument each
   if scope_exclude_apply "${SCOPE_CASE}" ${SCOPE_SLOTS}; then
     launch_units "$(for REP in $(seq 1 "${EVAL_REPETITIONS}"); do printf '%s 0 %s\n' "${REP}" "${SCOPE_IDX}"; done)" 1 "${SCOPE_PAUSE}"
@@ -4754,7 +4755,7 @@ for SCOPE_LINE in ${SCOPE_EXCLUDE_LINES[@]+"${SCOPE_EXCLUDE_LINES[@]}"}; do
   else
     for REP in $(seq 1 "${EVAL_REPETITIONS}"); do
       skip_unit "${TASKS[SCOPE_IDX]}" "${SCOPE_CASE}" "${REP}" "" "" "not run: its scope exclusion did not take effect" \
-        "scope-exclude: slot(s) ${SCOPE_SLOTS} could not be excluded from the install's scope"
+        "scope-exclude: slot(s) ${SCOPE_SLOTS/ +/, absent: } could not be excluded from the install's scope"
     done
   fi
   scope_exclude_restore "${SCOPE_CASE}" settle \

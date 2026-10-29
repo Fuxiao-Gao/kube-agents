@@ -359,7 +359,7 @@ class WiringTest(unittest.TestCase):
         self.assertLess(launch, log)
         self.assertLess(log, restore)
         # A scope edit that did not take effect records each repetition as infrastructure.
-        self.assertIn('"scope-exclude: slot(s) ${SCOPE_SLOTS} could not be excluded', body)
+        self.assertIn('"scope-exclude: slot(s) ${SCOPE_SLOTS/ +/, absent: } could not be excluded', body)
 
 
 if __name__ == "__main__":

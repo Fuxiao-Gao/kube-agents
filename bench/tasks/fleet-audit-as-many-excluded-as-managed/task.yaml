@@ -14,38 +14,38 @@
 # 8 excluded and 8 managed did not cancel (#3933). The nightly keeps measuring
 # it; a fix waits for a red here.
 #
-# The objectives are that the audit ran. The worker ran `audit_report.py start`
-# or a fleet-audit collector: a cancelled or deferred audit runs neither, and a
-# run with no worker commands is an error, not a pass. The answer names at least
-# one managed seeded cluster, slot a's or slot c's (an audit summary can leave
-# out a cluster with nothing to report), and does not say the audit was
-# cancelled (either spelling) or that the managed clusters are excluded. The case lists every
-# audit stream, so a repetition waits for an audit an earlier one left running.
+# THE PROMPT names one stream and its SOP, so the skill routes it to form 1
+# (fleet-audit references/on-demand.md): the session runs the audit itself, and
+# its outcome is in the report store before grading. The harness's prompt asked
+# for every audit, which form 2 answers by triggering cron runs that finish
+# after the objectives are read, so a cancel inside one could not be seen. The
+# misread is in the same step either way: every audit SOP starts from the
+# fleet_scope read ("the fleet is its projects, less every cluster it lists in
+# excluded_clusters").
+#
+# THE OBJECTIVES: a compliance-audit report finished after the run started is
+# in the report store; the worker ran `audit_report.py start` for the stream;
+# and the answer does not say the audit was cancelled or the managed clusters
+# are excluded. A cancel, before or after `start`, leaves no fresh report.
+#
+# READ A RED before counting it as #3933 evidence. #3933 is an answer that
+# cancels because it reads the managed clusters as excluded. A red with no
+# such claim is another failure: for example a worker that answers "queued for
+# the next cron tick" without running anything (#4258).
 id: fleet-audit-as-many-excluded-as-managed
 name: A fleet audit runs when as many clusters are excluded as are managed
 prompt: >-
-  Run a fleet audit across every cluster you manage and report the findings,
-  grouped by cluster.
+  Run the security and RBAC posture audit across every cluster you manage,
+  following the compliance-audit SOP, and report the result.
 expected_output: >-
-  The audit runs on the clusters the install manages and reports findings for
-  them, grouped by cluster. It does not cancel, and it does not say the managed clusters are
-  excluded; where it names the excluded clusters, it says they were not
-  checked.
+  The compliance audit runs on the clusters the install manages: the worker
+  starts and finishes the stream and reports its ledger. It does not cancel, and
+  it does not say the managed clusters are excluded; where it names the excluded
+  clusters, it says they were not checked.
 infrastructure:
   deployer: noop
 scope_exclude: { slots: [b, d], absent: 1 }
-audit_streams:
-  [
-    compliance-audit,
-    obtainability-audit,
-    security-patch-orchestrator,
-    fleet-wide-cost-analysis,
-    fleet-consistency-drift,
-    ai-security-audit,
-    stockout-prevention,
-    gcp-networking-fabric-audit,
-    gce-compute-fleet-audit,
-  ]
+audit_streams: [compliance-audit]
 fixtures: []
 validated: false
 
@@ -53,24 +53,29 @@ validated: false
 domain: fleet-audits
 
 verification_spec:
-  - name: the-audit-ran-on-the-managed-clusters
+  - name: the-report-store-holds-this-run
     role: objective
     mode: assert
     check:
-      type: report_contains
-      any_of_patterns: ["{cluster:a}", "{cluster:c}"]
-      forbidden_patterns:
-        [
-          '\baudit (?:(?:was|has been|is|got) )?cancel+ed',
-          '\bcancel+(?:ed|ing) the (?:fleet )?audit',
-          'managed clusters? (?:is|are|was|were|has been|have been) (?:\w+ )?excluded',
-        ]
-  - name: the-audit-or-a-collector-ran
+      type: audit_report_stored
+      audit: compliance-audit
+  - name: the-audit-ran
     role: objective
     mode: assert
     check:
       type: worker_commands
-      required_patterns:
+      required_runs:
+        - script: audit_report.py
+          flags: [start]
+          word_patterns: ["(?:^|=)compliance-audit$"]
+  - name: the-answer-does-not-cancel
+    role: objective
+    mode: assert
+    check:
+      type: report_contains
+      forbidden_patterns:
         [
-          '\baudit_report\.py\s+start\b|\b(?:collect|fleet_drift|fleet_health|fleet_stockout|fleet_waste|patch_readiness|upgrade_retrospective)\.py\b',
+          '\baudit (?:(?:was|has been|is|got) )?cancel+ed',
+          '\bcancel+(?:ed|ing) the (?:fleet |compliance )?audit',
+          'managed clusters? (?:is|are|was|were|has been|have been) (?:\w+ )?excluded',
         ]
