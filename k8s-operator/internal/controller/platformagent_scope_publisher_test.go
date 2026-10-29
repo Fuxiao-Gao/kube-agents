@@ -340,6 +340,18 @@ func TestTheScopeResolvedCondition(t *testing.T) {
 		{"too large", agent, doc("too-large", hash, time.Minute), metav1.ConditionFalse, "TooLarge", 0},
 		{"error", agent, doc("error", hash, time.Minute), metav1.ConditionFalse, "Error", 0},
 	}
+	// A document value the message quotes is cut, so a ConfigMap writer
+	// cannot push the message past the CRD's limit and fail every status
+	// write.
+	huge := strings.Repeat("x", 40<<10)
+	for name, data := range map[string]map[string]string{
+		"state":      doc(huge, hash, time.Minute),
+		"resolvedAt": {scopeResolvedDataKey: `{"v":1,"resolvedAt":"` + huge + `","state":"ok"}`},
+	} {
+		if got, _ := scopeResolvedCondition(agent, data, now); len(got.Message) > 512 {
+			t.Errorf("a 40 KiB %s gives a %d-byte message", name, len(got.Message))
+		}
+	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got, requeue := scopeResolvedCondition(tc.agent, tc.data, now)
@@ -355,10 +367,11 @@ func TestTheScopeResolvedCondition(t *testing.T) {
 }
 
 // The broker's side follows two gates. Under mode next it reads the
-// declaration (the mount and CREDENTIAL_PROXY_SCOPE_FILE). It confers the
-// scope role (the audience, the publisher's username on both lists, and
-// the ingress peer) only while the operator says the gateway pod admission
-// policy is rendered, and only for an account this PlatformAgent owns.
+// declaration (the mount and CREDENTIAL_PROXY_SCOPE_FILE). While the
+// operator says the gateway pod admission policy is rendered, its fence
+// admits the publisher pods, and for an account this PlatformAgent owns it
+// also confers the scope role: the audience and the publisher's username
+// on both lists.
 func TestTheBrokerConfersTheScopeRoleOnlyBehindTheGatewayPodPolicy(t *testing.T) {
 	type want struct{ file, role, peer bool }
 	cases := []struct {
@@ -509,6 +522,17 @@ func TestReconcileScopePublisher(t *testing.T) {
 			scopePublisherName(agent) + "/np": &networkingv1.NetworkPolicy{},
 		}
 	}
+	assertNoIdentity := func(t *testing.T, cl client.Client, agent *agentv1alpha1.PlatformAgent) {
+		t.Helper()
+		if err := cl.Get(ctx, types.NamespacedName{Name: scopeResolvedConfigMapName(agent), Namespace: agent.Namespace}, &corev1.ConfigMap{}); err != nil {
+			t.Errorf("the resolved-scope ConfigMap is not rendered: %v", err)
+		}
+		for _, obj := range []client.Object{&rbacv1.Role{}, &rbacv1.RoleBinding{}, &networkingv1.NetworkPolicy{}} {
+			if err := cl.Get(ctx, types.NamespacedName{Name: scopePublisherName(agent), Namespace: agent.Namespace}, obj); !apierrors.IsNotFound(err) {
+				t.Errorf("%T rendered while no publisher Job may run (err=%v)", obj, err)
+			}
+		}
+	}
 	assertStatic := func(t *testing.T, cl client.Client, agent *agentv1alpha1.PlatformAgent) {
 		t.Helper()
 		for key, obj := range staticKeys(agent) {
@@ -548,24 +572,33 @@ func TestReconcileScopePublisher(t *testing.T) {
 		}
 	})
 
-	t.Run("without the gateway pod policy no Job runs and the condition says why", func(t *testing.T) {
-		t.Setenv(a2aGatewayPodPolicyEnvVar, "")
+	t.Run("without the gateway pod policy no Job runs, no grant renders and the condition says why", func(t *testing.T) {
+		t.Setenv(a2aGatewayPodPolicyEnvVar, "true")
 		agent := scopePublisherAgent()
 		r, cl := scopePublisherReconciler(t, agent)
-		outcome, err := r.reconcileScopePublisher(ctx, agent, now)
-		if err != nil {
+		if _, err := r.reconcileScopePublisher(ctx, agent, now); err != nil {
 			t.Fatal(err)
 		}
 		assertStatic(t, cl, agent)
-		if jobs := scopePublisherJobs(t, cl, agent); len(jobs) != 0 {
-			t.Errorf("Jobs = %d with the scope role not conferred, want none", len(jobs))
+		// The policy goes away: the grant an earlier pass rendered goes too.
+		t.Setenv(a2aGatewayPodPolicyEnvVar, "")
+		outcome, err := r.reconcileScopePublisher(ctx, agent, now.Add(time.Minute))
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertNoIdentity(t, cl, agent)
+		if err := cl.Get(ctx, types.NamespacedName{Name: scopePublisherName(agent), Namespace: agent.Namespace}, &corev1.ServiceAccount{}); !apierrors.IsNotFound(err) {
+			t.Errorf("the publisher's ServiceAccount survived (err=%v)", err)
+		}
+		if jobs := scopePublisherJobs(t, cl, agent); len(jobs) != 1 {
+			t.Errorf("Jobs = %d after the policy went, want only the one started before", len(jobs))
 		}
 		if outcome.condition == nil || outcome.condition.Status != metav1.ConditionFalse || outcome.condition.Reason != "ScopeRoleNotConferred" {
 			t.Errorf("condition %+v, want False/ScopeRoleNotConferred", outcome.condition)
 		}
 	})
 
-	t.Run("a scope with nothing to resolve renders the objects, no Job and no condition", func(t *testing.T) {
+	t.Run("a scope with nothing to resolve renders the ConfigMap, no grant, no Job and no condition", func(t *testing.T) {
 		t.Setenv(a2aGatewayPodPolicyEnvVar, "true")
 		agent := scopePublisherAgent()
 		agent.Spec.Scope = &agentv1alpha1.ScopeSpec{Projects: []string{"team-a"}}
@@ -574,7 +607,7 @@ func TestReconcileScopePublisher(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		assertStatic(t, cl, agent)
+		assertNoIdentity(t, cl, agent)
 		if jobs := scopePublisherJobs(t, cl, agent); len(jobs) != 0 {
 			t.Errorf("Jobs = %d, want none", len(jobs))
 		}
@@ -619,6 +652,30 @@ func TestReconcileScopePublisher(t *testing.T) {
 		}
 		if err := cl.Get(ctx, client.ObjectKeyFromObject(squatter), &corev1.ServiceAccount{}); err != nil {
 			t.Errorf("the teardown removed an unowned ServiceAccount: %v", err)
+		}
+	})
+
+	t.Run("a ServiceAccount replaced by an unowned one takes the grant with it", func(t *testing.T) {
+		t.Setenv(a2aGatewayPodPolicyEnvVar, "true")
+		agent := scopePublisherAgent()
+		r, cl := scopePublisherReconciler(t, agent)
+		if _, err := r.reconcileScopePublisher(ctx, agent, now); err != nil {
+			t.Fatal(err)
+		}
+		assertStatic(t, cl, agent)
+		key := types.NamespacedName{Name: scopePublisherName(agent), Namespace: agent.Namespace}
+		if err := cl.Delete(ctx, &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := cl.Create(ctx, &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.reconcileScopePublisher(ctx, agent, now.Add(time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		assertNoIdentity(t, cl, agent)
+		if err := cl.Get(ctx, key, &corev1.ServiceAccount{}); err != nil {
+			t.Errorf("the unowned ServiceAccount was removed: %v", err)
 		}
 	})
 

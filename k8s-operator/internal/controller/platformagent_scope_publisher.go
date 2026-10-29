@@ -59,11 +59,12 @@ import (
 // The operator owns the ConfigMap and applies it with no data, as it does the
 // home-channel record (platformagent_home_channel_record.go): the publisher
 // merge-patches the one data key, so server-side apply never resets it, and
-// the ConfigMap is in no rollout hash, so a publish rolls no pod. The static
-// objects render on every next pass whatever the scope declares, so a later
-// edit that adds a folder only needs the next Job; the Job and the condition
-// exist only while the scope declares something to resolve
-// (scopeHasResolvableMembers). A today install renders none of it.
+// the ConfigMap is in no rollout hash, so a publish rolls no pod. The
+// ConfigMap and the gateway's read of it render on every next pass. The
+// publisher's identity and its patch grant render only while a Job may run
+// (scopePublisherMayRun), because without the gateway pod admission policy a
+// pod could run under that identity and write the document the gateway
+// trusts. A today install renders none of it.
 const (
 	scopeResolvedConfigMapSuffix = "-resolved-scope"
 	// scopeResolvedDataKey is the one key the publisher writes.
@@ -80,7 +81,6 @@ const (
 	scopePublisherScript = "/opt/defaults/scripts/scope_publisher.py"
 
 	// The publisher container's env, read by scope_publisher.py.
-	scopePublisherScopeFileEnvVar       = "KUBEAGENTS_SCOPE_FILE"
 	scopePublisherConfigMapEnvVar       = "KUBEAGENTS_RESOLVED_SCOPE_CONFIGMAP"
 	scopePublisherNamespaceEnvVar       = "POD_NAMESPACE"
 	scopePublisherBrokerURLEnvVar       = "CREDENTIAL_PROXY_URL"
@@ -185,6 +185,10 @@ const (
 	// confer the scope role (scopeBrokerRoleEnabled).
 	scopeResolvedReasonUnowned      = "UnownedServiceAccount"
 	scopeResolvedReasonNotConferred = "ScopeRoleNotConferred"
+	// scopeDocumentQuoteLimit bounds a document value the condition message
+	// quotes: the publisher's ConfigMap is not trusted to keep the message
+	// under the CRD's limit, and a status write over it fails whole.
+	scopeDocumentQuoteLimit = 64
 )
 
 // scopeResolvedConfigMapName is the resolved-scope ConfigMap's name.
@@ -214,6 +218,14 @@ func scopePublisherRendered(agent *agentv1alpha1.PlatformAgent) bool {
 // (a2aGatewayPodPolicyEnvVar).
 func scopeBrokerRoleEnabled(agent *agentv1alpha1.PlatformAgent) bool {
 	return scopePublisherRendered(agent) && os.Getenv(a2aGatewayPodPolicyEnvVar) == "true"
+}
+
+// scopePublisherMayRun is whether a publisher Job may run, and so whether
+// its identity and patch grant render: the scope declares something to
+// resolve, the publisher's ServiceAccount is this PlatformAgent's (owned),
+// and the broker confers the scope role.
+func scopePublisherMayRun(agent *agentv1alpha1.PlatformAgent, owned bool) bool {
+	return scopeHasResolvableMembers(agent) && owned && scopeBrokerRoleEnabled(agent)
 }
 
 // scopeHasResolvableMembers is whether spec.scope declares anything the
@@ -536,7 +548,7 @@ func buildScopePublisherJob(agent *agentv1alpha1.PlatformAgent, start time.Time,
 						ImagePullPolicy: scopePublisherPullPolicy(agent),
 						Command:         []string{scopePublisherPython, scopePublisherScript},
 						Env: []corev1.EnvVar{
-							{Name: scopePublisherScopeFileEnvVar, Value: path.Join(scopeDir, scopeFileName)},
+							{Name: scopeFileEnvKey, Value: path.Join(scopeDir, scopeFileName)},
 							{Name: scopePublisherConfigMapEnvVar, Value: scopeResolvedConfigMapName(agent)},
 							{Name: scopePublisherNamespaceEnvVar, ValueFrom: &corev1.EnvVarSource{
 								FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
@@ -658,7 +670,7 @@ func scopeResolvedCondition(agent *agentv1alpha1.PlatformAgent, data map[string]
 	resolvedAt, err := time.Parse(time.RFC3339, doc.ResolvedAt)
 	if err != nil {
 		condition.Reason = scopeResolvedReasonMissing
-		condition.Message = fmt.Sprintf("the resolved scope's resolvedAt %q is not an RFC 3339 time", doc.ResolvedAt)
+		condition.Message = fmt.Sprintf("the resolved scope's resolvedAt %q is not an RFC 3339 time", truncateToValidUTF8(doc.ResolvedAt, scopeDocumentQuoteLimit))
 		return condition, 0
 	}
 	bound := scopeFreshnessBound(scopeMaxProjects(agent))
@@ -671,7 +683,7 @@ func scopeResolvedCondition(agent *agentv1alpha1.PlatformAgent, data map[string]
 		condition.Message = fmt.Sprintf("the scope publisher could not resolve the scope (run at %s); see the publisher Job's log", doc.ResolvedAt)
 	case doc.State != scopeStateOK:
 		condition.Reason = scopeResolvedReasonMissing
-		condition.Message = fmt.Sprintf("the resolved scope at %s has a state this operator does not know (%q)", doc.ResolvedAt, doc.State)
+		condition.Message = fmt.Sprintf("the resolved scope at %s has a state this operator does not know (%q)", doc.ResolvedAt, truncateToValidUTF8(doc.State, scopeDocumentQuoteLimit))
 	case doc.MemberHash != scopeMemberHash(agent):
 		condition.Reason = scopeResolvedReasonMismatch
 		condition.Message = fmt.Sprintf("the resolved scope at %s is for an earlier spec.scope; a publisher run for the current one starts once no run is active", doc.ResolvedAt)
@@ -757,17 +769,18 @@ type scopePublisherOutcome struct {
 	requeue   time.Duration
 }
 
-// reconcileScopePublisher applies the publisher's static objects, starts a
-// publisher Job when the schedule says so, and reads the ConfigMap for the
-// condition. reconcileA2AStack runs it under next only; cleanupA2A removes
+// reconcileScopePublisher applies the ConfigMap, applies the publisher's
+// identity while a Job may run and removes it otherwise, starts a publisher
+// Job when the schedule says so, and reads the ConfigMap for the condition. reconcileA2AStack runs it under next only; cleanupA2A removes
 // what it rendered.
 func (r *PlatformAgentReconciler) reconcileScopePublisher(ctx context.Context, agent *agentv1alpha1.PlatformAgent, now time.Time) (scopePublisherOutcome, error) {
 	owned, err := r.scopePublisherIdentityOwned(ctx, agent)
 	if err != nil {
 		return scopePublisherOutcome{}, err
 	}
+	mayRun := scopePublisherMayRun(agent, owned)
 	objects := []client.Object{buildResolvedScopeConfigMap(agent)}
-	if owned {
+	if mayRun {
 		apiCIDRs := r.apiServerEgressTargets(ctx, agent, false)
 		objects = append(objects,
 			buildScopePublisherServiceAccount(agent),
@@ -776,8 +789,15 @@ func (r *PlatformAgentReconciler) reconcileScopePublisher(ctx context.Context, a
 			buildScopePublisherNetworkPolicy(agent, apiCIDRs, r.ungatedDNSClusterIPs(ctx, agent)),
 		)
 	} else {
-		logf.FromContext(ctx).Info("not adopting an unowned ServiceAccount as the scope publisher's identity; no publisher Job runs",
-			"namespace", agent.Namespace, "name", scopePublisherName(agent))
+		if !owned {
+			logf.FromContext(ctx).Info("not adopting an unowned ServiceAccount as the scope publisher's identity; no publisher Job runs",
+				"namespace", agent.Namespace, "name", scopePublisherName(agent))
+		}
+		// A grant an earlier pass rendered goes, including one bound by
+		// name to an account somebody else now holds.
+		if err := r.removeScopePublisherIdentity(ctx, agent); err != nil {
+			return scopePublisherOutcome{}, err
+		}
 	}
 	for _, obj := range objects {
 		if err := ctrl.SetControllerReference(agent, obj, r.Scheme); err != nil {
@@ -858,12 +878,23 @@ func (r *PlatformAgentReconciler) removeScopePublisher(ctx context.Context, agen
 			return fmt.Errorf("failed to delete scope publisher Job: %w", err)
 		}
 	}
+	if err := r.removeScopePublisherIdentity(ctx, agent); err != nil {
+		return err
+	}
+	if err := r.deleteA2AObjectIfOwned(ctx, agent, buildResolvedScopeConfigMap(agent), r.Client, nil); err != nil {
+		return fmt.Errorf("failed to remove the resolved-scope ConfigMap: %w", err)
+	}
+	return nil
+}
+
+// removeScopePublisherIdentity deletes the publisher's NetworkPolicy,
+// RoleBinding, Role and ServiceAccount, owned objects only.
+func (r *PlatformAgentReconciler) removeScopePublisherIdentity(ctx context.Context, agent *agentv1alpha1.PlatformAgent) error {
 	for _, obj := range []client.Object{
 		buildScopePublisherNetworkPolicy(agent, nil, nil),
 		buildScopePublisherRoleBinding(agent),
 		buildScopePublisherRole(agent),
 		buildScopePublisherServiceAccount(agent),
-		buildResolvedScopeConfigMap(agent),
 	} {
 		if err := r.deleteA2AObjectIfOwned(ctx, agent, obj, r.Client, nil); err != nil {
 			return fmt.Errorf("failed to remove scope publisher %T: %w", obj, err)
