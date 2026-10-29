@@ -952,7 +952,7 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(
             {"forge": "github", "repo": "acme/infra", "role": "unregistered", "ref": "main",
              "revision": "0" * 40, "path": str(self.into), "files": 2, "bytes": 16,
-             "archiveBytes": len(tar), "history": "none"},
+             "skipped": [], "archiveBytes": len(tar), "history": "none"},
             answer,
         )
         self.assertFalse((self.into / ".git").exists())
@@ -1018,18 +1018,106 @@ class SnapshotTest(unittest.TestCase):
             with self.subTest(name=name):
                 self.refused(build_tar(regular(name)))
 
-    def test_links_that_leave_the_tree_are_refused(self):
+    def test_symbolic_links_that_leave_the_tree_are_skipped_and_named(self):
+        # Real repositories hold such links (`-> /dev/null`); one of them must
+        # not cost the caller every other file, and none of them is written.
+        for member, reason in (
+            (special("abs", tarfile.SYMTYPE, "/etc/passwd"), "absolute or empty target"),
+            (special("up", tarfile.SYMTYPE, "../outside"), "out of the tree"),
+            (special("a/deep", tarfile.SYMTYPE, "../../outside"), "out of the tree"),
+            (special("empty", tarfile.SYMTYPE, ""), "absolute or empty target"),
+            (special("intogit", tarfile.SYMTYPE, "sub/../.git/config"), "into a `.git` path"),
+        ):
+            name = member[0].name
+            with self.subTest(name=name):
+                shutil.rmtree(self.into, ignore_errors=True)
+                answer = self.snapshot(build_tar(regular("ok.txt"), member))
+                self.assertTrue((self.into / "ok.txt").is_file())
+                self.assertFalse(os.path.lexists(self.into / name))
+                ((skipped),) = answer["skipped"]
+                self.assertEqual(name, skipped["path"])
+                self.assertIn(reason, skipped["reason"])
+
+    def test_hard_links_that_leave_the_tree_are_refused(self):
         for member in (
-            special("abs", tarfile.SYMTYPE, "/etc/passwd"),
-            special("up", tarfile.SYMTYPE, "../outside"),
-            special("a/deep", tarfile.SYMTYPE, "../../outside"),
-            special("empty", tarfile.SYMTYPE, ""),
             special("hard", tarfile.LNKTYPE, "../outside"),
             special("hardabs", tarfile.LNKTYPE, "/etc/passwd"),
-            special("intogit", tarfile.SYMTYPE, "sub/../.git/config"),
+            special("hardgit", tarfile.LNKTYPE, "a/../.git/config"),
         ):
             with self.subTest(name=member[0].name):
                 self.refused(build_tar(regular("ok.txt"), member))
+
+    def test_a_chain_through_a_symbolic_link_is_caught_by_these_checks_and_not_only_the_filter(self):
+        # `a -> .` makes `a/x -> ../outside` normalise to `outside` but resolve
+        # above the tree. The refusal names the link, which the `data` filter's
+        # own message does not.
+        caught = self.refused(build_tar(
+            special("a", tarfile.SYMTYPE, "."),
+            special("a/x", tarfile.SYMTYPE, "../outside"),
+        ))
+        self.assertIn("through a symbolic link", str(caught))
+        # A file written through a link is refused the same way.
+        caught = self.refused(build_tar(special("a", tarfile.SYMTYPE, "."), regular("a/f.txt")))
+        self.assertIn("through a symbolic link", str(caught))
+        # A link whose target passes through another link is not written:
+        # `d/a -> ..` is the top of the tree, so `d/a/../x` is above it.
+        answer = self.snapshot(build_tar(
+            special("d", tarfile.DIRTYPE),
+            special("d/a", tarfile.SYMTYPE, ".."),
+            special("b", tarfile.SYMTYPE, "d/a/../x"),
+            regular("x"),
+        ))
+        self.assertEqual([{"path": "b", "reason": "a link that passes through another link"}], answer["skipped"])
+        self.assertFalse(os.path.lexists(self.into / "b"))
+        # A hard link to a symbolic link is refused.
+        shutil.rmtree(self.into)
+        caught = self.refused(build_tar(
+            regular("x"), special("s", tarfile.SYMTYPE, "x"), special("h", tarfile.LNKTYPE, "s"),
+        ))
+        self.assertIn("hard link to a symbolic link", str(caught))
+
+    def test_a_directory_laid_out_as_a_bare_repository_is_refused(self):
+        # git discovers such a directory as a repository and reads its config.
+        for prefix in ("", "sub/", "a/b/"):
+            for names in (
+                ("HEAD", "config", "objects/pack/x", "refs/heads/main"),
+                ("head", "Objects/x", "REFS/x"),
+                ("HEAD", "commondir"),
+            ):
+                with self.subTest(prefix=prefix, names=names):
+                    caught = self.refused(build_tar(regular("ok.txt"), *(regular(prefix + name) for name in names)))
+                    self.assertIn("bare repository", str(caught))
+        # Paired: the names alone, or two of the three, are ordinary files.
+        self.snapshot(build_tar(regular("HEAD"), regular("objects/x"), regular("docs/refs/y")))
+        self.assertTrue((self.into / "HEAD").is_file())
+
+    def test_a_tar_git_archive_wrote_from_a_bare_repository_layout_is_refused(self):
+        # The tree a hostile public repository can commit: a bare repository's
+        # files, as plain files, whose `config` would run a program on `git log`.
+        repo = self.tmp / "layout"
+        repo.mkdir()
+        git(repo, "init", "--quiet")
+        (repo / "HEAD").write_text("ref: refs/heads/main\n")
+        (repo / "config").write_text("[core]\n\tbare = true\n[log]\n\tshowSignature = true\n")
+        (repo / "objects" / "info").mkdir(parents=True)
+        (repo / "objects" / "info" / "keep").write_text("")
+        (repo / "refs" / "heads").mkdir(parents=True)
+        (repo / "refs" / "heads" / "keep").write_text("")
+        git(repo, "add", "-A")
+        git(repo, "commit", "--quiet", "-m", "looks like docs")
+        tar = subprocess.run(
+            ["git", "archive", "--format=tar", "HEAD"], cwd=str(repo), capture_output=True, check=True,
+        ).stdout
+        caught = self.refused(tar)
+        self.assertIn("bare repository", str(caught))
+
+    def test_local_git_does_not_open_a_bare_repository_it_was_not_named(self):
+        bare = self.tmp / "bare"
+        git(self.tmp, "init", "--quiet", "--bare", str(bare))
+        with mock.patch.object(vcs_client, "LOCAL_GIT", REAL_GIT), mock.patch.object(vcs_client, "ROOT", self.tmp / "root"):
+            done = vcs_client.local_git(bare, "rev-parse", "--git-dir", check=False)
+        self.assertNotEqual(0, done.returncode)
+        self.assertIn("safe.bareRepository", done.stderr)
 
     def test_a_link_inside_the_tree_is_kept(self):
         tar = build_tar(

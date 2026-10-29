@@ -12,8 +12,9 @@
 > is not a scheduling slip: `inspect_repository.py` stays on the broker's
 > content-workspace route rather than moving to the verbs, because it reads
 > repositories this install does not manage and does it with a shallow clone —
-> neither of which the verbs offer, the second on purpose
-> ([The seam](#3-the-seam)). The CRD declares forges and repositories in `spec.integration.forges`
+> neither of which `clone` offers, the second on purpose
+> ([The seam](#3-the-seam)). The `snapshot` verb now offers both; the move is
+> not made yet. The CRD declares forges and repositories in `spec.integration.forges`
 > and `spec.integration.repositories`; each provider states its own hosts, grammar and credential.
 > This is the design for driving any forge, and the order the rest has to
 > happen in.
@@ -647,7 +648,8 @@ them a route. A protocol that answers from the credential side has to grow a
 verb for each such narrowing and a cap on each verb's response, and a caller
 that hits the cap gets a truncated list rather than a smaller question. This
 design has no cap on a history question, because a history question never
-crosses the seam. The one transfer it does make is bounded, once, at `clone`.
+crosses the seam. The transfers it does make are bounded once each, at `clone`
+and at `snapshot`.
 
 ### The broker is already in its own pod
 
@@ -693,7 +695,12 @@ has no parent for the receiver to miss, and the answer says `history: "none"`.
 The clone stays under `CREDENTIAL_PROXY_MAX_CLONE_BYTES`, and the tar under
 `CREDENTIAL_PROXY_MAX_SNAPSHOT_BYTES` (32 MiB, refused as `SNAPSHOT_TOO_LARGE`).
 The tar is smaller than the bundle ceiling because the answer is base64 inside
-one JSON body, and the broker holds several copies of it.
+one JSON body, and the broker holds several copies of it. The tar is sized from
+`git ls-tree` before `git archive` writes it, because the clone ceiling measures
+a compressed pack: a few MB of repeated bytes can be GB as a tar, on the volume
+the broker shares with its own state. The clone's `info/attributes` unsets
+`export-subst`, `ident`, `text` and `working-tree-encoding`, so the tar holds the
+committed bytes and the size measured holds.
 
 ### One git in the sandbox
 
@@ -742,9 +749,10 @@ directory's own profile.d entry always has. A missed prepend is a
 other thing deleting the shim buys.
 
 The wrapper gives the agent's own `git` `core.hooksPath` pointed at an empty,
-root-owned directory, `core.fsmonitor` off, `protocol.ext.allow=never`, and no
-system config — the hooks, `ext` and system-config settings `vcs.py` gives its
-own calls, plus `fsmonitor`. `-c` outranks every
+root-owned directory, `core.fsmonitor` off, `protocol.ext.allow=never`,
+`safe.bareRepository=explicit`, and no system config — the hooks, `ext`,
+bare-repository and system-config settings `vcs.py` gives its own calls, plus
+`fsmonitor`. `-c` outranks every
 config file, so a working copy that sets its own `core.hooksPath` — the step an
 injected `CONTRIBUTING.md` asked for — still gets the empty one. It is not a
 boundary, and does not claim to be. A repository-local `filter.<name>.clean`
@@ -818,7 +826,7 @@ about git.
 
 `vcs.py` runs that binary with `GIT_CONFIG_NOSYSTEM=1`,
 `GIT_CONFIG_GLOBAL=/dev/null`, `core.hooksPath` pointed at an empty directory,
-`protocol.ext.allow=never`, and no `origin`. The clone's only config is the one
+`protocol.ext.allow=never`, `safe.bareRepository=explicit`, and no `origin`. The clone's only config is the one
 git just wrote, so a `.gitattributes` naming `filter.foo.clean` finds no `foo`
 defined and is inert.
 
@@ -865,8 +873,8 @@ names a repository, does one thing, and keeps nothing. There is no session, no
 handle, and no state on the broker that a later call depends on — a caller that
 crashes between two verbs leaves nothing behind to reconcile, and two agents
 calling the same verb on the same repository do not have to be ordered against
-each other. `clone` is the only route that hands back something durable, and it
-hands it to the sandbox as a bundle rather than keeping a tree.
+each other. `clone` and `snapshot` are the only routes that hand back something
+durable: a bundle and a tar, never a tree the broker keeps.
 
 That is a constraint on what the verbs may be, not just a description of them.
 It is why `publish` carries `baseRevision` instead of remembering what `clone`
@@ -927,7 +935,8 @@ labels serves `label-ensure`, and a forge without them does not: the two say one
 thing, and the contract test holds them together. The issue verbs come as one
 group in the same way, all or none.
 
-The rows down to `issue-create`, and the two branch rows, are the version-control skill's. The rest are the union of
+The rows down to `issue-create` except `snapshot`, and the two branch rows, are the version-control skill's;
+`snapshot` is served to library callers (`vcs_client.snapshot`). The rest are the union of
 what the shipped consumers do to a forge — edit and close what they opened, read
 a proposal's commits, acknowledge a comment, keep a label in existence, ask who
 the credential is and whether a login may write — decided by the callers rather
@@ -1014,8 +1023,9 @@ instruction, not the broker's refusal.
 tip is not in the fresh copy, so no caller has to know which setting the
 repository has.
 
-Refusals carry a code: 501 `FORGE_UNSUPPORTED`, 413 `CLONE_TOO_LARGE` and
-`BUNDLE_TOO_LARGE`, 409 `NOT_FAST_FORWARD`, `BASE_MOVED`, `BRANCH_DIVERGED`,
+Refusals carry a code: 501 `FORGE_UNSUPPORTED`, 413 `CLONE_TOO_LARGE`,
+`BUNDLE_TOO_LARGE` and `SNAPSHOT_TOO_LARGE`, 400 `PATH_NOT_FOUND` (a `snapshot`
+path that names nothing at the ref), 409 `NOT_FAST_FORWARD`, `BASE_MOVED`, `BRANCH_DIVERGED`,
 `TARGET_IS_BRANCH`, `CLONED_BRANCH`, `PROTECTED_BRANCH`, `TARGET_NOT_BASE`,
 `BASE_BRANCH_MISSING`, `BRANCH_NOT_OURS`, `OPEN_PROPOSAL`, `BRANCH_MOVED`,
 `NOT_SPENT` and `DELETE_REFUSED`, 501 `LABELS_UNSUPPORTED`, 502 `GIT_FAILED`,
@@ -3427,11 +3437,18 @@ nobody registered therefore fails as `GIT_FAILED` instead of being read on a
 token that reaches more than the install lists. The clone is bare and one
 revision deep, and nothing is checked out. `git archive` does not write a
 `.git` path, and `vcs_client.snapshot` refuses one again on unpack (in any
-case), together with absolute paths, `..`, links out of the tree and device
-files. A bare `owner/name` on an install with no GitHub forge is read from
-github.com with no credential, as the content workspace reads it, because
-github.com is not in that install's host table and a URL cannot name it. The
-MCP role cannot call `snapshot`. The verb is reachable to the `shell` role and
+case), together with absolute paths, `..`, a path through a symbolic link, hard
+links out of the tree, device files, and a directory laid out as a bare
+repository (`HEAD` with `objects/` and `refs/`, or with `commondir`), which git
+would open and whose `config` it would read. A symbolic link that points out of
+the tree is not written, and the answer names it under `skipped`. Both of the
+sandbox's gits also run with `safe.bareRepository=explicit`, so git opens a bare
+repository only when it is named. A bare `owner/name` is GitHub's, as it is to
+the content workspace. On an install with a GitHub forge it is read on that
+forge. On an install with none it is read from github.com with no credential,
+because github.com is not in that install's host table and a URL cannot name
+it, unless the install's own forge lists the name as managed or context; then
+it is read there, as `clone` reads it. The MCP role cannot call `snapshot`. The verb is reachable to the `shell` role and
 lists itself in `capabilities`; no skill calls it yet.
 
 **Registered context repositories** are the one unmanaged read the install does

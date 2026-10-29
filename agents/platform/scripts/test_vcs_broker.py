@@ -3851,7 +3851,7 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual("origin\n", tar_text(answer, "README.md"))
 
     def test_a_revision_or_a_bad_name_is_refused_before_anything_runs(self):
-        for ref in ("0" * 40, "a" * 64, "--upload-pack=touch /tmp/x", "main..x", "HEAD", 7):
+        for ref in ("0" * 40, "a" * 64, "A" * 40, "aBc" * 13 + "D", "--upload-pack=touch /tmp/x", "main..x", "HEAD", 7):
             with self.subTest(ref=ref), self.assertRaises(WorkspaceError) as caught:
                 self.broker.snapshot({"repository": self.REPOSITORY, "ref": ref})
             self.assertEqual(400, caught.exception.status)
@@ -3920,6 +3920,117 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual((413, "CLONE_TOO_LARGE"), (caught.exception.status, caught.exception.fields.get("code")))
         self.assertFalse([argv for argv, _ in self.calls if "archive" in argv])
         self.assertEqual([], list(self.scratch.iterdir()))
+
+    def push_tree(self, files: dict[str, bytes], ref: str = "main") -> None:
+        """Commit ``files`` on top of main in the seed and push them as ``ref``."""
+        for name, data in files.items():
+            path = self.seed / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        git(self.seed, "add", "-A")
+        git(self.seed, "commit", "--quiet", "-m", "more")
+        git(self.seed, "push", "--quiet", "origin", f"HEAD:refs/heads/{ref}")
+
+    def test_a_compressible_tree_over_the_ceiling_is_refused_before_the_archive_is_written(self):
+        # A small pack, a large tar: the clone ceiling cannot see this, so the
+        # tree is sized from its listing before `git archive` writes a byte.
+        self.push_tree({f"zeros/{index}.bin": b"\0" * (1 << 20) for index in range(4)})
+        self.broker.max_snapshot_bytes = 1 << 20
+        written = []
+
+        def recording(argv, cwd, check=True, config=(), *, allow_http=False):
+            self.calls.append((list(argv), tuple(config)))
+            if "archive" in argv:
+                written.append(argv)
+            return git_runner(argv, cwd, check, config)
+
+        broker = VcsBroker(self.scratch, git_runner=recording)
+        broker.registry.hosts["local.test"] = self.forge
+        broker.max_snapshot_bytes = 1 << 20
+        with self.assertRaises(WorkspaceError) as caught:
+            broker.snapshot({"repository": self.REPOSITORY})
+        self.assertEqual((413, "SNAPSHOT_TOO_LARGE"), (caught.exception.status, caught.exception.fields.get("code")))
+        self.assertGreater(int(str(caught.exception).split(" is ")[1].split(" ")[0]), 4 << 20)
+        self.assertEqual([], written)
+        self.assertTrue([argv for argv, _ in self.calls if "ls-tree" in argv])
+        self.assertEqual([], list(self.scratch.iterdir()))
+
+    def test_the_measure_is_never_under_the_tar_and_close_to_it(self):
+        # Long names and a long link target take pax headers; a directory
+        # entry ends in `/`; a blob at two paths is in the tar twice.
+        long_dir = "d" * 120
+        self.push_tree({
+            f"{long_dir}/{'f' * 130}.txt": b"x" * 700,
+            "nested/a/b/c.txt": b"y" * 513,
+            "copy1.txt": b"same\n",
+            "copy2.txt": b"same\n",
+        })
+        os.symlink("t" * 150, self.seed / "longlink")
+        os.symlink("copy1.txt", self.seed / "shortlink")
+        git(self.seed, "add", "-A")
+        git(self.seed, "commit", "--quiet", "-m", "links")
+        git(self.seed, "push", "--quiet", "origin", "HEAD:refs/heads/main")
+        listings = []
+
+        def recording(argv, cwd, check=True, config=(), *, allow_http=False):
+            done = git_runner(argv, cwd, check, config)
+            if "ls-tree" in argv:
+                listings.append(done.stdout)
+            return done
+
+        broker = VcsBroker(self.scratch, git_runner=recording)
+        broker.registry.hosts["local.test"] = self.forge
+        answer = broker.snapshot({"repository": self.REPOSITORY})
+        (listing,) = listings
+        measured = vcs_broker._tar_bytes(listing)
+        self.assertGreaterEqual(measured, answer["size"])
+        self.assertLessEqual(measured, answer["size"] + vcs_broker.TAR_RECORD_BYTES)
+        # With `paths`, the listing is narrowed the same way the tar is.
+        listings.clear()
+        answer = broker.snapshot({"repository": self.REPOSITORY, "paths": ["nested"]})
+        self.assertGreaterEqual(vcs_broker._tar_bytes(listings[0]), answer["size"])
+        self.assertNotIn("copy1.txt", listings[0])
+
+    def test_a_listing_the_runner_cut_short_is_refused(self):
+        def cutting(argv, cwd, check=True, config=(), *, allow_http=False):
+            self.calls.append((list(argv), tuple(config)))
+            done = git_runner(argv, cwd, check, config)
+            if "ls-tree" in argv:
+                done.truncated = True
+            return done
+
+        broker = VcsBroker(self.scratch, git_runner=cutting)
+        broker.registry.hosts["local.test"] = self.forge
+        with self.assertRaises(WorkspaceError) as caught:
+            broker.snapshot({"repository": self.REPOSITORY})
+        self.assertEqual((413, "SNAPSHOT_TOO_LARGE"), (caught.exception.status, caught.exception.fields.get("code")))
+        self.assertFalse([argv for argv, _ in self.calls if "archive" in argv])
+        self.assertEqual([], list(self.scratch.iterdir()))
+
+    def test_the_written_tar_is_still_checked_after_the_measure(self):
+        self.broker.max_snapshot_bytes = 1
+        with mock.patch.object(vcs_broker, "_tar_bytes", return_value=0), self.assertRaises(WorkspaceError) as caught:
+            self.broker.snapshot({"repository": self.REPOSITORY})
+        self.assertEqual((413, "SNAPSHOT_TOO_LARGE"), (caught.exception.status, caught.exception.fields.get("code")))
+        self.assertTrue([argv for argv, _ in self.calls if "archive" in argv])
+        self.assertEqual([], list(self.scratch.iterdir()))
+
+    def test_the_tar_holds_the_committed_bytes_whatever_the_tree_s_attributes_say(self):
+        # `export-subst`, `ident`, `text`/`eol` and `working-tree-encoding`
+        # all make `archive` write other bytes, some far more of them, than
+        # the listing measured.
+        committed = b"$Format:%H %B$\n$Id$\nline one\nline two\n"
+        self.push_tree({
+            ".gitattributes": b"* export-subst ident text eol=crlf\nutf.txt working-tree-encoding=UTF-16\n",
+            "subst.txt": committed,
+            # git stores it as UTF-8 and would write it back as UTF-16.
+            "utf.txt": "plain ascii\n".encode("utf-16"),
+        })
+        answer = self.broker.snapshot({"repository": self.REPOSITORY})
+        data = base64.b64decode(answer["archiveBase64"])
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as archive:
+            self.assertEqual(committed, archive.extractfile("subst.txt").read())
+            self.assertEqual(b"plain ascii\n", archive.extractfile("utf.txt").read())
 
     def test_the_tar_ceiling_comes_from_its_own_variable(self):
         with mock.patch.dict(os.environ, {vcs_broker.MAX_SNAPSHOT_BYTES_ENV: "1234"}):
@@ -4058,6 +4169,18 @@ class SnapshotTest(unittest.TestCase):
         # Any other name goes through the registry and asks the role.
         broker.snapshot({"repository": self.REPOSITORY})
         self.assertEqual(["acme/infra"], asked)
+
+    def test_a_name_the_fallback_lifts_is_resolved_in_its_place(self):
+        asked = []
+        broker = self.make_broker(
+            repository_role=lambda forge, repo: asked.append((forge.name, repo)) or "unregistered",
+            bare_name_fallback=lambda repository, forges: self.REPOSITORY if repository == "acme/infra" else None,
+        )
+        answer = broker.snapshot({"repository": "acme/infra"})
+        self.assertEqual(("local", "acme/infra"), (answer["forge"], answer["repo"]))
+        self.assertEqual([("local", "acme/infra")], asked)
+        self.assertEqual((self.REPOSITORY, None), broker.snapshot_source("acme/infra"))
+        self.assertEqual(("other/name", None), broker.snapshot_source("other/name"))
 
 
 class RouteTableTest(unittest.TestCase):

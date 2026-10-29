@@ -30,7 +30,6 @@ import functools
 import io
 import json
 import os
-import posixpath
 import shutil
 import subprocess
 import sys
@@ -105,6 +104,20 @@ DOTGIT = ".git"
 # What Windows strips from the end of a name before it opens it; folded away
 # before the `.git` comparison, as git's own NTFS check does.
 DOTGIT_TRAILING = ". "
+# The names git's discovery (`is_git_directory`) reads a directory as a bare
+# repository by: `HEAD`, with `objects` and `refs` beside it or a `commondir`
+# that names where they are. git run in such a directory reads its `config`,
+# so a snapshot directory that holds them is one some later git would obey.
+# Folded as `.git` is.
+GIT_DIR_HEAD = "head"
+GIT_DIR_OBJECTS = "objects"
+GIT_DIR_REFS = "refs"
+GIT_DIR_COMMONDIR = "commondir"
+# git opens a bare repository only when it is named (`--git-dir`, GIT_DIR),
+# never by discovery from the working directory. `-c` outranks every config
+# file, so a repository cannot turn this off. deploy/sandbox/vcs-git.sh gives
+# the agent's own git the same pin.
+SAFE_BARE_REPOSITORY = "safe.bareRepository=explicit"
 
 # How many untracked files the refusal below names before it counts the rest.
 # Enough that the caller can see what it is being asked about -- a stray report
@@ -364,7 +377,9 @@ def local_git(cwd: Path, *args: str, check: bool = True) -> subprocess.Completed
     inert, the same reasoning `content_workspace` makes about the broker's
     trees. `core.hooksPath` is pointed at an empty directory rather than left to
     default, because a hook is the one thing that would not need a config entry
-    to have been supplied.
+    to have been supplied. `safe.bareRepository=explicit` stops git from
+    opening a directory of files laid out as a bare repository, and so from
+    reading the `config` among them.
     """
     empty = ROOT / ".no-hooks"
     empty.mkdir(parents=True, exist_ok=True)
@@ -393,6 +408,7 @@ def local_git(cwd: Path, *args: str, check: bool = True) -> subprocess.Completed
         "-c", f"core.hooksPath={empty}",
         "-c", "protocol.ext.allow=never",
         "-c", "protocol.file.allow=always",
+        "-c", SAFE_BARE_REPOSITORY,
         "-c", f"user.name={AUTHOR_NAME}",
         "-c", f"user.email={AUTHOR_EMAIL}",
         *args,
@@ -942,20 +958,55 @@ def _member_refused(name: str, reason: str) -> VcsError:
     )
 
 
-def _inside(path: str) -> bool:
-    """Whether the normalised relative `path` stays inside the tree it is relative to."""
-    return path != ".." and not path.startswith("../")
+def _fold(component: str) -> str:
+    """A path component as a case-insensitive file system would open it."""
+    return component.rstrip(DOTGIT_TRAILING).casefold()
 
 
-def _check_snapshot_members(members: list[tarfile.TarInfo], max_bytes: int) -> tuple[int, int]:
-    """Refuse the tar unless every member is safe to write. Answers (files, bytes).
+def _resolve_link(start: list[str], target: str, links: set[str]) -> tuple[list[str] | None, str]:
+    """Walk ``target`` from the directory ``start``, one component at a time.
+
+    Answers (the components it names, "") or (None, the reason it is not
+    followed): it climbs above the top of the tree, or it passes through a
+    symbolic link of the snapshot. A lexical `normpath` cannot see the second:
+    `a -> .` then `a/x -> ../outside` normalises to `outside` and resolves to
+    the directory above the tree.
+    """
+    resolved = list(start)
+    steps = [step for step in target.split("/") if step not in ("", ".")]
+    for index, step in enumerate(steps):
+        if step == "..":
+            if not resolved:
+                return None, "a link that points out of the tree"
+            resolved.pop()
+            continue
+        resolved.append(step)
+        if index < len(steps) - 1 and "/".join(resolved) in links:
+            return None, "a link that passes through another link"
+    return resolved, ""
+
+
+def _check_snapshot_members(
+    members: list[tarfile.TarInfo], max_bytes: int
+) -> tuple[list[tarfile.TarInfo], int, int, list[dict]]:
+    """Refuse the tar unless every member it writes is safe.
+
+    Answers the members to write, their file count and bytes, and the links
+    skipped.
 
     Checked before anything is written, so a refusal leaves nothing behind.
-    `extractall(filter="data")` repeats most of this as it writes; these
-    checks do not depend on it, and they add the `.git` refusal and the
-    ceiling, which it does not have.
+    `extractall(filter="data")` repeats some of this as it writes, but these
+    checks do not depend on it. They also refuse what it does not: a `.git`
+    component, a directory laid out as a bare repository, a path or a link
+    through a symbolic link, and a tree over the ceiling.
+
+    A symbolic link whose target is absolute, empty, out of the tree, through
+    another link or into a `.git` path is not written, and the answer lists
+    it under `skipped`: real repositories hold such links (`-> /dev/null`),
+    and one of them must not cost the caller every other file. Every other
+    unsafe member refuses the whole tar.
     """
-    files = total = 0
+    named = []
     for member in members:
         name = member.name
         if name.startswith("/"):
@@ -967,18 +1018,52 @@ def _check_snapshot_members(members: list[tarfile.TarInfo], max_bytes: int) -> t
             raise _member_refused(name, "a path with a `..` component")
         if any(_is_dotgit(part) for part in parts):
             raise _member_refused(name, "a path with a `.git` component")
+        named.append((member, parts))
+
+    # Every symbolic link, from the whole tar and not only the members before
+    # this one: tar order is the writer's choice, and a check that depends on
+    # it is a check a crafted tar can step round.
+    links = {"/".join(parts) for member, parts in named if member.issym()}
+    children: dict[str, set[str]] = {}
+    for _member, parts in named:
+        for depth, part in enumerate(parts):
+            children.setdefault("/".join(parts[:depth]), set()).add(_fold(part))
+    for directory, held in children.items():
+        if GIT_DIR_HEAD in held and (
+            {GIT_DIR_OBJECTS, GIT_DIR_REFS} <= held or GIT_DIR_COMMONDIR in held
+        ):
+            raise _member_refused(
+                directory or ".",
+                "a directory laid out as a bare repository (HEAD, objects, refs), "
+                "whose config git would read",
+            )
+
+    files = total = 0
+    skipped: list[dict] = []
+    kept: list[tarfile.TarInfo] = []
+    for member, parts in named:
+        name = "/".join(parts)
+        if any("/".join(parts[:depth]) in links for depth in range(1, len(parts))):
+            raise _member_refused(member.name, "a path through a symbolic link")
         if member.issym() or member.islnk():
             target = member.linkname
+            reason = ""
             if not target or target.startswith("/"):
-                raise _member_refused(name, "a link with an absolute or empty target")
-            # A symbolic link resolves from its own directory; a hard link
-            # names another member, from the top of the tree.
-            start = posixpath.dirname("/".join(parts)) if member.issym() else ""
-            resolved = posixpath.normpath(posixpath.join(start, target))
-            if not _inside(resolved):
-                raise _member_refused(name, "a link that points out of the tree")
-            if any(_is_dotgit(part) for part in resolved.split("/")):
-                raise _member_refused(name, "a link into a `.git` path")
+                reason = "a link with an absolute or empty target"
+            else:
+                # A symbolic link resolves from its own directory; a hard link
+                # names another member, from the top of the tree.
+                start = parts[:-1] if member.issym() else []
+                resolved, reason = _resolve_link(start, target, links)
+                if resolved is not None and any(_is_dotgit(part) for part in resolved):
+                    reason = "a link into a `.git` path"
+                elif resolved is not None and member.islnk() and "/".join(resolved) in links:
+                    reason = "a hard link to a symbolic link"
+            if reason and member.issym():
+                skipped.append({"path": name, "reason": reason})
+                continue
+            if reason:
+                raise _member_refused(member.name, reason)
         elif member.isreg():
             files += 1
             total += member.size
@@ -989,8 +1074,9 @@ def _check_snapshot_members(members: list[tarfile.TarInfo], max_bytes: int) -> t
                     code=SNAPSHOT_TOO_LARGE,
                 )
         elif not member.isdir():
-            raise _member_refused(name, "a device file, a FIFO or another special file")
-    return files, total
+            raise _member_refused(member.name, "a device file, a FIFO or another special file")
+        kept.append(member)
+    return kept, files, total, skipped
 
 
 def snapshot(
@@ -1011,7 +1097,8 @@ def snapshot(
     `into` must be absent or an empty directory. The tar is checked whole
     before anything is written (`_check_snapshot_members`), unpacked with
     `tarfile`'s `data` filter into a fresh directory beside `into`, and moved
-    into place, so a refusal leaves nothing behind.
+    into place, so a refusal leaves nothing behind. A symbolic link that
+    would point out of the tree is left out and named under `skipped`.
     """
     destination = Path(into)
     if destination.is_symlink() or (
@@ -1033,8 +1120,9 @@ def snapshot(
     try:
         try:
             with tarfile.open(fileobj=io.BytesIO(base64.b64decode(answer["archiveBase64"])), mode="r:") as archive:
-                members = archive.getmembers()
-                files, total = _check_snapshot_members(members, max_bytes)
+                members, files, total, skipped = _check_snapshot_members(
+                    archive.getmembers(), max_bytes
+                )
                 archive.extractall(str(staging), members=members, filter="data")
         except tarfile.TarError as exc:
             raise VcsError(
@@ -1056,6 +1144,8 @@ def snapshot(
         "path": str(destination),
         "files": files,
         "bytes": total,
+        # Symbolic links that were not written, each with the reason.
+        "skipped": skipped,
         "archiveBytes": answer["size"],
         # A tar carries no history: there is nothing here for git to read.
         "history": answer.get("history"),

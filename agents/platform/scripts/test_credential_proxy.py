@@ -1738,6 +1738,7 @@ class GitHardeningTest(unittest.TestCase):
             ["git", "x"],
             ["git", "gc"],
             ["git", "archive"],
+            ["git", "ls-tree", "-r", "HEAD"],
             ["git", "-C", "/tmp", "not-a-subcommand"],
         ):
             with self.subTest(argv=argv):
@@ -9643,6 +9644,26 @@ class VcsGitPathTest(unittest.TestCase):
         )
         self.assertEqual("true", result.stdout.strip())
 
+    def test_the_answer_says_whether_the_output_was_cut(self):
+        # `snapshot` sizes a tree from an `ls-tree` listing, and a cut listing
+        # undercounts it, so the cut has to reach the broker.
+        executor = self.executor()
+        executor.max_output_bytes = 1024
+        scratch = self.tree(executor)
+        blob = subprocess.run(
+            ["git", "hash-object", "-w", "--stdin"], cwd=scratch, input="x\n",
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        entries = "".join(f"100644 blob {blob}\t{index:03d}{'n' * 100}\n" for index in range(20))
+        tree = subprocess.run(
+            ["git", "mktree"], cwd=scratch, input=entries, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        cut = executor.execute_vcs_git(["git", "ls-tree", "-r", tree], scratch)
+        self.assertTrue(cut.truncated)
+        whole = executor.execute_vcs_git(["git", "ls-tree", f"{tree}", "000" + "n" * 100], scratch)
+        self.assertFalse(whole.truncated)
+        self.assertIn(blob, whole.stdout)
+
     def test_only_git_runs_on_this_door(self):
         executor = self.executor()
         scratch = self.tree(executor)
@@ -10256,16 +10277,22 @@ class SnapshotRouteTest(unittest.TestCase):
         self.assertEqual((HTTPStatus.NOT_IMPLEMENTED, "FORGE_UNSUPPORTED"), (status, payload.get("code")))
         self.assertEqual([], self.git)
 
-    def test_a_bare_name_on_an_install_with_no_github_forge_reads_github_com_with_no_credential(self):
+    def gitlab_only(self):
         token = self.base / "token"
         token.write_text("glpat-SENTINEL-must-never-appear")
-        broker = self.broker({"forges": [
+        return self.broker({"forges": [
             {"provider": "gitlab", "host": "gitlab.com", "tokenPath": str(token), "allowedPaths": ["acme"]},
         ]})
+
+    def test_a_bare_name_on_an_install_with_no_github_forge_reads_github_com_with_no_credential(self):
+        # An owner outside the GitLab forge's allowedPaths: the registry would
+        # refuse this name with a 403, so the request reaching the clone shows
+        # the dispatcher did not resolve it.
+        broker = self.gitlab_only()
         self.managed = {"gitlab:gitlab.com/acme/infra"}
-        status, payload = self.post({"repository": "acme/infra"}, broker)
+        status, payload = self.post({"repository": "kubernetes/kubernetes"}, broker)
         self.assert_reached_the_clone(status, payload)
-        self.assertIn("https://github.com/acme/infra.git", self.clone_argv())
+        self.assertIn("https://github.com/kubernetes/kubernetes.git", self.clone_argv())
         self.assertEqual((self.HELPER_CLEARED,), self.clone_config())
         self.assertNotIn("glpat", json.dumps(self.git))
         # A name with its host still goes to that host's forge, by the registry.
@@ -10275,9 +10302,56 @@ class SnapshotRouteTest(unittest.TestCase):
         self.assertIn("https://gitlab.com/acme/other.git", self.clone_argv())
         self.assertEqual((self.HELPER_CLEARED,), self.clone_config())
 
-    def test_the_fallback_applies_only_to_a_bare_name_on_an_install_with_no_github_forge(self):
+    def test_a_bare_name_the_install_s_own_forge_registers_is_read_there_and_not_on_github_com(self):
+        # The same name on github.com can belong to anyone; `clone` reads a
+        # bare name on the install's one forge, and so does `snapshot` when
+        # that forge lists it.
+        for managed, context in (({"gitlab:gitlab.com/acme/infra"}, set()), (set(), {"gitlab:gitlab.com/acme/infra"})):
+            with self.subTest(managed=managed, context=context):
+                broker = self.gitlab_only()
+                self.managed, self.context = managed, context
+                self.git.clear()
+                status, payload = self.post({"repository": "acme/infra"}, broker)
+                self.assert_reached_the_clone(status, payload)
+                self.assertIn("https://gitlab.com/acme/infra.git", self.clone_argv())
+                self.assertNotIn("github.com", json.dumps(self.git))
+
+    def test_a_bare_name_is_not_read_on_github_com_while_the_lists_cannot_be_read(self):
+        broker = self.gitlab_only()
+        self.lists_readable = False
+        with self.assertLogs(credential_proxy.LOGGER, level="WARNING"):
+            status, payload = self.post({"repository": "acme/infra"}, broker)
+        self.assert_reached_the_clone(status, payload)
+        self.assertIn("https://gitlab.com/acme/infra.git", self.clone_argv())
+        self.assertEqual((self.HELPER_CLEARED,), self.clone_config())
+
+    def test_a_bare_name_on_an_install_with_github_and_a_second_forge_is_read_on_github(self):
+        # The content workspace reads it there; without the lift the registry
+        # refuses a hostless name when it serves two forges.
+        token = self.base / "token"
+        token.write_text("glpat-SENTINEL-must-never-appear")
+        broker = self.broker({"forges": [
+            {"provider": "github", "host": "github.com"},
+            {"provider": "gitlab", "host": "gitlab.com", "tokenPath": str(token), "allowedPaths": ["acme"]},
+        ]})
+        status, payload = self.post({"repository": "kubernetes/kubernetes"}, broker)
+        self.assert_reached_the_clone(status, payload)
+        self.assertIn("https://github.com/kubernetes/kubernetes.git", self.clone_argv())
+        self.assertEqual((self.HELPER_CLEARED,), self.clone_config())
+        self.assertNotIn("glpat", json.dumps(self.git))
+        # The role is asked of the GitHub forge: a context repository there
+        # gets the read token.
+        self.git.clear()
+        self.context = {"github:github.com/acme/tf-live"}
+        status, payload = self.post({"repository": "acme/tf-live"}, broker)
+        self.assert_reached_the_clone(status, payload)
+        self.assertIn("https://github.com/acme/tf-live.git", self.clone_argv())
+        self.assertEqual([("github", "acme/tf-live")], self.minted)
+
+    def test_the_fallback_applies_only_to_a_bare_name(self):
         github = self.broker()
-        self.assertIsNone(github.bare_name_source("acme/infra"))
+        self.assertEqual(("https://github.com/acme/infra", None), github.snapshot_source("acme/infra"))
+        self.assertEqual(("gitlab.com/acme/infra", None), github.snapshot_source("gitlab.com/acme/infra"))
         self.assertIsNone(credential_proxy.snapshot_bare_name_fallback("github.com/acme", ()))
         self.assertIsNone(credential_proxy.snapshot_bare_name_fallback("gitlab.com/acme/infra", ()))
         self.assertEqual(
@@ -12793,6 +12867,9 @@ class MCPVcsVerbGateTest(unittest.TestCase):
         handler.headers = {"Content-Length": str(len(encoded))}
         handler.rfile = io.BytesIO(encoded)
         handler.vcs = mock.Mock()
+        # `snapshot` asks where a bare name is read before it resolves: here,
+        # as given.
+        handler.vcs.snapshot_source.side_effect = lambda repository: (repository, None)
         forge = mock.Mock()
         forge.name = "github"
         handler.vcs.registry.resolve.return_value = (forge, "acme/infra")

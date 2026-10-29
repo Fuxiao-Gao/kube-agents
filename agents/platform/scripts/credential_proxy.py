@@ -1811,31 +1811,52 @@ def _is_bare_name(repository: object) -> bool:
 
 def snapshot_bare_name_fallback(
     repository: object, forges: tuple[providers.Forge, ...]
-) -> tuple[str, str, str] | None:
-    """Where the vcs `snapshot` reads a bare `owner/name` on an install with no GitHub forge.
+) -> tuple[str, str, str] | str | None:
+    """Where the vcs `snapshot` reads a bare `owner/name`, as the content workspace reads it.
 
-    `(forge label, repository, clone URL)` for github.com, read with no
-    credential and the helper cleared, or None when this does not apply: the
-    name has a host, or ``forges`` (the broker's own) has a GitHub forge.
+    A bare name is GitHub's to the workspace (`is_bare_github_name`), and
+    `inspect-repository` relies on that. Against ``forges``, the broker's own:
 
-    This keeps what the content workspace does today, which `inspect-repository`
-    relies on: a bare name is GitHub's (`is_bare_github_name`). The other
-    choice, a refusal, was not taken. On such an install github.com is not in
-    the host table, so the bare name is the only way to name a public GitHub
-    repository there, and a refusal would take that read away. The host
+    - the name has a host, or is not GitHub-shaped: None, for the registry;
+    - the install has a GitHub forge: the name on that forge's host, for the
+      registry to resolve, as `_workspace_credential` lifts it (`_hosted`).
+      With a second forge the registry refuses a hostless name;
+    - no GitHub forge, and a forge of the install lists the name as managed
+      or context, or the lists cannot be read: None. The registry reads it on
+      the install's forge, as `clone` would, and not on github.com, where the
+      same name can belong to anyone;
+    - no GitHub forge, and nobody registered the name:
+      `(forge label, repository, clone URL)` for github.com, read with no
+      credential and the helper cleared.
+
+    The last case keeps a read the workspace has, where a refusal would take
+    it away: github.com is not in such an install's host table, so the bare
+    name is the only way to name a public GitHub repository there. The host
     allowlist exists to stop a credential from reaching a host nobody
     configured, and this clone carries none; the answer names `github` as the
-    forge, so a caller can see where it read. Without this, the registry would
-    read the name as the install's one forge, which is a different host.
+    forge, so a caller can see where it read.
     """
     if not _is_bare_name(repository):
-        return None
-    if any(forge.name == CONTENT_WORKSPACE_PROVIDER for forge in forges):
         return None
     ref = repo_ref.try_parse(repository)
     if ref is None or ref.host or len(ref.segments) != repo_ref.GITHUB_PATH_DEPTH:
         return None
     path = "/".join(ref.segments)
+    github = [forge for forge in forges if forge.name == CONTENT_WORKSPACE_PROVIDER]
+    if github:
+        return f"https://{github[0].hosts[0]}/{path}" if github[0].hosts else None
+    for forge in forges:
+        try:
+            role = repository_role(path, forge)
+        except Exception as exc:  # noqa: BLE001 - not known to be unregistered
+            LOGGER.warning(
+                "snapshot repo=%s: the repository lists could not be read type=%s; "
+                "reading the name on this install's forge and not on %s",
+                path, type(exc).__name__, repo_ref.GITHUB_CANONICAL_HOST,
+            )
+            return None
+        if role != ROLE_UNREGISTERED:
+            return None
     return (
         CONTENT_WORKSPACE_PROVIDER,
         path,
@@ -4216,8 +4237,9 @@ VCS_SCRATCH_DIR = "vcs"
 # `GIT_ALLOW_PROTOCOL` refuses everywhere for reasons the executor environment
 # spells out.
 #
-# `archive` is on it for one caller: `snapshot` writes one revision's tree as a
-# tar, to a file in its scratch directory (`--output`), from a bare clone.
+# `archive` and `ls-tree` are on it for one caller: `snapshot` lists one
+# revision's tree to size the tar, then writes the tree as a tar, to a file in
+# its scratch directory (`--output`), from a bare clone.
 VCS_GIT_SUBCOMMANDS = frozenset(
     {
         "archive",
@@ -4227,6 +4249,7 @@ VCS_GIT_SUBCOMMANDS = frozenset(
         "fetch",
         "init",
         "ls-remote",
+        "ls-tree",
         "merge-base",
         "push",
         "remote",
@@ -4240,8 +4263,9 @@ VCS_GIT_SUBCOMMANDS = frozenset(
 # The broker's own git subcommands that no caller's argv may name. `archive`
 # takes `--output=<path>` and `--remote=<url>`, and only `snapshot` issues it,
 # with a path and a revision the broker chose, so it stays off the `/v1/exec`
-# argument gate below.
-VCS_ONLY_GIT_SUBCOMMANDS = frozenset({"archive"})
+# argument gate below. `ls-tree` is there for the same caller, and stays off
+# the gate because no caller of `/v1/exec` needed it before.
+VCS_ONLY_GIT_SUBCOMMANDS = frozenset({"archive", "ls-tree"})
 
 
 def _allowed_git_subcommands() -> frozenset[str]:
@@ -6887,9 +6911,13 @@ class CommandExecutor:
             raise subprocess.CalledProcessError(
                 result.exit_code, argv, result.stdout, result.stderr
             )
-        return subprocess.CompletedProcess(
+        completed = subprocess.CompletedProcess(
             argv, result.exit_code, result.stdout, result.stderr
         )
+        # Whether the output was cut at the ceiling: `snapshot` sizes a tree
+        # from a listing, and a cut listing undercounts it.
+        completed.truncated = result.truncated
+        return completed
 
     def execute_forge_cli(
         self, argv: list[str], stdin: str | None = None
@@ -11187,16 +11215,18 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
                 #
                 # A role-selected verb (`vcs_broker.ROLE_SELECTED_VERBS`) is
                 # resolved and not compared: it chooses its credential by the
-                # repository's role itself. A bare name it reads from a host
-                # outside the table, with no credential
-                # (`snapshot_bare_name_fallback`), is not resolved here at all.
+                # repository's role itself. A bare name is resolved as the
+                # verb will read it (`snapshot_bare_name_fallback`): lifted
+                # onto the install's GitHub forge, or, when it is read from a
+                # host outside the table with no credential, not at all.
                 role_selected = verb in vcs_broker.ROLE_SELECTED_VERBS
-                resolves = verb not in vcs_broker.UNGATED_VERBS and not (
-                    role_selected and self.vcs.bare_name_source(payload.get("repository")) is not None
-                )
+                named, outside = payload.get("repository"), None
+                if role_selected:
+                    named, outside = self.vcs.snapshot_source(named)
+                resolves = verb not in vcs_broker.UNGATED_VERBS and outside is None
                 if resolves:
                     try:
-                        forge, repository = self.vcs.registry.resolve(payload.get("repository"))
+                        forge, repository = self.vcs.registry.resolve(named)
                     except providers.WorkspaceError as exc:
                         # A repository this install serves no credential for
                         # (`ForgeUnsupported`, a 501) or one an allowlist declines

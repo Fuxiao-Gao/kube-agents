@@ -191,12 +191,42 @@ MAX_SNAPSHOT_PATHS = 256
 # A full object ID, SHA-1 or SHA-256. `ref` names a branch or a tag:
 # `clone --branch` takes no revision, so one is refused by name rather than
 # left to fail as a git error.
-_OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+_OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}", re.IGNORECASE)
 # The ref namespaces a `ref` is looked up in after the clone, in the order
 # `clone --branch` itself prefers them.
 SNAPSHOT_REF_NAMESPACES = ("refs/heads/", "refs/tags/")
 # What `git archive` prints when a path names nothing in the tree.
 PATHSPEC_NO_MATCH = "did not match any files"
+# What `snapshot` writes into its bare clone's `info/attributes`, the file
+# that outranks every `.gitattributes` in the tree, before `git archive` runs.
+# Each attribute named here makes `archive` write something other than the
+# committed bytes, and some make it far larger: `export-subst` expands every
+# `$Format:%B$` to the whole commit message, `ident` grows each `$Id$` about
+# twelve times, `working-tree-encoding` can make text four times larger, and
+# `text` adds a CR to each line. With them unset the tar holds the files as
+# they were committed, and the size measured before the archive holds.
+SNAPSHOT_ATTRIBUTES_FILE = Path("info") / "attributes"
+SNAPSHOT_ATTRIBUTES = "* -export-subst -ident -text -working-tree-encoding\n"
+# What `git ls-tree` prints for each entry of the revision `snapshot` measures:
+# the mode, the size (`-` for a tree or a submodule) and the path, NUL-ended.
+SNAPSHOT_LISTING_FORMAT = "--format=%(objectmode) %(objectsize) %(path)"
+# The tree entry modes the measure reads: a symbolic link's blob is its
+# target, which goes in the tar header and not after it, and a tree or a
+# submodule is a directory entry whose name ends in `/`.
+GIT_MODE_SYMLINK = "120000"
+GIT_MODES_DIRECTORY = frozenset({"040000", "160000"})
+# The tar `git archive` writes, as the measure counts it: one 512-byte header
+# for each entry and the data padded to 512; a pax header (a header block and
+# its padded record) for a name or a link target longer than the 100 bytes the
+# ustar field holds, with the record's own length, key and newline counted
+# generously; the pax header with the commit ID at the start; two zero blocks
+# at the end, and the whole padded to a 20-block record.
+TAR_BLOCK_BYTES = 512
+TAR_NAME_FIELD_BYTES = 100
+TAR_PAX_RECORD_OVERHEAD_BYTES = 32
+TAR_GLOBAL_HEADER_BYTES = 2 * TAR_BLOCK_BYTES
+TAR_END_BYTES = 2 * TAR_BLOCK_BYTES
+TAR_RECORD_BYTES = 20 * TAR_BLOCK_BYTES
 
 # What git prints when the remote answered the delete and said no for good: a
 # hook, branch rule or ruleset (`[remote rejected] <ref> (... declined)`), a
@@ -309,6 +339,41 @@ def _login_key(login: str) -> str:
     spelling is how the comparison broke in the first place.
     """
     return _AUTOMATION_MARKING.sub("", (login or "").strip()).casefold()
+
+
+def _padded(size: int, unit: int) -> int:
+    """``size`` rounded up to a whole number of ``unit``."""
+    return -(-size // unit) * unit
+
+
+def _pax_bytes(length: int) -> int:
+    """What a pax header for a value of ``length`` bytes adds, or 0 when none is needed."""
+    if length <= TAR_NAME_FIELD_BYTES:
+        return 0
+    return TAR_BLOCK_BYTES + _padded(length + TAR_PAX_RECORD_OVERHEAD_BYTES, TAR_BLOCK_BYTES)
+
+
+def _tar_bytes(listing: str) -> int:
+    """The size of the tar `git archive` writes for ``listing``, a little over and never under.
+
+    ``listing`` is `git ls-tree -r -t -z` in `SNAPSHOT_LISTING_FORMAT`. Every
+    path is counted, so a blob named at a thousand paths is counted a thousand
+    times, as the tar holds it. An entry `export-ignore` drops is counted too.
+    """
+    total = TAR_GLOBAL_HEADER_BYTES
+    for entry in listing.split("\0"):
+        if not entry:
+            continue
+        mode, size, path = entry.split(" ", 2)
+        name_bytes = len(path.encode("utf-8"))
+        if mode in GIT_MODES_DIRECTORY:
+            name_bytes += 1
+        total += TAR_BLOCK_BYTES + _pax_bytes(name_bytes)
+        if mode == GIT_MODE_SYMLINK:
+            total += _pax_bytes(int(size))
+        elif mode not in GIT_MODES_DIRECTORY:
+            total += _padded(int(size), TAR_BLOCK_BYTES)
+    return _padded(total + TAR_END_BYTES, TAR_RECORD_BYTES)
 
 
 def _snapshot_paths(raw: Any) -> list[str]:
@@ -442,7 +507,7 @@ class VcsBroker:
         drop_write: Callable[[str], None] | None = None,
         mint: Callable[[str, str], str] | None = None,
         repository_role: Callable[[Forge, str], str] | None = None,
-        bare_name_fallback: Callable[[Any, tuple[Forge, ...]], tuple[str, str, str] | None] | None = None,
+        bare_name_fallback: Callable[[Any, tuple[Forge, ...]], tuple[str, str, str] | str | None] | None = None,
     ) -> None:
         self.scratch_root = Path(scratch_root)
         # Which list of the broker's ConfigMap names `repo` on `forge`: one of
@@ -450,10 +515,11 @@ class VcsBroker:
         # `snapshot` asks. None answers ROLE_UNREGISTERED for every repository,
         # so a broker built without it presents no credential on a snapshot.
         self._repository_role = repository_role
-        # For a repository name this install reads from a host its forge
-        # table does not hold, with no credential: the forge label, the
-        # repository and the clone URL; None for every other name. Asked by
-        # `snapshot` before the registry, with the forges this broker built.
+        # Where `snapshot` reads a bare name, asked before the registry with
+        # the forges this broker built: a host-qualified name to resolve in
+        # its place; or, for a name read from a host the forge table does not
+        # hold, with no credential, the forge label, the repository and the
+        # clone URL; or None, for the registry to resolve the name as given.
         self._bare_name_fallback = bare_name_fallback
         # git's output to the FORGE_TLS_UNTRUSTED refusal it stands for, or
         # None, for the git runs that read a failure themselves rather than
@@ -831,14 +897,14 @@ class VcsBroker:
                     "ref names a revision; a snapshot takes a branch or a tag name"
                 )
         paths = _snapshot_paths(payload.get("paths"))
-        fallback = self.bare_name_source(payload.get("repository"))
+        repository, fallback = self.snapshot_source(payload.get("repository"))
         if fallback is not None:
             forge_name, repo, url = fallback
             base = None
             role = ROLE_UNREGISTERED
             git = self._git_with(lambda: (HELPER_CLEARED,), False)
         else:
-            bound = self._bind(payload)
+            bound = self._bind({"repository": repository})
             forge_name, repo = bound.forge.name, bound.repo
             # Before the role and any credential: a host this install names
             # but serves no credential for refuses here, by name.
@@ -872,6 +938,10 @@ class VcsBroker:
             if target is None:
                 target = self._default_branch(git, clone_dir)
             revision = self._snapshot_revision(git, clone_dir, target)
+            attributes = clone_dir / SNAPSHOT_ATTRIBUTES_FILE
+            attributes.parent.mkdir(parents=True, exist_ok=True)
+            attributes.write_text(SNAPSHOT_ATTRIBUTES, encoding="utf-8")
+            self._measure_snapshot(git, clone_dir, revision, paths, repo)
             # `--literal-pathspecs` is GIT_LITERAL_PATHSPECS as a flag: each
             # path is a name, never a glob or pathspec magic.
             argv = [
@@ -891,14 +961,10 @@ class VcsBroker:
                     written.returncode, argv, written.stdout, written.stderr
                 )
             size = archive.stat().st_size
+            # The second check: the measure above is the one that keeps a
+            # large tar off the disk.
             if size > self.max_snapshot_bytes:
-                raise WorkspaceError(
-                    f"the snapshot of {repo} is {size} bytes, over the "
-                    f"{self.max_snapshot_bytes}-byte ceiling. Name `paths` to "
-                    "take part of the tree.",
-                    status=413,
-                    code="SNAPSHOT_TOO_LARGE",
-                )
+                raise self._snapshot_too_large(repo, size)
             blob = base64.b64encode(archive.read_bytes()).decode("ascii")
         finally:
             _remove_tree(root)
@@ -913,15 +979,56 @@ class VcsBroker:
             "history": SNAPSHOT_HISTORY,
         }
 
-    def bare_name_source(self, repository: Any) -> tuple[str, str, str] | None:
-        """`bare_name_fallback`'s answer for `repository` on this broker's forges.
+    def _snapshot_too_large(self, repo: str, size: int) -> WorkspaceError:
+        return WorkspaceError(
+            f"the snapshot of {repo} is {size} bytes, over the "
+            f"{self.max_snapshot_bytes}-byte ceiling. Name `paths` to "
+            "take part of the tree.",
+            status=413,
+            code="SNAPSHOT_TOO_LARGE",
+        )
 
-        Asked by `snapshot` and by the HTTP layer, which skips its resolve for
-        a name answered here.
+    def _measure_snapshot(
+        self, git: Callable, clone_dir: Path, revision: str, paths: list[str], repo: str
+    ) -> None:
+        """Refuse a tree whose tar would pass the ceiling, before `git archive` writes it.
+
+        The clone ceiling measures the pack, and a pack compresses: a few MB
+        of repeated bytes can be GB as a tar, and writing that to the scratch
+        volume is what would get the broker evicted. So the tar is sized from
+        the tree listing (`_tar_bytes`) first. A listing the runner cut short
+        is refused too: a partial sum says nothing about the rest.
+        """
+        argv = ["--literal-pathspecs", "ls-tree", "-r", "-t", "-z", SNAPSHOT_LISTING_FORMAT, revision]
+        if paths:
+            argv += ["--", *paths]
+        listed = git(clone_dir, *argv)
+        if getattr(listed, "truncated", False):
+            raise WorkspaceError(
+                f"the tree of {repo} lists more entries than one answer holds. "
+                "Name `paths` to take part of the tree.",
+                status=413,
+                code="SNAPSHOT_TOO_LARGE",
+            )
+        size = _tar_bytes(listed.stdout or "")
+        if size > self.max_snapshot_bytes:
+            raise self._snapshot_too_large(repo, size)
+
+    def snapshot_source(self, repository: Any) -> tuple[Any, tuple[str, str, str] | None]:
+        """The repository `snapshot` resolves, and the read outside the host table, if any.
+
+        `bare_name_fallback` answers for a bare name: a host-qualified name
+        resolved in its place, or `(forge label, repository, clone URL)` for a
+        read with no credential that is not resolved at all. Asked by
+        `snapshot` and by the HTTP layer, which resolves the first answer and
+        skips its resolve for the second.
         """
         if self._bare_name_fallback is None:
-            return None
-        return self._bare_name_fallback(repository, self.registry.forges)
+            return repository, None
+        answer = self._bare_name_fallback(repository, self.registry.forges)
+        if isinstance(answer, str):
+            return answer, None
+        return repository, answer
 
     def _snapshot_git(self, bound: Binding) -> tuple[str, Callable[..., Any]]:
         """The repository's role, and a git runner that presents its credential.
