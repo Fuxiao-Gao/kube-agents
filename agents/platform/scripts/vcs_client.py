@@ -812,13 +812,34 @@ def clone(
     *,
     force: bool = False,
     key: str | None = None,
+    destination: Path | None = None,
 ) -> dict:
     """Bring the repository down as history, not as a directory listing.
 
     One call to the broker, which clones, bundles and deletes its tree before
     answering. Nothing stays on the credential side after a read, and there is
     no handle to release.
+
+    `destination` is for a caller that only reads: the copy goes into that
+    directory, which must be absent or empty, and no record is written. A
+    record is keyed on the repository and the branch, so it would replace the
+    record of the agent's own copy of the same branch. Without a record,
+    `commit`, `publish` and `discard` do not see the copy, and the caller
+    deletes it. `force` and `key` act only on a recorded copy, so they have no
+    effect here.
     """
+    if destination is not None:
+        # Absolute, because git runs in the parent with this path as its target:
+        # a relative `a/b` would land at `a/a/b`. `abspath` also folds `..`.
+        destination = Path(os.path.abspath(destination))
+        try:
+            occupied = destination.is_symlink() or (
+                destination.exists() and (not destination.is_dir() or any(destination.iterdir()))
+            )
+        except OSError as error:
+            raise VcsError(f"{destination} cannot be read: {error}") from error
+        if occupied:
+            raise VcsError(f"{destination} is not an empty directory. Clone into an empty or absent directory.")
     payload: dict = {"repository": repository}
     if branch:
         payload["branch"] = branch
@@ -828,19 +849,24 @@ def clone(
     # yet: `submit-suggestion` clones the base and then switches, and the copy
     # belongs to that branch, not to the base every other card also clones.
     key = key or branch or answer["branch"]
-    destination = ROOT / _slug(answer["forge"], answer["repo"], key)
-    _refuse_a_collision(destination, answer["forge"], answer["repo"], key)
-    # Here, because this is the one verb that adds to the scratch root. Best
-    # effort: a copy that could not be tidied is not a reason to refuse a read.
-    try:
-        reap_stale_copies(keep=destination)
-    except OSError:
-        pass
-    if destination.exists():
-        _refuse_to_discard(destination, force=force)
-        shutil.rmtree(destination)
+    recorded = destination is None
+    if recorded:
+        destination = ROOT / _slug(answer["forge"], answer["repo"], key)
+        _refuse_a_collision(destination, answer["forge"], answer["repo"], key)
+        # Here, because this is the one verb that adds to the scratch root. Best
+        # effort: a copy that could not be tidied is not a reason to refuse a read.
+        try:
+            reap_stale_copies(keep=destination)
+        except OSError:
+            pass
+        if destination.exists():
+            _refuse_to_discard(destination, force=force)
+            shutil.rmtree(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    handle, name = tempfile.mkstemp(dir=str(destination.parent), suffix=".bundle")
+    # Under the scratch root, not beside a caller's destination: the bundle is
+    # the full history, and the caller's directory may not be writable.
+    ROOT.mkdir(parents=True, exist_ok=True)
+    handle, name = tempfile.mkstemp(dir=str(ROOT), suffix=".bundle")
     bundle_file = Path(name)
     try:
         with os.fdopen(handle, "wb") as stream:
@@ -887,7 +913,8 @@ def clone(
         "baseRevision": answer["revision"],
         "path": str(destination),
     }
-    save_session(session)
+    if recorded:
+        save_session(session)
     tracked = local_git(destination, "ls-files").stdout.splitlines()
     return {
         "forge": answer["forge"],

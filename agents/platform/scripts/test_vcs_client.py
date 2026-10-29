@@ -812,6 +812,80 @@ class WorkingCopyTest(unittest.TestCase):
         cloned = vcs_client.clone("acme/infra", key="fix/one")
         self.assertTrue(Path(cloned["path"]).exists())
 
+    def test_a_clone_into_a_destination_writes_no_record_and_nothing_under_the_root(self):
+        destination = Path(self.tmp.name) / "read"
+        cloned = vcs_client.clone("acme/infra", destination=destination)
+        self.assertEqual(cloned["path"], str(destination))
+        self.assertEqual(cloned["revision"], self.head)
+        self.assertEqual(cloned["remotes"], [])
+        self.assertEqual((destination / "a.txt").read_text(), "a\n")
+        self.assertEqual(git(destination, "remote").stdout, "")
+        self.assertEqual(vcs_client.all_sessions(), [])
+        # `local_git` keeps its own `.home` and `.no-hooks` there; nothing else is.
+        self.assertLessEqual({p.name for p in vcs_client.ROOT.iterdir()}, {".home", ".no-hooks", ".sessions"})
+        with self.assertRaises(vcs_client.VcsError):
+            vcs_client.resolve_session("acme/infra")
+
+    def test_a_clone_into_an_empty_directory_is_taken(self):
+        # The shape `tempfile.TemporaryDirectory()` hands a caller.
+        destination = Path(self.tmp.name) / "empty"
+        destination.mkdir()
+        cloned = vcs_client.clone("acme/infra", destination=destination)
+        self.assertEqual(cloned["files"], 1)
+        self.assertTrue((destination / "a.txt").exists())
+
+    def test_a_clone_into_a_directory_with_anything_in_it_is_refused_before_the_broker_is_asked(self):
+        destination = Path(self.tmp.name) / "occupied"
+        destination.mkdir()
+        (destination / "keep.txt").write_text("mine\n")
+        a_file = Path(self.tmp.name) / "a-file"
+        a_file.write_text("mine\n")
+        dangling = Path(self.tmp.name) / "dangling"
+        dangling.symlink_to(Path(self.tmp.name) / "absent")
+        asked = mock.Mock()
+        for target in (destination, str(destination), a_file, dangling):
+            with self.subTest(target=target), mock.patch.object(vcs_client, "call", asked):
+                with self.assertRaises(vcs_client.VcsError) as caught:
+                    vcs_client.clone("acme/infra", destination=target)
+                self.assertIn("not an empty directory", str(caught.exception))
+        asked.assert_not_called()
+        self.assertEqual(sorted(p.name for p in destination.iterdir()), ["keep.txt"])
+        self.assertEqual(a_file.read_text(), "mine\n")
+
+    def test_a_relative_destination_lands_where_it_names(self):
+        work = Path(self.tmp.name) / "cwd"
+        work.mkdir()
+        previous = os.getcwd()
+        os.chdir(work)
+        self.addCleanup(os.chdir, previous)
+        cloned = vcs_client.clone("acme/infra", destination=Path("a/b"))
+        self.assertEqual(Path(cloned["path"]).resolve(), (work / "a" / "b").resolve())
+        self.assertTrue((work / "a" / "b" / "a.txt").exists())
+        self.assertFalse((work / "a" / "a").exists())
+        self.assertEqual(git(work / "a" / "b", "remote").stdout, "")
+        folded = vcs_client.clone("acme/infra", destination=Path("x/../y"))
+        self.assertNotIn("..", folded["path"])
+        self.assertFalse((work / "x").exists())
+
+    def test_the_bundle_is_staged_under_the_root_not_beside_the_destination(self):
+        parent = Path(self.tmp.name) / "read-only"
+        (parent / "mount").mkdir(parents=True)
+        parent.chmod(0o500)
+        self.addCleanup(parent.chmod, 0o700)
+        cloned = vcs_client.clone("acme/infra", destination=parent / "mount")
+        self.assertTrue((parent / "mount" / "a.txt").exists())
+        self.assertEqual(cloned["revision"], self.head)
+        self.assertEqual(list(vcs_client.ROOT.glob("*.bundle")), [])
+
+    def test_a_clone_into_a_destination_leaves_the_agents_copy_of_the_same_branch_alone(self):
+        own = vcs_client.clone("acme/infra")
+        (Path(own["path"]) / "a.txt").write_text("edited\n")
+        before = self._record()
+        vcs_client.clone("acme/infra", destination=Path(self.tmp.name) / "read")
+        self.assertEqual(self._record(), before)
+        self.assertEqual(vcs_client.resolve_session("acme/infra")["path"], own["path"])
+        self.assertEqual((Path(own["path"]) / "a.txt").read_text(), "edited\n")
+
     def test_a_record_naming_a_path_outside_the_root_is_never_reaped(self):
         """The record is a file the sandbox user can write; its path must not become a delete primitive."""
         vcs_client.clone("acme/infra", key="fix/one")
