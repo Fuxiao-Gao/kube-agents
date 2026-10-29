@@ -2675,7 +2675,13 @@ admits `proposal-view` only, checked on the normalised verb before the body is r
 verb's managed-repository check still applying. It is bound the same way:
 `CREDENTIAL_PROXY_MCP_CALLERS` names the MCP pod's own ServiceAccount, which may present only
 the mcp audience, and no other caller may present it; with the list empty, nobody holds the
-role. It names the account only while the operator controls it; an account somebody else holds under the name is never named. A `NetworkPolicy` would have expressed the same thing and is not the mechanism
+role. It names the account only while the operator controls it; an account somebody else holds under the name is never named. A sixth, `scope`, is the scope publisher Job's under `mode: next`:
+its token is minted for `kubeagents-credential-proxy-scope`, it is bound to its callers through
+`CREDENTIAL_PROXY_SCOPE_CALLERS` as the mcp role is, it reaches `/v1/exec` alone, and
+`ROLE_EXECUTABLES` holds it to `gcloud`. Within that, `scope_policy.py` admits five lookups token
+for token, each on an argument the `scope.json` at `CREDENTIAL_PROXY_SCOPE_FILE` declares or
+that an earlier lookup returned to the role within two hours. That record of returned members is
+memory in the one broker process, so the role stays on the single broker pod. A `NetworkPolicy` would have expressed the same thing and is not the mechanism
 chosen, because it does nothing at all on a CNI that does not implement `NetworkPolicy` and
 `TokenReview` is answered by the API server on every cluster.
 

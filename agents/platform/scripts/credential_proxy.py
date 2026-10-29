@@ -49,6 +49,7 @@ import feedback_broker
 import mcp_policy
 import providers
 import repo_ref
+import scope_policy
 import scoped_sa_pool
 import vcs_broker
 import watcher_policy
@@ -321,6 +322,10 @@ CGROUP_NO_LIMIT = "max"
 # knob, and the operator's spec.deployment.env reaches it.
 DEFAULT_SESSION_MAX_CONCURRENT_COMMANDS = 2
 ENV_SESSION_MAX_CONCURRENT_COMMANDS = "CREDENTIAL_PROXY_SESSION_MAX_CONCURRENT_COMMANDS"
+# The scope role's share, for the same reason: the publisher probes one project
+# per call, up to maxProjects calls a run, from the pool the shell uses.
+DEFAULT_SCOPE_MAX_CONCURRENT_COMMANDS = 4
+ENV_SCOPE_MAX_CONCURRENT_COMMANDS = "CREDENTIAL_PROXY_SCOPE_MAX_CONCURRENT_COMMANDS"
 # How long a request waits for admission -- a slot under the slot cap and room
 # under the child memory budget alike -- before it is refused with 503. Long
 # enough to ride out a burst of one-shot reads, short enough that a queue held
@@ -584,13 +589,14 @@ ADMISSION_BOUND_SLOT = "slot"
 ADMISSION_BOUND_BUDGET = "budget"
 ADMISSION_BOUND_REFRESH_LOCK = "refresh-lock"
 ADMISSION_BOUND_SESSION = "session"
+ADMISSION_BOUND_SCOPE = "scope"
 ADMISSION_BOUND_OTHER = "other"
 #: The histogram's label for a request admitted without a wait: nothing held
 #: it, so neither bound is blamed, and the label does not flip with the memory
 #: limit. Never a refusal's bound.
 ADMISSION_BOUND_NONE = "none"
 ADMISSION_BOUNDS = frozenset(
-    {ADMISSION_BOUND_SLOT, ADMISSION_BOUND_BUDGET, ADMISSION_BOUND_REFRESH_LOCK, ADMISSION_BOUND_SESSION, ADMISSION_BOUND_NONE}
+    {ADMISSION_BOUND_SLOT, ADMISSION_BOUND_BUDGET, ADMISSION_BOUND_REFRESH_LOCK, ADMISSION_BOUND_SESSION, ADMISSION_BOUND_SCOPE, ADMISSION_BOUND_NONE}
 )
 # Edges where a reader wants them: 15 s is the cap the Cluster Agent preflight
 # (cluster_preflight.sh) puts on one brokered call, the shortest caller-side
@@ -985,6 +991,12 @@ DEFAULT_CREDENTIAL_PROXY_CHAT_AUDIENCE = "kubeagents-credential-proxy-chat"
 # not known", rather than with some other role's reach.
 DEFAULT_CREDENTIAL_PROXY_MCP_AUDIENCE = "kubeagents-credential-proxy-mcp"
 
+# The scope publisher's audience (#4119). A next-mode Job with no gcloud of its
+# own: it runs five read-only lookups through /v1/exec, and scope_policy holds
+# it to them. Bound to its callers both ways, and conferred to nobody when no
+# callers are named, as the mcp audience is.
+DEFAULT_CREDENTIAL_PROXY_SCOPE_AUDIENCE = "kubeagents-credential-proxy-scope"
+
 # The roles a caller can hold, named by which Pod holds them.
 CALLER_ROLE_SHELL = "shell"
 CALLER_ROLE_CHAT = "chat"
@@ -1005,6 +1017,10 @@ CALLER_ROLE_WATCHER = "watcher"
 # so nothing it can be asked to do may write to a forge, clone into the broker,
 # or spend the forge credential on anything but a read of a managed repository.
 CALLER_ROLE_MCP = "mcp"
+# The scope publisher Job. The exec route only, gcloud only, and within it the
+# five lookups scope_policy names, each on an argument scope.json declares or an
+# earlier lookup returned.
+CALLER_ROLE_SCOPE = "scope"
 
 # The TokenReview user.extra key under which the API server names the Pod a
 # projected token is bound to.
@@ -1020,6 +1036,7 @@ CALLER_ROLES = (
     CALLER_ROLE_SESSION,
     CALLER_ROLE_WATCHER,
     CALLER_ROLE_MCP,
+    CALLER_ROLE_SCOPE,
 )
 
 # Which executables a role may hand to /v1/exec. A role absent here keeps
@@ -1029,6 +1046,7 @@ CALLER_ROLES = (
 # refusal: widening the route never widens a session.
 ROLE_EXECUTABLES: dict[str, frozenset[str]] = {
     CALLER_ROLE_SESSION: frozenset({"kubectl", "gcloud"}),
+    CALLER_ROLE_SCOPE: frozenset({"gcloud"}),
 }
 
 
@@ -1248,7 +1266,7 @@ ROUTE_ROLES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # 404s anything else under it, so the prefix admits nothing extra today.
     ("/v1/chat/api", (CALLER_ROLE_CHAT, CALLER_ROLE_A2A_CHAT)),
     ("/v1/chat/", (CALLER_ROLE_CHAT,)),
-    ("/v1/exec", (CALLER_ROLE_SHELL, CALLER_ROLE_SESSION)),
+    ("/v1/exec", (CALLER_ROLE_SHELL, CALLER_ROLE_SESSION, CALLER_ROLE_SCOPE)),
     # The feedback form verb: the sandbox's one way to file a report about
     # kube-agents itself (feedback_broker.py). The shell alone: a session pod
     # files nothing on anyone's behalf.
@@ -2048,16 +2066,20 @@ class AdmissionSnapshot(NamedTuple):
     budget_bytes: int | None
 
 
-def session_slot_limit_from_env() -> int:
-    """The session role's concurrent-command bound, from the env or the default.
+def session_slot_limit_from_env(
+    env_name: str = ENV_SESSION_MAX_CONCURRENT_COMMANDS,
+    default: int = DEFAULT_SESSION_MAX_CONCURRENT_COMMANDS,
+) -> int:
+    """A role's concurrent-command bound, from the env or the default.
 
-    Anything that is not a positive integer falls back to the default with a
-    warning, so a typo narrows rather than opens: the default is the small
-    number, and an unset or broken knob is never "unlimited".
+    The session role's by default; the scope role's with its own env name and
+    default. Anything that is not a positive integer falls back to the default
+    with a warning, so a typo narrows rather than opens: the default is the
+    small number, and an unset or broken knob is never "unlimited".
     """
-    raw = os.getenv(ENV_SESSION_MAX_CONCURRENT_COMMANDS, "").strip()
+    raw = os.getenv(env_name, "").strip()
     if not raw:
-        return DEFAULT_SESSION_MAX_CONCURRENT_COMMANDS
+        return default
     try:
         value = int(raw)
     except ValueError:
@@ -2065,37 +2087,47 @@ def session_slot_limit_from_env() -> int:
     if value <= 0:
         LOGGER.warning(
             "%s=%r is not a positive integer; using the default of %d",
-            ENV_SESSION_MAX_CONCURRENT_COMMANDS, raw, DEFAULT_SESSION_MAX_CONCURRENT_COMMANDS,
+            env_name, raw, default,
         )
-        return DEFAULT_SESSION_MAX_CONCURRENT_COMMANDS
+        return default
     return value
 
 
 class SessionSlots:
-    """The session role's bounded share of the command pool.
+    """One role's bounded share of the command pool: the session role's by default.
 
-    Only CALLER_ROLE_SESSION is counted; every other role passes through to
-    the pool unchanged. A session at its bound is refused immediately with
+    Only `role` is counted; every other role passes through to the pool
+    unchanged. A caller at its bound is refused immediately with
     CommandSlotUnavailable, which the exec route already answers as busy, so
-    the shim prints why and the model reports it rather than retrying.
+    the shim prints why and the model reports it rather than retrying. The
+    scope role gets a second instance with its own env name and bound label.
     """
 
-    def __init__(self, limit: int) -> None:
+    def __init__(
+        self,
+        limit: int,
+        role: str = CALLER_ROLE_SESSION,
+        env_name: str = ENV_SESSION_MAX_CONCURRENT_COMMANDS,
+        bound: str = ADMISSION_BOUND_SESSION,
+    ) -> None:
         self.limit = limit
+        self.role = role
+        self.env_name = env_name
+        self.bound = bound
         self._in_flight = 0
         self._lock = threading.Lock()
 
     @contextlib.contextmanager
     def acquire(self, role: str) -> Iterator[None]:
-        if role != CALLER_ROLE_SESSION:
+        if role != self.role:
             yield
             return
         with self._lock:
             if self._in_flight >= self.limit:
                 raise CommandSlotUnavailable(
-                    f"the session role is limited to {self.limit} concurrent command(s) through the "
-                    f"credential proxy ({ENV_SESSION_MAX_CONCURRENT_COMMANDS}); try again when one finishes",
-                    bound=ADMISSION_BOUND_SESSION,
+                    f"the {self.role} role is limited to {self.limit} concurrent command(s) through the "
+                    f"credential proxy ({self.env_name}); try again when one finishes",
+                    bound=self.bound,
                 )
             self._in_flight += 1
         try:
@@ -2246,6 +2278,9 @@ class ServiceAccountAuthenticator:
     leave the audience deciding: the mcp role postdates its binding, so no
     operator renders the audience without the callers, and an empty set
     confers the mcp role to nobody.
+
+    ``scope_callers`` binds the scope role exactly as ``mcp_callers`` binds
+    the mcp role, empty set included.
     """
 
     authenticates = True
@@ -2262,6 +2297,7 @@ class ServiceAccountAuthenticator:
         cache_seconds: float = 60.0,
         session_callers: frozenset[str] = frozenset(),
         mcp_callers: frozenset[str] = frozenset(),
+        scope_callers: frozenset[str] = frozenset(),
     ) -> None:
         if not audience_roles or not all(audience_roles):
             raise ValueError("an audience is required to authenticate callers")
@@ -2273,6 +2309,7 @@ class ServiceAccountAuthenticator:
         self.allowed_callers = allowed_callers
         self.session_callers = session_callers
         self.mcp_callers = mcp_callers
+        self.scope_callers = scope_callers
         self.api_host = api_host
         self.api_port = api_port
         self.ca_file = ca_file
@@ -2410,6 +2447,10 @@ class ServiceAccountAuthenticator:
         # callers named the mcp audience confers nothing.
         if role == CALLER_ROLE_MCP and username not in self.mcp_callers:
             raise AuthenticationError("the mcp audience is only for mcp callers")
+        if username in self.scope_callers and role != CALLER_ROLE_SCOPE:
+            raise AuthenticationError("a scope caller may present only the scope audience")
+        if role == CALLER_ROLE_SCOPE and username not in self.scope_callers:
+            raise AuthenticationError("the scope audience is only for scope callers")
         groups = user.get("groups") or []
         extra = user.get("extra") or {}
         pod_names = (extra.get(TOKEN_REVIEW_POD_NAME_EXTRA) or []) if isinstance(extra, dict) else []
@@ -2478,6 +2519,13 @@ def build_authenticator() -> NullAuthenticator | ServiceAccountAuthenticator:
         for caller in os.getenv("CREDENTIAL_PROXY_MCP_CALLERS", "").split(",")
         if caller.strip()
     )
+    # The scope publisher's ServiceAccounts, read the same way, with the mcp
+    # meaning: unset confers the scope role to nobody.
+    scope_callers = frozenset(
+        caller.strip()
+        for caller in os.getenv("CREDENTIAL_PROXY_SCOPE_CALLERS", "").split(",")
+        if caller.strip()
+    )
     if chat_audience and chat_audience != shell_audience:
         audience_roles = {
             shell_audience: CALLER_ROLE_SHELL,
@@ -2542,6 +2590,23 @@ def build_authenticator() -> NullAuthenticator | ServiceAccountAuthenticator:
                     "is not; the mcp role is bound to the callers named there, so every "
                     "caller presenting the mcp audience is refused"
                 )
+        # The scope publisher's audience, read raw and refused on a collision
+        # for the mcp audience's reasons.
+        scope_audience = os.getenv("CREDENTIAL_PROXY_SCOPE_AUDIENCE", "").strip()
+        if scope_audience and scope_audience in audience_roles:
+            LOGGER.warning(
+                "CREDENTIAL_PROXY_SCOPE_AUDIENCE equals the %s audience; the scope "
+                "role needs an audience of its own, so it is not conferred",
+                audience_roles[scope_audience] or CALLER_ROLE_SHELL,
+            )
+        elif scope_audience:
+            audience_roles[scope_audience] = CALLER_ROLE_SCOPE
+            if not scope_callers:
+                LOGGER.warning(
+                    "CREDENTIAL_PROXY_SCOPE_AUDIENCE is set but CREDENTIAL_PROXY_SCOPE_CALLERS "
+                    "is not; the scope role is bound to the callers named there, so every "
+                    "caller presenting the scope audience is refused"
+                )
     else:
         audience_roles = {shell_audience: ""}
         if os.getenv("CREDENTIAL_PROXY_A2A_CHAT_AUDIENCE", "").strip():
@@ -2564,11 +2629,18 @@ def build_authenticator() -> NullAuthenticator | ServiceAccountAuthenticator:
                 "is not; the mcp role only exists once the chat audience split does, "
                 "so the mcp audience is ignored"
             )
+        if os.getenv("CREDENTIAL_PROXY_SCOPE_AUDIENCE", "").strip():
+            LOGGER.warning(
+                "CREDENTIAL_PROXY_SCOPE_AUDIENCE is set but CREDENTIAL_PROXY_CHAT_AUDIENCE "
+                "is not; the scope role only exists once the chat audience split does, "
+                "so the scope audience is ignored"
+            )
     return ServiceAccountAuthenticator(
         audience_roles=audience_roles,
         allowed_callers=allowed,
         session_callers=session_callers,
         mcp_callers=mcp_callers,
+        scope_callers=scope_callers,
         api_host=os.getenv("KUBERNETES_SERVICE_HOST", "").strip(),
         api_port=os.getenv("KUBERNETES_SERVICE_PORT", "443").strip() or "443",
         ca_file=os.getenv(
@@ -9220,6 +9292,9 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
     # The session role's bounded share of the command pool, installed by main
     # beside the executor; None (the route tests' stand-ins) means unbounded.
     session_slots: "SessionSlots | None" = None
+    scope_slots: "SessionSlots | None" = None
+    # The scope role's member window: one per broker process (scope_policy).
+    scope_window: scope_policy.MemberWindow = scope_policy.MemberWindow()
     max_request_bytes: int
     slack_max_request_bytes: int
     enforce_read_only: bool = True
@@ -9684,6 +9759,34 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
                 },
             )
             return
+        # The scope role's whole surface: five lookups, each on an argument
+        # scope.json declares or an earlier lookup returned (scope_policy).
+        scope_admitted = None
+        if principal.role == CALLER_ROLE_SCOPE:
+            scope_refusal, scope_admitted = scope_policy.check(
+                argv,
+                extras=stdin is not None or cwd is not None or kubeconfig_context is not None or wants_kubeconfig,
+                scope_file=os.getenv(scope_policy.SCOPE_FILE_ENV, ""),
+                window=self.scope_window,
+            )
+            if scope_refusal is not None:
+                LOGGER.warning(
+                    "scope request refused request_id=%s rule=%s",
+                    request_id,
+                    scope_refusal.rule,
+                    extra=audit(AUDIT_STATUS_BLOCKED, rule=scope_refusal.rule),
+                )
+                self.metrics.record_tool(tool_label, subcommand_label, TOOL_STATUS_BLOCKED)
+                self._json(
+                    HTTPStatus.FORBIDDEN,
+                    {
+                        "status": "blocked",
+                        "code": "SECURITY_POLICY_BLOCKED",
+                        "rule": scope_refusal.rule,
+                        "message": scope_refusal.message,
+                    },
+                )
+                return
         rule = self.policy.blocked_by(argv)
         if rule is not None:
             LOGGER.warning(
@@ -9855,6 +9958,13 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
                 if result.timed_out:
                     self.metrics.record_failure(BROKER_FAILURE_EXEC_TIMEOUT, tool=tool_label)
                 self.metrics.observe_duration(tool_label, result.duration_ms / MILLISECONDS_PER_SECOND)
+                if scope_admitted is not None and result.exit_code == 0 and not result.truncated and not result.timed_out:
+                    scope_policy.record(
+                        scope_admitted,
+                        result.stdout,
+                        scope_file=os.getenv(scope_policy.SCOPE_FILE_ENV, ""),
+                        window=self.scope_window,
+                    )
                 response = {
                     "status": "completed",
                     "exitCode": result.exit_code,
@@ -11534,8 +11644,8 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
             )
 
     def _session_slot(self, role: str) -> contextlib.AbstractContextManager:
-        """The session role's bounded share, or nothing for every other role."""
-        slots = getattr(self, "session_slots", None)
+        """The session or scope role's bounded share, or nothing for every other role."""
+        slots = getattr(self, "scope_slots" if role == CALLER_ROLE_SCOPE else "session_slots", None)
         if slots is None:
             return contextlib.nullcontext()
         return slots.acquire(role)
@@ -11840,6 +11950,12 @@ def serve(args: argparse.Namespace) -> None:
     executor.bootstrap(os.getenv("CREDENTIAL_PROXY_BOOTSTRAP_COMMAND", ""))
     CredentialProxyHandler.executor = executor
     CredentialProxyHandler.session_slots = SessionSlots(session_slot_limit_from_env())
+    CredentialProxyHandler.scope_slots = SessionSlots(
+        session_slot_limit_from_env(ENV_SCOPE_MAX_CONCURRENT_COMMANDS, DEFAULT_SCOPE_MAX_CONCURRENT_COMMANDS),
+        role=CALLER_ROLE_SCOPE,
+        env_name=ENV_SCOPE_MAX_CONCURRENT_COMMANDS,
+        bound=ADMISSION_BOUND_SCOPE,
+    )
     CredentialProxyHandler.base_branch = (
         getattr(args, "base_branch", "")
         or os.getenv("CREDENTIAL_PROXY_BASE_BRANCH", "")
