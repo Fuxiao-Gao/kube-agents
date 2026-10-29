@@ -2397,7 +2397,7 @@ type taskStart struct {
 	LinkParent bool
 	// Route, when set, addresses the task to an AgentProfile: the grant is
 	// minted against the resolved profile at the requester's tier with the
-	// target in scope, and the submission goes on the profile's .submit
+	// target in scope, and the submission goes on the profile's submission
 	// subject with the parameters as a part (spec-profiles-dispatch.md,
 	// "Addressing"). rec.Addressee is the resolved profile. Nil for every
 	// task addressed to platform or a session.

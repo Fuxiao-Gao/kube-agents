@@ -662,7 +662,7 @@ leaves the record as it was:
    parent's tier when the parent is a profile task, and at its requester's otherwise. A profile
    task can't delegate to `platform`, whose child would be minted at the install's tier and
    scope.
-4. **Submit.** The submission goes on `a2a.tasks.<profile>.<tier>.<kind>.<task>.submit`, `top`
+4. **Submit.** The submission goes on `a2a.submit.<profile>.<tier>.<kind>.<task>`, on the `PROFILE_SUBMITS` stream, `top`
    for a client's turn and `child` for a delegation, with the parameters as a `taskParameters`
    part. The gateway is the subject's one writer. Steers, a stop and follow-ups go to the task's
    own `a2a.tasks.<profile>.<task>.in`.

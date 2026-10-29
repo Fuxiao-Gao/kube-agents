@@ -1068,7 +1068,7 @@ class A3TheTaskPlaneSubjectSaysWhoWroteIt(unittest.TestCase):
             "have the record read as infrastructure",
         )
 
-    SUBMIT_PROBE = "a2a.tasks.cluster.read.top.task-0001.submit"
+    SUBMIT_PROBE = "a2a.submit.cluster.read.top.task-0001"
 
     def test_A3_the_submit_subject_has_exactly_one_writer(self) -> None:
         """A profile task's `…submit` is written by the gateway and nobody else.

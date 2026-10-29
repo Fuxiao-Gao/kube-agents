@@ -2969,7 +2969,7 @@ func TestADelegationToAProfileIsSubmittedForTheResolvedProfile(t *testing.T) {
 	}
 	var got []subjectEnvelope
 	waitFor(t, "the child on the pinned profile's child queue", func() bool {
-		got = streamEnvelopes(t, r.url, "a2a.tasks.prod-east.>")
+		got = streamEnvelopes(t, r.url, lib.SubmitSubjectPrefix+"prod-east.>")
 		return len(got) == 1
 	})
 	profile, tier, kind, _, ok := lib.ParseSubmitSubject(got[0].subject)

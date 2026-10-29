@@ -295,8 +295,10 @@ const (
 const a2aBridgeAddressee = "platform"
 
 // a2aProfileSubmitSubjects is every AgentProfile's submission subject,
-// a2a.tasks.<profile>.<tier>.<kind>.<task>.submit (lib.TaskSubmitSubject).
-const a2aProfileSubmitSubjects = "a2a.tasks.*.*.*.*.submit"
+// a2a.submit.<profile>.<tier>.<kind>.<task> (lib.TaskSubmitSubject), on the
+// PROFILE_SUBMITS stream. Publish only: the gateway holds no consumer or
+// stream right there, and its publish ack returns on _INBOX.gateway.>.
+const a2aProfileSubmitSubjects = "a2a.submit.*.*.*.*"
 
 // The operator's own bus principal: its NATS user and inbox owner, and the
 // directory it writes AgentProfile cards to (agentprofile_card.go).
@@ -417,7 +419,7 @@ func gatewayIdentity(agent *agentv1alpha1.PlatformAgent, ns string) a2aIdentity 
 	publish := []string{
 		"a2a.tasks.*.*.in",
 		"a2a.tasks.*.*.supervisor",
-		// A new task for an AgentProfile, on the profile's .submit subject
+		// A new task for an AgentProfile, on the profile's submission subject
 		// with its tier and kind (spec-profiles-dispatch.md, "Addressing").
 		// The gateway is the subject's one writer: the dispatcher reads it
 		// through its durables, and no worker or session holds it.

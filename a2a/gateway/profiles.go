@@ -111,7 +111,7 @@ func submissionPayload(text, taskID, contextID string, route *profileRoute) ([]b
 	return messagePayloadParts([]lib.Part{{Kind: "text", Text: text}, params}, taskID, contextID)
 }
 
-// submissionSubject is where a new task is published: a profile's .submit
+// submissionSubject is where a new task is published: a profile's submission
 // subject, carrying the tier and kind its durables route on, or the
 // addressee's .in subject for platform and sessions.
 func submissionSubject(addressee, taskID string, route *profileRoute) string {

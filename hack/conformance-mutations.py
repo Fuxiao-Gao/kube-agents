@@ -2256,7 +2256,7 @@ Mutation(
         "A3-bridge-submits-profile-tasks",
         "k8s-operator/internal/controller/platformagent_a2a_identities.go",
         ('\t\t"a2a.tasks." + a2aBridgeAddressee + ".*.events",\n\t\t"$KV.runtime-state.>",',
-         '\t\t"a2a.tasks." + a2aBridgeAddressee + ".*.events",\n\t\t"a2a.tasks.*.*.*.*.submit",\n\t\t"$KV.runtime-state.>",'),
+         '\t\t"a2a.tasks." + a2aBridgeAddressee + ".*.events",\n\t\t"a2a.submit.*.*.*.*",\n\t\t"$KV.runtime-state.>",'),
         "test_A3_the_submit_subject_has_exactly_one_writer",
         "grant the static bridge publish on profiles' submit subject, so the "
         "platform agent can hand a profile work without a gateway hop. It "

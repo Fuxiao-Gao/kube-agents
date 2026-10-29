@@ -72,6 +72,14 @@ func provision(t *testing.T, url string) {
 	}); err != nil {
 		t.Fatalf("create TASKS: %v", err)
 	}
+	// Profile submissions' own stream, as the provision Job makes it.
+	if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name:      lib.ProfileSubmitStream,
+		Subjects:  []string{lib.SubmitSubjectPrefix + ">"},
+		Retention: jetstream.LimitsPolicy,
+	}); err != nil {
+		t.Fatalf("create %s: %v", lib.ProfileSubmitStream, err)
+	}
 	if _, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: lib.SessionStateBucket}); err != nil {
 		t.Fatalf("create session-state: %v", err)
 	}

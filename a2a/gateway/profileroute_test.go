@@ -23,7 +23,8 @@ type subjectEnvelope struct {
 	env     *lib.Envelope
 }
 
-// streamEnvelopes is every envelope on TASKS under filter, oldest first.
+// streamEnvelopes is every envelope under filter, oldest first: on
+// PROFILE_SUBMITS for a submission filter, on TASKS otherwise.
 func streamEnvelopes(t *testing.T, url, filter string) []subjectEnvelope {
 	t.Helper()
 	nc, err := nats.Connect(url)
@@ -37,7 +38,11 @@ func streamEnvelopes(t *testing.T, url, filter string) []subjectEnvelope {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	cons, err := js.OrderedConsumer(ctx, lib.TasksStream, jetstream.OrderedConsumerConfig{FilterSubjects: []string{filter}})
+	stream := lib.TasksStream
+	if strings.HasPrefix(filter, lib.SubmitSubjectPrefix) {
+		stream = lib.ProfileSubmitStream
+	}
+	cons, err := js.OrderedConsumer(ctx, stream, jetstream.OrderedConsumerConfig{FilterSubjects: []string{filter}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +124,7 @@ func TestProfileTurn_IsMintedForTheResolvedProfileAndSubmittedOnSubmit(t *testin
 
 	var got []subjectEnvelope
 	waitFor(t, "a submission on the pinned profile's .submit", func() bool {
-		got = streamEnvelopes(t, r.url, "a2a.tasks.prod-east.>")
+		got = streamEnvelopes(t, r.url, lib.SubmitSubjectPrefix+"prod-east.>")
 		return len(got) == 1
 	})
 	profile, tier, kind, taskID, ok := lib.ParseSubmitSubject(got[0].subject)
@@ -182,7 +187,8 @@ func TestProfileTurn_ARefusalPostsWhyAndSubmitsNothing(t *testing.T) {
 				}
 				return false
 			})
-			if got := streamEnvelopes(t, r.url, "a2a.tasks.>"); len(got) != 0 {
+			got := append(streamEnvelopes(t, r.url, "a2a.tasks.>"), streamEnvelopes(t, r.url, lib.SubmitSubjectPrefix+">")...)
+			if len(got) != 0 {
 				t.Fatalf("published %d message(s) for a refused turn: %s", len(got), got[0].subject)
 			}
 		})
@@ -251,8 +257,8 @@ func submissionOn(t *testing.T, r *rig, profile string) *lib.Envelope {
 	var got []subjectEnvelope
 	waitFor(t, "a submission on "+profile, func() bool {
 		got = nil
-		for _, e := range streamEnvelopes(t, r.url, "a2a.tasks."+profile+".>") {
-			if strings.HasSuffix(e.subject, ".submit") {
+		for _, e := range streamEnvelopes(t, r.url, lib.SubmitSubjectPrefix+profile+".>") {
+			{
 				got = append(got, e)
 			}
 		}
@@ -315,7 +321,7 @@ func TestAProfileParentDelegatesWaitsAndEndsItsChain(t *testing.T) {
 	}
 	childEnv := submissionOn(t, r, "prod-east")
 	childSubject := ""
-	for _, e := range streamEnvelopes(t, r.url, "a2a.tasks.prod-east.>") {
+	for _, e := range streamEnvelopes(t, r.url, lib.SubmitSubjectPrefix+"prod-east.>") {
 		childSubject = e.subject
 	}
 	if _, tier, kind, _, ok := lib.ParseSubmitSubject(childSubject); !ok || tier != "read" || kind != lib.SubmitKindChild {
@@ -404,7 +410,7 @@ func TestAProfileTurnWhileATaskRunsIsRefusedNotSteered(t *testing.T) {
 			t.Fatal("the profile turn was steered into the running platform task")
 		}
 	}
-	if got := streamEnvelopes(t, r.url, "a2a.tasks.prod-east.>"); len(got) != 0 {
+	if got := streamEnvelopes(t, r.url, lib.SubmitSubjectPrefix+"prod-east.>"); len(got) != 0 {
 		t.Fatalf("a profile task was submitted while another ran: %s", got[0].subject)
 	}
 }
