@@ -3790,6 +3790,8 @@ unit_delegation_timeout() {
     fleet-audit-unchanged-finding-keeps-wording) echo 3000 ;;
     upgrades-master-behind-offered-elsewhere | upgrades-audit-reports-upgrade-blocked) echo 3000 ;;
     obtainability-planted-orphan-service) echo 3000 ;;
+    # A full fleet audit, every stream: 834 s and 1310 s on a dev install (#3933).
+    fleet-audit-as-many-excluded-as-managed) echo 3000 ;;
     # Two attempts of about 150 trivial calls each before the card settles; the
     # default would cut the second attempt on a slow night and grade the
     # repetition as infrastructure instead of reading the cap.

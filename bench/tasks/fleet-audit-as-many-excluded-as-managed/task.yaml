@@ -1,0 +1,54 @@
+# Domain: fleet audits. Journey: ask for a fleet audit on an install whose
+# spec.scope.exclude.clusters names as many clusters as it manages; the audit
+# must run on the managed clusters, not cancel (#3933).
+#
+# The runner excludes slots b and d for this case's repetitions alone, plus one
+# cluster that does not exist, named like the seeded ones (scope_exclude,
+# absent: 1). On a pool install that manages the host cluster and four seeded
+# clusters, that leaves three managed (the host, seeded-a, seeded-c) against
+# three excluded, with names alike, the shape the harness saw.
+#
+# Not reproduced on demand: on the #3753 harness install (8 excluded, 8
+# managed) two of three fleet audits answered that "all 8 managed clusters are
+# explicitly excluded" and cancelled; three runs on main on a dev install with
+# 8 excluded and 8 managed did not cancel (#3933). The nightly keeps measuring
+# it; a fix waits for a red here.
+#
+# The objective is that the audit ran: it names at least one managed seeded
+# cluster, seeded-a or seeded-c (an audit summary can leave out a cluster with
+# nothing to report), and it does not say the audit was cancelled or that the
+# managed clusters are excluded.
+id: fleet-audit-as-many-excluded-as-managed
+name: A fleet audit runs when as many clusters are excluded as are managed
+prompt: >-
+  Run a fleet audit across every cluster you manage and report the findings,
+  grouped by cluster.
+expected_output: >-
+  The audit runs on the clusters the install manages and reports findings for
+  them, grouped by cluster. It does not cancel, and it does not say the managed clusters are
+  excluded; where it names the excluded clusters, it says they were not
+  checked.
+infrastructure:
+  deployer: noop
+scope_exclude: { slots: [b, d], absent: 1 }
+fixtures: []
+validated: false
+
+# Slug per docs/designs/domains.yaml.
+domain: fleet-audits
+
+verification_spec:
+  - name: the-audit-ran-on-the-managed-clusters
+    role: objective
+    mode: assert
+    check:
+      type: report_contains
+      any_of_phrases: ["seeded-a", "seeded-c"]
+      forbidden_phrases:
+        [
+          "audit was cancelled",
+          "audit cancelled",
+          "audit is cancelled",
+          "cancelled the audit",
+          "managed clusters are explicitly excluded",
+        ]

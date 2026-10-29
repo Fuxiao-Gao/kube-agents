@@ -1213,7 +1213,7 @@ def validate_case(name: str, path: pathlib.Path, *, registered: set[str] | None)
         try:
             slots = reader.declared_slots(path)
         except reader.ScopeExcludeError as exc:
-            problems.append(f"'scope_exclude:' must be {{slots: [<slot>, ...]}}: {exc}")
+            problems.append(f"'scope_exclude:' must be {{slots: [<slot>, ...], absent: <n>}}: {exc}")
         else:
             catalog = _catalog_slots()
             unknown = sorted(set(slots) - catalog)
