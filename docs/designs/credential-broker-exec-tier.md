@@ -519,49 +519,62 @@ count, and changes the operator, the NetworkPolicy and the audit.
 ## 8. Measurement plan
 
 The #3935 runner is the tool. The tiger team owns it, so the plan is a new plan file,
-`bench/scale/broker.yaml`, run as part of #3753 Phase 2. This document owns what it measures.
+`bench/scale/broker.yaml`, run as part of #3753 Phase 2. This document owns what it measures. The
+first run, on 2026-10-28, is in #4242: 32 runs at 2 and 8 clusters on a `spec.mode: next` install,
+with an agent image that has the #3933 fix (`f8fc7905`) and the broker at 1 CPU / 2 GiB, slot cap 8.
 
 ### 8.1 Metrics to add
 
-| Metric                                                                                                 | Source                                                                                                                               | Status                                                       |
-| ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------ |
-| Slots in use (peak) and admitted                                                                       | `kubeagents_credential_proxy_slots_in_use` gauge [code], as Managed Prometheus stores it (30 s scrape); `/v1/exec/admission` (#4084) | Read by the broker plan's runner                             |
-| Wait p50 and p95, refusals, **by class**                                                               | Wait histogram with a new `class` label                                                                                              | Needs §4                                                     |
-| Traffic mix: requests and slot-seconds by caller (sweep, reconcile, stall watch, interactive, session) | Audit lines with the class, and a caller name from the shim (caller-supplied, outside `principal`)                                   | New                                                          |
-| CPU throttling                                                                                         | The proxy container's cgroup `cpu.stat`, before and after each run                                                                   | Read by the broker plan's runner                             |
-| Per-replica balance                                                                                    | The same metrics per pod                                                                                                             | New in the runner                                            |
-| Requests and slot-seconds by tool (`kubectl`, `gcloud`, other)                                         | The broker's command duration histogram, by its `tool` label                                                                         | Read by the broker plan's runner; splits the load §3.6 moves |
-| k8s-api-proxy CPU, memory and in-flight requests                                                       | Cloud Monitoring; its `in_flight_requests` gauge (#3760, #4128)                                                                      | New in the runner, with the proxy switched on                |
+| Metric                                                                                                 | Source                                                                                                                               | Status                                                                                                                              |
+| ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Slots in use (peak) and admitted                                                                       | `kubeagents_credential_proxy_slots_in_use` gauge [code], as Managed Prometheus stores it (30 s scrape); `/v1/exec/admission` (#4084) | Read by the runner (#4242). The 2026-10-28 cluster stored no Managed Prometheus series for the gauge, so those records have no peak |
+| Wait p50 and p95, refusals, **by class**                                                               | Wait histogram with a new `class` label                                                                                              | Needs §4                                                                                                                            |
+| Traffic mix: requests and slot-seconds by caller (sweep, reconcile, stall watch, interactive, session) | Audit lines with the class, and a caller name from the shim (caller-supplied, outside `principal`)                                   | New                                                                                                                                 |
+| CPU throttling                                                                                         | The proxy container's cgroup `cpu.stat`, before and after each run                                                                   | Measured (#4242)                                                                                                                    |
+| Per-replica balance                                                                                    | The same metrics per pod                                                                                                             | New in the runner                                                                                                                   |
+| Requests and slot-seconds by tool (`kubectl`, `gcloud`, other)                                         | The broker's command duration histogram, by its `tool` label                                                                         | Measured (#4242); splits the load §3.6 moves                                                                                        |
+| k8s-api-proxy CPU, memory and in-flight requests                                                       | Cloud Monitoring; its `in_flight_requests` gauge (#3760, #4128)                                                                      | New in the runner, with the proxy switched on                                                                                       |
 
 ### 8.2 Points
 
-| Run set           | Points                                                                                                    | Why                                                                            |
-| ----------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| Baseline, one pod | 2, 8, 16, 32 clusters, with a fleet audit that really runs                                                | Where waits and refusals start, and the sweep's share                          |
-| Mixed concurrency | 8, 10, 12, 15 interactive questions during a sweep                                                        | Interactive waits behind background work, today and with §4                    |
-| Vertical control  | Broker CPU at 2 cores at 8 clusters (`bench/scale/broker-proxy-raised.yaml`); #4107 ran 4 CPU at 2 and 16 | CPU-bound or slot-bound                                                        |
-| Autopilot         | One point at the 1 GiB clamp (budget admits 4)                                                            | The worst default                                                              |
-| Mode              | One baseline point in `spec.mode: today`                                                                  | Phase 1 covered `next` only                                                    |
-| Exec tier         | 1, 2 and 3 replicas at 16 and 32 clusters                                                                 | #4082 "Done when": the chosen shape at two or more sizes                       |
-| `kubectl` split   | The baseline points again with #4128's switch on                                                          | The broker sized without the `kubectl` share, and the k8s-api-proxy's own load |
+| Run set           | Points                                                                                                    | Why                                                                            | Status                                                                |
+| ----------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ | --------------------------------------------------------------------- |
+| Baseline, one pod | 2, 8, 16, 32 clusters, with a fleet audit that really runs                                                | Where waits and refusals start, and the sweep's share                          | 2 and 8 measured, 3 runs each (#4242); 16 and 32 not yet              |
+| Mixed concurrency | 8, 10, 12, 15 interactive questions during a sweep                                                        | Interactive waits behind background work, today and with §4                    | Measured at 8 clusters, 3 runs each, without a parallel sweep (#4242) |
+| Vertical control  | Broker CPU at 2 cores at 8 clusters (`bench/scale/broker-proxy-raised.yaml`); #4107 ran 4 CPU at 2 and 16 | CPU-bound or slot-bound                                                        | Measured, 1 run (#4242)                                               |
+| Autopilot         | One point at the 1 GiB clamp (budget admits 4)                                                            | The worst default                                                              | Not yet                                                               |
+| Mode              | One baseline point in `spec.mode: today`                                                                  | Phase 1 covered `next` only                                                    | Not yet                                                               |
+| Exec tier         | 1, 2 and 3 replicas at 16 and 32 clusters                                                                 | #4082 "Done when": the chosen shape at two or more sizes                       | Not yet; needs the tier                                               |
+| `kubectl` split   | The baseline points again with #4128's switch on                                                          | The broker sized without the `kubectl` share, and the k8s-api-proxy's own load | Not yet; needs #4128                                                  |
 
-Each point runs 3 times. The planned points are only a few times the Phase 1 run time [predicted],
-because most points reuse the fan-out and audit operations.
+Each point runs 3 times, except where the status says otherwise: the first run cut the `gcloud`
+load levels and the 2-CPU control to 1 run each, to fit its time limit.
 
-### 8.3 The #3933 blocker
+### 8.3 Results of the first run (#4242)
 
-The sweep is the load this design is about, and Phase 1 could not measure it:
+The fleet audits ran: the image has the #3933 fix, so no audit cancelled. They read the clusters and
+cannot write, because the experiment install has no GitOps repository. All numbers are [measured,
+#4242], with the broker at 1 CPU unless a line says 2 CPU.
 
-- At 8 clusters, the fleet audit cancelled in 2 of 3 runs. It claimed every managed cluster was
-  excluded. This is the #3933 bug: it fires when the number of excluded clusters equals the number
-  of managed clusters. The experiment install excludes every cluster in the project except the
-  test fleet, so the counts can match.
-- In the third run, the audit was declined because the install has no GitOps repository.
+| Point                                 | Result                                                                                                                                                                                                                                   |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Audits, 2 clusters (3 × 30 min)       | 158 to 218 commands. `gcloud`: 20 to 26% of the commands, 53 to 62% of the slot time. 0.2 to 0.5 slots in use on average. CPU throttled in 11 to 13% of periods. Wait p50 0.1 s, max 2.5 s. No refusals.                                 |
+| Audits, 8 clusters (3 × 30 min)       | 773 to 790 commands in two runs (511 in the third). 4.4 to 4.6 slots in use on average. Mean command time 10.3 to 10.5 s. CPU throttled in 72 to 74% of periods. Wait p50 5 s, max in the 60 s bucket. No refusals. Memory peak 716 MiB. |
+| Audits, 8 clusters, **2 CPU** (1 run) | 893 commands. Mean command time 4.4 s. 2.2 slots in use. CPU peak 2.1 (at the new limit), throttled in 42% of periods. Wait max 30 s. Memory peak 680 MiB.                                                                               |
+| `gcloud` load, 1 / 4 / 8 / 16 at once | 0.4 / 0.47 / 0.43 / 0.35 commands per second; p50 2.5 / 8.5 / 18 / 45 s. From 4 at once, about 95% of CPU periods are throttled. At 16 at once the wait p50 is 30 s, so the 8 slots bind there.                                          |
+| `kubectl` load, 1 at once             | 1.4 to 1.5 commands per second, p50 0.6 s, as #4107 measured.                                                                                                                                                                            |
+| Questions at once, 8 clusters         | 8 and 10: no refusals, answers in 3 to 10 minutes. 12: 2 to 3 refused per run. 15: 5 refused per run (`429 Too many concurrent runs`). The broker stays almost idle.                                                                     |
 
-Before the baseline runs, one of these must hold: #3933 is fixed, or the experiment runs in a
-project where the install's scope needs no exclusions. The audit also needs a path that runs
-without a GitOps repository, or a repository whose writes are blocked. Without this, the baseline
-measures everything except the sweep.
+What they mean for this design:
+
+- **One CPU is the first limit, not the slots.** `gcloud` throughput stays flat at about 0.45 per second from 4 at once. This supports the CPU raise as step 0 (§9) and the CPU term in §8.4.
+- **A 2-CPU limit more than halves the command time** at 8 clusters, and the broker still sits at that limit. Its need at 8 clusters is above 2 cores.
+- **`gcloud` is the load that stays on the exec tier** (§3.6). Per command it costs about 5 times the broker CPU of `kubectl` (about 1.6 to 2.0 against about 0.34 core-seconds).
+- **Interactive bursts meet the agent's 10 run slots first** (#3724), as §2.3 said.
+- **Memory is not a limit at these sizes:** at most 775 MiB of 2 GiB.
+
+Not measured yet: 16 and 32 clusters, Autopilot, `spec.mode: today`, the exec tier itself, and the
+peak slots in use (the 2026-10-28 cluster stored no series for the gauge).
 
 ### 8.4 Footprint at 250 / 1,000 / 2,500 clusters
 
@@ -580,21 +593,23 @@ minute at about 3 s each with the broker at 4 CPU (about 1.8 slots in use), agai
 at 17 s with 1 CPU [measured, #4107]. Slot-minutes per cluster therefore depend on CPU. So the
 CPU-limit raise (#4106) is step 0 (§9), and the slot terms are taken after it.
 
-[predicted, for scale only] The worked example takes an exec replica with a 2-CPU limit (§3.3)
-and a 1,000-cluster audit round in one hour. #4107 measured two points at 16 clusters, and
-neither is at 2 CPU, so the example gives both:
+The worked example takes an exec replica with a 2-CPU limit (§3.3) and a 1,000-cluster audit round in
+one hour. Its base is the measured 8-cluster run at 2 CPU (§8.3) [measured, #4242]: about 8.2
+slot-minutes and about 200 broker core-seconds per cluster for one audit round. #4107's two
+16-cluster points are kept for comparison.
 
-| #4107's 16-cluster audit window | Slot-minutes per cluster | Background slots | Slot term (`B = 6`) | CPU term (2 CPU per replica)                       | Replicas |
-| ------------------------------- | ------------------------ | ---------------- | ------------------- | -------------------------------------------------- | -------- |
-| 4 CPU: 1,077 commands × 3.0 s   | about 3.4                | about 57         | 10                  | 2.5 cores for 1.8 slots in use: about 79 cores, 40 | about 40 |
-| 1 CPU: 674 commands × 17.3 s    | about 12                 | about 202        | 34                  | 1 core for 6.4 slots in use: about 32 cores, 16    | about 34 |
+| Base                          | Slot-minutes per cluster | Background slots | Slot term (`B = 6`) | CPU term (2 CPU per replica)                           | Replicas     |
+| ----------------------------- | ------------------------ | ---------------- | ------------------- | ------------------------------------------------------ | ------------ |
+| **8 clusters, 2 CPU (#4242)** | about 8.2                | about 137        | 23                  | about 200 core-seconds per cluster: about 56 cores, 28 | **about 28** |
+| 16 clusters, 4 CPU (#4107)    | about 3.4                | about 57         | 10                  | 2.5 cores for 1.8 slots in use: about 79 cores, 40     | about 40     |
+| 16 clusters, 1 CPU (#4107)    | about 12                 | about 202        | 34                  | 1 core for 6.4 slots in use: about 32 cores, 16        | about 34     |
 
-So the CPU term or the slower commands set the count, not the slots alone: about 34 to 40
-replicas without a cache. If the cache takes 80% of the sweep's reads (an assumption), that becomes
-about 7 to 8. These are averages; the peak is higher. The cores per slot in use are derived from
-the whole broker's CPU, which also runs the Cloud API relay and the other routes, so they overstate
-exec's share. The broker plan's 2-CPU control run (§8.2) replaces this table with a measurement at
-the replica's own limit. This is why the design needs both the exec tier and the cache contract.
+[predicted] So about 28 replicas without a cache, and about 6 if the cache takes 80% of the sweep's
+reads (an assumption). This is a straight line from 8 clusters to 1,000, from one run whose broker
+was still at its 2-CPU limit, so it is an order of magnitude, not a size. The CPU term sets the
+count, as before. The core-seconds come from the whole broker, which also runs the Cloud API relay
+and the other routes, so they overstate exec's share. The 16- and 32-cluster points and the exec
+tier runs (§8.2) replace it. This is why the design needs both the exec tier and the cache contract.
 
 ## 9. Rollout
 
@@ -624,10 +639,10 @@ the replica's own limit. This is why the design needs both the exec tier and the
 4. **Default on** at a replica count from the measurements, with the chart footprint updated.
 5. **Then** mark `credential-proxy-single-pod.md` superseded. It already points here.
 
-The cache contract (§6) is not needed to ship the tier, and its work can run in parallel with
-steps 1 to 3. The footprint in §8.4 assumes it, though: about 7 to 8 replicas with the cache
-against about 34 to 40 without, for a 1,000-cluster round in one hour [predicted]. So for large
-fleets the cache must land before default on (step 4).
+The cache contract (§6) is not needed to ship the tier, and its work can run in parallel with steps
+1 to 3. The footprint in §8.4 assumes it, though: about 6 replicas with the cache against about 28
+without, for a 1,000-cluster round in one hour [predicted]. So for large fleets the cache must land
+before default on (step 4).
 
 Do not add new work to the stateful pod beyond phase 0. §3.7 can remove most of its routes later:
 the content workspace, and the chat relays if they become safe on N pods.
