@@ -1,0 +1,111 @@
+# FIXTURE_NOT_READY -- an entry in scripts/validate_bench_cases.py, not a
+# roster line, until the context repository below is seeded (#4243).
+#
+# What this case grades (#4243): inspect-repository reads two repositories
+# this install does not manage, through the broker's stateless `snapshot`
+# verb, and not through a content-workspace handle:
+#   1. an unmanaged public repository: gke-labs/kube-agents at the tag
+#      0.13.0, whose tree (about 65 MiB) is over the 32 MiB snapshot cap, so
+#      a whole copy is refused with SNAPSHOT_TOO_LARGE and the agent must take
+#      `--prefix tags.env`;
+#   2. the install's context repository, registered for declared intent in
+#      the `context_repos` key of the GitOps state ConfigMap.
+# Each question has an answer that only the file holds. The tag is immutable,
+# so the first fact does not move; no model knows an image digest.
+#
+# RED: a `main` build with the content workspace switched off on the eval
+# install (CREDENTIAL_PROXY_CONTENT_WORKSPACE=0), the state that removing the
+# workspace creates. On `main`, inspect_repository.py asks the broker for
+# content workspaces, finds none and falls back to a leased local checkout,
+# which the sandbox cannot clone, so neither fact is read. A plain `main` run
+# with the workspace on would pass the fact checks: the red needs the switch.
+# GREEN: this branch's build, with the workspace still switched off.
+#
+# THE FIXTURE THIS CASE NEEDS (not yet planted anywhere):
+#   - a repository registered in the install's `context_repos`, readable by
+#     the broker (public, or private with the forge's read-only token);
+#   - at its root, CONTEXT-FACT.md holding the one line
+#       context fact: kestrel-0b7d41
+#   - nothing else registered in `context_repos`, so "the context repository"
+#     names one repository.
+# scripts/provision_ci_pool_project.sh, which already seeds each pool
+# project's GitOps repository, is the place to seed it. Until then the case is
+# FIXTURE_NOT_READY and runs only on a dev install that carries the fixture.
+#
+# WHY THE WORKSPACE CHECK IS A FORBIDDEN PATTERN. The worker log keeps only the
+# first command of a compound block, so a required-pattern route check misses
+# a run it cannot see and reads as a false red (vcs-review-feedback-read-back
+# explains it). A forbidden-pattern hit is positive evidence that a workspace
+# handle was used.
+#
+# Domain: source-control (a repository read through the version-control
+# verbs, never a credentialed clone in the sandbox).
+# Isolation class: read-only; it writes nothing to any repository or cluster.
+# Eligible tier: nightly, once the fixture exists.
+id: inspect-repository-unmanaged-and-context-read
+name: Two repositories the install does not manage are read through the snapshot verb
+prompt: >-
+  Answer two questions from the source files, not from memory, and don't
+  change anything.
+
+  1. In the public GitHub repository gke-labs/kube-agents, at the tag 0.13.0,
+  which Hermes agent image does the file tags.env pin? Give the full value,
+  digest included.
+
+  2. This install has one context repository registered for declared intent.
+  Which repository is it, and what does the file CONTEXT-FACT.md at its root
+  say? Quote its line.
+expected_output: >-
+  The agent reads tags.env from gke-labs/kube-agents at the tag 0.13.0 with
+  inspect-repository, narrowing the copy with --prefix when the whole tree is
+  refused as too large, and reports HERMES_AGENT_TAG as
+  v2026.9.14@sha256:99641e57ec762c59e54cb44aa6746b7fc68c18b3c5ddb088af54234c613d9294.
+  It names the install's context repository, reads CONTEXT-FACT.md from it the
+  same way, and quotes "context fact: kestrel-0b7d41". It changes nothing.
+infrastructure:
+  deployer: noop
+validated: false
+
+# Slug per docs/designs/domains.yaml.
+domain: source-control
+
+# Who answers when this case flakes -- see bench/CONTRIBUTING.md.
+owner: Fuxiao-Gao
+
+verification_spec:
+  # The request reached a specialist: the front door holds no shell, and
+  # without a card the worker check below would error, not fail.
+  - name: the-request-was-delegated
+    role: objective
+    # assert: the transcript is immutable once the run ends.
+    mode: assert
+    check:
+      type: tool_called
+      tool_names: ["kanban_create"]
+      require_success: true
+  # The unmanaged public repository. The digest is the part no model can
+  # know; the first twelve hex characters are enough to be unguessable.
+  - name: the-public-fact-was-read
+    role: objective
+    mode: assert
+    check:
+      type: report_contains
+      required_patterns: ["99641e57ec76"]
+  # The context repository. The token is the fixture's own line.
+  - name: the-context-fact-was-read
+    role: objective
+    mode: assert
+    check:
+      type: report_contains
+      required_patterns: ["kestrel-0b7d41"]
+  # No broker workspace handle: none of the subcommands this change removed,
+  # and no call to the workspace route. An objective, because a safeguard
+  # cannot carry the red.
+  - name: no-workspace-handle-was-used
+    role: objective
+    mode: assert
+    check:
+      type: worker_commands
+      forbidden_patterns:
+        - 'inspect_repository\.py"?\s+(open|list|grep|fetch|close)\b'
+        - '/v1/workspace\b'
