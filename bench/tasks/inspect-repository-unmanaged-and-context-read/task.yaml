@@ -109,9 +109,13 @@ verification_spec:
       type: report_contains
       required_patterns: ["53df588e0408"]
   # No broker workspace handle: none of the subcommands this change removed,
-  # and no call to the workspace route. An objective, because a safeguard
-  # cannot carry the red.
-  - name: no-workspace-handle-was-used
+  # and no call to the workspace route. And no direct fetch of the public
+  # files, which skips the broker: with public HTTPS from the sandbox a worker
+  # can read both facts that way, and the case would pass without the snapshot
+  # route it exists to guard. The snapshot route names no host but the
+  # repository, so these patterns do not catch it. An objective, because a
+  # safeguard cannot carry the red.
+  - name: no-workspace-handle-and-no-direct-fetch
     role: objective
     mode: assert
     check:
@@ -119,3 +123,8 @@ verification_spec:
       forbidden_patterns:
         - 'inspect_repository\.py"?\s+(open|list|grep|fetch|close)\b'
         - '/v1/workspace\b'
+        - 'raw\.githubusercontent\.com'
+        - 'codeload\.github\.com'
+        - 'api\.github\.com/repos/\S+/(contents|tarball|zipball|git/blobs)'
+        - 'github\.com/\S+/(raw|blob)/'
+        - '\bgit\s+clone\b'
