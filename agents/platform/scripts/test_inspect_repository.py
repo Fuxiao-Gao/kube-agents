@@ -92,7 +92,9 @@ class InspectRepositoryTestCase(unittest.TestCase):
         env.update(GIT_ENV)
         made = subprocess.run(["git", *argv], cwd=str(self.seed), env=env, capture_output=True)
         if made.returncode != 0:
-            raise vcs_client.VcsError("a path in `paths` names nothing", code="PATH_NOT_FOUND")
+            raise vcs_client.VcsError(
+                "a path in `paths` names nothing", code="PATH_NOT_FOUND", revision=self.revision
+            )
         return {
             "forge": "github", "repo": payload["repository"], "role": "unregistered",
             "ref": payload.get("ref") or "main", "revision": self.revision,
@@ -158,6 +160,8 @@ class TestClone(InspectRepositoryTestCase):
         self.assertEqual(result["written"], 0)
         self.assertTrue(result["complete"])
         self.assertEqual(result["missing"], ".kube-agents")
+        # The fleet audit searches the repository only when it has the commit.
+        self.assertEqual(result["sha"], self.revision)
         self.assertEqual(list(into.iterdir()), [])
 
     def test_force_adds_a_second_prefix_to_the_tree(self):

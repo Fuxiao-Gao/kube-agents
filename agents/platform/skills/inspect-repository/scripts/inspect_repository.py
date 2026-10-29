@@ -117,10 +117,10 @@ def clone_content(args) -> int:
             if exc.code != PATH_NOT_FOUND or not paths:
                 raise
             # The prefix names nothing at this revision: an empty copy of it,
-            # as a listing of the prefix would have been. The broker names no
-            # revision in this refusal, so `sha` is empty.
+            # as a listing of the prefix would have been. The refusal carries
+            # the revision the broker read, so the caller still has the commit.
             print(json.dumps({
-                "mode": "content", "repo": args.repo, "base": args.ref, "sha": "",
+                "mode": "content", "repo": args.repo, "base": args.ref, "sha": exc.revision or "",
                 "into": str(into), "written": 0, "bytes": 0, "skipped": [],
                 "stopped": None, "complete": True, "missing": args.prefix,
             }))
