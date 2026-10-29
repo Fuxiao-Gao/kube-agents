@@ -169,14 +169,17 @@ type Gateway struct {
 	// profiles is the AgentProfiles this gateway can address, kept from
 	// their cards on DIRECTORY (startProfileDirectory).
 	profiles *profileDirectory
-	cfg      *Config
-	client   *lib.Client
-	reg      *Registry
-	adapter  Adapter
-	pm       *PrincipalMap
-	ps       *Pseudonymizer
-	log      *slog.Logger
-	spawner  spawner // nil until SpawnSessions arms (W4)
+	// resolvedScope reads the scope publisher's ConfigMap (SetResolvedScope);
+	// nil when none is configured.
+	resolvedScope resolvedScopeSource
+	cfg           *Config
+	client        *lib.Client
+	reg           *Registry
+	adapter       Adapter
+	pm            *PrincipalMap
+	ps            *Pseudonymizer
+	log           *slog.Logger
+	spawner       spawner // nil until SpawnSessions arms (W4)
 	// usage reads what "/feedback summary" prints (feedback_summary.go);
 	// nil where the gateway has no cluster credentials, and the command then
 	// answers that the summary is unavailable.

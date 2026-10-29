@@ -39,15 +39,24 @@ const (
 // prefixes for the room (refusalNotice). Each names what was asked, since the
 // asker may not know the install's profiles or scope.
 const (
-	noticeProfileUnknown      = "there is no agent profile named %q"
-	noticeProfilePinnedOther  = "%s works only on cluster %s, not %s"
-	noticeProfileNoTarget     = "%s needs a target cluster (project, location and cluster)"
-	noticeProfileTakesNone    = "%s doesn't take a target cluster"
-	noticeProfileAmbiguous    = "more than one agent profile is pinned to cluster %s"
-	noticeProfileNoGeneric    = "no agent profile serves cluster %s"
-	noticeTargetExcluded      = "cluster %s is excluded from this install's scope"
-	noticeTargetOutOfScope    = "cluster %s is outside this install's scope"
-	noticeTargetUnconfirmed   = "can't confirm %s is in this install's scope yet"
+	noticeProfileUnknown     = "there is no agent profile named %q"
+	noticeProfilePinnedOther = "%s works only on cluster %s, not %s"
+	noticeProfileNoTarget    = "%s needs a target cluster (project, location and cluster)"
+	noticeProfileTakesNone   = "%s doesn't take a target cluster"
+	noticeProfileAmbiguous   = "more than one agent profile is pinned to cluster %s"
+	noticeProfileNoGeneric   = "no agent profile serves cluster %s"
+	noticeTargetExcluded     = "cluster %s is excluded from this install's scope"
+	noticeTargetOutOfScope   = "cluster %s is outside this install's scope"
+	noticeTargetUnconfirmed  = "can't confirm %s is in this install's scope yet"
+	// noticeTargetStale refuses a target the resolved scope would decide,
+	// when the resolved scope is missing, stale or from another declaration.
+	noticeTargetStale = "can't confirm %s is in this install's scope yet (the resolved scope is stale)"
+	// noticeTargetUnpublished refuses a target the resolved scope would decide,
+	// when the document reads too-large or error; the second verb is that state.
+	noticeTargetUnpublished = "can't confirm %s is in this install's scope (the resolved scope reads %s)"
+	// noticeTargetUnreadable refuses a member project the publisher's probe
+	// could not read; the second verb is the probe's outcome.
+	noticeTargetUnreadable    = "can't confirm %s is in this install's scope (its project can't be read: %s)"
 	noticeTargetParamsInvalid = "the task's parameters aren't valid: %v"
 	noticeProfileNoIdentity   = "an agent profile runs a task only for an identified requester"
 	noticeProfileRouteFailed  = "the task couldn't be routed to its agent profile"
@@ -313,11 +322,14 @@ func resolveProfile(dir *profileDirectory, addressee string, params map[string]s
 // scopeDeclaration is the operator's rendered spec.scope (scope.json, the
 // file the platform agent also reads; renderScopeJSON in the operator).
 type scopeDeclaration struct {
-	Present       bool     `json:"present"`
-	Projects      []string `json:"projects"`
-	Folders       []string `json:"folders"`
-	Organizations []string `json:"organizations"`
-	Exclude       struct {
+	Present        bool     `json:"present"`
+	Projects       []string `json:"projects"`
+	Folders        []string `json:"folders"`
+	Organizations  []string `json:"organizations"`
+	SharedVpcHosts []string `json:"sharedVpcHosts"`
+	MetricsScopes  []string `json:"metricsScopes"`
+	MaxProjects    *int     `json:"maxProjects"`
+	Exclude        struct {
 		Projects []string `json:"projects"`
 		Clusters []struct {
 			ProjectID   string `json:"projectId"`
@@ -349,8 +361,9 @@ func loadScope(path string) (*scopeDeclaration, error) {
 // checkTargetScope refuses a target outside the install's scope
 // (spec-profiles-dispatch.md, "Addressing", step 2). An exclusion always
 // refuses. A declared project list admits only its projects. Past that, a
-// folder or organization scope can't be confirmed without resolving
-// membership, which the gateway can't do yet, so it refuses: "not
+// project a folder, organization, Shared VPC host or Metrics Scope may reach
+// can't be confirmed from the declaration, so it refuses with errUnresolved,
+// which Gateway.checkScope settles against the resolved scope: "not
 // excluded" isn't "in scope". An install that declares no scope draws no
 // boundary, as the platform agent reads it, so only exclusions apply. A nil
 // declaration (no file rendered, or one that didn't parse) refuses every
@@ -383,8 +396,10 @@ func checkTargetScope(decl *scopeDeclaration, management string, t clusterTarget
 	if slices.Contains(decl.Projects, t.Project) {
 		return nil
 	}
-	if len(decl.Folders) > 0 || len(decl.Organizations) > 0 {
-		return refused(noticeTargetUnconfirmed, t)
+	if declaresResolution(decl) {
+		// Only the resolved scope can confirm a project a folder,
+		// organization or selector reaches (Gateway.checkScope).
+		return errUnresolved{errRefused{notice: fmt.Sprintf(noticeTargetUnconfirmed, t)}}
 	}
 	return refused(noticeTargetOutOfScope, t)
 }
@@ -518,7 +533,7 @@ func (g *Gateway) profileRouteFor(addressee string, params map[string]string, ti
 		g.log.Warn("scope file unreadable; refusing the target", "path", g.cfg.ScopeFile, "err", err)
 		decl = nil
 	}
-	if err := checkTargetScope(decl, g.cfg.ManagementProject, *target); err != nil {
+	if err := g.checkScope(decl, *target); err != nil {
 		return nil, err
 	}
 	if route.Params == nil {
