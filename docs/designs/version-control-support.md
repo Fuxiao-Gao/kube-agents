@@ -692,15 +692,18 @@ directions) — say so in their refusals.
 history leaves the broker. It runs `git archive` on the one revision of a bare,
 single-branch clone and sends the tree as a tar. A tar has no commits, so it
 has no parent for the receiver to miss, and the answer says `history: "none"`.
-The clone stays under `CREDENTIAL_PROXY_MAX_CLONE_BYTES`, and the tar under
+The clone stays under `CREDENTIAL_PROXY_MAX_CLONE_BYTES`: it is measured while
+git writes, about every half second, and killed past the ceiling, because the
+repository can be anyone's and a clone left to finish could fill the scratch
+volume first. The tar stays under
 `CREDENTIAL_PROXY_MAX_SNAPSHOT_BYTES` (32 MiB, refused as `SNAPSHOT_TOO_LARGE`).
 The tar is smaller than the bundle ceiling because the answer is base64 inside
 one JSON body, and the broker holds several copies of it. The tar is sized from
 `git ls-tree` before `git archive` writes it, because the clone ceiling measures
 a compressed pack: a few MB of repeated bytes can be GB as a tar, on the volume
 the broker shares with its own state. The clone's `info/attributes` unsets
-`export-subst`, `ident`, `text` and `working-tree-encoding`, so the tar holds the
-committed bytes and the size measured holds.
+`export-subst`, `export-ignore`, `ident`, `text` and `working-tree-encoding`, so the tar holds every file of the tree as it was
+committed, and the measured size holds.
 
 ### One git in the sandbox
 

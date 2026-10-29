@@ -192,6 +192,8 @@ SNAPSHOT_ARCHIVE_FILE = "snapshot.tar"
 SNAPSHOT_HISTORY = "none"
 # The most `paths` one snapshot request may name. Each is one argv entry.
 MAX_SNAPSHOT_PATHS = 256
+# How often the snapshot clone's size is measured while it runs.
+CLONE_WATCH_SECONDS = 0.5
 # A path entry, and all of them joined: well under the kernel's limits on one
 # argument (128 KiB) and on a command line, so git always starts.
 MAX_SNAPSHOT_PATH_BYTES = 4096
@@ -213,8 +215,10 @@ PATHSPEC_NO_MATCH = "did not match any files"
 # twelve times, `working-tree-encoding` can make text four times larger, and
 # `text` adds a CR to each line. With them unset the tar holds the files as
 # they were committed, and the size measured before the archive holds.
+# `export-ignore` is unset too: it leaves files out of the tar with no sign,
+# and a caller would read a partial tree as the whole one.
 SNAPSHOT_ATTRIBUTES_FILE = Path("info") / "attributes"
-SNAPSHOT_ATTRIBUTES = "* -export-subst -ident -text -working-tree-encoding\n"
+SNAPSHOT_ATTRIBUTES = "* -export-subst -export-ignore -ident -text -working-tree-encoding\n"
 # What `git ls-tree` prints for each entry of the revision `snapshot` measures:
 # the mode, the size (`-` for a tree or a submodule) and the path, NUL-ended.
 SNAPSHOT_LISTING_FORMAT = "--format=%(objectmode) %(objectsize) %(path)"
@@ -423,6 +427,20 @@ def warn_without_read_token(forge: Forge, credential: Any, where: str) -> None:
         "none; a private repository will refuse it",
         where, forge.name, FORGE_READ_TOKEN_KEY,
     )
+
+
+def _tree_bytes(root: Path, stop_past: int) -> int:
+    """The bytes of the files under ``root``, counted until the total passes ``stop_past``."""
+    total = 0
+    for directory, _subdirs, filenames in os.walk(root):
+        for filename in filenames:
+            try:
+                total += os.lstat(os.path.join(directory, filename)).st_size
+            except OSError:
+                continue
+            if total > stop_past:
+                return total
+    return total
 
 
 def _snapshot_paths(raw: Any) -> list[str]:
@@ -714,10 +732,13 @@ class VcsBroker:
     ) -> Callable[..., Any]:
         """A git runner that puts `config()` on each invocation's config layer."""
 
-        def run(cwd: Path, *args: str, check: bool = True):
+        def run(cwd: Path, *args: str, check: bool = True, stop: Callable[[], bool] | None = None):
+            extra: dict[str, Any] = {}
             if allow_http:
-                return self._git_runner(["git", *args], cwd, check, config(), allow_http=True)
-            return self._git_runner(["git", *args], cwd, check, config())
+                extra["allow_http"] = True
+            if stop is not None:
+                extra["stop"] = stop
+            return self._git_runner(["git", *args], cwd, check, config(), **extra)
 
         return run
 
@@ -741,20 +762,16 @@ class VcsBroker:
     def _enforce_ceiling(
         self, root: Path, repo: str, remedy: str = "Name a `branch` to fetch one line of development."
     ) -> None:
-        total = 0
-        for directory, _subdirs, filenames in os.walk(root):
-            for filename in filenames:
-                try:
-                    total += os.lstat(os.path.join(directory, filename)).st_size
-                except OSError:
-                    continue
-                if total > self.max_clone_bytes:
-                    raise WorkspaceError(
-                        f"{repo} is larger than the {self.max_clone_bytes}-byte "
-                        f"ceiling for a broker-side clone. {remedy}",
-                        status=413,
-                        code="CLONE_TOO_LARGE",
-                    )
+        if _tree_bytes(root, self.max_clone_bytes) > self.max_clone_bytes:
+            raise self._clone_too_large(repo, remedy)
+
+    def _clone_too_large(self, repo: str, remedy: str) -> WorkspaceError:
+        return WorkspaceError(
+            f"{repo} is larger than the {self.max_clone_bytes}-byte "
+            f"ceiling for a broker-side clone. {remedy}",
+            status=413,
+            code="CLONE_TOO_LARGE",
+        )
 
     @staticmethod
     def _default_branch(git: Callable, root: Path) -> str:
@@ -990,13 +1007,30 @@ class VcsBroker:
             if target is not None:
                 argv += ["--branch", target]
             argv += [url, SNAPSHOT_CLONE_DIR]
-            git(root, *argv)
+            # Measured while git writes, not only after: the repository can be
+            # anyone's, and a clone that ran to the end could fill the scratch
+            # volume first. Past the ceiling the clone is killed (checked about
+            # every `CLONE_WATCH_SECONDS`). A killed git removes what it wrote,
+            # so the watch's own record, not a second measure, answers the 413.
+            last, stopped = [0.0], [False]
+
+            def over_ceiling() -> bool:
+                now = time.monotonic()
+                if now - last[0] < CLONE_WATCH_SECONDS:
+                    return False
+                last[0] = now
+                stopped[0] = _tree_bytes(clone_dir, self.max_clone_bytes) > self.max_clone_bytes
+                return stopped[0]
+
+            cloned = git(root, *argv, check=False, stop=over_ceiling)
             # One revision, one branch, no history: no field of the request
             # makes this clone smaller, and `paths` narrows only the tar.
-            self._enforce_ceiling(
-                clone_dir, repo,
-                remedy="The pack of this one revision is over it; no `ref` or `paths` makes the clone smaller.",
-            )
+            remedy = "The pack of this one revision is over it; no `ref` or `paths` makes the clone smaller."
+            if stopped[0]:
+                raise self._clone_too_large(repo, remedy)
+            if cloned.returncode != 0:
+                raise subprocess.CalledProcessError(cloned.returncode, argv, cloned.stdout, cloned.stderr)
+            self._enforce_ceiling(clone_dir, repo, remedy=remedy)
             if target is None:
                 target = self._default_branch(git, clone_dir)
             revision = self._snapshot_revision(git, clone_dir, target)

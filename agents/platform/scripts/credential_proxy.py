@@ -241,6 +241,8 @@ KILLED_COMMAND_DRAIN_SECONDS = 5
 # looked at: nothing can wake that wait, so the deadline and the caller's
 # hang-up are checked in steps this long.
 PIPES_CLOSED_POLL_SECONDS = 0.5
+# How often a command's `stop` check is asked while it runs (`_capture_output`).
+STOP_POLL_SECONDS = 0.5
 # How many requests that run commands may be in flight at once. A slot is held
 # from the moment a request is admitted until its response is on the wire,
 # because everything the request costs lives that long: one child process -- a
@@ -5661,6 +5663,7 @@ def _capture_output(
     limit: int,
     timeout: float,
     caller: Any = None,
+    stop: Callable[[], bool] | None = None,
 ) -> _CapturedOutput:
     """Run a started command to completion holding at most `limit` bytes per stream.
 
@@ -5672,6 +5675,10 @@ def _capture_output(
     run to its deadline for nobody; and a command that is killed -- for either
     reason -- still has what it managed to write collected, briefly, so a
     timed-out kubectl's partial output and stderr reach the caller.
+
+    `stop`, when given, is asked about every `STOP_POLL_SECONDS` while the
+    command runs; a true answer kills it as a caller's hang-up does. The
+    snapshot clone uses it to stop at the clone ceiling while it writes.
 
     Returns once the command has exited. `process.returncode` is set.
     """
@@ -5714,7 +5721,10 @@ def _capture_output(
             remaining = until - time.monotonic()
             if remaining <= 0:
                 return True, False
-            for key, _ in selector.select(remaining):
+            if watch_caller and stop is not None and stop():
+                return False, True
+            wait = min(remaining, STOP_POLL_SECONDS) if stop is not None else remaining
+            for key, _ in selector.select(wait):
                 stream = key.fileobj
                 if stream is caller:
                     if _caller_has_gone(caller):
@@ -5775,6 +5785,8 @@ def _capture_output(
                 if remaining <= 0:
                     timed_out = True
                 elif caller is not None and _caller_has_gone(caller):
+                    abandoned = True
+                elif stop is not None and stop():
                     abandoned = True
                 else:
                     time.sleep(min(PIPES_CLOSED_POLL_SECONDS, remaining))
@@ -6843,6 +6855,7 @@ class CommandExecutor:
         config: tuple[tuple[str, str], ...] = (),
         *,
         allow_http: bool = False,
+        stop: Callable[[], bool] | None = None,
     ) -> subprocess.CompletedProcess:
         """git the version-control broker issues, in its own scratch tree.
 
@@ -6881,6 +6894,7 @@ class CommandExecutor:
             containment_root=self.vcs_root,
             extra_config=tuple(config),
             allow_http=allow_http,
+            stop=stop,
         )
         self._drop_write_tokens_refused_by(result.exit_code, result.stderr, config)
         if check and result.exit_code != 0:
@@ -8120,6 +8134,7 @@ class CommandExecutor:
         caller: socket.socket | None = None,
         *,
         allow_http: bool = False,
+        stop: Callable[[], bool] | None = None,
     ) -> ExecutionResult:
         """Run a command. `kubeconfig_path` is already resolved and trusted.
 
@@ -8250,6 +8265,7 @@ class CommandExecutor:
                 limit=self.max_output_bytes,
                 timeout=effective_timeout,
                 caller=caller,
+                stop=stop,
             )
         stdout_text, stdout_cut = _bounded_text(captured.stdout, self.max_output_bytes)
         stderr_text, stderr_cut = _bounded_text(captured.stderr, self.max_output_bytes)

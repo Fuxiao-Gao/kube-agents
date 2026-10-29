@@ -27,6 +27,7 @@ import os
 import subprocess
 import tarfile
 import tempfile
+import shutil
 import unittest
 import urllib.parse
 from pathlib import Path
@@ -73,14 +74,14 @@ def git(cwd: Path | str, *args: str, check: bool = True):
     )
 
 
-def git_runner(argv, cwd, check=True, config=(), *, allow_http=False):
+def git_runner(argv, cwd, check=True, config=(), *, allow_http=False, stop=None):
     """The shape the broker's git runner presents.
 
     `config` is what the forge's credential asked for on this invocation. The
     executor turns it into a `GIT_CONFIG_COUNT` layer; here it becomes `-c`
     flags, which is the same precedence and is visible to an assertion.
     """
-    del allow_http
+    del allow_http, stop
     flags = [flag for key, value in config for flag in ("-c", f"{key}={value}")]
     return subprocess.run(
         [argv[0], *flags, *argv[1:]],
@@ -3759,7 +3760,7 @@ class SnapshotTest(unittest.TestCase):
         self.broker = self.make_broker()
 
     def make_broker(self, forge=None, **kwargs):
-        def recording(argv, cwd, check=True, config=(), *, allow_http=False):
+        def recording(argv, cwd, check=True, config=(), *, allow_http=False, stop=None):
             self.calls.append((list(argv), tuple(config)))
             return git_runner(argv, cwd, check, config, allow_http=allow_http)
 
@@ -3800,7 +3801,7 @@ class SnapshotTest(unittest.TestCase):
     def test_the_clone_is_bare_one_revision_deep_and_one_branch_wide(self):
         depth = []
 
-        def recording(argv, cwd, check=True, config=(), *, allow_http=False):
+        def recording(argv, cwd, check=True, config=(), *, allow_http=False, stop=None):
             if "archive" in argv:
                 # The clone as `archive` sees it: shallow, one revision.
                 depth.append(
@@ -3923,6 +3924,33 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual((413, "SNAPSHOT_TOO_LARGE"), (caught.exception.status, caught.exception.fields.get("code")))
         self.assertEqual([], list(self.scratch.iterdir()))
 
+    def test_a_clone_is_stopped_at_the_ceiling_while_it_writes(self):
+        # A clone of anyone's repository could fill the scratch volume before
+        # it ends; the watch kills it once it passes the ceiling, and a killed
+        # git removes what it wrote, as this one does.
+        self.broker.max_clone_bytes = 4096
+        asked = []
+
+        def growing(argv, cwd, check=True, config=(), *, allow_http=False, stop=None):
+            if argv[1] != "clone":
+                return git_runner(argv, cwd, check, config)
+            target = Path(cwd) / argv[-1]
+            target.mkdir()
+            for chunk in range(100):
+                (target / f"pack-{chunk}").write_bytes(b"x" * 1024)
+                asked.append(chunk)
+                if stop is not None and stop():
+                    shutil.rmtree(target)
+                    return subprocess.CompletedProcess(argv, -15, "", "")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        self.broker._git_runner = growing
+        with mock.patch.object(vcs_broker, "CLONE_WATCH_SECONDS", 0), self.assertRaises(WorkspaceError) as caught:
+            self.broker.snapshot({"repository": self.REPOSITORY})
+        self.assertEqual((413, "CLONE_TOO_LARGE"), (caught.exception.status, caught.exception.fields.get("code")))
+        self.assertLess(len(asked), 10)
+        self.assertEqual([], list(self.scratch.iterdir()))
+
     def test_a_clone_over_the_ceiling_is_refused_and_nothing_is_left(self):
         self.broker.max_clone_bytes = 1
         with self.assertRaises(WorkspaceError) as caught:
@@ -3951,7 +3979,7 @@ class SnapshotTest(unittest.TestCase):
         self.broker.max_snapshot_bytes = 1 << 20
         written = []
 
-        def recording(argv, cwd, check=True, config=(), *, allow_http=False):
+        def recording(argv, cwd, check=True, config=(), *, allow_http=False, stop=None):
             self.calls.append((list(argv), tuple(config)))
             if "archive" in argv:
                 written.append(argv)
@@ -3985,7 +4013,7 @@ class SnapshotTest(unittest.TestCase):
         git(self.seed, "push", "--quiet", "origin", "HEAD:refs/heads/main")
         listings = []
 
-        def recording(argv, cwd, check=True, config=(), *, allow_http=False):
+        def recording(argv, cwd, check=True, config=(), *, allow_http=False, stop=None):
             done = git_runner(argv, cwd, check, config)
             if "ls-tree" in argv:
                 listings.append(done.stdout)
@@ -4005,7 +4033,7 @@ class SnapshotTest(unittest.TestCase):
         self.assertNotIn("copy1.txt", listings[0])
 
     def test_a_listing_the_runner_cut_short_is_refused(self):
-        def cutting(argv, cwd, check=True, config=(), *, allow_http=False):
+        def cutting(argv, cwd, check=True, config=(), *, allow_http=False, stop=None):
             self.calls.append((list(argv), tuple(config)))
             done = git_runner(argv, cwd, check, config)
             if "ls-tree" in argv:
@@ -4044,6 +4072,21 @@ class SnapshotTest(unittest.TestCase):
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as archive:
             self.assertEqual(committed, archive.extractfile("subst.txt").read())
             self.assertEqual(b"plain ascii\n", archive.extractfile("utf.txt").read())
+
+    def test_the_tar_holds_files_the_tree_marks_export_ignore(self):
+        # A repository marks files `export-ignore` for its release tarballs;
+        # a snapshot is a read of the tree, so it leaves nothing out.
+        self.push_tree({
+            ".gitattributes": b"manifests/** export-ignore\nnotes.txt export-ignore\n",
+            "manifests/app.yaml": b"kind: app\n",
+            "notes.txt": b"kept\n",
+        })
+        answer = self.broker.snapshot({"repository": self.REPOSITORY})
+        data = base64.b64decode(answer["archiveBase64"])
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as archive:
+            names = archive.getnames()
+        self.assertIn("manifests/app.yaml", names)
+        self.assertIn("notes.txt", names)
 
     def test_the_tar_ceiling_comes_from_its_own_variable(self):
         with mock.patch.dict(os.environ, {vcs_broker.MAX_SNAPSHOT_BYTES_ENV: "1234"}):
