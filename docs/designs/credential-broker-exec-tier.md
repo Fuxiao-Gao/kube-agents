@@ -493,7 +493,9 @@ There is no shared queue. Each replica runs §4.2 on its own share of the traffi
 - The retry skips a refusal at the session cap. Today that refusal uses the same code, so that the
   model reports it and does not retry [code, `credential_proxy.py`, `SessionSlots`]. The busy reply
   therefore gets a `bound` field with the bound that the broker already counts (`slot`, `budget`,
-  `session` and others) [code, `ADMISSION_BOUND_*`]. The shim retries only `slot` and `budget`.
+  `session` and others) [code, `ADMISSION_BOUND_*`]. A new bound, `draining`, marks the refusal
+  of a replica that is stopping (§9 step 0). The shim retries `slot`, `budget` and `draining`, and
+  no other bound.
 - The retry has costs. After a full 60 s wait it makes the worst case about 120 s, and when every
   replica is saturated it only adds load. §8 measures whether it helps; if not, it is dropped.
 - The session cap of 2 is per replica, so the tier admits `2 × N` session commands. They also
@@ -582,7 +584,7 @@ with an agent image that has the #3933 fix (`f8fc7905`) and the broker at 1 CPU 
 | Metric                                                                                                 | Source                                                                                                                                   | Status                                                                                                                              |
 | ------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
 | Slots in use (peak) and admitted                                                                       | `kubeagents_credential_proxy_slots_in_use` gauge [code], as Managed Prometheus stores it (30 s scrape); `/v1/exec/admission` (#4084)     | Read by the runner (#4242). The 2026-10-28 cluster stored no Managed Prometheus series for the gauge, so those records have no peak |
-| Wait p50 and p95, refusals, **by class**                                                               | Wait histogram with a new `class` label                                                                                                  | Needs §4                                                                                                                            |
+| Wait p50 and p95, refusals, **by class**                                                               | Wait histogram with a new `class` label; the refusal counter also gets the `draining` bound (§4.3), so a rollout does not count as load  | Needs §4                                                                                                                            |
 | Command duration p50 and p95 **by class**                                                              | The broker's command duration histogram with a new `class` label; shows whether the nice value (§4.2) protects interactive run time      | Needs §4                                                                                                                            |
 | Requests and CPU by route: `/v1/gcp/`, the other non-exec routes, and exec                             | `kubeagents_credential_proxy_requests_total` by its `endpoint` label; exec CPU from the per-tool command time and §8.3's CPU per command | New; gives the stateful pod its sizing term (§8.4, open question 4)                                                                 |
 | Traffic mix: requests and slot-seconds by caller (sweep, reconcile, stall watch, interactive, session) | Audit lines with the class, and a caller name from the shim (caller-supplied, outside `principal`)                                       | New                                                                                                                                 |
@@ -714,7 +716,8 @@ cache contract.
    - **Graceful shutdown.** Today `serve()` runs `serve_forever()` with no SIGTERM handler, and
      the Deployment sets no `terminationGracePeriodSeconds` and no `preStop`, so a pod stop drops
      the commands in flight. The broker gets a SIGTERM handler that stops admitting (new requests
-     get the 503 that §4.3's retry handles) and drains the commands in flight. The drain depends
+     get a 503 with the new bound `draining`, which §4.3's retry sends to another replica) and
+     drains the commands in flight. The drain depends
      on the Deployment:
      - On the single pod, which keeps `Recreate`, Kubernetes ends the old pod before it starts
        the new one, so every route is down while the pod drains. There the drain is short and
