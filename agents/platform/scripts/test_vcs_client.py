@@ -1088,22 +1088,36 @@ class SnapshotTest(unittest.TestCase):
         ))
         self.assertIn("hard link to a symbolic link", str(caught))
 
-    def test_a_directory_laid_out_as_a_bare_repository_is_refused(self):
-        # git discovers such a directory as a repository and reads its config.
-        for prefix in ("", "sub/", "a/b/"):
+    def test_a_directory_laid_out_as_a_bare_repository_is_skipped_and_listed(self):
+        # git discovers such a directory as a repository and reads its config,
+        # so none of it is written; git tooling commits such fixtures, so the
+        # rest of the tree still is.
+        for prefix in ("sub/", "a/b/"):
             for names in (
                 ("HEAD", "config", "objects/pack/x", "refs/heads/main"),
                 ("head", "Objects/x", "REFS/x"),
                 ("HEAD", "commondir"),
             ):
                 with self.subTest(prefix=prefix, names=names):
-                    caught = self.refused(build_tar(regular("ok.txt"), *(regular(prefix + name) for name in names)))
-                    self.assertIn("bare repository", str(caught))
+                    if self.into.exists():
+                        shutil.rmtree(self.into)
+                    answer = self.snapshot(build_tar(regular("ok.txt"), *(regular(prefix + name) for name in names)))
+                    self.assertTrue((self.into / "ok.txt").is_file())
+                    self.assertFalse((self.into / prefix.rstrip("/")).exists())
+                    [entry] = answer["skipped"]
+                    self.assertEqual(prefix.rstrip("/"), entry["path"])
+                    self.assertIn("bare repository", entry["reason"])
+        # The whole tree laid out so: nothing of it is written.
+        shutil.rmtree(self.into)
+        answer = self.snapshot(build_tar(regular("HEAD"), regular("objects/x"), regular("refs/y")))
+        self.assertEqual([], list(self.into.iterdir()))
+        self.assertEqual(".", answer["skipped"][0]["path"])
+        shutil.rmtree(self.into)
         # Paired: the names alone, or two of the three, are ordinary files.
         self.snapshot(build_tar(regular("HEAD"), regular("objects/x"), regular("docs/refs/y")))
         self.assertTrue((self.into / "HEAD").is_file())
 
-    def test_a_tar_git_archive_wrote_from_a_bare_repository_layout_is_refused(self):
+    def test_a_tar_git_archive_wrote_from_a_bare_repository_layout_writes_none_of_it(self):
         # The tree a hostile public repository can commit: a bare repository's
         # files, as plain files, whose `config` would run a program on `git log`.
         repo = self.tmp / "layout"
@@ -1120,8 +1134,19 @@ class SnapshotTest(unittest.TestCase):
         tar = subprocess.run(
             ["git", "archive", "--format=tar", "HEAD"], cwd=str(repo), capture_output=True, check=True,
         ).stdout
-        caught = self.refused(tar)
-        self.assertIn("bare repository", str(caught))
+        answer = self.snapshot(tar)
+        self.assertEqual([], list(self.into.iterdir()))
+        self.assertIn("bare repository", answer["skipped"][0]["reason"])
+
+    def test_a_hard_link_into_a_skipped_bare_layout_is_skipped_too(self):
+        answer = self.snapshot(build_tar(
+            regular("ok.txt"), regular("fx/HEAD"), regular("fx/objects/x"), regular("fx/refs/y"),
+            special("config-copy", tarfile.LNKTYPE, "fx/HEAD"),
+        ))
+        self.assertTrue((self.into / "ok.txt").is_file())
+        self.assertFalse((self.into / "config-copy").exists())
+        self.assertFalse((self.into / "fx").exists())
+        self.assertEqual(["fx", "config-copy"], [entry["path"] for entry in answer["skipped"]])
 
     def test_local_git_does_not_open_a_bare_repository_it_was_not_named(self):
         bare = self.tmp / "bare"

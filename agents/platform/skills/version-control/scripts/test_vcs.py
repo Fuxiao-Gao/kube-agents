@@ -1288,10 +1288,10 @@ class AbstractionTest(unittest.TestCase):
             "branch-view": ("remote-branch", "view"),
             "branch-delete": ("remote-branch", "delete"),
         }
-        # Served to library callers only, through `vcs_client.snapshot`. No
-        # `vcs.py` command: `capabilities` lists the verb, but a command is a
-        # change of agent behaviour with an eval case of its own.
-        library_only = {"snapshot"}
+        # Served to library callers only, through `vcs_client.snapshot`: no
+        # `vcs.py` command, and `capabilities` does not advertise them
+        # (test_vcs_broker checks that half).
+        from providers import LIBRARY_VERBS as library_only
         for verb in vcs_broker.route_table(mock.Mock()):
             if verb in library_only:
                 continue

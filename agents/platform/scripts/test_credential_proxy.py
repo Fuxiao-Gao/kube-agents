@@ -10336,6 +10336,21 @@ class SnapshotRouteTest(unittest.TestCase):
                 self.assertIn("https://gitlab.com/acme/infra.git", self.clone_argv())
                 self.assertNotIn("github.com", json.dumps(self.git))
 
+    def test_a_bare_name_registered_on_one_of_two_non_github_forges_is_read_there(self):
+        # The registry refuses a hostless name once the install has two
+        # forges, so the fallback names the host of the forge that lists it.
+        token = self.base / "token"
+        token.write_text("glpat-SENTINEL-must-never-appear")
+        broker = self.broker({"forges": [
+            {"provider": "gitlab", "host": "gitlab.com", "tokenPath": str(token), "allowedPaths": ["acme"]},
+            {"provider": "gitlab", "host": "git.example.com", "tokenPath": str(token), "allowedPaths": ["acme"]},
+        ]})
+        self.context = {"gitlab:git.example.com/acme/notes"}
+        status, payload = self.post({"repository": "acme/notes"}, broker)
+        self.assert_reached_the_clone(status, payload)
+        self.assertIn("https://git.example.com/acme/notes.git", self.clone_argv())
+        self.assertNotIn("github.com", json.dumps(self.git))
+
     def test_a_bare_name_is_not_read_on_github_com_while_the_lists_cannot_be_read(self):
         broker = self.gitlab_only()
         self.lists_readable = False

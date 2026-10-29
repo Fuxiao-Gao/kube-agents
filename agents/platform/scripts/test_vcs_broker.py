@@ -37,6 +37,7 @@ import repo_ref
 import vcs_broker
 from providers import (
     BROKER_VERBS,
+    LIBRARY_VERBS,
     COLLABORATION_VERBS,
     ForgeUnsupported,
     Registry,
@@ -2474,7 +2475,7 @@ class CapabilitiesTest(unittest.TestCase):
         self.assertEqual(answer["forge"], self.broker.registry.default.name)
         self.assertEqual(answer["proposalNoun"], "pull request")
         self.assertEqual(
-            sorted(answer["verbs"]), sorted({*BROKER_VERBS, *COLLABORATION_VERBS})
+            sorted(answer["verbs"]), sorted({*BROKER_VERBS, *COLLABORATION_VERBS} - LIBRARY_VERBS)
         )
         self.assertEqual(answer["missing"], [])
 
@@ -3920,6 +3921,9 @@ class SnapshotTest(unittest.TestCase):
         with self.assertRaises(WorkspaceError) as caught:
             self.broker.snapshot({"repository": self.REPOSITORY})
         self.assertEqual((413, "CLONE_TOO_LARGE"), (caught.exception.status, caught.exception.fields.get("code")))
+        # The verb has no `branch` field, and no field makes this clone smaller.
+        self.assertNotIn("`branch`", str(caught.exception))
+        self.assertIn("no `ref` or `paths`", str(caught.exception))
         self.assertFalse([argv for argv, _ in self.calls if "archive" in argv])
         self.assertEqual([], list(self.scratch.iterdir()))
 

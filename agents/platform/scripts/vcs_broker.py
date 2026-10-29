@@ -728,7 +728,9 @@ class VcsBroker:
         path.mkdir(parents=True)
         return path
 
-    def _enforce_ceiling(self, root: Path, repo: str) -> None:
+    def _enforce_ceiling(
+        self, root: Path, repo: str, remedy: str = "Name a `branch` to fetch one line of development."
+    ) -> None:
         total = 0
         for directory, _subdirs, filenames in os.walk(root):
             for filename in filenames:
@@ -739,8 +741,7 @@ class VcsBroker:
                 if total > self.max_clone_bytes:
                     raise WorkspaceError(
                         f"{repo} is larger than the {self.max_clone_bytes}-byte "
-                        "ceiling for a broker-side clone. Name a `branch` to "
-                        "fetch one line of development.",
+                        f"ceiling for a broker-side clone. {remedy}",
                         status=413,
                         code="CLONE_TOO_LARGE",
                     )
@@ -980,7 +981,12 @@ class VcsBroker:
                 argv += ["--branch", target]
             argv += [url, SNAPSHOT_CLONE_DIR]
             git(root, *argv)
-            self._enforce_ceiling(clone_dir, repo)
+            # One revision, one branch, no history: no field of the request
+            # makes this clone smaller, and `paths` narrows only the tar.
+            self._enforce_ceiling(
+                clone_dir, repo,
+                remedy="The pack of this one revision is over it; no `ref` or `paths` makes the clone smaller.",
+            )
             if target is None:
                 target = self._default_branch(git, clone_dir)
             revision = self._snapshot_revision(git, clone_dir, target)

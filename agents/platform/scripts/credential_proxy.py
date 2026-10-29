@@ -1793,9 +1793,11 @@ def snapshot_bare_name_fallback(
       registry to resolve, as `_workspace_credential` lifts it (`_hosted`).
       With a second forge the registry refuses a hostless name;
     - no GitHub forge, and a forge of the install lists the name as managed
-      or context, or the lists cannot be read: None. The registry reads it on
-      the install's forge, as `clone` would, and not on github.com, where the
-      same name can belong to anyone;
+      or context: the name on that forge's host, read on the install's forge,
+      as `clone` would, and not on github.com, where the same name can belong
+      to anyone. With a host the registry resolves it even when the install
+      has more than one forge;
+    - no GitHub forge, and the lists cannot be read: None, for the registry;
     - no GitHub forge, and nobody registered the name:
       `(forge label, repository, clone URL)` for github.com, read with no
       credential and the helper cleared.
@@ -1827,7 +1829,7 @@ def snapshot_bare_name_fallback(
             )
             return None
         if role != ROLE_UNREGISTERED:
-            return None
+            return f"https://{forge.hosts[0]}/{path}" if forge.hosts else None
     return (
         CONTENT_WORKSPACE_PROVIDER,
         path,

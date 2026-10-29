@@ -113,6 +113,9 @@ GIT_DIR_HEAD = "head"
 GIT_DIR_OBJECTS = "objects"
 GIT_DIR_REFS = "refs"
 GIT_DIR_COMMONDIR = "commondir"
+BARE_LAYOUT_SKIPPED = (
+    "a directory laid out as a bare repository (HEAD, objects, refs), whose config git would read"
+)
 # git opens a bare repository only when it is named (`--git-dir`, GIT_DIR),
 # never by discovery from the working directory. `-c` outranks every config
 # file, so a repository cannot turn this off. deploy/sandbox/vcs-git.sh gives
@@ -1004,14 +1007,21 @@ def _check_snapshot_members(
     Checked before anything is written, so a refusal leaves nothing behind.
     `extractall(filter="data")` repeats some of this as it writes, but these
     checks do not depend on it. They also refuse what it does not: a `.git`
-    component, a directory laid out as a bare repository, a path or a link
-    through a symbolic link, and a tree over the ceiling.
+    component, a path or a link through a symbolic link, and a tree over the
+    ceiling.
 
-    A symbolic link whose target is absolute, empty, out of the tree, through
-    another link or into a `.git` path is not written, and the answer lists
-    it under `skipped`: real repositories hold such links (`-> /dev/null`),
-    and one of them must not cost the caller every other file. Every other
-    unsafe member refuses the whole tar.
+    Two kinds of member are not written, and the answer lists them under
+    `skipped`, because real repositories hold them and one of them must not
+    cost the caller every other file:
+
+    - a symbolic link whose target is absolute, empty, out of the tree,
+      through another link or into a `.git` path (`-> /dev/null`);
+    - every member of a directory laid out as a bare repository, which git
+      would discover and whose `config` it would read. Git tooling commits
+      such directories as test fixtures. The directory is listed once, and a
+      hard link into it is skipped too, so nothing of the layout is written.
+
+    Every other unsafe member refuses the whole tar.
     """
     named = []
     for member in members:
@@ -1035,21 +1045,24 @@ def _check_snapshot_members(
     for _member, parts in named:
         for depth, part in enumerate(parts):
             children.setdefault("/".join(parts[:depth]), set()).add(_fold(part))
-    for directory, held in children.items():
-        if GIT_DIR_HEAD in held and (
-            {GIT_DIR_OBJECTS, GIT_DIR_REFS} <= held or GIT_DIR_COMMONDIR in held
-        ):
-            raise _member_refused(
-                directory or ".",
-                "a directory laid out as a bare repository (HEAD, objects, refs), "
-                "whose config git would read",
-            )
+    bare = sorted(
+        directory for directory, held in children.items()
+        if GIT_DIR_HEAD in held and ({GIT_DIR_OBJECTS, GIT_DIR_REFS} <= held or GIT_DIR_COMMONDIR in held)
+    )
+
+    def in_bare(path: list[str]) -> bool:
+        name = "/".join(path)
+        return any(not directory or name == directory or name.startswith(directory + "/") for directory in bare)
 
     files = total = 0
-    skipped: list[dict] = []
+    skipped: list[dict] = [
+        {"path": directory or ".", "reason": BARE_LAYOUT_SKIPPED} for directory in bare
+    ]
     kept: list[tarfile.TarInfo] = []
     for member, parts in named:
         name = "/".join(parts)
+        if in_bare(parts):
+            continue
         if any("/".join(parts[:depth]) in links for depth in range(1, len(parts))):
             raise _member_refused(member.name, "a path through a symbolic link")
         if member.issym() or member.islnk():
@@ -1066,6 +1079,9 @@ def _check_snapshot_members(
                     reason = "a link into a `.git` path"
                 elif resolved is not None and member.islnk() and "/".join(resolved) in links:
                     reason = "a hard link to a symbolic link"
+                elif resolved is not None and member.islnk() and in_bare(resolved):
+                    skipped.append({"path": name, "reason": "a hard link into a skipped bare-repository layout"})
+                    continue
             if reason and member.issym():
                 skipped.append({"path": name, "reason": reason})
                 continue

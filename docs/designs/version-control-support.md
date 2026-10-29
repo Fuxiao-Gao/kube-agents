@@ -3438,10 +3438,12 @@ token that reaches more than the install lists. The clone is bare and one
 revision deep, and nothing is checked out. `git archive` does not write a
 `.git` path, and `vcs_client.snapshot` refuses one again on unpack (in any
 case), together with absolute paths, `..`, a path through a symbolic link, hard
-links out of the tree, device files, and a directory laid out as a bare
-repository (`HEAD` with `objects/` and `refs/`, or with `commondir`), which git
-would open and whose `config` it would read. A symbolic link that points out of
-the tree is not written, and the answer names it under `skipped`. Both of the
+links out of the tree and device files. Two things are not written, and the
+answer names them under `skipped`: a symbolic link that points out of the tree,
+and every member of a directory laid out as a bare repository (`HEAD` with
+`objects/` and `refs/`, or with `commondir`), which git would open and whose
+`config` it would read. Git tooling commits such directories as test fixtures,
+so one of them does not cost the rest of the tree. Both of the
 sandbox's gits also run with `safe.bareRepository=explicit`, so git opens a bare
 repository only when it is named. A bare `owner/name` is GitHub's, as it is to
 the content workspace. On an install with a GitHub forge it is read on that
