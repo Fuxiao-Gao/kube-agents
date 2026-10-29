@@ -1120,10 +1120,14 @@ at nothing and the policies silently inert:
 # Kubernetes 1.30+ only (ValidatingAdmissionPolicy v1). Skip on older clusters -- unlike
 # the chart, which checks the version itself, this apply will fail there.
 kubectl apply -f config/admission/agent-rbac-policy.yaml
+kubectl apply -f config/admission/a2a-gateway-pod-policy.yaml
 ```
 
 [Method 1](#method-1-the-install-engine--terraform--helm) gets these from the chart and needs no
-such step. Skipping it here leaves agent RBAC without its admission backstop. Read that file's
+such step. Skipping it here leaves agent RBAC without its admission backstop, and leaves the
+pods the A2A gateway creates under `spec.mode: next` free to run as any ServiceAccount in the
+namespace. The operator on this path does not get `A2A_GATEWAY_POD_POLICY`, so it leaves off the
+features it turns on only behind the second policy. Read that file's
 header for what the policies do and do not enforce — notably, they cannot check the rules of a role
 that a binding merely _references_.
 
