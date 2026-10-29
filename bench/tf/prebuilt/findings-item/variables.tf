@@ -13,8 +13,9 @@
 # limitations under the License.
 
 # The deployer drops an injected variable this stack does not declare and
-# raises on a task.yaml variable it does not declare, so this file and
-# bench/tasks/findings-decision-covers-item/task.yaml are a matched pair.
+# raises on a task.yaml variable it does not declare, so this file,
+# bench/tasks/findings-decision-covers-item/task.yaml and
+# bench/tasks/findings-decision-leaves-unnamed-open/task.yaml are matched.
 
 variable "host_cluster_name" {
   type        = string

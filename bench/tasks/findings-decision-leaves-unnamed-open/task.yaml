@@ -14,9 +14,8 @@
 # check, another cluster) and no-memory-limit on bench-shop-east (same cluster,
 # another check). The objective passes when the three named rows of the line
 # are dismissed. The safeguard passes when the queued row is still queued and
-# the other two lines are still undecided. The prompt is the one
-# findings-decision-covers-item uses: the id the nudge printed and the
-# decision.
+# the other two lines are still undecided. The prompt has the same form as
+# findings-decision-covers-item's: the id the nudge printed and the decision.
 #
 # Isolation class: read-only on the cluster. It writes six rows to the install's
 # findings queue under a project nothing else uses, and the destroy resolves any of

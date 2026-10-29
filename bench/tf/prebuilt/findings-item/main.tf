@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# The scenario driver for bench/tasks/findings-decision-covers-item: plant the
-# five findings-queue rows in findings.json on the install under test, every one
-# `surfaced`, and resolve them again on destroy.
+# The scenario driver for bench/tasks/findings-decision-covers-item and
+# bench/tasks/findings-decision-leaves-unnamed-open: plant the findings-queue
+# rows of var.findings_file (findings.json by default) on the install under
+# test, every one `surfaced` except a row marked `plant_state: queued`, and
+# resolve them again on destroy.
 #
 # Three rows share check, project and cluster, so they are one gathered line of
 # the nudge's message, which names only the first of them by id. The other two

@@ -89,10 +89,10 @@ RECURRENCE_STATES = ("resolved", "stale")
 # `surfaced`, which ends a snooze early (§3.2, §6.1).
 PATCHABLE_STATES = ("accepted", "dismissed", "snoozed", "surfaced")
 # The user's three decisions. One on any row of a gathered line covers the
-# line (§7.2): the rows of that item still waiting to be decided take it too.
+# line (§7.2): the rows of that item a message has named (`CASCADE_STATES`)
+# take it too.
 DECISION_STATES = ("accepted", "dismissed", "snoozed")
-# The states of a row still waiting to be decided, which a decision on another
-# row of its item reaches.
+# The states of a row still waiting to be decided.
 UNDECIDED_STATES = ("queued", "surfaced")
 # The rows of an item a decision reaches: the named ones. A `queued` row no
 # message has named yet (`mark_surfaced` moves every named row out of it), so
@@ -1178,7 +1178,9 @@ def rolled_up(finding: Mapping) -> bool:
 
 
 def decided_with_item(finding: Mapping) -> bool:
-    """Whether a decision on another row of this row's item applies to it too (§7.2)."""
+    """Whether this row is an undecided member of its item (§7.2): what the
+    nudge's count counts. A decision on another row reaches only those of them
+    in `CASCADE_STATES`; `patch_finding` returns the others as left open."""
     return finding.get("state") in UNDECIDED_STATES and not rolled_up(finding)
 
 
@@ -1252,9 +1254,10 @@ class Item:
     severity: str = SEVERITIES[-1]
     # The earliest showing among the pending members, None for a new item.
     first_shown: datetime | None = None
-    # How many rows a decision on any member's id applies to (`patch_finding`):
-    # the members, and any row of the line that is neither pending nor new
-    # but still undecided, such as a shown row the sweep stopped reporting.
+    # How many rows a decision on any member's id applies to once the nudge
+    # has marked the members it names (`patch_finding`, `CASCADE_STATES`): the
+    # members, and any row of the line that is neither pending nor new but
+    # still undecided, such as a shown row the sweep stopped reporting.
     covers: int = 0
 
     @property
