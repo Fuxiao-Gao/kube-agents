@@ -3706,8 +3706,8 @@ const defaultA2AMaxSessions = 10
 // legitimately runs here: the rendered stack and its neighbors (operator,
 // agent pod, gateway, NATS, LiteLLM, dashboard), Job pods (provision, seed,
 // and the scope publisher's, one at a time and only while it runs, since a
-// finished pod counts against no quota), rollout surge doubling a Deployment for a moment, and the gateway's
-// count-then-create overshoot. Fifteen covered roughly ten standing pods plus
+// finished pod counts against no quota), rollout surge doubling a
+// Deployment for a moment, and the gateway's count-then-create overshoot. Fifteen covered roughly ten standing pods plus
 // surge; the console server made it eleven, hence sixteen. If the base
 // install grows again, raise this before anything user-visible starts failing
 // admission.
@@ -4270,8 +4270,8 @@ func buildA2AGatewayRole(agent *agentv1alpha1.PlatformAgent) *rbacv1.Role {
 	}
 	// The resolved scope under mode next, one named ConfigMap, read only:
 	// the scope publisher writes it, for the gateway's admission check to
-	// read under the name in A2A_RESOLVED_SCOPE_CONFIGMAP. Rendered with the ConfigMap, so the
-	// grant never outlives the object it names.
+	// read under the name in A2A_RESOLVED_SCOPE_CONFIGMAP. Rendered with the
+	// ConfigMap, so the grant never outlives the object it names.
 	if scopePublisherRendered(agent) {
 		role.Rules = append(role.Rules, rbacv1.PolicyRule{
 			APIGroups:     []string{""},

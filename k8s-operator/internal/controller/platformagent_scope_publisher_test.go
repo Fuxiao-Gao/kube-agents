@@ -149,6 +149,7 @@ func policyRulesEqual(a, b rbacv1.PolicyRule) bool {
 
 func TestTheScopePublisherJob(t *testing.T) {
 	agent := scopePublisherAgent()
+	agent.Spec.Deployment = &agentv1alpha1.DeploymentSpec{ImagePullSecrets: []corev1.LocalObjectReference{{Name: "registry-creds"}}}
 	start := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
 	hash := scopeMemberHash(agent)
 	job := buildScopePublisherJob(agent, start, hash)
@@ -156,18 +157,26 @@ func TestTheScopePublisherJob(t *testing.T) {
 	if !strings.HasPrefix(job.Name, "test-agent-scope-publisher-") || len(job.Name) != len("test-agent-scope-publisher-")+scopeJobSuffixLength {
 		t.Errorf("Job name %q", job.Name)
 	}
-	// A long agent name keeps the Job name within a label value, and two
-	// agents that share the shortened prefix still get different names.
+	// A long agent name keeps the Job name within a label value. Two names
+	// that differ only past the shortened prefix (52 characters) still get
+	// different Job names, from the agent name in the hash.
 	long := agent.DeepCopy()
-	long.Name = strings.Repeat("a", 50)
+	long.Name = strings.Repeat("a", 60) + "x"
 	longName := buildScopePublisherJob(long, start, hash).Name
-	if len(longName) > 63 || strings.Contains(longName, "--") {
-		t.Errorf("Job name for a 50-character agent = %q (%d characters)", longName, len(longName))
+	if len(longName) != 63 {
+		t.Errorf("Job name for a 61-character agent = %q (%d characters), want 63", longName, len(longName))
 	}
 	other := long.DeepCopy()
-	other.Name = strings.Repeat("a", 49) + "b"
+	other.Name = strings.Repeat("a", 60) + "y"
 	if buildScopePublisherJob(other, start, hash).Name == longName {
-		t.Error("two long agent names that share the shortened prefix share a Job name")
+		t.Error("two agent names that differ only past the shortened prefix share a Job name")
+	}
+	// At 51 characters the cut falls on the dash after the agent name,
+	// which is trimmed rather than doubled.
+	cut := agent.DeepCopy()
+	cut.Name = strings.Repeat("a", 51)
+	if name := buildScopePublisherJob(cut, start, hash).Name; strings.Contains(name, "--") || len(name) > 63 {
+		t.Errorf("Job name for a 51-character agent = %q", name)
 	}
 	if other := buildScopePublisherJob(agent, start.Add(time.Second), hash); other.Name == job.Name {
 		t.Error("two runs at different times share a name")
@@ -191,8 +200,8 @@ func TestTheScopePublisherJob(t *testing.T) {
 		pod.SecurityContext.FSGroup == nil || *pod.SecurityContext.FSGroup != agentFSGroup {
 		t.Errorf("pod security context %+v, want the broker's UID and group", pod.SecurityContext)
 	}
-	if len(pod.ImagePullSecrets) != len(resolveImagePullSecrets(agent.Spec.Deployment)) {
-		t.Errorf("pull secrets %v, want the agent image's", pod.ImagePullSecrets)
+	if len(pod.ImagePullSecrets) != 1 || pod.ImagePullSecrets[0].Name != "registry-creds" {
+		t.Errorf("pull secrets %v, want the agent image's registry-creds", pod.ImagePullSecrets)
 	}
 	if pod.ServiceAccountName != "test-agent-scope-publisher" || pod.RestartPolicy != corev1.RestartPolicyNever ||
 		pod.AutomountServiceAccountToken == nil || *pod.AutomountServiceAccountToken {
