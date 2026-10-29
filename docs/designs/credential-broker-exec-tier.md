@@ -260,8 +260,10 @@ shim always takes the fallback and nothing reports it.
   only under the cluster-view flag (the condition the stateful broker has today), and the metrics
   port from GMP. The egress rules that select the broker's pod labels also need the exec tier as a
   peer: the sandbox (`shell_sandbox_manifests.go`) and session pods
-  (`platformagent_a2a_manifests.go`). The agent pod gets no egress to it, because `/v1/exec`
-  admits only the shell and session roles.
+  (`platformagent_a2a_manifests.go`). `/v1/exec` admits the shell, session and profile roles
+  (#4257). So the exec tier also takes ingress on 8765 from profile worker pods in AgentProfile
+  namespaces, and the egress rule that `agentprofile_namespace.go` renders toward the broker gets
+  the exec tier as a peer. The agent pod gets no egress to it.
 - The chart's footprint and the quota preflight add N × the exec replica's requests: 2 CPU /
   2 GiB each, on every cluster mode.
 
@@ -287,6 +289,11 @@ shim always takes the fallback and nothing reports it.
 - **Scoped service account tokens:** with the scoped service account pool on
   (`scoped_sa_pool.py`), each replica keeps its own token cache, so token mints grow N times.
 - **TokenReview cache:** per replica; one extra review per caller per replica. Small.
+- **Profile callers (#4257):** each exec replica verifies the dispatcher-signed `proxyToken`
+  itself, on every request. So the exec builder mounts the same operator-rendered
+  `CREDENTIAL_PROXY_PROFILE_IDENTITIES` map and the task-credential verification key as the
+  stateful broker. Both are configuration with a public key, and no secret is copied. The
+  verification is per request, so nothing is cached across replicas.
 - **Forge tokens:** not on the exec tier (§3.1), so mints do not multiply.
 
 ### 3.5 Capacity the tier reports
@@ -297,7 +304,9 @@ answers. With N replicas it must report the tier, or the sweeps under-read by N.
 writes the replica count to a ConfigMap that the exec pods mount, and the route reads it on each
 request. A scale change then does not change the pod template, so it does not restart the tier
 and refill its caches (§3.4). The route reports `B × replicas` as what a sweep may use (the
-background share, §4.2), with `admitted × replicas` and the per-replica numbers beside it. A
+background share, §4.2), with `admitted × replicas` and the per-replica numbers beside it. It
+also reports the profile share, `P` per replica and `P × replicas`, with the profile commands in
+use; a sweep sizes to `B × replicas`, which profile work shares. A
 sweep sized to `admitted × replicas` would run past its share. It is a target, not a promise: a
 replica that is not ready lowers the real number until the rollout ends.
 
@@ -440,6 +449,9 @@ caller presents, and nothing the caller can set alone changes it.
   turn. The sandbox session receives the turn token at its start, the way it receives
   `HERMES_PROFILE_HOME`, so it needs an `AcceptEnv` entry and the session-command path. #3889's
   per-task credentials have the same shape, and the turn token can be one of them.
+- A profile-role request (#4257) is `background` by default, like the shell role once the turn
+  token exists. A task that a chat turn started could later carry an interactive claim in its
+  `proxyToken`; open question 9 covers that.
 - The turn token does not exist on `main`. The broker authenticates only projected
   ServiceAccount tokens, through TokenReview (`ServiceAccountAuthenticator` in
   `credential_proxy.py`), and the session role comes from the token audience and
@@ -465,6 +477,12 @@ caller presents, and nothing the caller can set alone changes it.
   like the session cap of 2 today, but it reserves capacity instead of only limiting it.
 - Interactive work may hold at most `I = admitted − 1`, so one admission is always free for
   background work and the reserve is not one-way.
+- Profile work has its own share per replica: `P = min(CREDENTIAL_PROXY_PROFILE_SLOTS, B)`. A
+  profile command counts against both `P` and the background cap `B`. With the defaults
+  (admitted 8, `B = 6`, `P = 4`), profile work holds at most 4 admissions, all background work at
+  most 6, and the interactive reserve of 2 is untouched. #4257 clamps its share to "pool − session
+  − 1" on today's single queue. Once the classes exist (§9 step 2), the clamp to `B` takes its
+  place, because the reserve already protects interactive work.
 - Inside a class the order stays arrival order. Interactive requests go ahead of queued background
   requests, within the cap.
 - Without a minimum, Autopilot's clamp to a 1 GiB request would make the budget admit 4, and
@@ -494,8 +512,9 @@ There is no shared queue. Each replica runs §4.2 on its own share of the traffi
   model reports it and does not retry [code, `credential_proxy.py`, `SessionSlots`]. The busy reply
   therefore gets a `bound` field with the bound that the broker already counts (`slot`, `budget`,
   `session` and others) [code, `ADMISSION_BOUND_*`]. A new bound, `draining`, marks the refusal
-  of a replica that is stopping (§9 step 0). The shim retries `slot`, `budget` and `draining`, and
-  no other bound.
+  of a replica that is stopping (§9 step 0). The shim retries `slot`, `budget`, `draining` and `profile`, and
+  no other bound. `profile` is a share of one replica's pool, not a limit on one caller, so another
+  replica can admit the command.
 - The retry has costs. After a full 60 s wait it makes the worst case about 120 s, and when every
   replica is saturated it only adds load. §8 measures whether it helps; if not, it is dropped.
 - The session cap of 2 is per replica, so the tier admits `2 × N` session commands. They also
@@ -581,17 +600,17 @@ with an agent image that has the #3933 fix (`f8fc7905`) and the broker at 1 CPU 
 
 ### 8.1 Metrics to add
 
-| Metric                                                                                                 | Source                                                                                                                                   | Status                                                                                                                              |
-| ------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| Slots in use (peak) and admitted                                                                       | `kubeagents_credential_proxy_slots_in_use` gauge [code], as Managed Prometheus stores it (30 s scrape); `/v1/exec/admission` (#4084)     | Read by the runner (#4242). The 2026-10-28 cluster stored no Managed Prometheus series for the gauge, so those records have no peak |
-| Wait p50 and p95, refusals, **by class**                                                               | Wait histogram with a new `class` label; the refusal counter also gets the `draining` bound (§4.3), so a rollout does not count as load  | Needs §4                                                                                                                            |
-| Command duration p50 and p95 **by class**                                                              | The broker's command duration histogram with a new `class` label; shows whether the nice value (§4.2) protects interactive run time      | Needs §4                                                                                                                            |
-| Requests and CPU by route: `/v1/gcp/`, the other non-exec routes, and exec                             | `kubeagents_credential_proxy_requests_total` by its `endpoint` label; exec CPU from the per-tool command time and §8.3's CPU per command | New; gives the stateful pod its sizing term (§8.4, open question 4)                                                                 |
-| Traffic mix: requests and slot-seconds by caller (sweep, reconcile, stall watch, interactive, session) | Audit lines with the class, and a caller name from the shim (caller-supplied, outside `principal`)                                       | New                                                                                                                                 |
-| CPU throttling                                                                                         | The proxy container's cgroup `cpu.stat`, before and after each run                                                                       | Measured (#4242)                                                                                                                    |
-| Per-replica balance                                                                                    | The same metrics per pod                                                                                                                 | New in the runner                                                                                                                   |
-| Requests and slot-seconds by tool (`kubectl`, `gcloud`, other)                                         | The broker's command duration histogram, by its `tool` label                                                                             | Measured (#4242); splits the load §3.6 moves                                                                                        |
-| k8s-api-proxy CPU, memory and in-flight requests                                                       | Cloud Monitoring; its `in_flight_requests` gauge (#3760, #4128)                                                                          | New in the runner, with the proxy switched on                                                                                       |
+| Metric                                                                                                 | Source                                                                                                                                                                   | Status                                                                                                                              |
+| ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Slots in use (peak) and admitted                                                                       | `kubeagents_credential_proxy_slots_in_use` gauge [code], as Managed Prometheus stores it (30 s scrape); `/v1/exec/admission` (#4084)                                     | Read by the runner (#4242). The 2026-10-28 cluster stored no Managed Prometheus series for the gauge, so those records have no peak |
+| Wait p50 and p95, refusals, **by class**                                                               | Wait histogram with a new `class` label; the refusal counter also gets the `draining` bound (§4.3), so a rollout does not count as load, and the `profile` bound (#4257) | Needs §4                                                                                                                            |
+| Command duration p50 and p95 **by class**                                                              | The broker's command duration histogram with a new `class` label; shows whether the nice value (§4.2) protects interactive run time                                      | Needs §4                                                                                                                            |
+| Requests and CPU by route: `/v1/gcp/`, the other non-exec routes, and exec                             | `kubeagents_credential_proxy_requests_total` by its `endpoint` label; exec CPU from the per-tool command time and §8.3's CPU per command                                 | New; gives the stateful pod its sizing term (§8.4, open question 4)                                                                 |
+| Traffic mix: requests and slot-seconds by caller (sweep, reconcile, stall watch, interactive, session) | Audit lines with the class, and a caller name from the shim (caller-supplied, outside `principal`)                                                                       | New                                                                                                                                 |
+| CPU throttling                                                                                         | The proxy container's cgroup `cpu.stat`, before and after each run                                                                                                       | Measured (#4242)                                                                                                                    |
+| Per-replica balance                                                                                    | The same metrics per pod                                                                                                                                                 | New in the runner                                                                                                                   |
+| Requests and slot-seconds by tool (`kubectl`, `gcloud`, other)                                         | The broker's command duration histogram, by its `tool` label                                                                                                             | Measured (#4242); splits the load §3.6 moves                                                                                        |
+| k8s-api-proxy CPU, memory and in-flight requests                                                       | Cloud Monitoring; its `in_flight_requests` gauge (#3760, #4128)                                                                                                          | New in the runner, with the proxy switched on                                                                                       |
 
 ### 8.2 Points
 
@@ -816,7 +835,8 @@ on: the sandbox restarts with the variable before an exec replica is ready.
    (merge `37a9829b`) fixed it on `main`, and the #4242 image `f8fc7905` has the fix. The caller
    ceiling after the fix is not measured (§3.6).
 9. How does the gateway mint the turn token (§4.1), and can #3889's per-task credential be it for
-   chat turns as well as for profile workers?
+   chat turns as well as for profile workers? The same claim could mark a profile task that a chat
+   turn started as interactive (§4.1).
 10. After #4128's default-on step, should `/v1/watcher/*` and `/v1/k8s/*` move to the
     k8s-api-proxy? They do the same job (Kubernetes API reads under kube-agents' identity) and keep
     no state that breaks on more than one pod (§3.1), so there would be one Kubernetes path instead
