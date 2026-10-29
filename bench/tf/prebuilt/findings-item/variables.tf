@@ -49,3 +49,11 @@ variable "agent_container" {
   description = "Container inside agent_deployment that runs the Session KV server and holds its key"
   default     = "platform-agent"
 }
+
+# Which rows to plant: findings.json for findings-decision-covers-item, and
+# findings-unnamed.json for findings-decision-leaves-unnamed-open, which adds
+# a row no message has named (`plant_state: queued`) under its own project.
+variable "findings_file" {
+  type    = string
+  default = "findings.json"
+}
