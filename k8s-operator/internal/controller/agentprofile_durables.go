@@ -11,9 +11,11 @@ import (
 	agentv1alpha1 "github.com/gke-labs/kube-agents/k8s-operator/api/v1alpha1"
 )
 
-// The profiles' shared durables on TASKS (#3660, "Admission and holding";
-// contract on #3655): one per (profile, tier, kind), created and owned by the
-// operator, read only by the dispatcher. This is lib.EnsureHeldConsumer's
+// The profiles' shared durables on PROFILE_SUBMITS (#3660, "Admission and
+// holding"; contract on #3655): one per (profile, tier, kind), created and
+// owned by the operator, read only by the dispatcher. The stream is the
+// profiles' own so that the operator is the only principal that can make or
+// edit a consumer on it (a2aProfileSubmitStream). This is lib.EnsureHeldConsumer's
 // contract restated here, because this module can't import that one: a
 // durable made here must pass SubscribeHeld's checks on the stored config
 // (the held-durable fixture test holds that). SubscribeHeld's intake check
@@ -46,7 +48,7 @@ type profileDurable struct {
 
 // profileDurableFilter is lib.ProfileDurableFilter.
 func profileDurableFilter(profile, tier, kind string) string {
-	return fmt.Sprintf("a2a.tasks.%s.%s.%s.*.submit", profile, tier, kind)
+	return fmt.Sprintf("%s%s.%s.%s.*", a2aProfileSubmitPrefix, profile, tier, kind)
 }
 
 // desiredProfileDurables are the durables a profile with a rendered identity
@@ -85,7 +87,7 @@ func allProfileDurableNames(profile string) []string {
 // pace from AckWait when it bound. A consumer under the name that doesn't
 // carry the held marker isn't this operator's, and is refused.
 func ensureDurable(ctx context.Context, js jetstream.JetStream, d profileDurable) error {
-	existing, err := js.Consumer(ctx, a2aTasksStream, d.name)
+	existing, err := js.Consumer(ctx, a2aProfileSubmitStream, d.name)
 	switch {
 	case errors.Is(err, jetstream.ErrConsumerNotFound):
 	case err != nil:
@@ -94,7 +96,7 @@ func ensureDurable(ctx context.Context, js jetstream.JetStream, d profileDurable
 		old := existing.CachedInfo().Config
 		switch {
 		case old.Metadata[a2aHeldMarkerKey] != a2aHeldMarkerValue:
-			return fmt.Errorf("a consumer named %s exists on %s without the held-delivery mark; the operator doesn't adopt it", d.name, a2aTasksStream)
+			return fmt.Errorf("a consumer named %s exists on %s without the held-delivery mark; the operator doesn't adopt it", d.name, a2aProfileSubmitStream)
 		case old.FilterSubject != d.filter || len(old.FilterSubjects) > 0:
 			return fmt.Errorf("durable %s filters %q; refusing to move it to %q under a bound dispatcher (re-create it)", d.name, old.FilterSubject, d.filter)
 		case old.AckWait != a2aHeldAckWait:
@@ -103,12 +105,12 @@ func ensureDurable(ctx context.Context, js jetstream.JetStream, d profileDurable
 			// The mark is a public constant, so it proves nothing on its
 			// own: anything this operator would have left at its default
 			// and that is set says someone else made the consumer.
-			return fmt.Errorf("a consumer named %s exists on %s that %s, which the operator never sets; it doesn't adopt it", d.name, a2aTasksStream, heldConfigTampered(old))
+			return fmt.Errorf("a consumer named %s exists on %s that %s, which the operator never sets; it doesn't adopt it", d.name, a2aProfileSubmitStream, heldConfigTampered(old))
 		case old.MaxAckPending == d.maxAckPending:
 			return nil
 		}
 	}
-	_, err = js.CreateOrUpdateConsumer(ctx, a2aTasksStream, jetstream.ConsumerConfig{
+	_, err = js.CreateOrUpdateConsumer(ctx, a2aProfileSubmitStream, jetstream.ConsumerConfig{
 		Durable:       d.name,
 		FilterSubject: d.filter,
 		AckPolicy:     jetstream.AckExplicitPolicy,
@@ -117,7 +119,7 @@ func ensureDurable(ctx context.Context, js jetstream.JetStream, d profileDurable
 		Metadata:      map[string]string{a2aHeldMarkerKey: a2aHeldMarkerValue},
 	})
 	if errors.Is(err, jetstream.ErrMaximumConsumersLimit) {
-		return fmt.Errorf("durable %s: TASKS has no consumer slot left for it (%w). A TASKS stream created before the dispatcher has no room set aside for profile durables, and its max_consumers can't be raised in place: lower spec.harness.tuning.maxSessions to free slots, or recreate TASKS (losing its history) so it is created with the allowance", d.name, err)
+		return fmt.Errorf("durable %s: %s has no consumer slot left for it (%w); it holds %d durables, two per allowed tier for each of %d profiles", d.name, a2aProfileSubmitStream, err, a2aProfileDurablesAllowed, a2aProfileDurablesAllowed/4)
 	}
 	if err != nil {
 		return fmt.Errorf("durable %s: %w", d.name, err)
@@ -148,6 +150,14 @@ func heldConfigTampered(cc jetstream.ConsumerConfig) string {
 		return "backs off redeliveries"
 	case cc.RateLimit != 0:
 		return "is rate limited"
+	case cc.PauseUntil != nil && !cc.PauseUntil.IsZero():
+		return "is paused until " + cc.PauseUntil.String()
+	case cc.PriorityPolicy != jetstream.PriorityPolicyNone || len(cc.PriorityGroups) > 0:
+		return "pins or overflows deliveries to a priority group"
+	case cc.MaxRequestBatch != 0 || cc.MaxRequestExpires != 0 || cc.MaxRequestMaxBytes != 0:
+		return "limits pull requests"
+	case cc.MemoryStorage:
+		return "keeps its state in memory, lost on a server restart"
 	}
 	return ""
 }
@@ -156,7 +166,7 @@ func heldConfigTampered(cc jetstream.ConsumerConfig) string {
 // marker. Deleting it drops whatever submissions it held unacknowledged; a
 // profile or tier that goes away takes its queue with it.
 func deleteDurable(ctx context.Context, js jetstream.JetStream, name string) error {
-	existing, err := js.Consumer(ctx, a2aTasksStream, name)
+	existing, err := js.Consumer(ctx, a2aProfileSubmitStream, name)
 	switch {
 	case errors.Is(err, jetstream.ErrConsumerNotFound):
 		return nil
@@ -166,7 +176,7 @@ func deleteDurable(ctx context.Context, js jetstream.JetStream, name string) err
 	if existing.CachedInfo().Config.Metadata[a2aHeldMarkerKey] != a2aHeldMarkerValue {
 		return nil
 	}
-	if err := js.DeleteConsumer(ctx, a2aTasksStream, name); err != nil && !errors.Is(err, jetstream.ErrConsumerNotFound) {
+	if err := js.DeleteConsumer(ctx, a2aProfileSubmitStream, name); err != nil && !errors.Is(err, jetstream.ErrConsumerNotFound) {
 		return fmt.Errorf("deleting durable %s: %w", name, err)
 	}
 	return nil

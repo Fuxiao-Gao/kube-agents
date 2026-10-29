@@ -90,7 +90,10 @@ func resolveProfileCeiling(agent *agentv1alpha1.PlatformAgent) int {
 	if t := profileTuning(agent); t != nil && t.Ceiling != nil {
 		return *t.Ceiling
 	}
-	return resolveKanbanMaxInProgress(agent)
+	// maxInProgress has no maximum of its own (it only capped kanban
+	// workers); clamp it to the ceiling's, so the quota arithmetic and the
+	// reserves never see a value the ceiling field itself would refuse.
+	return min(resolveKanbanMaxInProgress(agent), agentv1alpha1.MaxProfileCeiling)
 }
 
 // profileTuning is spec.harness.tuning.profiles, or nil.
@@ -99,18 +102,6 @@ func profileTuning(agent *agentv1alpha1.PlatformAgent) *agentv1alpha1.ProfileTun
 		return t.Profiles
 	}
 	return nil
-}
-
-// resolveProfileChildReserve is spec.harness.tuning.profiles.childReserve,
-// defaulted to max(1, ceil(ceiling/3)) and kept below the ceiling, so a
-// ceiling of 1 reserves nothing it can't also run.
-func resolveProfileChildReserve(agent *agentv1alpha1.PlatformAgent) int {
-	ceiling := resolveProfileCeiling(agent)
-	reserve := max(1, (ceiling+2)/3)
-	if t := profileTuning(agent); t != nil && t.ChildReserve != nil {
-		reserve = *t.ChildReserve
-	}
-	return min(reserve, ceiling-1)
 }
 
 // profileIntOr is one of the interval fields, or its default.

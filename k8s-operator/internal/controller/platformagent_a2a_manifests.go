@@ -116,6 +116,12 @@ const (
 	a2aFeedbackBucket      = "feedback"
 	a2aKVStreamPrefix      = "KV_"
 
+	// a2aProfileSubmitStream holds the profiles' submissions, every subject
+	// under a2aProfileSubmitPrefix (lib.ProfileSubmitStream and
+	// lib.SubmitSubjectPrefix). Its consumers are the operator's alone.
+	a2aProfileSubmitStream = "PROFILE_SUBMITS"
+	a2aProfileSubmitPrefix = "a2a.submit."
+
 	// a2aNATSConfGrantLine renders one allow-list entry at the depth
 	// renderA2APermission puts them: the subject-list indent, two more for
 	// the bracketed list inside the direction's block, the quoted subject, a
@@ -1627,7 +1633,7 @@ var a2aWildcardListenHosts = map[string]bool{"": true, "0.0.0.0": true, "::": tr
 var a2aProvisionedStreams = []string{
 	"TASKS", "DIRECTORY", "TOPICS-STATE", "TOPICS-JOURNAL",
 	"KV_runtime-state", "KV_session-state", "KV_cap", "KV_feedback",
-	"KV_PROFILE_LEASES",
+	"KV_PROFILE_LEASES", "PROFILE_SUBMITS",
 }
 
 // a2aSeedJetStreamGrants is seed's publish allow-list for the JetStream API,
@@ -2810,7 +2816,7 @@ func a2aOperatorNATSPeers() []networkingv1.NetworkPolicyPeer {
 	}}
 }
 
-// a2aProvisionScript is the provisioning payload: the four streams, five KV
+// a2aProvisionScript is the provisioning payload: the five streams, five KV
 // buckets, and four starter topics from the deployment spec, created
 // idempotently with the nats CLI. Topics are provisioned-only (payload spec):
 // which topics exist is exactly the subject lists rendered here.
@@ -3126,6 +3132,20 @@ $NATS kv info feedback      >/dev/null 2>&1 || $NATS kv add feedback --history=1
 # dispatcher reads expiry from each record, so a restarted one can still read
 # every lease it has to re-adopt or fail.
 $NATS kv info PROFILE_LEASES >/dev/null 2>&1 || $NATS kv add PROFILE_LEASES --history=1 --replicas=1 --storage=file --max-bucket-size=67108864
+
+# PROFILE_SUBMITS: new tasks for AgentProfiles, one subject per task
+# (a2a.submit.<profile>.<tier>.<kind>.<task>), published by the gateway and
+# held by the dispatcher on the operator's durables (contract on #3655). It is
+# its own stream so that the operator is the only principal with a consumer
+# verb on it: on TASKS, anything that can create consumers could pull a
+# profile's queue or rewrite its durable. Follow-ups and events stay on TASKS.
+# max-consumers is the durables' allowance, two per allowed tier for 16
+# profiles; nothing else makes a consumer here.
+$NATS stream info PROFILE_SUBMITS >/dev/null 2>&1 || $NATS stream add PROFILE_SUBMITS --allow-direct \
+  --subjects='a2a.submit.>' --storage=file --retention=limits \
+  --max-age=72h --max-bytes=1073741824 --discard=old --replicas=1 \
+  --max-msgs-per-subject=1 --dupe-window=2m \
+  --max-consumers=` + strconv.Itoa(a2aProfileDurablesAllowed) + ` --defaults
 
 # TASKS older than this render: the limits the create above could not apply.
 #
@@ -4062,35 +4082,17 @@ func a2aTasksConsumerBudget(agent *agentv1alpha1.PlatformAgent) int {
 	return resolveA2AMaxSessions(agent)*a2aSessionConsumersPerSession + a2aTasksReserve(agent)
 }
 
-// a2aProfileDurablesAllowed is the AgentProfile durables the TASKS budget
-// carries once there is a dispatcher to read them (#3655): one per (profile,
-// tier, kind), so 16 profiles with both tiers. Profiles are not bounded by
-// the CRD, so this is an allowance, not a count: a profile past it gets no
-// durables (the create is refused at the stream's cap) and its CardPublished
-// condition says why. A sizing knob replaces it when the budget work lands.
-//
-// It sizes a TASKS stream at creation only, and is not part of the budget the
-// provision script holds an existing stream to: a stream's max_consumers
-// can't be raised in place, so holding a live stream to it would refuse every
-// existing next install the day the dispatcher is turned on, with deleting
-// TASKS (and its audit history) as the only way out. On a stream created
-// before the dispatcher the durables take spare slots instead, and a profile
-// they don't fit says so (ensureDurable).
+// a2aProfileDurablesAllowed is PROFILE_SUBMITS's max_consumers: one durable
+// per (profile, tier, kind), so 16 profiles with both tiers. Profiles are not
+// bounded by the CRD, so this is an allowance, not a count: a profile past it
+// gets no durables (the create is refused at the stream's cap) and its
+// CardPublished condition says why. A sizing knob replaces it when the budget
+// work lands.
 const a2aProfileDurablesAllowed = 16 * 2 * 2
-
-// a2aProfileDurableAllowance is a2aProfileDurablesAllowed when this operator
-// renders a dispatcher, and nothing otherwise, so an install without one
-// sizes TASKS exactly as before.
-func a2aProfileDurableAllowance() int {
-	if a2aDispatcherEnabled() {
-		return a2aProfileDurablesAllowed
-	}
-	return 0
-}
 
 // a2aTasksMaxConsumers is what a fresh TASKS stream is created with.
 func a2aTasksMaxConsumers(agent *agentv1alpha1.PlatformAgent) int {
-	if budget := a2aTasksConsumerBudget(agent) + a2aProfileDurableAllowance(); budget > a2aTasksMaxConsumersFloor {
+	if budget := a2aTasksConsumerBudget(agent); budget > a2aTasksMaxConsumersFloor {
 		return budget
 	}
 	return a2aTasksMaxConsumersFloor
@@ -6512,9 +6514,11 @@ func (r *PlatformAgentReconciler) cleanupA2A(ctx context.Context, agent *agentv1
 		r.profileNamespaceFailure(ctx, agent, "delete the quota on the flip to today", profileQuotaErr)
 	}
 	// And the dispatcher's pod-read Role and binding there, likewise
-	// unowned, likewise not worth stopping the flip for.
-	if err := r.deleteDispatcherPodsRBAC(ctx, agent); err != nil {
-		r.profileNamespaceFailure(ctx, agent, "delete the dispatcher's pod-read Role on the flip to today", err)
+	// unowned, likewise not worth stopping the flip for, and likewise kept
+	// in sight: a failure leaves the fence below as the sentinel.
+	dispatcherRBACErr := r.deleteDispatcherPodsRBAC(ctx, agent)
+	if dispatcherRBACErr != nil {
+		r.profileNamespaceFailure(ctx, agent, "delete the dispatcher's pod-read Role on the flip to today", dispatcherRBACErr)
 	}
 
 	// 2. The callout's ClusterRoleBinding. Cluster-scoped, so it carries no
@@ -6563,11 +6567,14 @@ func (r *PlatformAgentReconciler) cleanupA2A(ctx context.Context, agent *agentv1
 	// namespace is gone (LiteLLM's policy dropped it earlier in the pass,
 	// when it re-rendered for today). Before the sentinel, so a failed delete
 	// leaves cleanup to resume.
-	// Skipped on a pass whose quota delete failed: the fence then stays as
-	// the sentinel that brings the teardown back for the quota, transient
-	// failure or not. A fence left behind only restricts, so a failed fence
-	// delete is logged and retried the same way, without holding the bus.
-	if profileQuotaErr == nil {
+	// Skipped on a pass whose quota delete, or the dispatcher's pod-read
+	// RBAC delete, failed: the fence then stays as the sentinel that brings
+	// the teardown back for them, transient failure or not. A pod-read
+	// binding left behind would grant a later ServiceAccount of the
+	// dispatcher's name pod read in the profile namespace. A fence left
+	// behind only restricts, so a failed fence delete is logged and retried
+	// the same way, without holding the bus.
+	if profileQuotaErr == nil && dispatcherRBACErr == nil {
 		if err := r.deleteProfileFence(ctx, agent); err != nil {
 			r.profileNamespaceFailure(ctx, agent, "delete the fence on the flip to today", err)
 		}

@@ -674,23 +674,32 @@ func TestThePlatformAgentCRDBoundsTheDispatchIntervals(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i, tc := range []struct {
-		tuning agentv1alpha1.ProfileTuning
-		want   string // "" admits
+		tuning        agentv1alpha1.ProfileTuning
+		want          string // "" admits
+		maxInProgress *int
 	}{
-		{agentv1alpha1.ProfileTuning{}, ""},
-		{agentv1alpha1.ProfileTuning{LeaseSeconds: ptr.To(60), RenewSeconds: ptr.To(20)}, ""},
-		{agentv1alpha1.ProfileTuning{LeaseSeconds: ptr.To(59)}, "leaseSeconds must be at least three renewSeconds"},
-		{agentv1alpha1.ProfileTuning{RenewSeconds: ptr.To(31)}, "leaseSeconds must be at least three renewSeconds"},
+		{agentv1alpha1.ProfileTuning{}, "", nil},
+		{agentv1alpha1.ProfileTuning{LeaseSeconds: ptr.To(60), RenewSeconds: ptr.To(20)}, "", nil},
+		{agentv1alpha1.ProfileTuning{LeaseSeconds: ptr.To(59)}, "leaseSeconds must be at least three renewSeconds", nil},
+		{agentv1alpha1.ProfileTuning{RenewSeconds: ptr.To(31)}, "leaseSeconds must be at least three renewSeconds", nil},
 		// The default grace (60) is short of two renewals of 31.
-		{agentv1alpha1.ProfileTuning{RenewSeconds: ptr.To(31), LeaseSeconds: ptr.To(100)}, "restartGraceSeconds must be at least two renewSeconds"},
-		{agentv1alpha1.ProfileTuning{RenewSeconds: ptr.To(31), LeaseSeconds: ptr.To(100), RestartGraceSeconds: ptr.To(62)}, ""},
-		{agentv1alpha1.ProfileTuning{RenewSeconds: ptr.To(30), LeaseSeconds: ptr.To(90)}, ""},
-		{agentv1alpha1.ProfileTuning{Ceiling: ptr.To(4), ChildReserve: ptr.To(3)}, ""},
-		{agentv1alpha1.ProfileTuning{Ceiling: ptr.To(4), ChildReserve: ptr.To(4)}, "childReserve must be below ceiling"},
+		{agentv1alpha1.ProfileTuning{RenewSeconds: ptr.To(31), LeaseSeconds: ptr.To(100)}, "restartGraceSeconds must be at least two renewSeconds", nil},
+		{agentv1alpha1.ProfileTuning{RenewSeconds: ptr.To(31), LeaseSeconds: ptr.To(100), RestartGraceSeconds: ptr.To(62)}, "", nil},
+		{agentv1alpha1.ProfileTuning{RenewSeconds: ptr.To(30), LeaseSeconds: ptr.To(90)}, "", nil},
+		{agentv1alpha1.ProfileTuning{Ceiling: ptr.To(4), ChildReserve: ptr.To(3)}, "", nil},
+		{agentv1alpha1.ProfileTuning{Ceiling: ptr.To(4), ChildReserve: ptr.To(4)}, "childReserve must be below the profile ceiling", nil},
+		// With the ceiling unset, the reserve is held to maxInProgress's default (6).
+		{agentv1alpha1.ProfileTuning{ChildReserve: ptr.To(6)}, "childReserve must be below the profile ceiling", nil},
+		{agentv1alpha1.ProfileTuning{ChildReserve: ptr.To(5)}, "", nil},
+		// With the ceiling unset and maxInProgress set, the reserve is held to it.
+		{agentv1alpha1.ProfileTuning{ChildReserve: ptr.To(3)}, "childReserve must be below the profile ceiling", ptr.To(3)},
+		{agentv1alpha1.ProfileTuning{ChildReserve: ptr.To(2)}, "", ptr.To(3)},
+		// A set ceiling wins over maxInProgress.
+		{agentv1alpha1.ProfileTuning{Ceiling: ptr.To(8), ChildReserve: ptr.To(5)}, "", ptr.To(3)},
 		// The task deadline cap may only be lowered from 6h.
-		{agentv1alpha1.ProfileTuning{MaxTaskDeadlineSeconds: ptr.To(900)}, ""},
-		{agentv1alpha1.ProfileTuning{MaxTaskDeadlineSeconds: ptr.To(21601)}, "maxTaskDeadlineSeconds"},
-		{agentv1alpha1.ProfileTuning{MaxTaskDeadlineSeconds: ptr.To(59)}, "maxTaskDeadlineSeconds"},
+		{agentv1alpha1.ProfileTuning{MaxTaskDeadlineSeconds: ptr.To(900)}, "", nil},
+		{agentv1alpha1.ProfileTuning{MaxTaskDeadlineSeconds: ptr.To(21601)}, "maxTaskDeadlineSeconds", nil},
+		{agentv1alpha1.ProfileTuning{MaxTaskDeadlineSeconds: ptr.To(59)}, "maxTaskDeadlineSeconds", nil},
 	} {
 		agent := a2aTestAgent()
 		agent.Name = fmt.Sprintf("agent-%d", i)
@@ -698,7 +707,7 @@ func TestThePlatformAgentCRDBoundsTheDispatchIntervals(t *testing.T) {
 		tuning := tc.tuning
 		agent.Spec.Harness = &agentv1alpha1.HarnessSpec{
 			ProjectID: envtestHarnessProject, Location: envtestHarnessLocation, ClusterName: envtestHarnessCluster,
-			Tuning: &agentv1alpha1.TuningSpec{Profiles: &tuning},
+			Tuning: &agentv1alpha1.TuningSpec{Profiles: &tuning, MaxInProgress: tc.maxInProgress},
 		}
 		err := c.Create(ctx, agent)
 		switch {

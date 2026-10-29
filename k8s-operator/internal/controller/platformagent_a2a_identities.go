@@ -338,19 +338,17 @@ func operatorIdentity() (a2aIdentity, bool) {
 		subscribe: []string{"_INBOX." + a2aOperatorBusUser + ".>"},
 	}
 	// With a dispatcher, the operator also makes and removes the profiles'
-	// shared durables on TASKS (agentprofile_durables.go). Create carries the
-	// durable's filter in its subject, so it is held to submit subjects:
-	// a2a.tasks.<profile>.<tier>.<kind>.<task>.submit, never a task's .in or
-	// .events. INFO and DELETE carry only the name, and a NATS wildcard
-	// matches a whole token, so they reach every consumer on TASKS; the
-	// operator deletes only consumers carrying its held-delivery mark, and
-	// the principal is the operator, which already holds far more than this
-	// in the cluster.
+	// shared durables on PROFILE_SUBMITS (agentprofile_durables.go), and it
+	// is the only principal that can: nothing else holds a consumer verb on
+	// that stream, so no one else can pull a profile's submissions or edit
+	// its durable. Create carries the durable's filter in its subject, so it
+	// is held to submission subjects. INFO and DELETE carry only the name;
+	// the operator deletes only consumers carrying its held-delivery mark.
 	if a2aDispatcherEnabled() {
 		id.publish = append(id.publish,
-			"$JS.API.CONSUMER.CREATE."+a2aTasksStream+".*.a2a.tasks.*.*.*.*.submit",
-			"$JS.API.CONSUMER.INFO."+a2aTasksStream+".*",
-			"$JS.API.CONSUMER.DELETE."+a2aTasksStream+".*",
+			"$JS.API.CONSUMER.CREATE."+a2aProfileSubmitStream+".*."+a2aProfileSubmitPrefix+"*.*.*.*",
+			"$JS.API.CONSUMER.INFO."+a2aProfileSubmitStream+".*",
+			"$JS.API.CONSUMER.DELETE."+a2aProfileSubmitStream+".*",
 		)
 	}
 	return id, ok
@@ -623,6 +621,7 @@ func provisionIdentity(agent *agentv1alpha1.PlatformAgent, ns string) a2aIdentit
 			"$JS.API.STREAM.CREATE.KV_cap",
 			"$JS.API.STREAM.CREATE.KV_feedback",
 			"$JS.API.STREAM.CREATE.KV_PROFILE_LEASES",
+			"$JS.API.STREAM.CREATE.PROFILE_SUBMITS",
 			"$JS.API.STREAM.INFO.TASKS",
 			"$JS.API.STREAM.INFO.DIRECTORY",
 			"$JS.API.STREAM.INFO.TOPICS-STATE",
@@ -632,6 +631,7 @@ func provisionIdentity(agent *agentv1alpha1.PlatformAgent, ns string) a2aIdentit
 			"$JS.API.STREAM.INFO.KV_cap",
 			"$JS.API.STREAM.INFO.KV_feedback",
 			"$JS.API.STREAM.INFO.KV_PROFILE_LEASES",
+			"$JS.API.STREAM.INFO.PROFILE_SUBMITS",
 			"_INBOX.provision.>",
 		},
 		subscribe: []string{
@@ -1088,6 +1088,12 @@ func webIdentity() a2aIdentity {
 // KV_session-state lists every key, which is every conversation and task id.
 // There is no sizes-only route to grant, so the capacity tiles that wanted
 // bucket sizes wait for one.
+//
+// On PROFILE_SUBMITS, the AgentProfile submissions, it holds DIRECT.GET and
+// nothing else, so it can show a profile task's prompt by subject. No
+// STREAM.INFO, for the subjects_filter reason above, and no consumer verb:
+// the operator is the only principal that makes consumers there, so nothing
+// a browser holds can pull a profile's queue.
 func consoleIdentity() a2aIdentity {
 	return a2aIdentity{
 		user:    a2aConsoleConfUser,
@@ -1116,6 +1122,7 @@ func consoleIdentity() a2aIdentity {
 			"$JS.API.CONSUMER.MSG.NEXT.DIRECTORY.*",
 			"$JS.API.CONSUMER.MSG.NEXT.TOPICS-STATE.*",
 			"$JS.API.CONSUMER.MSG.NEXT.TOPICS-JOURNAL.*",
+			"$JS.API.DIRECT.GET." + a2aProfileSubmitStream + ".>",
 			"chat.console.*.in",
 			"_INBOX.console.>",
 		},
