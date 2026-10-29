@@ -576,7 +576,7 @@ PROXY_REQUESTS_METRIC = "kubeagents_credential_proxy_requests_total"
 # request waited to be admitted and which bound held it, how many waited out
 # the bound and were refused, and what is in use against each cap. `bound` is
 # a closed vocabulary: the slot cap, the child memory budget, the forge
-# refresh lock, or the session role's own limit; anything else counts as
+# refresh lock, or the session or scope role's own limit; anything else counts as
 # `other`, so no message text ever opens a series.
 ADMISSION_WAIT_METRIC = "kubeagents_credential_proxy_admission_wait_seconds"
 ADMISSION_REFUSALS_METRIC = "kubeagents_credential_proxy_admission_refusals_total"
@@ -9911,8 +9911,8 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
 
             # One slot for the command and its response together; see
             # CommandExecutor.request_slot for why the response is inside it.
-            # The session role's own bound is taken first, so a session past
-            # its share never queues for the pool the shell shares.
+            # The session or scope role's own bound is taken first, so a caller
+            # past its share never queues for the pool the shell shares.
             with self._session_slot(principal.role), self._request_slot():
                 result = self.executor.execute(
                     exec_argv,

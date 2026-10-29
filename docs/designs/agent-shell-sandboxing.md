@@ -2663,7 +2663,7 @@ role, and the legacy event routes it cannot reach; [the chatops gateway
 design](spec-chatops-gateway.md) ("The Google Chat adapter") owns why that caller is kept
 apart from the legacy chat one. Under the operator's `A2A_SESSION_CLUSTER_VIEW` flag there is
 a fourth, `session`, for the pods the A2A gateway spawns per conversation: their token is
-minted for `kubeagents-credential-proxy-session`, `/v1/exec` admits `(shell, session)`, and
+minted for `kubeagents-credential-proxy-session`, `/v1/exec` admits the session beside the shell, and
 within that route `ROLE_EXECUTABLES` holds the session to `kubectl` and `gcloud`. Because a
 Pod picks the audience it projects, the role is also bound to the caller:
 `CREDENTIAL_PROXY_SESSION_CALLERS` names the session ServiceAccount, which may present only
@@ -2685,7 +2685,8 @@ its token is minted for `kubeagents-credential-proxy-scope`, it is bound to its 
 `ROLE_EXECUTABLES` holds it to `gcloud`. Within that, `scope_policy.py` admits five lookups token
 for token, each on an argument the `scope.json` at `CREDENTIAL_PROXY_SCOPE_FILE` declares or
 that an earlier lookup returned to the role within five hours. That record of returned members is
-memory in the one broker process, so the role stays on the single broker pod.
+memory in the one broker process, so the role stays on the single broker pod
+([credential-proxy-single-pod.md](credential-proxy-single-pod.md#2-state-that-lives-in-the-pod)).
 
 Be precise about what the token buys: it is a **multi-tenancy control** that stops another
 workload in the cluster borrowing the agent's credentials, and not an agent-containment

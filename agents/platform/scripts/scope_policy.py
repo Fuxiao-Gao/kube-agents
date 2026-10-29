@@ -229,7 +229,8 @@ def argv_refusal(argv: list[str]) -> tuple[Refusal | None, tuple[str, str] | Non
         return None, matched
     if any(_token_names(token, PROJECT_FLAG) for token in argv[1:]):
         return Refusal(
-            RULE_SCOPE_ARGV, f"The scope caller may pass {PROJECT_FLAG} only to `container clusters list`."
+            RULE_SCOPE_ARGV,
+            f"The scope caller may pass {PROJECT_FLAG} only in the exact `container clusters list` lookup.",
         ), None
     return Refusal(
         RULE_SCOPE_ARGV,
