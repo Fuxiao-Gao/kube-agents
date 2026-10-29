@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Plant and remove the findings-queue rows of bench/tasks/findings-decision-covers-item.
+"""Plant and remove the findings-queue rows of bench/tasks/findings-decision-covers-item
+and bench/tasks/findings-decision-leaves-unnamed-open (the stack's findings_file).
 
 main.tf runs this in the agent container as `python3 - <mode> <base url> <rows, base64>`:
 the Session KV server answers there on loopback, and the container's environment
