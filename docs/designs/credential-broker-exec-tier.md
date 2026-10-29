@@ -1,6 +1,6 @@
 # The Credential Broker Scales Out: an Exec Tier Beside One Stateful Broker
 
-> **STATUS — Draft for review. Measurements pending (§8); the sweep load is blocked by #3933.**
+> **STATUS — Draft for review. First measurement run in §8.3 (#4242); 16 and 32 clusters and the exec tier are not measured yet.**
 > Nothing is built. This document proposes how the credential broker grows past one pod. It is
 > meant to replace [`credential-proxy-single-pod.md`](credential-proxy-single-pod.md) once the
 > measurements in §8 exist and the design is reviewed. Issue: #4082. Partner: the sizing tiger
@@ -326,9 +326,9 @@ How the load splits between them:
 - The broker plan's first record, at 2 clusters during the first-run audits: 175 `kubectl`
   commands ran for 180 s in total, and 43 `gcloud` commands for 204 s. So `gcloud` was 20% of the
   commands but 53% of the slot time. The broker's CPU was throttled in 11% of its periods
-  [measured, broker plan, image `f8fc7905`, one 30-minute run].
+  [measured, #4242, image `f8fc7905`, one 30-minute run].
 
-§8.1's runs settle CPU and slots for both tools at more fleet sizes.
+§8.3 has the split for every audit run at 2 and 8 clusters; the larger fleet sizes are not measured yet.
 
 How the k8s-api-proxy runs [#3760 head, not main, `kube_proxy_manifests.go`]:
 
@@ -368,7 +368,8 @@ What this means for this design:
   auth plugin. The k8s-api-proxy starts no process per call, so it also raises `kubectl` capacity,
   while it still runs as one pod.
 - #3760 also removes the shim's Python client from every `kubectl`, which is the caller-side cost
-  #4107 measured (#4027). The 1.5 commands per second ceiling then holds for `gcloud` only.
+  #4107 measured (#4027). For `gcloud` the broker's CPU binds first: about 0.45 commands per second
+  at 1 CPU (§8.3), well below the 1.5 per second caller ceiling.
 
 ### 3.7 Later: one scaled broker
 
@@ -552,23 +553,23 @@ load levels and the 2-CPU control to 1 run each, to fit its time limit.
 
 ### 8.3 Results of the first run (#4242)
 
-The fleet audits ran: the image has the #3933 fix, so no audit cancelled. They read the clusters and
+The fleet audits ran: the image has the #3933 fix, so no audit cancelled. In two windows a job failed or was still running at the end. They read the clusters and
 cannot write, because the experiment install has no GitOps repository. All numbers are [measured,
 #4242], with the broker at 1 CPU unless a line says 2 CPU.
 
-| Point                                 | Result                                                                                                                                                                                                                                   |
-| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Audits, 2 clusters (3 × 30 min)       | 158 to 218 commands. `gcloud`: 20 to 26% of the commands, 53 to 62% of the slot time. 0.2 to 0.5 slots in use on average. CPU throttled in 11 to 13% of periods. Wait p50 0.1 s, max 2.5 s. No refusals.                                 |
-| Audits, 8 clusters (3 × 30 min)       | 773 to 790 commands in two runs (511 in the third). 4.4 to 4.6 slots in use on average. Mean command time 10.3 to 10.5 s. CPU throttled in 72 to 74% of periods. Wait p50 5 s, max in the 60 s bucket. No refusals. Memory peak 716 MiB. |
-| Audits, 8 clusters, **2 CPU** (1 run) | 893 commands. Mean command time 4.4 s. 2.2 slots in use. CPU peak 2.1 (at the new limit), throttled in 42% of periods. Wait max 30 s. Memory peak 680 MiB.                                                                               |
-| `gcloud` load, 1 / 4 / 8 / 16 at once | 0.4 / 0.47 / 0.43 / 0.35 commands per second; p50 2.5 / 8.5 / 18 / 45 s. From 4 at once, about 95% of CPU periods are throttled. At 16 at once the wait p50 is 30 s, so the 8 slots bind there.                                          |
-| `kubectl` load, 1 at once             | 1.4 to 1.5 commands per second, p50 0.6 s, as #4107 measured.                                                                                                                                                                            |
-| Questions at once, 8 clusters         | 8 and 10: no refusals, answers in 3 to 10 minutes. 12: 2 to 3 refused per run. 15: 5 refused per run (`429 Too many concurrent runs`). The broker stays almost idle.                                                                     |
+| Point                                 | Result                                                                                                                                                                                                                                                                                                                                    |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Audits, 2 clusters (3 × 30 min)       | 158 to 218 commands. `gcloud`: 20 to 26% of the commands, 53 to 62% of the slot time. 0.2 to 0.5 slots in use on average. CPU throttled in 11 to 13% of periods. Wait p50 0.1 s, max 2.5 s. No refusals.                                                                                                                                  |
+| Audits, 8 clusters (3 × 30 min)       | Runs 1 and 2: 773 to 790 commands, 4.4 to 4.6 slots in use on average, mean command time 10.3 to 10.5 s, CPU throttled in 72 to 74% of periods, wait p50 5 s, max in the 60 s bucket. Run 3 was lighter (cause not confirmed): 511 commands, 1.9 slots, 6.7 s, 37% throttled, wait p50 0.1 s, max 30 s. No refusals. Memory peak 716 MiB. |
+| Audits, 8 clusters, **2 CPU** (1 run) | 893 commands. Mean command time 4.4 s. 2.2 slots in use. CPU peak 2.1 (at the new limit), mean 0.88 cores; throttled in 42% of periods. Wait max 30 s. Memory peak 680 MiB. One job was still running at the end of the window.                                                                                                           |
+| `gcloud` load, 1 / 4 / 8 / 16 at once | 0.4 / 0.47 / 0.43 / 0.35 commands per second; p50 2.5 / 8.5 / 18 / 45 s. From 4 at once, about 95% of CPU periods are throttled. At 16 at once the wait p50 is 30 s, so the 8 slots bind there. The 4, 8 and 16 levels ran once each; the 16 run overlapped 19 outside commands.                                                          |
+| `kubectl` load, 1 at once             | 1.5 commands per second, p50 0.6 s, as #4107 measured (1 clean run; 2 more overlapped other work).                                                                                                                                                                                                                                        |
+| Questions at once, 8 clusters         | 8 and 10: no refusals, answers in 3 to 10 minutes; most of these runs also met model-provider 429s. 12: 2 to 3 refused per run. 15: 5 refused per run (`429 Too many concurrent runs`). The broker stays almost idle.                                                                                                                     |
 
 What they mean for this design:
 
 - **One CPU is the first limit, not the slots.** `gcloud` throughput stays flat at about 0.45 per second from 4 at once. This supports the CPU raise as step 0 (§9) and the CPU term in §8.4.
-- **A 2-CPU limit more than halves the command time** at 8 clusters, and the broker still sits at that limit. Its need at 8 clusters is above 2 cores.
+- **A 2-CPU limit more than halves the command time** at 8 clusters. The broker reached that limit at peak (mean 0.88 cores, 42% of periods throttled), so at peak it needs more than 2 cores at 8 clusters.
 - **`gcloud` is the load that stays on the exec tier** (§3.6). Per command it costs about 5 times the broker CPU of `kubectl` (about 1.6 to 2.0 against about 0.34 core-seconds).
 - **Interactive bursts meet the agent's 10 run slots first** (#3724), as §2.3 said.
 - **Memory is not a limit at these sizes:** at most 775 MiB of 2 GiB.
@@ -605,8 +606,16 @@ slot-minutes and about 200 broker core-seconds per cluster for one audit round. 
 | 16 clusters, 1 CPU (#4107)    | about 12                 | about 202        | 34                  | 1 core for 6.4 slots in use: about 32 cores, 16        | about 34     |
 
 [predicted] So about 28 replicas without a cache, and about 6 if the cache takes 80% of the sweep's
-reads (an assumption). This is a straight line from 8 clusters to 1,000, from one run whose broker
-was still at its 2-CPU limit, so it is an order of magnitude, not a size. The CPU term sets the
+reads (an assumption). These are floors, for three reasons:
+
+- one audit job was still running at the end of the 30-minute window, so 8.2 slot-minutes and 200
+  core-seconds are a lower bound for a full round;
+- the CPU term plans each replica at its full 2 cores on average, while the measured broker was
+  throttled in 42% of its periods at 44% average use, so the peak needs more;
+- these are averages, and the peak is higher.
+
+It is also a straight line from 8 clusters to 1,000, from one run whose broker reached its 2-CPU
+limit at peak, so it is an order of magnitude, not a size. The CPU term sets the
 count, as before. The core-seconds come from the whole broker, which also runs the Cloud API relay
 and the other routes, so they overstate exec's share. The 16- and 32-cluster points and the exec
 tier runs (§8.2) replace it. This is why the design needs both the exec tier and the cache contract.
@@ -641,8 +650,8 @@ tier runs (§8.2) replace it. This is why the design needs both the exec tier an
 
 The cache contract (§6) is not needed to ship the tier, and its work can run in parallel with steps
 1 to 3. The footprint in §8.4 assumes it, though: about 6 replicas with the cache against about 28
-without, for a 1,000-cluster round in one hour [predicted]. So for large fleets the cache must land
-before default on (step 4).
+without, for a 1,000-cluster round in one hour [predicted, and floors: §8.4]. So for large fleets
+the cache must land before default on (step 4).
 
 Do not add new work to the stateful pod beyond phase 0. §3.7 can remove most of its routes later:
 the content workspace, and the chat relays if they become safe on N pods.
@@ -690,7 +699,7 @@ To revert, set replicas to 0. The shim falls back to `CREDENTIAL_PROXY_URL`.
    show whether it matters.
 5. Kubeconfig without `gcloud` (§3.4): worth it at 2,500 clusters?
 6. Who owns `bench/scale/broker.yaml`: the tiger team, as part of Phase 2, with this doc as its
-   requirements? To agree with them before §8 starts.
+   requirements? The first run (#4242) used it; to agree with them before the 16- and 32-cluster runs.
 7. For dshnayder, on #3760 and epic #4128 (§3.6):
    - How do the session pods run `kubectl` once the sandbox image has no wrapper? Do they move to
      the k8s-api-proxy, or keep `/v1/exec`?
