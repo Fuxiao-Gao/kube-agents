@@ -174,14 +174,15 @@ What they do **not** cover, stated plainly because a backstop misread as complet
 
 ### The admission policy on the A2A gateway's pods
 
-Under `spec.mode: next`, the A2A gateway creates one session pod per delegated task, so its Role allows `create` on pods in its namespace. RBAC cannot limit what such a pod runs as. A third `ValidatingAdmissionPolicy`, `kube-agents-a2a-gateway-pod`, holds every pod the gateway's ServiceAccount creates to the session pod shape:
+Under `spec.mode: next`, the A2A gateway creates session pods (one per delegated task, or one per conversation on the session route), so its Role allows `create` on pods in its namespace. RBAC cannot limit what such a pod runs as. A third `ValidatingAdmissionPolicy`, `kube-agents-a2a-gateway-pod`, holds every pod the gateway's ServiceAccount creates to the session pod shape:
 
 - It runs as the session ServiceAccount, `<name>-a2a-session`, which holds no RBAC.
 - `automountServiceAccountToken` is `false`, and its projected tokens are only for the bus and the credential broker's session audience.
-- It mounts no Secret and no host path, uses no host namespace, and runs no privileged or init container.
-- It carries the session labels that the session network policies select on.
+- It mounts no Secret and no host path, uses no host namespace, host port or fixed node, and runs no init container.
+- It meets Pod Security "restricted": non-root, seccomp `RuntimeDefault`, no added capabilities, no privilege escalation, and no `Unconfined` AppArmor.
+- It carries exactly the session labels, so the session network policies select it and no other workload's policies or Services do.
 
-The source is [`k8s-operator/config/admission/a2a-gateway-pod-policy.yaml`](https://github.com/gke-labs/kube-agents/blob/main/k8s-operator/config/admission/a2a-gateway-pod-policy.yaml). The chart installs it on the same terms as the two policies above: `admissionPolicy.enabled` and Kubernetes 1.30 or later. Method 2 applies it by hand. Where the chart installs it, the chart also sets `A2A_GATEWAY_POD_POLICY` on the operator, and the operator turns on the features that depend on this policy only then.
+The source is [`k8s-operator/config/admission/a2a-gateway-pod-policy.yaml`](https://github.com/gke-labs/kube-agents/blob/main/k8s-operator/config/admission/a2a-gateway-pod-policy.yaml). The chart installs it on the same terms as the two policies above: `admissionPolicy.enabled` and Kubernetes 1.30 or later. Method 2 applies it by hand. Where the chart installs it, the chart also sets `A2A_GATEWAY_POD_POLICY` on the operator. It is a signal for operator features that must run only where this policy is installed, and it says the policy was rendered, not that it still holds.
 
 It does not cover an install where it is not applied: there, the gateway's `create` on pods is as wide as its Role. It selects the gateway by its ServiceAccount name, `<name>-a2a-gateway`.
 

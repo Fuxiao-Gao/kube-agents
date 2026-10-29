@@ -2578,8 +2578,8 @@ The defaults carry no ephemeral-storage request because the operator renders non
 Whether the chart renders the A2A gateway's pod admission policy
 (templates/a2a-gateway-pod-admission-policy.yaml): the admission-policy values gate,
 on a cluster where ValidatingAdmissionPolicy is v1. The template renders on this, and
-the operator's A2A_GATEWAY_POD_POLICY is set from it, so a feature the operator turns
-on only behind that policy cannot be on where the policy is not rendered.
+the operator's A2A_GATEWAY_POD_POLICY is set from it, so an operator feature gated on
+that signal cannot be on where the policy is not rendered.
 */}}
 {{- define "kube-agents.a2aGatewayPodPolicyEnabled" -}}
 {{- if and .Values.admissionPolicy.enabled (semverCompare ">=1.30.0-0" .Capabilities.KubeVersion.Version) -}}
