@@ -952,6 +952,14 @@
 # one front-door turn with no card: +3 units.
 ./tasks/chat-voice-capabilities-names-cluster-agents/task.yaml
 
+# The silence case for a deliberate scale to zero (#4098): an in-cluster
+# gateway whose proxy and backend are both at replicas 0 reports
+# Programmed=False, and the stall check must not report it. Reads the
+# scaled-zero-gateway role on seeded-a (`deployer: noop`, read-only), graded
+# on the contracted "stalled resources: 0" line with two safeguards against
+# scaling the environment back up. Red on main without the rule, green with it.
+./tasks/cluster-agent-scaled-zero-gateway-silence/task.yaml
+
 # #3598: consistency-authorized-networks-probe demoted 2026-10-21. On the
 # Gemini setup it failed about 30% of repetitions on unrelated pull requests
 # and on main's eval-next (37 of 126 across 42 runs; the store's record
