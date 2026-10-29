@@ -1554,7 +1554,8 @@ class TestFindingsQueueTools(unittest.TestCase):
         doc = " ".join(platform_mcp_server.update_finding.__doc__.split())
         self.assertIn("Covering the rest of the item is the decision's design, not a side effect to confirm", doc)
         self.assertIn("say in the reply which other findings it covered", doc)
-        self.assertIn("Ask first only when the item also holds a finding in state 'queued'", doc)
+        self.assertIn("before the call, look for one: get_findings(project=..., cluster=..., state='queued')", doc)
+        self.assertIn("If there is one, ask the user instead of calling", doc)
         import findings_queue
 
         self.assertIn("queued", findings_queue.UNDECIDED_STATES)

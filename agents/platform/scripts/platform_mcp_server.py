@@ -1284,9 +1284,11 @@ def update_finding(
     to confirm: the nudge prints one id per item and tells the user that a
     decision on it covers every undecided finding of the item. So apply the
     decision the user gave, and say in the reply which other findings it
-    covered. Ask first only when the item also holds a finding in state
-    'queued': no message has named that finding yet, so the user has not seen
-    it. A finding that no longer reproduces is not set here: that is a
+    covered. The call itself decides any 'queued' finding of the item too, and
+    no message has named a 'queued' finding yet, so the user has not seen it.
+    So before the call, look for one: get_findings(project=..., cluster=...,
+    state='queued') and the same check. If there is one, ask the user instead
+    of calling. A finding that no longer reproduces is not set here: that is a
     verification outcome.
 
     Args:
