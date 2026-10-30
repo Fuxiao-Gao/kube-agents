@@ -4845,16 +4845,29 @@ def _get_credentials_target(argv: list[str]) -> ClusterTarget | None:
 def _is_get_credentials(argv: list[str]) -> bool:
     """Is this the one command that legitimately authors a kubeconfig?
 
-    Matched on the subcommand sequence rather than on position, so global flags
-    may appear anywhere ahead of it.
+    Matched on the command words that `command_policy` reads, after its own
+    flag walk, so a flag between the words -- `container --project=p clusters
+    get-credentials`, `clusters --location x get-credentials` -- is the same
+    command here as it is to the policy that allowed it, and goes through the
+    get-credentials path rather than running as a plain gcloud command. A
+    leading release track (`beta container ...`) is looked past.
+
+    An argv the walk cannot read (a flag of unknown arity) is routed here
+    whenever it carries the verb at all. Read-only enforcement refuses every
+    such argv first, so this only matters with enforcement off. There, a
+    command routed here by mistake still runs gcloud against a scratch
+    kubeconfig, but it costs an endpoint lookup and may get an endpoint flag
+    added that it doesn't take. Missing a real get-credentials instead runs it
+    as a plain gcloud command.
     """
     if not argv or argv[0] != "gcloud":
         return False
-    try:
-        index = argv.index("container")
-    except ValueError:
-        return False
-    return argv[index + 1 : index + 3] == ["clusters", "get-credentials"]
+    words, _ = command_policy._gcloud_words_and_flag(argv)
+    if words is None:
+        return "get-credentials" in argv
+    if words and words[0] in command_policy._GCLOUD_RELEASE_TRACKS:
+        words = words[1:]
+    return words[:3] == ["container", "clusters", "get-credentials"]
 
 
 def _kubectl_output_format(argv: list[str]) -> str:
