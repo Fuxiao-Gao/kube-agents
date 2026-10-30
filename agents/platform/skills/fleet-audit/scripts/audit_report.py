@@ -1958,6 +1958,8 @@ GREP_MAX_MATCH_CHARS = 400
 GREP_NO_MATCH_EXIT_CODE = 1
 # The broker's refusal of a snapshot whose `paths` name nothing at that revision.
 SNAPSHOT_PATH_NOT_FOUND = "PATH_NOT_FOUND"
+# How many characters of a revision a message names.
+REVISION_SHOWN_CHARS = 12
 # The GitOps layout's per-cluster tree, `clusters/<name>/`, as the collector
 # reads it: a PDB name collides only inside its own cluster's tree.
 CLUSTER_TREE_ROOT = "clusters"
@@ -15725,6 +15727,10 @@ class _GroupPush(NamedTuple):
 
     base: str
     proposable: bool
+    # The open pull request of this install the broker landing found on the
+    # branch when the labelled listing had missed it, for the pull-request
+    # step to refresh rather than ask for again; None otherwise.
+    adopted: dict | None = None
 
 
 def _land_group_via_clone(
@@ -15888,7 +15894,7 @@ class RepositorySnapshot:
     def read_bytes(self, path: str) -> bytes:
         target = self.tree / path
         if target.is_symlink() or not target.is_file():
-            raise FileNotFoundError(f"{path} is not a file at {self.revision[:12]}")
+            raise FileNotFoundError(f"{path} is not a file at {self.revision[:REVISION_SHOWN_CHARS]}")
         return target.read_bytes()
 
     def grep(
@@ -15911,18 +15917,21 @@ class RepositorySnapshot:
         argv += ["-e", pattern]
         if prefix:
             argv += ["--", prefix]
-        # The sandbox's local git, hardened by the vcs client, on a tree with no `.git`.
+        # The sandbox's local git, hardened by the vcs client, on a tree with no
+        # `.git`. Bytes, so only git's own newlines end a record: a lone `\r`
+        # in a matched line is content.
+        result = vcs_client.local_git(self.tree, *argv, check=False, text=False)
+        if result.returncode not in (0, GREP_NO_MATCH_EXIT_CODE):
+            raise ValidationError("git could not search for that pattern; check the expression")
         try:
-            result = vcs_client.local_git(self.tree, *argv, check=False)
+            output = result.stdout.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ValidationError(
                 f"a file that matches is not UTF-8 text ({exc.reason}); narrow the search with --prefix"
             ) from exc
-        if result.returncode not in (0, GREP_NO_MATCH_EXIT_CODE):
-            raise ValidationError("git could not search for that pattern; check the expression")
         matches: list[dict] = []
         total = 0
-        for record in result.stdout.split("\n"):
+        for record in output.split("\n"):
             if not record:
                 continue
             path, _, remainder = record.partition("\0")
@@ -15988,6 +15997,12 @@ def prefix_snapshot(repo: str, branch: str | None, prefix: str | None) -> "Repos
     except vcs_client.VcsError as exc:
         if prefix and exc.code == SNAPSHOT_PATH_NOT_FOUND:
             return _EmptyTree(exc.revision or "")
+        if exc.code == vcs_client.SNAPSHOT_TOO_LARGE:
+            # The broker's text names its own request field; the command's is --prefix.
+            raise ValidationError(
+                f"{prefix or 'the repository'} is too large for one snapshot ({exc}); "
+                "read a smaller directory with --prefix"
+            ) from exc
         raise
 
 
@@ -16029,6 +16044,7 @@ def _land_group_via_broker(
         else ""
     )
     message = group_commit_subject(audit_id, group)
+    adopted: dict | None = None
     try:
         held = forge("branch-view", repo, {"branch": branch}).get("branch") or {}
         if held.get("exists") and not open_base:
@@ -16037,6 +16053,8 @@ def _land_group_via_broker(
             # still this install's to add to.
             adopted = open_proposal_on(repo, branch)
             open_base = str((adopted or {}).get("baseRefName") or "")
+            if not open_base:
+                adopted = None
         try:
             if held.get("exists") and open_base:
                 cloned = vcs_client.clone(repo, branch=branch, force=True, key=branch)
@@ -16045,10 +16063,10 @@ def _land_group_via_broker(
                         f"{branch}: the branch already carries this fix; its pull "
                         "request is refreshed without a push."
                     )
-                    return _GroupPush(open_base, True)
+                    return _GroupPush(open_base, True, adopted)
                 vcs_client.commit(message, paths=paths, spec=repo, key=branch)
                 vcs_client.publish(repo, target=open_base, advance=True, key=branch)
-                return _GroupPush(open_base, True)
+                return _GroupPush(open_base, True, adopted)
 
             cloned = vcs_client.clone(repo, force=True, key=branch)
             base = cloned["branch"]
@@ -16185,6 +16203,8 @@ def open_remediation_pr(
     if not landed.proposable:
         return None
     base = landed.base
+    if landed.adopted is not None:
+        existing = landed.adopted
 
     # Known from `ensure_labels`, which every run calls first; a forge not yet
     # known is taken to have labels, and the label write below corrects it.
@@ -19533,14 +19553,22 @@ def handle_fetch(args: argparse.Namespace) -> None:
     # land locally, which is a question only this side can ask.
     targets = {path: resolve_inside_repo(root, path, "fetch") for path in args.path}
 
+    import vcs_client
+
     written: list[str] = []
     # The `sha` printed is the revision the snapshot was taken at: the branch
     # head when `--branch` names one the remote has, the base otherwise. A
     # content-mode run needs it for its `declared_intent_searched` entry and
     # has no `git` history to read it from.
-    with RepositorySnapshot(
-        repo, ref=snapshot_ref(repo, args.branch), paths=list(targets)
-    ) as snap:
+    try:
+        snap = RepositorySnapshot(repo, ref=snapshot_ref(repo, args.branch), paths=list(targets))
+    except vcs_client.VcsError as exc:
+        if exc.code == vcs_client.SNAPSHOT_TOO_LARGE:
+            raise ValidationError(
+                f"the files named by --path are too large for one snapshot ({exc}); fetch fewer at a time"
+            ) from exc
+        raise
+    with snap:
         for path, target in targets.items():
             content = snap.read_bytes(path)
             target.parent.mkdir(parents=True, exist_ok=True)

@@ -18868,8 +18868,9 @@ class ContentModeTestCase(BaseTestCase):
     -- that no remote and no credential reach this container, that a second
     run adds to the first -- are properties of what git does with the bytes,
     and a stubbed broker would only prove that the test agrees with itself.
-    What is stubbed is the HTTP hop, at `vcs_client.call`, which raises the
-    same exception type the real transport raises for a refusal.
+    What is stubbed is the HTTP hop, at `credential_proxy_client.vcs_call`,
+    which raises the same exception type the real transport raises for a
+    refusal.
 
     `run_cmd` is still the Recorder, so every other forge call is captured and
     any `git` the run tries to issue through it is visible. There should not
@@ -18911,11 +18912,14 @@ class ContentModeTestCase(BaseTestCase):
         self.broker.registry.default = forge
         routes = vcs_broker.route_table(self.broker)
         self.verbs = []
+        # (verb, payload) for every request the HTTP hop carried.
+        self.requests: list[tuple[str, dict]] = []
         # verb -> the exception the HTTP hop raises for it instead of answering.
         self.vcs_failures: dict[str, BaseException] = {}
 
         def call(endpoint, verb, payload):
             self.verbs.append(verb)
+            self.requests.append((verb, dict(payload)))
             if verb in self.vcs_failures:
                 raise self.vcs_failures[verb]
             try:
@@ -19031,7 +19035,10 @@ class ContentModeTestCase(BaseTestCase):
         # code-execution routes through the credential container to work.
         self.assertFalse((self.workspace / ".git").exists())
 
-    def test_no_git_command_is_issued_from_this_container(self):
+    def test_no_git_command_goes_through_run_cmd(self):
+        # The landing commits with the vcs client's local git, which never holds
+        # a remote; what must not happen is a `git` through the harness's own
+        # runner, the directory-mode path that pushes from this container.
         self.start()
         self.write_manifest(
             "clusters/prod-us-east/payments-netpol.yaml", "kind: NetworkPolicy\n"
@@ -19185,8 +19192,9 @@ class ContentModeTestCase(BaseTestCase):
         # feeds `existing` missed it. The landing finds it and adds to it.
         branch = self.publish_once()
         first = self.origin_git(["rev-parse", branch]).strip()
-        self.patch_attr("open_proposal_on", lambda repo, name: {"state": "OPEN", "baseRefName": "main"})
-        self.assertEqual(self.land(b"kind: NetworkPolicy\nspec: {}\n"), audit_report._GroupPush("main", True))
+        adopted = {"state": "OPEN", "baseRefName": "main"}
+        self.patch_attr("open_proposal_on", lambda repo, name: adopted)
+        self.assertEqual(self.land(b"kind: NetworkPolicy\nspec: {}\n"), audit_report._GroupPush("main", True, adopted))
         history = self.origin_git(["rev-list", branch]).split()
         self.assertIn(first, history)
         self.assertNotEqual(history[0], first)
@@ -19217,6 +19225,56 @@ class ContentModeTestCase(BaseTestCase):
             self.run_main(["grep", "--audit", AUDIT, "--pattern", "seed", "--prefix", "clusters/none"]), 0
         )
         self.assertEqual(json.loads(self.out.strip())["matches"], [])
+
+    def test_a_prefix_narrows_the_snapshot_list_and_grep_take(self):
+        self.publish_once()
+        branch = self.branch_for(make_doc())
+        for argv in (
+            ["list", "--audit", AUDIT, "--branch", branch, "--prefix", "clusters"],
+            ["grep", "--audit", AUDIT, "--branch", branch, "--pattern", "kind", "--prefix", "clusters"],
+        ):
+            with self.subTest(argv[0]):
+                before = len(self.requests)
+                self.assertEqual(self.run_main(argv), 0)
+                snapshots = [p for v, p in self.requests[before:] if v == "snapshot"]
+                self.assertEqual([p.get("paths") for p in snapshots], [["clusters"]])
+                self.assertTrue(json.loads(self.out.strip())["total"] >= 1)
+
+    def test_a_too_large_snapshot_names_the_prefix_option(self):
+        self.start()
+        self.vcs_failures["snapshot"] = credential_proxy_client.WorkspaceRequestError(
+            413, {"code": "SNAPSHOT_TOO_LARGE", "error": "over the ceiling. Name `paths` to take part of the tree."}
+        )
+        self.assertEqual(self.run_main(["list", "--audit", AUDIT]), 2)
+        self.assertIn("read a smaller directory with --prefix", self.err)
+        self.assertEqual(self.run_main(["fetch", "--audit", AUDIT, "--path", "README.md"]), 2)
+        self.assertIn("fetch fewer at a time", self.err)
+
+    def test_a_lone_carriage_return_in_a_match_is_one_match(self):
+        self.push_to_origin("legacy/app.yaml", b"namespace: payments\rlabels: {}\n")
+        self.start()
+        self.assertEqual(self.run_main(["grep", "--audit", AUDIT, "--pattern", "namespace"]), 0)
+        found = json.loads(self.out.strip())
+        self.assertEqual(found["total"], 1)
+        self.assertEqual([m["path"] for m in found["matches"]], ["legacy/app.yaml"])
+
+    def test_an_adopted_pull_request_is_refreshed_without_a_second_lookup(self):
+        branch = self.publish_once()
+        lookups = []
+
+        def adopt(repo, name):
+            lookups.append(name)
+            return {"number": 8, "state": "OPEN", "baseRefName": "main",
+                    "url": "https://github.com/acme/fleet/pull/8", "headRefName": name}
+
+        self.patch_attr("open_proposal_on", adopt)
+        creates = len(self.harness.forge_calls("proposal-create"))
+        self.start()
+        self.write_manifest("clusters/prod-us-east/payments-netpol.yaml", "kind: NetworkPolicy\nspec: {}\n")
+        self.assertEqual(self.run_finish(make_doc()), 0, self.err)
+        self.assertEqual(lookups, [branch])
+        self.assertEqual(len(self.harness.forge_calls("proposal-create")), creates)
+        self.assertTrue(self.harness.forge_calls("proposal-update"))
 
     def test_grep_over_a_file_that_is_not_utf8_names_the_cause(self):
         self.push_to_origin("legacy/app.yaml", "namespace: caf\u00e9\n".encode("latin-1"))
@@ -19446,6 +19504,9 @@ class ContentModeTestCase(BaseTestCase):
         self.assertEqual(self.copies_left(), [])
 
     def test_a_snapshot_a_killed_run_left_is_removed_once_it_is_stale(self):
+        ttl = patch.object(vcs_client, "COPY_TTL_HOURS", 24.0)
+        ttl.start()
+        self.addCleanup(ttl.stop)
         self.vcs_root.mkdir(parents=True, exist_ok=True)
         stale = self.vcs_root / f"{audit_report.SNAPSHOT_DIR_PREFIX}old"
         fresh = self.vcs_root / f"{audit_report.SNAPSHOT_DIR_PREFIX}new"
