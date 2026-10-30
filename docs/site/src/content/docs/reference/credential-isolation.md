@@ -286,6 +286,19 @@ kubectl run wi-check -n kubeagents-system --rm -it --restart=Never \
   -- gcloud auth print-access-token
 ```
 
+**The credential-proxy container restarts and its log ends without an error.** Read the previous container's exit first:
+
+```bash
+kubectl get pod -n kubeagents-system -l app=platform-agent-credential-proxy \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.containerStatuses[*].lastState.terminated}{"\n"}{end}'
+```
+
+`OOMKilled` with exit code 137 is the kernel killing the container for its memory limit. On cgroup v2 the kubelet arms the group kill, so one child over the limit takes the broker, Envoy and every command in flight with it, and the log stops mid-request. The broker's `memory high-water` and `memory limit reached` lines before the stop say what the container held and which process held it; `largest child so far` names the biggest child (the first such line is the startup command, `bootstrap`). The same figures are series on the metrics listener ([Observability](/kube-agents/concepts/observability/)).
+
+A `kubectl` child in the hundreds of MiB is a listing of a large cluster. The tool builds the whole list before it prints. The image's `kubectl` held 432 MiB listing 4,000 pods as JSON and 1.3 GiB as YAML, where the budget charges 128 MiB per request for the child (176 MiB with its output allowance). Size `spec.deployment.credentialProxy.resources.limits.memory` to hold the largest listing the fleet produces for every command that runs at once (eight at the slot cap). Add the 320 MiB of fixed reserves: 192 MiB for the broker and Envoy, 128 MiB for the content workspace. The 2Gi default holds eight requests of 176 MiB, not eight of 500 MiB.
+
+Any other exit is named by the container's PID 1 as `start-services: … exited with status …` or `… was killed by signal …`, the line its PID 1 writes before the container ends. A stop the kubelet sent to the container (a rollout, an eviction, a drain) reads `… stopped by signal 15 …` instead.
+
 **The broker exits during startup.** The credential runtime runs `CREDENTIAL_PROXY_BOOTSTRAP_COMMAND` before it begins serving, and a non-zero exit stops the container, so the Deployment never has a ready endpoint. The command's stdout and stderr go to the container's log. Bootstrap failures usually mean the Pod cannot reach the cluster or mint a token; see [Security & IAM](/kube-agents/reference/security-and-iam/) for the Workload Identity binding it depends on.
 
 ## Where to go next

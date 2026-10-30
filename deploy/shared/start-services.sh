@@ -46,6 +46,10 @@ set -euo pipefail
 # else mounts, so the wider mode does not widen who can read a credential.
 umask 0002
 
+# An exit status over this is a signal: status - SIGNAL_EXIT_BASE.
+# report_credential_path_exit reads it. Below the umask, like everything.
+readonly SIGNAL_EXIT_BASE=128
+
 # Below the umask, and nothing goes above it: `tests/test_startup_umask.py`
 # asserts the umask is the first line here that could create a file, because one
 # sitting under a `mkdir` reads as the control while doing none of its job.
@@ -488,6 +492,42 @@ terminate() {
   [[ -z "${envoy_pid}" ]] || kill "${envoy_pid}" 2>/dev/null || true
 }
 trap terminate EXIT INT TERM
+
+# What ended the container, said before it ends. Only the credential path's
+# two processes are waited on at the foot of this script, and when one of them
+# exits nothing else says which or how: the broker's own log stops mid-request
+# and Envoy's says nothing. A status over SIGNAL_EXIT_BASE is a signal; 137 is
+# SIGKILL, which is the kernel's OOM killer or the kubelet, and the container's
+# lastState (`OOMKilled`) says which. Under cgroup v2 the kubelet sets
+# memory.oom.group, so an OOM kill takes this script down with the process it
+# was for, and then no line is written at all: a restart with OOMKilled in
+# lastState and no line here is that case, and the broker's own memory
+# high-water lines before it are the record of what it held (#4315).
+report_credential_path_exit() {
+  local ended_pid="$1"
+  local status="$2"
+  local name="a credential-path process"
+  if [[ -z "${ended_pid}" && "${status}" -gt "${SIGNAL_EXIT_BASE}" ]]; then
+    # Nothing was waited for: the signal was this script's, the kubelet's
+    # stop, and `terminate` has already ended the credential-path processes
+    # for it (both in the broker role; the runtime alone in api-proxy).
+    echo "start-services: stopped by signal $((status - SIGNAL_EXIT_BASE)) (exit status ${status}) before a credential-path process exited; the container ends" >&2
+    return "${status}"
+  fi
+  if [[ -n "${ended_pid}" && "${ended_pid}" == "${runtime_pid}" ]]; then
+    name="the credential runtime"
+  elif [[ -n "${ended_pid}" && -n "${envoy_pid}" && "${ended_pid}" == "${envoy_pid}" ]]; then
+    name="envoy"
+  fi
+  if [[ "${status}" -gt "${SIGNAL_EXIT_BASE}" ]]; then
+    echo "start-services: ${name} (pid ${ended_pid}) was killed by signal $((status - SIGNAL_EXIT_BASE)) (exit status ${status}); the container ends" >&2
+  else
+    echo "start-services: ${name} (pid ${ended_pid}) exited with status ${status}; the container ends" >&2
+  fi
+  # Handed back so that, as the script's last command, the status it reports
+  # is the status the container exits with.
+  return "${status}"
+}
 
 # Workload Identity Federation, when the proxy shares a pod with the shell
 # sandbox. It has to run before anything that authenticates to GCP: the
@@ -937,6 +977,13 @@ fi
 # Only the credential-path services are waited on. The watcher and the drift
 # detector are absent from this list deliberately — see the header. envoy_pid is
 # empty in the api-proxy role, and `wait -n` rejects an empty argument, so it is
-# expanded unquoted.
+# expanded unquoted. `-p` names the one that exited; its status is the
+# container's, once report_credential_path_exit has said whose it was: the
+# report is the last command, and it returns the status it was given.
+# `-p` unsets its variable when no process was waited for, which a trapped
+# SIGTERM is, so the expansion carries a default or `set -u` ends the script
+# on this line instead of the report.
+exit_status=0
 # shellcheck disable=SC2086
-wait -n "${runtime_pid}" ${envoy_pid}
+wait -n -p ended_pid "${runtime_pid}" ${envoy_pid} || exit_status=$?
+report_credential_path_exit "${ended_pid-}" "${exit_status}"
