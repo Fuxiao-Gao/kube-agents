@@ -339,6 +339,8 @@ func TestTheScopeResolvedCondition(t *testing.T) {
 		{"another hash", agent, doc("ok", "sha256:old", time.Minute), metav1.ConditionFalse, "HashMismatch", 0},
 		{"too large", agent, doc("too-large", hash, time.Minute), metav1.ConditionFalse, "TooLarge", 0},
 		{"error", agent, doc("error", hash, time.Minute), metav1.ConditionFalse, "Error", 0},
+		{"within the clock skew allowance", agent, doc("ok", hash, -30*time.Second), metav1.ConditionTrue, "Resolved", 40*time.Minute + 30*time.Second},
+		{"later than the clock", agent, doc("ok", hash, -50*time.Minute), metav1.ConditionFalse, "Missing", 0},
 	}
 	// A document value the message quotes is cut, so a ConfigMap writer
 	// cannot push the message past the CRD's limit and fail every status

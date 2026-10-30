@@ -189,6 +189,10 @@ const (
 	// quotes: the publisher's ConfigMap is not trusted to keep the message
 	// under the CRD's limit, and a status write over it fails whole.
 	scopeDocumentQuoteLimit = 64
+	// scopeClockSkewAllowance is how far past the operator's clock a
+	// resolvedAt may be and still read as fresh. Beyond it the document is
+	// not fresh: a stamp in the future would hold Resolved past the bound.
+	scopeClockSkewAllowance = time.Minute
 )
 
 // scopeResolvedConfigMapName is the resolved-scope ConfigMap's name.
@@ -678,6 +682,9 @@ func scopeResolvedCondition(agent *agentv1alpha1.PlatformAgent, data map[string]
 	// fractional-second digits, so doc.ResolvedAt itself has no length bound.
 	stamp := resolvedAt.UTC().Format(time.RFC3339)
 	switch {
+	case resolvedAt.After(now.Add(scopeClockSkewAllowance)):
+		condition.Reason = scopeResolvedReasonMissing
+		condition.Message = fmt.Sprintf("the resolved scope's resolvedAt %s is later than the operator's clock, so it is not a fresh document", stamp)
 	case doc.State == scopeStateTooLarge:
 		condition.Reason = scopeResolvedReasonTooLarge
 		condition.Message = fmt.Sprintf("the resolved scope at %s was larger than the ConfigMap allows, so it lists no project", stamp)
