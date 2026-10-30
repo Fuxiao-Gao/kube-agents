@@ -130,6 +130,14 @@ EXIT_NOT_WRITTEN = 1
 # members only. The management project and explicit projects are admitted by the gateway
 # from its own environment and `scope.json`.
 ROW_EXCLUDED_VIAS = (rec.VIA_MANAGEMENT, rec.VIA_EXPLICIT)
+# How many broker commands the run has in flight at once. The broker gives the `scope` caller
+# one command slot by default, so the shell keeps its own beside the profile workers, and it
+# refuses a command past that slot at once (503) rather than queue it; a second command in
+# flight would read `unreachable` for no reason of its own. The listing budget is the
+# reconcile's, sized for LIST_WORKERS at a time, so at this width each command gets a quarter
+# of the time; one still running when the budget is spent reads `unreachable`, and its row
+# keeps the confirmation it had.
+SCOPE_WORKERS = 1
 # The outcomes `_resolve_projects` gives a member a source listed this run: None for a
 # selector member it named, `ok` for a container member. These are probed. Any other
 # outcome is a member every one of whose sources failed, which keeps its previous row, or a
@@ -369,10 +377,10 @@ def build_document(declared: dict, management: str | None, previous: dict | None
     deadline = time.monotonic() + budget
     patterns = scope[EXCLUDE_KEY][EXCLUDE_PROJECTS_KEY]
     groups = rec._resolve_groups(rec._container_ids(scope) + rec._selector_ids(scope), deadline,
-                                 rec.LIST_WORKERS, budget)
+                                 SCOPE_WORKERS, budget)
     searches = {g: r for g, r in groups.items() if rec._is_container(g)}
     selector_reports = {g: r for g, r in groups.items() if rec._is_selector(g)}
-    selections = rec._selector_members(selector_reports, looked_up, deadline, patterns, rec.LIST_WORKERS, budget)
+    selections = rec._selector_members(selector_reports, looked_up, deadline, patterns, SCOPE_WORKERS, budget)
     # With no management project named, its slot is still reserved: the cap passed on is one
     # smaller, which is what `_resolve_projects` makes of a management project it counts.
     entries, _, _, _ = rec._resolve_projects(management, scope, searches, looked_up, selections,
@@ -387,7 +395,7 @@ def build_document(declared: dict, management: str | None, previous: dict | None
                for e in counted if e[ROW_ID] not in member_ids
                and any(rec._is_container(via) or rec._is_selector(via) for via in e[ROW_VIA])]
     probes = rec._bounded_map(rec._list_project, [e[ROW_ID] for e in members if e[ROW_OUTCOME] in LISTED_OUTCOMES],
-                              deadline, "probing", rec.LIST_WORKERS, budget,
+                              deadline, "probing", SCOPE_WORKERS, budget,
                               consequence="its row is not confirmed this run")
     rows_before = {row[ROW_ID]: row for row in (previous or {}).get(DOC_PROJECTS, [])
                    if isinstance(row, dict) and isinstance(row.get(ROW_ID), str)}

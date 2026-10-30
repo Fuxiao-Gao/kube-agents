@@ -380,6 +380,8 @@ MANAGEMENT = "mgmt-project"
 # the run is held by that lookup rather than by the budget (only a regression reaches it).
 SHORT_BUDGET_SECONDS = 0.2
 SYNC_FAILURE_TIMEOUT_SECONDS = 10.0
+# Long enough that two commands run in parallel would overlap.
+OVERLAP_WINDOW_SECONDS = 0.02
 FOLDER_A = "folders/111111111111"
 FOLDER_B = "folders/222222222222"
 ORG = "organizations/333333333333"
@@ -676,6 +678,30 @@ class BuildDocumentTest(unittest.TestCase):
         broker = FakeBroker(assets={FOLDER_A: ["team-a"]})
         document = self._build(broker, _scope(folders=[FOLDER_A.split("/")[1]]), previous)
         self.assertEqual(list(self._rows(document)), ["team-a"])
+
+    def test_the_run_has_one_broker_command_in_flight_at_a_time(self):
+        broker = FakeBroker(assets={FOLDER_A: ["a-1-project", "a-2-project"], FOLDER_B: ["b-1-project"]},
+                            xpn={"host-project": ["svc-proj-a"]}, scopes={"scope-project": ["111", "222"]},
+                            names={"111": "mon-proj-a", "222": "mon-proj-b"})
+        lock, state = threading.Lock(), {"now": 0, "most": 0}
+        answer = broker.__call__
+
+        def counted(argv, *, check, timeout):
+            with lock:
+                state["now"] += 1
+                state["most"] = max(state["most"], state["now"])
+            try:
+                time.sleep(OVERLAP_WINDOW_SECONDS)
+                return answer(argv, check=check, timeout=timeout)
+            finally:
+                with lock:
+                    state["now"] -= 1
+
+        with mock.patch.object(rec, "COMMAND_RUNNER", counted):
+            document = pub.build_document(_scope(folders=["111111111111", "222222222222"], sharedVpcHosts=["host-project"],
+                                                 metricsScopes=["scope-project"]), MANAGEMENT, None)
+        self.assertEqual(len(document["projects"]), 6)
+        self.assertEqual(state["most"], 1)
 
     def test_a_source_that_hangs_does_not_hold_the_run_past_its_budget(self):
         released = threading.Event()
