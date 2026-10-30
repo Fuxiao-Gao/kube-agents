@@ -234,8 +234,9 @@ the runner holds those streams' locks while it runs; see
 [bench-case-format.md](../docs/designs/bench-case-format.md).
 
 A task whose precondition is an install that leaves some seeded clusters out of its scope
-declares `scope_exclude: {slots: [...]}`, and the runner excludes those slots' clusters for its
-repetitions alone; see [bench-case-format.md](../docs/designs/bench-case-format.md).
+declares `scope_exclude: {slots: [...]}` (with an optional `absent: <n>` for clusters that do not
+exist), and the runner excludes those slots' clusters for its repetitions alone; see
+[bench-case-format.md](../docs/designs/bench-case-format.md).
 
 A task may also carry a top-level `expected_fail: true`, which inverts the presubmit's verdict for
 it: failing is the declared outcome, and _passing_ every repetition is what reports. That is the
