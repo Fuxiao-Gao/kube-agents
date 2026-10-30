@@ -5117,6 +5117,8 @@ func TestGatewayHoldsNoWholesaleJetStreamAPI(t *testing.T) {
 		"a2a.tasks.*.*.supervisor",
 		// A profile task's submission; the gateway is its one writer.
 		"a2a.submit.*.*.*.*",
+		// A profile task's stop record; the gateway is its one writer too.
+		"a2a.stop.*.*",
 		"$KV.session-state.>",
 		"$KV.feedback.>",
 		"chat.console.*.out",

@@ -679,7 +679,10 @@ end reaches a profile parent as a `childResult` message on the parent's `.in`, w
 reads while it waits open, and the parent holds the conversation again, so a stop or a steer
 reaches it. A session parent is woken as before. A top-level profile task's own end is its
 chain's end, delegated or not. A stop while the child runs cancels the child and every profile
-task waiting open above it. The cards are re-read every five minutes, so a card or tombstone
+task waiting open above it. Beside each profile task's cancel, the gateway writes a stop record,
+`{"v":1,"taskId":…}` on `a2a.stop.<profile>.<task>` in the `DISPATCH_STOPS` stream, for the
+dispatcher, which has no read on `.in`. The gateway is the record's one writer, and a task
+addressed to platform or a session gets none. The cards are re-read every five minutes, so a card or tombstone
 published while the gateway's connection was down is picked up, and a profile no longer on
 `DIRECTORY` is forgotten. The delegate tool
 the worker adapter serves still offers no `parameters`, so a session can delegate to a pinned

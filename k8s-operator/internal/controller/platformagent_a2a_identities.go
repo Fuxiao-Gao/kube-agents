@@ -300,6 +300,12 @@ const a2aBridgeAddressee = "platform"
 // stream right there, and its publish ack returns on _INBOX.gateway.>.
 const a2aProfileSubmitSubjects = "a2a.submit.*.*.*.*"
 
+// a2aDispatchStopSubjects is every profile task's stop record,
+// a2a.stop.<profile>.<task> (lib.DispatchStopSubject), on the DISPATCH_STOPS
+// stream. Publish only, like the submission: the gateway writes a record
+// beside each cancel it sends a profile task, and the dispatcher reads it.
+const a2aDispatchStopSubjects = "a2a.stop.*.*"
+
 // The operator's own bus principal: its NATS user and inbox owner, and the
 // directory it writes AgentProfile cards to (agentprofile_card.go).
 const (
@@ -424,6 +430,10 @@ func gatewayIdentity(agent *agentv1alpha1.PlatformAgent, ns string) a2aIdentity 
 		// The gateway is the subject's one writer: the dispatcher reads it
 		// through its durables, and no worker or session holds it.
 		a2aProfileSubmitSubjects,
+		// A stop for a profile task, the record the dispatcher reads in place
+		// of the task's `…in` (addendum 9 on #3655). The gateway is its one
+		// writer.
+		a2aDispatchStopSubjects,
 		// The session registry's data plane. The bucket is spelled here and
 		// named by constant inside the grant function; the two are held
 		// together by TestGatewayGrantNamesTheBucketItsDataPlaneWritesTo,

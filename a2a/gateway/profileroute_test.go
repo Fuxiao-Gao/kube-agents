@@ -396,6 +396,90 @@ func TestAStopWhileAProfileChildRunsCancelsTheWaitingParent(t *testing.T) {
 	}
 	waitFor(t, "the child's cancel", func() bool { return cancelled("prod-east", childEnv.TaskID) })
 	waitFor(t, "the waiting parent's cancel", func() bool { return cancelled("chat", origin.TaskID) })
+	// Each profile task in the tree gets its stop record too, for the
+	// dispatcher, which has no read on `…in`.
+	for _, task := range []struct{ profile, id string }{{"prod-east", childEnv.TaskID}, {"chat", origin.TaskID}} {
+		waitFor(t, "the stop record for "+task.profile, func() bool {
+			stop, ok := dispatchStopFor(t, r.url, task.profile, task.id)
+			return ok && stop.V == 1 && stop.TaskID == task.id
+		})
+	}
+}
+
+// TestAStopOfAPlatformTaskWritesNoStopRecord: the record is the dispatcher's,
+// and a task addressed to platform never went through it.
+func TestAStopOfAPlatformTaskWritesNoStopRecord(t *testing.T) {
+	r := startProfileRig(t)
+	conv := "discord:8/8"
+	r.adapter.inbox <- InboundMessage{Conversation: conv, Kind: "dm", AuthorID: "1001", MessageID: "m-8a", Text: "how is the fleet?"}
+	origin := r.awaitTask(t, "platform")
+	r.adapter.inbox <- InboundMessage{Conversation: conv, Kind: "dm", AuthorID: "1001", MessageID: "stop-8", Text: "stop"}
+	waitFor(t, "the cancel", func() bool {
+		for _, e := range streamEnvelopes(t, r.url, lib.TaskInSubject("platform", origin.TaskID)) {
+			if e.env.Kind == lib.KindCancel {
+				return true
+			}
+		}
+		return false
+	})
+	if n := dispatchStopCount(t, r.url); n != 0 {
+		t.Fatalf("a platform task's stop wrote %d stop records", n)
+	}
+}
+
+// dispatchStopFor reads a task's stop record the way the dispatcher does: a
+// direct get of the last message on its subject.
+func dispatchStopFor(t *testing.T, url, profile, taskID string) (*lib.DispatchStop, bool) {
+	t.Helper()
+	nc, err := nats.Connect(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nc.Close()
+	js, err := jetstream.New(nc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stream, err := js.Stream(ctx, lib.DispatchStopStream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := stream.GetLastMsgForSubject(ctx, lib.DispatchStopSubject(profile, taskID))
+	if err != nil {
+		return nil, false
+	}
+	var stop lib.DispatchStop
+	if err := json.Unmarshal(msg.Data, &stop); err != nil {
+		t.Fatalf("stop record %s: %v", msg.Subject, err)
+	}
+	return &stop, true
+}
+
+// dispatchStopCount is how many stop records the stream holds.
+func dispatchStopCount(t *testing.T, url string) uint64 {
+	t.Helper()
+	nc, err := nats.Connect(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nc.Close()
+	js, err := jetstream.New(nc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stream, err := js.Stream(ctx, lib.DispatchStopStream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := stream.Info(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.State.Msgs
 }
 
 func TestAProfileTurnWhileATaskRunsIsRefusedNotSteered(t *testing.T) {

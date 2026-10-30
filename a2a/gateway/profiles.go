@@ -596,6 +596,21 @@ func truncateBytes(s string, n int) string {
 	return s[:n]
 }
 
+// publishDispatchStop writes the stop record for a profile task, beside the
+// cancel already sent on its `…in`: the dispatcher has no read on `…in`, and
+// a task it still holds queued is dropped when its record appears (addendum 9
+// on #3655). A task addressed to platform or a session has no record. A
+// failed publish is logged and leaves the cancel standing: a held task still
+// gets the cancel, and only one still queued would run.
+func (g *Gateway) publishDispatchStop(ctx context.Context, ref TaskRef) {
+	if ref.Tier == "" {
+		return
+	}
+	if err := g.client.PublishDispatchStop(ctx, ref.Addressee, ref.ID); err != nil {
+		g.log.Error("dispatch stop record failed", "taskId", ref.ID, "profile", ref.Addressee, "err", err)
+	}
+}
+
 // cancelWaitingProfileParents cancels the AgentProfile tasks waiting open on
 // taskID, parent by parent up the chain, so a stop cancels the task tree
 // (spec-profiles-dispatch.md, "Results and stop") and not only the child that
@@ -621,6 +636,7 @@ func (g *Gateway) cancelWaitingProfileParents(ctx context.Context, rec *SessionR
 				return
 			}
 			rec.MarkCanceled(parent.ID)
+			g.publishDispatchStop(ctx, parent)
 		}
 		ref, ok = parent, true
 	}

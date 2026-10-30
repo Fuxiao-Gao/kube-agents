@@ -2824,6 +2824,9 @@ func (g *Gateway) cancelTaskVoiced(ctx context.Context, rec *SessionRecord, auth
 		g.post(rec.Key, "🛑 cancel sent — the task ends when the executor confirms")
 	}
 	g.observeCancel(rec, active.TaskID)
+	if ref, ok := rec.TaskRefFor(active.TaskID); ok {
+		g.publishDispatchStop(ctx, ref)
+	}
 	g.cancelWaitingProfileParents(ctx, rec, active.TaskID, authority)
 	return true
 }

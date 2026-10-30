@@ -2253,6 +2253,16 @@ Mutation(
         "infrastructure",
     ),
     Mutation(
+        "A3-bridge-writes-stop-records",
+        "k8s-operator/internal/controller/platformagent_a2a_identities.go",
+        ('\t\t"a2a.tasks." + a2aBridgeAddressee + ".*.events",\n\t\t"$KV.runtime-state.>",',
+         '\t\t"a2a.tasks." + a2aBridgeAddressee + ".*.events",\n\t\t"a2a.stop.*.*",\n\t\t"$KV.runtime-state.>",'),
+        "test_A3_the_stop_record_has_exactly_one_writer",
+        "grant the static bridge publish on profiles' stop records, so the "
+        "platform agent can stop a profile task it delegated. It can then stop "
+        "tasks other requesters started",
+    ),
+    Mutation(
         "A3-bridge-submits-profile-tasks",
         "k8s-operator/internal/controller/platformagent_a2a_identities.go",
         ('\t\t"a2a.tasks." + a2aBridgeAddressee + ".*.events",\n\t\t"$KV.runtime-state.>",',

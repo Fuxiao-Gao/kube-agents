@@ -1096,6 +1096,30 @@ class A3TheTaskPlaneSubjectSaysWhoWroteIt(unittest.TestCase):
                 "subject; a worker that can write there can start tasks of its own",
             )
 
+    STOP_PROBE = "a2a.stop.cluster.task-0001"
+
+    def test_A3_the_stop_record_has_exactly_one_writer(self) -> None:
+        """A profile task's stop record is written by the gateway and nobody else.
+
+        The dispatcher drops a queued task, or cancels a held one, when its
+        stop record appears, without reading the task's `…in`. A second
+        writer could stop another requester's task. The dispatcher's own
+        publish on `a2a.dispatch.*.*.*` doesn't reach the record's root,
+        `a2a.stop`, and no session or profile worker derives a grant there.
+        """
+        writers = sorted(
+            builder
+            for builder, grants in self._rendered_publish_grants().items()
+            if any(self._subject_matches(g, self.STOP_PROBE) for g in grants)
+        )
+        self.assertEqual(["gateway"], writers)
+        self.assertNotIn(
+            "a2a.stop",
+            self._session_publish_derivation(),
+            "the callout derives an executor a publish grant on a stop record; "
+            "a worker that can write there can stop other requesters' tasks",
+        )
+
     NOTIFY_PROBE = "chat.notify.gchat"
     NOTIFY_SLACK_PROBE = "chat.notify.slack"
     NOTIFY_CONSOLE_PROBE = "chat.notify.console"
