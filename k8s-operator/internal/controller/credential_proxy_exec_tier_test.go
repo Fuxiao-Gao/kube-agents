@@ -322,6 +322,51 @@ func TestTheExecTierMountsNoForgeCredentials(t *testing.T) {
 	}
 }
 
+// A Secret the broker gains later, as a volume or a projected source, does not
+// reach the exec pods: they are dropped by source, not by name.
+func TestTheExecTierDropsEverySecretBackedVolume(t *testing.T) {
+	agent := gitlabAgent("gitlab-token")
+	agent.Spec.Deployment = &agentv1alpha1.DeploymentSpec{
+		CredentialProxy: &agentv1alpha1.CredentialProxySpec{Exec: &agentv1alpha1.CredentialProxyExecSpec{Replicas: ptr.To(int32(2))}},
+	}
+	broker := buildCredentialProxyDeployment(agent, "hash")
+	spec := &broker.Spec.Template.Spec
+	spec.Volumes = append(spec.Volumes,
+		corev1.Volume{Name: "future-secret", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "x"}}},
+		corev1.Volume{Name: "future-projected", VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
+			Sources: []corev1.VolumeProjection{{Secret: &corev1.SecretProjection{LocalObjectReference: corev1.LocalObjectReference{Name: "y"}}}},
+		}}},
+	)
+	c := &spec.Containers[0]
+	c.VolumeMounts = append(c.VolumeMounts,
+		corev1.VolumeMount{Name: "future-secret", MountPath: "/future/secret"},
+		corev1.VolumeMount{Name: "future-projected", MountPath: "/future/projected"},
+	)
+	dep := buildCredentialProxyExecTierDeployment(agent, broker)
+	kept := map[string]bool{}
+	for _, v := range dep.Spec.Template.Spec.Volumes {
+		kept[v.Name] = true
+		if volumeHoldsSecret(v) {
+			t.Errorf("exec pod has Secret-backed volume %s", v.Name)
+		}
+	}
+	for _, ctr := range dep.Spec.Template.Spec.Containers {
+		for _, m := range ctr.VolumeMounts {
+			if !kept[m.Name] {
+				t.Errorf("container %s mounts %s, a volume the exec pod does not have", ctr.Name, m.Name)
+			}
+		}
+		for _, e := range ctr.Env {
+			if e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil {
+				t.Errorf("container %s reads %s from a Secret", ctr.Name, e.Name)
+			}
+		}
+	}
+	if !kept["credential-proxy-ksa-token"] || !kept["credential-proxy-policy"] {
+		t.Error("exec pod lost a volume that holds no Secret")
+	}
+}
+
 // Callers on the credentialed port: the sandbox always, the profile namespace
 // only with a profile caller, and never the gateway.
 func TestTheExecTierFenceAdmitsItsCallersOnly(t *testing.T) {

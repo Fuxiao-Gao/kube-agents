@@ -63,6 +63,10 @@ const (
 	// broker.
 	credentialProxyExecTierPDBMinReplicas = 2
 	credentialProxyExecTierMaxUnavailable = 1
+	// The broker container's request port name, which the Service targets.
+	credentialProxyExecTierPortName = "cred-proxy"
+	labelAppKey                     = "app"
+	labelComponentKey               = "kubeagents.x-k8s.io/component"
 )
 
 // credentialProxyExecTierEnvDropped names the broker env the exec tier does
@@ -88,8 +92,8 @@ func credentialProxyExecTierReplicasName(agent *agentv1alpha1.PlatformAgent) str
 // send chat and workspace calls to an exec pod, and the reverse.
 func credentialProxyExecTierSelector(agent *agentv1alpha1.PlatformAgent) map[string]string {
 	return map[string]string{
-		"app":                           credentialProxyExecTierName(agent),
-		"kubeagents.x-k8s.io/component": credentialProxyExecTierComponent,
+		labelAppKey:       credentialProxyExecTierName(agent),
+		labelComponentKey: credentialProxyExecTierComponent,
 	}
 }
 
@@ -101,13 +105,6 @@ func credentialProxyExecTierReplicas(agent *agentv1alpha1.PlatformAgent) int32 {
 		return 0
 	}
 	return *d.CredentialProxy.Exec.Replicas
-}
-
-// credentialProxyExecTierURL is the exec Service's address, for the callers'
-// CREDENTIAL_PROXY_EXEC_URL.
-func credentialProxyExecTierURL(agent *agentv1alpha1.PlatformAgent) string {
-	return fmt.Sprintf("http://%s.%s.svc.cluster.local:%d",
-		credentialProxyExecTierName(agent), agent.Namespace, credentialProxyPort)
 }
 
 func credentialProxyExecTierResources() corev1.ResourceRequirements {
@@ -129,16 +126,17 @@ func credentialProxyExecTierResources() corev1.ResourceRequirements {
 //   - CREDENTIAL_PROXY_ROLE=exec, and the replica count mounted from the
 //     ConfigMap;
 //   - fixed resources;
-//   - no env read from a Secret (chat, Teams and plugin credentials), no forge
-//     credentials and no relay or workspace settings: exec never uses them, so
-//     scaling out copies no secret.
+//   - no Secret: no Secret-backed volume (forge credentials and CA bundles
+//     included) and no env read from one (chat, Teams and plugin credentials),
+//     dropped by source rather than by name so a Secret the broker gains later
+//     does not reach N exec pods; and no forge, relay or workspace settings.
 func buildCredentialProxyExecTierDeployment(agent *agentv1alpha1.PlatformAgent, broker *appsv1.Deployment) *appsv1.Deployment {
 	dep := broker.DeepCopy()
 	name := credentialProxyExecTierName(agent)
 	selector := credentialProxyExecTierSelector(agent)
 	dep.ObjectMeta = metav1.ObjectMeta{Name: name, Namespace: agent.Namespace}
 	withCommonLabels(dep, agent)
-	dep.Labels["app"] = name
+	dep.Labels[labelAppKey] = name
 	dep.Spec.Replicas = ptr.To(credentialProxyExecTierReplicas(agent))
 	dep.Spec.Strategy = appsv1.DeploymentStrategy{Type: appsv1.RollingUpdateDeploymentStrategyType}
 	dep.Spec.Selector = &metav1.LabelSelector{MatchLabels: selector}
@@ -150,9 +148,11 @@ func buildCredentialProxyExecTierDeployment(agent *agentv1alpha1.PlatformAgent, 
 	dep.Spec.Template.Labels = podLabels
 	delete(dep.Spec.Template.Annotations, secretEnvHashAnnotation)
 
-	forgeVolumes := map[string]bool{}
-	for _, v := range buildVCSForgesVolumes(agent) {
-		forgeVolumes[v.Name] = true
+	dropped := map[string]bool{}
+	for _, v := range dep.Spec.Template.Spec.Volumes {
+		if volumeHoldsSecret(v) {
+			dropped[v.Name] = true
+		}
 	}
 	forgeEnv := map[string]bool{}
 	for _, e := range buildVCSForgesEnv(agent) {
@@ -168,7 +168,7 @@ func buildCredentialProxyExecTierDeployment(agent *agentv1alpha1.PlatformAgent, 
 	spec := &dep.Spec.Template.Spec
 	volumes := spec.Volumes[:0]
 	for _, v := range spec.Volumes {
-		if !forgeVolumes[v.Name] {
+		if !dropped[v.Name] {
 			volumes = append(volumes, v)
 		}
 	}
@@ -207,7 +207,7 @@ func buildCredentialProxyExecTierDeployment(agent *agentv1alpha1.PlatformAgent, 
 		c.EnvFrom = envFrom
 		mounts := c.VolumeMounts[:0]
 		for _, m := range c.VolumeMounts {
-			if !forgeVolumes[m.Name] && !forgeMounts[m.MountPath] {
+			if !dropped[m.Name] && !forgeMounts[m.MountPath] {
 				mounts = append(mounts, m)
 			}
 		}
@@ -226,14 +226,30 @@ func buildCredentialProxyExecTierService(agent *agentv1alpha1.PlatformAgent) *co
 		Spec: corev1.ServiceSpec{
 			Selector: credentialProxyExecTierSelector(agent),
 			Ports: []corev1.ServicePort{{
-				Name:       "cred-proxy",
+				Name:       credentialProxyExecTierPortName,
 				Port:       credentialProxyPort,
-				TargetPort: intstr.FromString("cred-proxy"),
+				TargetPort: intstr.FromString(credentialProxyExecTierPortName),
 			}},
 		},
 	}
 	withCommonLabels(svc, agent)
 	return svc
+}
+
+// volumeHoldsSecret reports whether a volume's content comes from a Secret,
+// directly or as a projected source.
+func volumeHoldsSecret(v corev1.Volume) bool {
+	if v.Secret != nil {
+		return true
+	}
+	if v.Projected != nil {
+		for _, src := range v.Projected.Sources {
+			if src.Secret != nil {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // buildCredentialProxyExecTierReplicasConfigMap holds the replica count the
@@ -380,7 +396,7 @@ func (r *PlatformAgentReconciler) removeCredentialProxyExecTier(ctx context.Cont
 // is left.
 func (r *PlatformAgentReconciler) credentialProxyExecTierPodsGone(ctx context.Context, agent *agentv1alpha1.PlatformAgent) (bool, error) {
 	pods := &corev1.PodList{}
-	if err := r.List(ctx, pods, client.InNamespace(agent.Namespace), client.MatchingLabels(credentialProxyExecTierSelector(agent))); err != nil {
+	if err := r.podReader().List(ctx, pods, client.InNamespace(agent.Namespace), client.MatchingLabels(credentialProxyExecTierSelector(agent))); err != nil {
 		return false, err
 	}
 	return len(pods.Items) == 0, nil
