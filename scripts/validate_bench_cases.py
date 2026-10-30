@@ -285,11 +285,6 @@ KNOWN_UNREGISTERED = {
 # (merging plants nothing; the reconcile's postsubmit does) and goes in the
 # later pull request that moves the case to the nightly file.
 FIXTURE_NOT_READY = {
-    "cluster-agent-scaled-zero-gateway-silence": (
-        "#4098: needs bench/tf/fleet's scaled-zero-gateway role on every pool project "
-        "(the postsubmit reconcile) and stall_report.py's scale-to-zero rule for Gateways "
-        "and HTTPRoutes; without the rule the case is red every run"
-    ),
     # Needs Config Sync's RootSync CRD and one root-sync object reporting
     # Stalled=True on a seeded cluster. No pool project enables the GKE Hub
     # API, so Config Sync is installed nowhere, and the seeded fleet plants no
