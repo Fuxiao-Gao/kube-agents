@@ -11246,7 +11246,8 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
         ROUTE_ROLES by `_authenticated`; what happens here, in order, is the
         normal-form check on the caller's text, the `api_policy` decision, the
         upstream request with exactly the broker's two headers, and the
-        passthrough of the upstream's status, `Content-Type` and body. Two
+        passthrough of the upstream's status, `Content-Type` and body (a 2xx body
+        cut down by the route's projection, when it has one). Two
         audit lines per request, on the exec route's pattern: one before the
         decision and exactly one verdict -- rejected, blocked, forwarded, or
         one of the upstream failures. `host` and `path` are caller text and go through
@@ -11353,6 +11354,29 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
                 },
             )
             return
+        projection = api_policy.response_projection(decision.rule_id)
+        if projection is not None and HTTPStatus.OK <= upstream.status < HTTPStatus.MULTIPLE_CHOICES:
+            # The route hands back only what its projection keeps (the GKE cluster
+            # routes drop `masterAuth`, which can carry a client key). A body the
+            # projection cannot read is answered 502 rather than relayed whole.
+            projected = projection(upstream.body)
+            if projected is None:
+                LOGGER.warning(
+                    "api response unprojectable request_id=%s host=%s rule=%s status=%d",
+                    request_id,
+                    host,
+                    decision.rule_id,
+                    upstream.status,
+                )
+                self._json(
+                    HTTPStatus.BAD_GATEWAY,
+                    {
+                        "error": "the upstream answer was not the shape this route relays",
+                        "code": "UPSTREAM_UNEXPECTED",
+                    },
+                )
+                return
+            upstream = replace(upstream, body=projected)
         LOGGER.info(
             "api forwarded request_id=%s host=%s status=%d bytes=%d duration_ms=%d",
             request_id,
