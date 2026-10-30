@@ -864,3 +864,24 @@ on: the sandbox restarts with the variable before an exec replica is ready.
     copies it from `/proc` cannot present it (§4.1)?
 13. Should the exec tier get a HorizontalPodAutoscaler, with `exec.replicas` as its floor (§9 step
     1)? The CPU and admission signals above are what it would scale on.
+
+## 12. Implementation contract
+
+The names and shapes that the implementation shares. The operator, the broker, the shim and the
+chart use these exact values. A Python block in `credential_proxy_client.py` holds the broker's
+and the shim's copies, and `test_exec_tier_contract.py` checks that they match this section.
+
+| Item                  | Value                                                                                                                                                                                                                                             |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CR field              | `spec.deployment.credentialProxy.exec.replicas`: an integer from 0 to 32, default 0. At 0 the operator renders no exec workload and sets no exec URL. Each replica requests and is limited to 2 CPU and 2 GiB (§3.3); there is no override field. |
+| Workload names        | Deployment, Service and PodDisruptionBudget `<agent>-credential-proxy-exec`; ConfigMap `<agent>-credential-proxy-exec-replicas`. Port 8765 for requests, 8766 for metrics.                                                                        |
+| Labels                | `app: <agent>-credential-proxy-exec` and `kubeagents.x-k8s.io/component: credential-proxy-exec`. Not the stateful broker's labels, and no `kubeagents.x-k8s.io/has-credential-proxy`.                                                             |
+| Broker role           | `CREDENTIAL_PROXY_ROLE=exec`. An exec pod runs the broker and Envoy only: no watchers and no relays.                                                                                                                                              |
+| Exec routes           | `POST /v1/exec`, `GET /v1/gcp/…`, `GET /v1/exec/admission`, `/healthz` and metrics. Every other route answers 404 on an exec pod. The `scope` role's `/v1/exec` call is refused there, because its member window lives on the stateful pod.       |
+| Caller URL            | `CREDENTIAL_PROXY_EXEC_URL`, the exec Service's URL, for the sandbox, session pods and profile workers; the A2A gateway reads it from `A2A_CREDENTIAL_PROXY_EXEC_URL`. Unset at 0 replicas, so callers use `CREDENTIAL_PROXY_URL`.                |
+| Replica count in pods | The ConfigMap's key `replicas`, mounted at `/etc/credential-proxy-exec/replicas`; `CREDENTIAL_PROXY_EXEC_REPLICAS_FILE` names that path. A scale change rewrites the ConfigMap and does not restart the pods.                                     |
+| Busy reply            | HTTP 503 `{"status": "busy", "code": "CREDENTIAL_PROXY_BUSY", "bound": "<bound>", "error": "…"}`. The bounds are `slot`, `budget`, `refresh-lock`, `session`, `profile`, `draining` and `other`.                                                  |
+| Shim retry            | Once, on a new connection, for the bounds `slot`, `budget`, `draining` and `profile`; never for the others, and never after a dropped connection.                                                                                                 |
+| Connect fallback      | When a connection to `CREDENTIAL_PROXY_EXEC_URL` cannot be made, the shim sends the request to `CREDENTIAL_PROXY_URL` and writes one stderr line.                                                                                                 |
+| Classes               | `interactive` and `background`; the metric label is `class`, on the admission wait, the refusals and the command duration.                                                                                                                        |
+| Audit fields          | `broker_tier` (`exec` or `stateful`), `class` and `broker_pod` on each tool-execution record.                                                                                                                                                     |
