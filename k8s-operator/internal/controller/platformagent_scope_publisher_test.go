@@ -373,10 +373,10 @@ func TestTheScopeResolvedCondition(t *testing.T) {
 
 // The broker's side follows two gates. Under mode next it reads the
 // declaration (the mount and CREDENTIAL_PROXY_SCOPE_FILE). While the
-// operator says the gateway pod admission policy is rendered, its fence
-// admits the publisher pods, and for an account this PlatformAgent owns it
-// also confers the scope role: the audience and the publisher's username
-// on both lists.
+// operator says the gateway pod admission policy is rendered and the scope
+// declares something to resolve, its fence admits the publisher pods; when
+// the account is also this PlatformAgent's, it confers the scope role: the
+// audience and the publisher's username on both lists.
 func TestTheBrokerConfersTheScopeRoleOnlyBehindTheGatewayPodPolicy(t *testing.T) {
 	type want struct{ file, role, peer bool }
 	cases := []struct {
@@ -425,14 +425,6 @@ func TestTheBrokerConfersTheScopeRoleOnlyBehindTheGatewayPodPolicy(t *testing.T)
 			if mounted != tc.want.file || volume != tc.want.file {
 				t.Errorf("declaration mounted %v, volume %v, want %v", mounted, volume, tc.want.file)
 			}
-			// Beside the forge CA mounts, never above them: a mount point
-			// inside a read-only ConfigMap volume cannot be created.
-			for _, m := range c.VolumeMounts {
-				if m.Name != scopeVolumeName && strings.HasPrefix(m.MountPath, brokerScopeDir+"/") {
-					t.Errorf("mount %s sits inside the declaration's read-only volume", m.MountPath)
-				}
-			}
-
 			audience, audienceFound := brokerEnvValue(c.Env, "CREDENTIAL_PROXY_SCOPE_AUDIENCE")
 			callers, callersFound := brokerEnvValue(c.Env, "CREDENTIAL_PROXY_SCOPE_CALLERS")
 			allowed, _ := brokerEnvValue(c.Env, "CREDENTIAL_PROXY_ALLOWED_CALLERS")
@@ -456,6 +448,38 @@ func TestTheBrokerConfersTheScopeRoleOnlyBehindTheGatewayPodPolicy(t *testing.T)
 				t.Errorf("broker fence admits the publisher: %v, want %v", peer, tc.want.peer)
 			}
 		})
+	}
+}
+
+// The declaration mounts beside the forge CA mounts, never above them: the
+// runtime cannot create a mount point inside a read-only ConfigMap volume,
+// so a nested mount would stop the broker on every install with a forge CA
+// bundle. The fixture renders a real forge CA mount next to the declaration.
+func TestTheBrokerDeclarationMountSitsBesideTheForgeCAMounts(t *testing.T) {
+	if forgeCADir == brokerScopeDir || strings.HasPrefix(forgeCADir, brokerScopeDir+"/") {
+		t.Fatalf("forge CA mounts under %s sit inside the declaration's volume at %s", forgeCADir, brokerScopeDir)
+	}
+	agent := gitlabAgent("gitlab-forge-token")
+	agent.Spec.Integration.Forges[1].Host = "gitlab.internal.example"
+	agent.Spec.Integration.Forges[1].CABundleRef = &agentv1alpha1.ForgeCABundleRef{Name: "gitlab-forge-ca", Key: "root.pem"}
+	agent.Spec.Mode = ptr.To("next")
+	agent.Spec.Scope = &agentv1alpha1.ScopeSpec{Folders: []string{"111111111111"}}
+	mounts := buildCredentialProxyDeploymentForPlugins(agent, "hash", nil, allBrokerCallersOwned).Spec.Template.Spec.Containers[0].VolumeMounts
+
+	var declaration, forgeCA bool
+	for _, m := range mounts {
+		switch {
+		case m.Name == scopeVolumeName:
+			declaration = true
+		case strings.HasPrefix(m.MountPath, forgeCADir+"/"):
+			forgeCA = true
+		}
+		if m.Name != scopeVolumeName && (m.MountPath == brokerScopeDir || strings.HasPrefix(m.MountPath, brokerScopeDir+"/")) {
+			t.Errorf("mount %s sits inside the declaration's read-only volume at %s", m.MountPath, brokerScopeDir)
+		}
+	}
+	if !declaration || !forgeCA {
+		t.Fatalf("declaration mounted %v, forge CA mounted %v: the fixture does not render both, so this test proves nothing", declaration, forgeCA)
 	}
 }
 
