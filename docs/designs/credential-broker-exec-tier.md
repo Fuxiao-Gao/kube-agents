@@ -65,20 +65,20 @@ PROPOSED: commands get their own tier
 
 What changes, side by side:
 
-|                                             | Today                                        | Proposed                                                                                                                                |
-| ------------------------------------------- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| Who runs commands                           | The one broker pod                           | **NEW:** the exec tier, N pods                                                                                                          |
-| Command capacity                            | 8 slots in total                             | **8 slots × N**                                                                                                                         |
-| Priority                                    | None: one first-in, first-out queue          | **NEW:** 2 classes the broker sets from the token, for the shell role only once the turn token exists (§4.1); background ≤ admitted − 2 |
-| Chat relays, workspace, vcs/forge, watchers | The one broker pod                           | Same pod, unchanged                                                                                                                     |
-| Cloud API relay (`/v1/gcp/`)                | The one broker pod                           | **NEW:** the exec tier, with the commands; the stateful pod keeps it while 0 replicas is legal (§3.1, §9)                               |
-| How callers reach commands                  | `CREDENTIAL_PROXY_URL`                       | **NEW:** `CREDENTIAL_PROXY_EXEC_URL`; if it is not set, as today                                                                        |
-| Upgrade of the command path                 | `Recreate`: commands stop during the restart | `RollingUpdate` with a long drain, a PDB at N ≥ 2 (§9 step 0): no outage at N ≥ 2; the stateful pod keeps `Recreate` (30 s drain)       |
-| Identity and permissions                    | One KSA / GSA                                | Same KSA / GSA, no new IAM                                                                                                              |
-| Code                                        | `credential_proxy.py`                        | Same file and image, with `CREDENTIAL_PROXY_ROLE=exec` on the new pods                                                                  |
+|                                             | Today                                        | Proposed                                                                                                                                                      |
+| ------------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Who runs commands                           | The one broker pod                           | **NEW:** the exec tier, N pods                                                                                                                                |
+| Command capacity                            | 8 slots in total                             | **8 slots × N**                                                                                                                                               |
+| Priority                                    | None: one first-in, first-out queue          | **NEW:** 2 classes the broker sets from the caller's role (§4.1); the shell role counts as interactive until the turn token exists; background ≤ admitted − 2 |
+| Chat relays, workspace, vcs/forge, watchers | The one broker pod                           | Same pod, unchanged                                                                                                                                           |
+| Cloud API relay (`/v1/gcp/`)                | The one broker pod                           | **NEW:** the exec tier, with the commands; the stateful pod keeps it while 0 replicas is legal (§3.1, §9)                                                     |
+| How callers reach commands                  | `CREDENTIAL_PROXY_URL`                       | **NEW:** `CREDENTIAL_PROXY_EXEC_URL`; if it is not set, as today                                                                                              |
+| Upgrade of the command path                 | `Recreate`: commands stop during the restart | `RollingUpdate` with a long drain, a PDB at N ≥ 2 (§9 step 0): no outage at N ≥ 2; the stateful pod keeps `Recreate` (30 s drain)                             |
+| Identity and permissions                    | One KSA / GSA                                | Same KSA / GSA, no new IAM                                                                                                                                    |
+| Code                                        | `credential_proxy.py`                        | Same file and image, with `CREDENTIAL_PROXY_ROLE=exec` on the new pods                                                                                        |
 
 The shell-role classes in the picture apply only once the turn token exists (§4.1, open question
-9). Until then, shell-role requests keep today's single queue.
+9). Until then, shell-role requests count as interactive (§12).
 
 Later, with a fleet cache (§6, contract only in this round): fleet-wide sweeps read the cache
 first, and fall back to the exec tier when the cache is stale or missing.
@@ -213,8 +213,8 @@ base and makes a wrong route fail loudly.
 | Sandbox shim, `execute()`                       | `CREDENTIAL_PROXY_URL`                                                                         | `CREDENTIAL_PROXY_EXEC_URL` when set, else `CREDENTIAL_PROXY_URL`                                  |
 | Sandbox shim, `Workspace`, vcs, forge           | `CREDENTIAL_PROXY_URL`                                                                         | Unchanged                                                                                          |
 | Session pods (under the cluster-view flag only) | `CREDENTIAL_PROXY_URL`, from the gateway's `A2A_CREDENTIAL_PROXY_URL` (`a2a/gateway/spawn.go`) | Also get `CREDENTIAL_PROXY_EXEC_URL`, through a new `A2A_CREDENTIAL_PROXY_EXEC_URL` on the gateway |
-| Fleet audits (agent cron jobs)                  | The model's shell, then the shim                                                               | Same path; background by default once the turn token exists (§4.1); until then, today's queue      |
-| Watches, reconcile                              | Through `sandbox_exec` and the shim                                                            | Same path; background by default once the turn token exists (§4.1); until then, today's queue      |
+| Fleet audits (agent cron jobs)                  | The model's shell, then the shim                                                               | Same path; background by default once the turn token exists (§4.1); until then, interactive (§12)  |
+| Watches, reconcile                              | Through `sandbox_exec` and the shim                                                            | Same path; background by default once the turn token exists (§4.1); until then, interactive (§12)  |
 | Cloud API relay callers (`ApiSession`)          | `CREDENTIAL_PROXY_URL`                                                                         | `CREDENTIAL_PROXY_EXEC_URL` when set, else `CREDENTIAL_PROXY_URL`                                  |
 | Gateway relays, watchers                        | Their own URL variables                                                                        | Unchanged                                                                                          |
 
