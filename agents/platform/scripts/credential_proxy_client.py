@@ -76,11 +76,13 @@ EXEC_REPLICAS_FILE_ENV = "CREDENTIAL_PROXY_EXEC_REPLICAS_FILE"
 EXEC_REPLICAS_FILE = "/etc/credential-proxy-exec-tier/replicas"
 BUSY_BOUND_KEY = "bound"
 ADMISSION_BOUND_DRAINING = "draining"
+ADMISSION_BOUND_BACKGROUND = "background"
 # A busy answer under one of these bounds is retried once on a new connection;
 # another replica can admit it. The session cap is a caller's own limit, and
 # the others name no replica-local shortage.
-ADMISSION_BOUND_BACKGROUND = "background"
-RETRYABLE_BUSY_BOUNDS = frozenset({"slot", "budget", "background", "draining", "profile"})
+RETRYABLE_BUSY_BOUNDS = frozenset(
+    {"slot", "budget", ADMISSION_BOUND_BACKGROUND, ADMISSION_BOUND_DRAINING, "profile"}
+)
 CLASS_INTERACTIVE = "interactive"
 CLASS_BACKGROUND = "background"
 CLASS_LABEL = "class"
