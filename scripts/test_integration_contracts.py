@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import copy
 import contextlib
+import fnmatch
 import io
 import json
 import os
@@ -998,6 +999,62 @@ class WorkflowNameJoinTest(unittest.TestCase):
         join_runs = " ".join(step.get("run", "") for step in join["steps"])
         self.assertIn(f"COVERAGE_SHARD_COUNT={count}", join_runs, "the join expects another shard count than the matrix has")
         self.assertFalse(shards["strategy"].get("fail-fast", True), "one red shard would cancel the others")
+
+    def test_the_join_downloads_the_shards_coverage_twice(self):
+        """The required join's artifact download gets two attempts, and the
+        second is the hard one.
+
+        The action's own retries ran out twice on 2026-10-30 with every shard
+        uploaded and every test green, and nothing in a normal run shows the
+        shape that rescues it: drop `continue-on-error` from the first
+        download, or the `if` from the second, and every check stays green
+        until the next bad minute. The first attempt may be soft only because
+        the second is not; a second attempt that is also soft, or that runs
+        whatever the first did, is a different gate from the one described.
+        The clearing step in between is what keeps a half-extracted first
+        attempt out of the join.
+        """
+        yaml = _yaml()
+        workflow = yaml.safe_load((WORKFLOWS / "python-tests.yml").read_text())
+        self.assert_join_downloads_twice(workflow)
+        attempts = self._download_attempts(workflow["jobs"]["test"])
+        for label, mutate in (
+            ("a hard first attempt", lambda steps: steps[0].pop("continue-on-error")),
+            ("a soft second attempt", lambda steps: steps[-1].__setitem__("continue-on-error", True)),
+            ("an ungated second attempt", lambda steps: steps[-1].pop("if")),
+            ("a second attempt with other inputs", lambda steps: steps[-1]["with"].__setitem__("path", "elsewhere")),
+        ):
+            mutant = copy.deepcopy(workflow)
+            mutate(self._download_attempts(mutant["jobs"]["test"]))
+            with self.subTest(mutant=label), self.assertRaises(AssertionError):
+                self.assert_join_downloads_twice(mutant)
+        # The three places the artifact name is spelled agree: the shards'
+        # upload name and the pattern both download attempts filter by.
+        uploads = [step for step in workflow["jobs"]["test-shard"]["steps"] if "upload-artifact" in str(step.get("uses", ""))]
+        names = [str(step["with"]["name"]).replace("${{ matrix.shard }}", "1") for step in uploads]
+        pattern = attempts[0]["with"]["pattern"]
+        self.assertTrue(any(fnmatch.fnmatch(name, pattern) for name in names), f"no shard upload name matches the join's download pattern {pattern!r}: {names}")
+
+    @staticmethod
+    def _download_attempts(join):
+        """The join's download-artifact steps, in order."""
+        return [step for step in join["steps"] if "download-artifact" in str(step.get("uses", ""))]
+
+    def assert_join_downloads_twice(self, workflow):
+        join = workflow["jobs"]["test"]
+        attempts = self._download_attempts(join)
+        self.assertEqual(len(attempts), 2, f"the join has {len(attempts)} download-artifact steps, not two")
+        first, second = attempts
+        self.assertIs(first.get("continue-on-error"), True, "the first download attempt is not continue-on-error, so its failure ends the job before the second attempt")
+        self.assertTrue(first.get("id"), "the first download attempt has no id for the second to read")
+        gate = "${{steps.%s.outcome=='failure'}}" % first["id"]
+        self.assertEqual(self._expr(second.get("if", "")), gate, "the second download attempt is not gated on the first attempt's failure")
+        self.assertNotIn("continue-on-error", second, "the second download attempt is continue-on-error, so a download that fails twice does not fail the check")
+        self.assertEqual(first.get("uses"), second.get("uses"), "the two download attempts pin different action versions")
+        self.assertEqual(first.get("with"), second.get("with"), "the two download attempts take different inputs")
+        between = join["steps"][join["steps"].index(first) + 1 : join["steps"].index(second)]
+        clears = [step for step in between if self._expr(step.get("if", "")) == gate and f"rm -rf {first['with']['path']}" in str(step.get("run", ""))]
+        self.assertEqual(len(clears), 1, "no step gated on the first attempt's failure clears its download directory before the second attempt")
 
     def test_the_coverage_artifact_name_join_holds(self):
         producer = (WORKFLOWS / "python-tests.yml").read_text()
