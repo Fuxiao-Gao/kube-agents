@@ -485,6 +485,27 @@ func TestTheBrokerDeclarationMountSitsBesideTheForgeCAMounts(t *testing.T) {
 	}
 }
 
+// The publisher's ServiceAccount name is reserved in both modes, as the
+// other operator-owned accounts are: neither a profile nor the broker's
+// override may hold it, or a flip to next would find it already taken.
+func TestThePublisherServiceAccountNameIsReserved(t *testing.T) {
+	for _, mode := range []*string{ptr.To("next"), nil} {
+		agent := scopePublisherAgent()
+		agent.Spec.Mode = mode
+		sa := scopePublisherName(agent)
+		p := testAgentProfile(agent.Namespace, "sneaky", func(p *agentv1alpha1.AgentProfile) {
+			p.Spec.Identity.ServiceAccountName = sa
+		})
+		if got := resolveAgentProfileIdentities(agent, []agentv1alpha1.AgentProfile{p})["sneaky"]; got.refused == nil {
+			t.Errorf("mode %v: a profile naming %q resolved to %+v, want refused", mode, sa, got)
+		}
+		agent.Spec.Security = &agentv1alpha1.SecuritySpec{ServiceAccountName: sa}
+		if msg := ReservedServiceAccountOverride(agent); msg == "" {
+			t.Errorf("mode %v: an override naming %q is not refused", mode, sa)
+		}
+	}
+}
+
 func TestTheReservedListNamesTheScopeBrokerVariables(t *testing.T) {
 	names := []string{"CREDENTIAL_PROXY_SCOPE_AUDIENCE", "CREDENTIAL_PROXY_SCOPE_CALLERS", "CREDENTIAL_PROXY_SCOPE_FILE"}
 	var extra []corev1.EnvVar
