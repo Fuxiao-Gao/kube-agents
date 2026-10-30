@@ -195,6 +195,12 @@ CI enforcement: `make docs-check` runs the same checks as
 - `docs-check-context-budget` — `scripts/check_context_budget.py`; `AGENTS.md`
   plus `CLAUDE.md` are loaded into every agent session before the first prompt,
   and their combined size must stay inside the `BUDGET` that file sets.
+- `docs-check-pr-template` — `scripts/check_pr_template.py`; no section of
+  `.github/PULL_REQUEST_TEMPLATE.md` may tell the author to delete it, a section
+  that opens with a condition names the one-line answer the rest write
+  (`Otherwise write "..."`), and no comment holds a line the description readers
+  split a section on. The rule, and why the readers need it, is in
+  `.agents/rules/pre_pr_review.md`.
 
 ### Identifier sources
 
