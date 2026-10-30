@@ -93,10 +93,10 @@ const (
 	// The publisher's broker token: projected for an audience of its own,
 	// which the broker confers the `scope` role by, one hour like every
 	// broker token.
-	credentialProxyScopeAudience        = "kubeagents-credential-proxy-scope" // #nosec G101 -- Token audience name, not a credential
-	scopePublisherBrokerTokenVolume     = "scope-broker-token"                // #nosec G101 -- Volume name, not a credential
-	scopePublisherBrokerTokenMountDir   = "/var/run/secrets/kubeagents/credential-proxy"
-	scopePublisherBrokerTokenKey        = "token" // #nosec G101 -- Projected file name, not a credential
+	credentialProxyScopeAudience        = "kubeagents-credential-proxy-scope"            // #nosec G101 -- Token audience name, not a credential
+	scopePublisherBrokerTokenVolume     = "scope-broker-token"                           // #nosec G101 -- Volume name, not a credential
+	scopePublisherBrokerTokenMountDir   = "/var/run/secrets/kubeagents/credential-proxy" // #nosec G101 -- Mount path, not a credential
+	scopePublisherBrokerTokenKey        = "token"                                        // #nosec G101 -- Projected file name, not a credential
 	scopePublisherBrokerTokenTTLSeconds = 3600
 
 	// The broker's side: the audience it confers the scope
@@ -104,7 +104,7 @@ const (
 	// reads the declaration that bounds every scope argument.
 	credentialProxyScopeAudienceEnvVar = "CREDENTIAL_PROXY_SCOPE_AUDIENCE" // #nosec G101 -- Environment variable name, not a credential
 	credentialProxyScopeCallersEnvVar  = "CREDENTIAL_PROXY_SCOPE_CALLERS"  // #nosec G101 -- Environment variable name, not a credential
-	credentialProxyScopeFileEnvVar     = "CREDENTIAL_PROXY_SCOPE_FILE"
+	credentialProxyScopeFileEnvVar     = "CREDENTIAL_PROXY_SCOPE_FILE"     // #nosec G101 -- Environment variable name, not a credential
 	// brokerScopeDir is where the broker mounts the declaration: a directory
 	// of its own beside forgeCADir rather than scopeDir, because the forge CA
 	// Secrets mount under scopeDir in the broker, and the runtime cannot
