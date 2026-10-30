@@ -639,6 +639,21 @@ METRICS_SERVER_HEADER = "credential-proxy-metrics"
 # sends -- the bound the gateway's Go listener puts on its header read.
 METRICS_MAX_CONNECTIONS = 16
 METRICS_CONNECTION_DEADLINE_SECONDS = 10
+# How many connections the kernel queues for the credentialed listener between
+# accepts. The handler speaks HTTP/1.0 and closes after every response, so Envoy
+# opens a fresh upstream connection for every request: each brokered command,
+# each event-pull iteration and each readiness probe is one connect() on the
+# Unix socket. On that socket a connect() past the queue is refused with EAGAIN
+# at once, and Envoy answers the caller with a 503 before any handler thread
+# exists; a probe caught in a burst that way reads as not ready. (The TCP
+# listeners share the constant; there a full queue drops the SYN and the
+# client stalls until it retries.) The stdlib's 5 is smaller than one sweep's
+# command slots. Envoy's default per-cluster connection ceiling is 1024, the
+# most it can hold open to the broker at once, so a queue of that size leaves
+# Envoy's own breaker, never this queue, as what refuses first. listen()
+# clamps it to net.core.somaxconn: 4096 on a recent Linux kernel, 1024 inside
+# a gVisor sandbox, so the queue is at most this size and never less.
+LISTEN_BACKLOG = 1024
 # Metric names, and the vocabulary of every label value. Nothing served is
 # caller text: a label value is one of these strings or a member of the
 # vocabularies below, so a caller cannot grow the series set by varying what
@@ -996,10 +1011,13 @@ class ThreadingUnixHTTPServer(HandlerErrorsToLog, socketserver.ThreadingMixIn, s
     """HTTP server over a private Unix socket used behind Envoy."""
 
     daemon_threads = True
+    request_queue_size = LISTEN_BACKLOG
 
 
 class ThreadingTCPHTTPServer(HandlerErrorsToLog, ThreadingHTTPServer):
     """ThreadingHTTPServer for the credentialed and API-relay listeners on TCP."""
+
+    request_queue_size = LISTEN_BACKLOG
 
 
 # ---------------------------------------------------------------------------

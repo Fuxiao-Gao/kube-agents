@@ -13607,6 +13607,75 @@ class AuthenticationOverTheSocketTest(unittest.TestCase):
         self.assertEqual(401, raised.exception.code)
 
 
+class ListenBacklogTest(unittest.TestCase):
+    """A burst of connections waits in the listener's queue; none is refused.
+
+    Envoy opens one upstream connection per request, because the handler
+    speaks HTTP/1.0 and closes after every response, so every brokered call,
+    every event-pull iteration and every readiness probe is a fresh connect()
+    on the broker's Unix socket. The kernel holds the connections the accept
+    loop has not reached yet in the listen backlog; one past it is refused
+    with EAGAIN at once, which Envoy answers with a 503 before any handler
+    thread exists. The stdlib's backlog is 5. The accept loop is left stopped
+    here so that the queue, and nothing else, decides.
+    """
+
+    # Well past the stdlib's 5 and well under any file-descriptor limit a CI
+    # runner sets; the production value admits far more than this.
+    BURST = 64
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.socket_path = os.path.join(self.directory.name, "backend.sock")
+        self.server = credential_proxy.ThreadingUnixHTTPServer(
+            self.socket_path, CredentialProxyHandler
+        )
+        self.addCleanup(self.server.server_close)
+        self.opened = []
+        self.addCleanup(lambda: [sock.close() for sock in self.opened])
+
+    def _connect(self, ordinal):
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(5)
+        try:
+            sock.connect(self.socket_path)
+        except BlockingIOError as exc:
+            sock.close()
+            self.fail(
+                f"connection {ordinal} was refused with {ordinal - 1} waiting for "
+                f"the accept loop: {exc}"
+            )
+        self.opened.append(sock)
+        return sock
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux refuses a connect past the backlog with EAGAIN")
+    def test_a_burst_waits_in_the_backlog_and_the_probe_behind_it_is_answered(self):
+        for ordinal in range(1, self.BURST):
+            self._connect(ordinal)
+        probe = self._connect(self.BURST)
+        probe.sendall(b"GET /healthz HTTP/1.0\r\n\r\n")
+        # Only now does the accept loop run: the probe is the last of a burst
+        # the queue had to hold in full for it to be reached at all.
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.shutdown)
+        response = http.client.HTTPResponse(probe)
+        response.begin()
+        self.assertEqual(200, response.status)
+        self.assertEqual({"status": "ok"}, json.loads(response.read()))
+
+    def test_both_listener_classes_carry_the_backlog(self):
+        self.assertEqual(
+            credential_proxy.LISTEN_BACKLOG, credential_proxy.ThreadingUnixHTTPServer.request_queue_size
+        )
+        self.assertEqual(
+            credential_proxy.LISTEN_BACKLOG, credential_proxy.ThreadingTCPHTTPServer.request_queue_size
+        )
+        # Envoy's per-cluster connection ceiling, the most it can ever hold open
+        # to the broker at once; the queue must not be what refuses first.
+        self.assertGreaterEqual(credential_proxy.LISTEN_BACKLOG, 1024)
+
+
 class ScopedServiceAccountPathTest(unittest.TestCase):
     """The pool as the broker actually reaches it, not as a unit.
 
