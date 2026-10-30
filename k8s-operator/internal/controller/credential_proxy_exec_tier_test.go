@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -386,6 +387,43 @@ func TestTheExecTierFenceAdmitsItsCallersOnly(t *testing.T) {
 	for _, peer := range withProfiles.Spec.Ingress[0].From {
 		if peer.PodSelector != nil && peer.PodSelector.MatchLabels["app"] == agent.Name+"-gateway" {
 			t.Error("fence admits the gateway")
+		}
+	}
+}
+
+// With the tier on, the agent's name must leave room for the suffix in a
+// 63-character Service name: 36 characters render, 37 are refused and render
+// nothing, and 37 with the tier off is not refused.
+func TestTheExecTierRefusesAnAgentNameTooLongForItsObjects(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		nameLen  int
+		replicas int32
+		refused  bool
+	}{
+		{36, 2, false},
+		{37, 2, true},
+		{37, 0, false},
+	} {
+		agent := execTierTestAgent(ptr.To(tc.replicas))
+		agent.Name = strings.Repeat("a", tc.nameLen)
+		if got := len(ValidateCredentialProxyExec(agent, nil)) > 0; got != tc.refused {
+			t.Errorf("name of %d with %d replicas: refused %v, want %v", tc.nameLen, tc.replicas, got, tc.refused)
+		}
+		if tc.replicas == 0 {
+			continue
+		}
+		r, cl := execTierTestReconciler(t, agent)
+		if err := r.reconcileCredentialProxyExecTier(ctx, agent, buildCredentialProxyDeployment(agent, "hash"), credentialProxyProfileConfig{}); err != nil {
+			t.Fatal(err)
+		}
+		dep := &appsv1.Deployment{}
+		err := cl.Get(ctx, types.NamespacedName{Name: credentialProxyExecTierName(agent), Namespace: agent.Namespace}, dep)
+		if rendered := err == nil; rendered == tc.refused {
+			t.Errorf("name of %d: exec Deployment rendered %v, want %v", tc.nameLen, rendered, !tc.refused)
+		}
+		if !tc.refused && len(credentialProxyExecTierName(agent)) != 63 {
+			t.Errorf("the longest accepted name gives a %d-character Service name, want 63", len(credentialProxyExecTierName(agent)))
 		}
 	}
 }

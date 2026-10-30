@@ -29,9 +29,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentv1alpha1 "github.com/gke-labs/kube-agents/k8s-operator/api/v1alpha1"
 )
@@ -67,6 +70,12 @@ const (
 	credentialProxyExecTierPortName = "cred-proxy"
 	labelAppKey                     = "app"
 	labelComponentKey               = "kubeagents.x-k8s.io/component"
+	// The tier's Service name and its `app` label value are the agent's name
+	// and the suffix, and both are capped at 63 characters, so with the tier
+	// on the agent's name is capped at 63 minus the suffix.
+	credentialProxyExecTierMaxAgentName       = validation.DNS1035LabelMaxLength - len(credentialProxyExecTierSuffix)
+	credentialProxyExecTierNameRefusalFmt     = "the agent's name %q is %d characters; with spec.deployment.credentialProxy.exec.replicas above 0 it must be at most %d, so <name>%s fits the 63-character Service name and label value. Rename the agent, or set exec.replicas to 0"
+	conditionReasonInvalidCredentialProxyExec = "InvalidCredentialProxyExec"
 )
 
 // credentialProxyExecTierEnvDropped names the broker env the exec tier does
@@ -105,6 +114,18 @@ func credentialProxyExecTierReplicas(agent *agentv1alpha1.PlatformAgent) int32 {
 		return 0
 	}
 	return *d.CredentialProxy.Exec.Replicas
+}
+
+// ValidateCredentialProxyExec refuses an agent name too long for the tier's
+// objects while the tier is on. The admission webhook calls it at apply, and
+// the reconciler before rendering the tier, because the chart installs with
+// the webhook off.
+func ValidateCredentialProxyExec(agent *agentv1alpha1.PlatformAgent, path *field.Path) field.ErrorList {
+	if credentialProxyExecTierReplicas(agent) <= 0 || len(agent.Name) <= credentialProxyExecTierMaxAgentName {
+		return nil
+	}
+	return field.ErrorList{field.Invalid(path, agent.Name, fmt.Sprintf(credentialProxyExecTierNameRefusalFmt,
+		agent.Name, len(agent.Name), credentialProxyExecTierMaxAgentName, credentialProxyExecTierSuffix))}
 }
 
 func credentialProxyExecTierResources() corev1.ResourceRequirements {
@@ -338,6 +359,14 @@ func buildCredentialProxyExecTierNetworkPolicy(agent *agentv1alpha1.PlatformAgen
 // this reconcile rendered it.
 func (r *PlatformAgentReconciler) reconcileCredentialProxyExecTier(ctx context.Context, agent *agentv1alpha1.PlatformAgent, broker *appsv1.Deployment, profiles credentialProxyProfileConfig) error {
 	replicas := credentialProxyExecTierReplicas(agent)
+	if errs := ValidateCredentialProxyExec(agent, nil); len(errs) > 0 {
+		// Refused: rendered as off, and said so. The objects could not be
+		// created under a name past 63 characters anyway.
+		logf.FromContext(ctx).Info("refusing spec.deployment.credentialProxy.exec.replicas; the exec tier is not rendered",
+			"name", agent.Name, "namespace", agent.Namespace, "refusal", errs[0].Detail)
+		r.recordEvent(agent, corev1.EventTypeWarning, conditionReasonInvalidCredentialProxyExec, errs[0].Detail)
+		replicas = 0
+	}
 	if replicas <= 0 {
 		return r.removeCredentialProxyExecTier(ctx, agent)
 	}
