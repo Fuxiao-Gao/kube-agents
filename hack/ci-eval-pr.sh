@@ -497,8 +497,9 @@ EVAL_FORGE="${EVAL_FORGE:-github}"
 # The forge table is hack/ci-deploy.sh's forge_profile (kube-agents#3682), one
 # row per EVAL_FORGE value: the kind (github or gitlab), the host, and whether
 # the forge is self-managed (a private host whose CA the run supplies). Lifted
-# rather than sourced, as the project tables are, so the two scripts read one
-# table and the eval refuses exactly what the deploy refuses.
+# rather than sourced, as the project tables are, so the three scripts (this
+# one, the deploy and hack/ci-forge.sh) read one table and the eval refuses
+# exactly what the deploy refuses.
 eval_forge_profile() { # <EVAL_FORGE> -> "<kind> <host> <yes|no>"
   local body
   body="$(sed -n '/^forge_profile() {/,/^}$/p' "${SCRIPT_DIR}/ci-deploy.sh")"
@@ -2528,8 +2529,8 @@ NIGHTLY_CASES_FILE="${SCRIPT_DIR}/${EVAL_NIGHTLY_CASES_FILE}"
 BLOCKING_ROSTER_FILE="${SCRIPT_DIR}/${EVAL_BLOCKING_ROSTER_FILE}"
 # Which lane list a forge runs (kube-agents#3682): the GitLab list on either
 # GitLab, gitlab.com or a self-managed instance, since the cases grade the
-# forge and not where it is; the GHES list on ghes (eval/ghes-cases.txt, which
-# arrives with the GHES lane, kube-agents#3684). github runs the catalogue. A
+# forge and not where it is; the GHES list on ghes (eval/ghes-cases.txt).
+# github runs the catalogue. A
 # forge whose list this checkout lacks stops here by name, not at the roster
 # reader's message for a missing file.
 lane_cases_file() { # <EVAL_FORGE> -> the list's path relative to hack/
@@ -2542,7 +2543,7 @@ lane_cases_file() { # <EVAL_FORGE> -> the list's path relative to hack/
 LANE_CASES_REL="$(lane_cases_file "${EVAL_FORGE}" 2>/dev/null)" || LANE_CASES_REL=""
 LANE_CASES_FILE="${LANE_CASES_REL:+${SCRIPT_DIR}/${LANE_CASES_REL}}"
 if [ -n "${LANE_CASES_FILE}" ] && [ ! -f "${LANE_CASES_FILE}" ]; then
-  echo "ERROR: EVAL_FORGE=${EVAL_FORGE} runs the lane list ${LANE_CASES_REL}, which this checkout does not have; the lane that adds it is kube-agents#3684." >&2
+  echo "ERROR: EVAL_FORGE=${EVAL_FORGE} runs the lane list ${LANE_CASES_REL}, which this checkout does not have." >&2
   exit 1
 fi
 
@@ -2995,7 +2996,9 @@ if [ -z "${INJECT_LANE_REPO}" ]; then
   echo "ERROR: no GitOps repository is known for PROJECT_ID=${PROJECT_ID:-unset} (gitops_repo_for_project or gitlab_project_for_project in hack/ci-deploy.sh, by EVAL_FORGE; EVAL_GITOPS_REPO on a local GitHub run); the write safeguard (${EVAL_INJECT_LANE_SAFEGUARDS_FILE}) cannot name the repository it reads, so the run does not start." >&2
   exit 1
 fi
-if [ "${EVAL_FORGE:-github}" = "github" ] && [ -z "${EVAL_LEDGER_APP_KEY_FILE:-}" ] \
+# The kind, not the row: a GitHub Enterprise row grades through the GitHub
+# reader too. The row stands in where this block runs lifted without the table.
+if [ "${EVAL_FORGE_KIND:-${EVAL_FORGE:-github}}" = "github" ] && [ -z "${EVAL_LEDGER_APP_KEY_FILE:-}" ] \
     && [ -z "${BENCH_GITHUB_TOKEN:-}" ] && [ -z "${GITHUB_TOKEN:-}" ]; then
   echo "ERROR: no GitHub read credential: EVAL_LEDGER_APP_KEY_FILE is unset and neither BENCH_GITHUB_TOKEN nor GITHUB_TOKEN is set; the write safeguard (${EVAL_INJECT_LANE_SAFEGUARDS_FILE}) cannot read the repository, so the run does not start. Export a token that can read ${INJECT_LANE_REPO} as BENCH_GITHUB_TOKEN." >&2
   exit 1
