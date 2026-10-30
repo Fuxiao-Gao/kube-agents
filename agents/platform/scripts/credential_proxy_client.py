@@ -73,7 +73,7 @@ API_RELAY_PREFIX = "/v1/gcp/"
 EXEC_ROLE = "exec"
 EXEC_URL_ENV = "CREDENTIAL_PROXY_EXEC_URL"
 EXEC_REPLICAS_FILE_ENV = "CREDENTIAL_PROXY_EXEC_REPLICAS_FILE"
-EXEC_REPLICAS_FILE = "/etc/credential-proxy-exec/replicas"
+EXEC_REPLICAS_FILE = "/etc/credential-proxy-exec-tier/replicas"
 BUSY_BOUND_KEY = "bound"
 ADMISSION_BOUND_DRAINING = "draining"
 # A busy answer under one of these bounds is retried once on a new connection;
