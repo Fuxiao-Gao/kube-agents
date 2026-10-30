@@ -11814,9 +11814,9 @@ class RequiredRoleTest(unittest.TestCase):
                     credential_proxy.required_roles(path),
                 )
 
-    def test_the_exec_route_admits_the_shell_and_the_session(self):
+    def test_the_exec_route_admits_the_shell_the_session_and_the_profile(self):
         self.assertEqual(
-            (credential_proxy.CALLER_ROLE_SHELL, credential_proxy.CALLER_ROLE_SESSION),
+            (credential_proxy.CALLER_ROLE_SHELL, credential_proxy.CALLER_ROLE_SESSION, credential_proxy.CALLER_ROLE_PROFILE),
             credential_proxy.required_roles("/v1/exec"),
         )
 
