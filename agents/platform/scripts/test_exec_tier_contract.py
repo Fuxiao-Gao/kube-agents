@@ -38,7 +38,7 @@ class ExecTierContractTest(unittest.TestCase):
             client.CLASS_INTERACTIVE, client.CLASS_BACKGROUND, f"`{client.CLASS_LABEL}`",
             client.AUDIT_BROKER_TIER, client.AUDIT_BROKER_POD,
             f"`{client.BROKER_TIER_EXEC}`", f"`{client.BROKER_TIER_STATEFUL}`",
-            client.API_RELAY_PREFIX.rstrip("/"),
+            client.API_RELAY_PREFIX.rstrip("/"), f"nice {client.BACKGROUND_NICE}",
         ):
             with self.subTest(value=value):
                 self.assertIn(value, contract)
@@ -48,6 +48,7 @@ class ExecTierContractTest(unittest.TestCase):
         self.assertEqual(set(client.RETRYABLE_BUSY_BOUNDS), retried)
         bounds = set(re.findall(r"`([a-z-]+)`", _row(_contract(), "Busy reply").split("The bounds are", 1)[1]))
         self.assertIn(client.ADMISSION_BOUND_DRAINING, bounds)
+        self.assertIn(client.ADMISSION_BOUND_BACKGROUND, bounds)
         self.assertTrue(client.RETRYABLE_BUSY_BOUNDS < bounds)
 
 

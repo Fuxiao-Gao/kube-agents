@@ -79,10 +79,12 @@ ADMISSION_BOUND_DRAINING = "draining"
 # A busy answer under one of these bounds is retried once on a new connection;
 # another replica can admit it. The session cap is a caller's own limit, and
 # the others name no replica-local shortage.
-RETRYABLE_BUSY_BOUNDS = frozenset({"slot", "budget", "draining", "profile"})
+ADMISSION_BOUND_BACKGROUND = "background"
+RETRYABLE_BUSY_BOUNDS = frozenset({"slot", "budget", "background", "draining", "profile"})
 CLASS_INTERACTIVE = "interactive"
 CLASS_BACKGROUND = "background"
 CLASS_LABEL = "class"
+BACKGROUND_NICE = 10
 BROKER_TIER_EXEC = "exec"
 BROKER_TIER_STATEFUL = "stateful"
 AUDIT_BROKER_TIER = "broker_tier"
