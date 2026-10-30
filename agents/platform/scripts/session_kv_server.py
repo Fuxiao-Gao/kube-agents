@@ -2586,8 +2586,7 @@ def _data_volume_warned() -> bool:
 
 
 def _set_data_volume_warned(warned: bool) -> bool:
-    """Move the flag to `warned`. True only for the caller that changed it, so
-    of two checks racing to post the warning one claims it and one stands down."""
+    """Move the flag to `warned`. True only for the caller that changed it."""
     with closing(sqlite3.connect(SESSION_KV_DB_PATH, timeout=5.0)) as conn:
         with conn:
             conn.execute("INSERT OR IGNORE INTO data_volume_warning (id, warned) VALUES (1, 0)")
@@ -2632,15 +2631,14 @@ def check_data_volume() -> None:
         return
     if percent < DATA_VOLUME_WARN_PERCENT:
         return
-    if not _set_data_volume_warned(True):
-        return
     message = DATA_VOLUME_WARNING.format(
         percent=percent, used=(total - free) / BYTES_PER_GIB, total=total / BYTES_PER_GIB
     )
     logger.warning(message)
-    if not _post_data_volume_warning(message):
-        # Release the claim so the next check posts it.
-        _set_data_volume_warned(False)
+    # Set only after the post is delivered. A process killed during the send
+    # (a pod roll) then posts at the next check instead of never.
+    if _post_data_volume_warning(message):
+        _set_data_volume_warned(True)
 
 
 def _data_volume_monitor() -> None:

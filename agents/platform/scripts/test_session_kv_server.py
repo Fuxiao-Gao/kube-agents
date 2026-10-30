@@ -12148,6 +12148,18 @@ class TestDataVolumeWarning(unittest.TestCase):
         self.assertEqual(self.post.call_count, 2)
         self.assertTrue(session_kv_server._data_volume_warned())
 
+    def test_a_post_cut_off_before_it_returns_does_not_silence_the_crossing(self):
+        # A pod roll can kill the process during the send. An exception out of
+        # the send leaves the same state: nothing posted.
+        self.post.side_effect = RuntimeError("killed during the send")
+        with self.assertRaises(RuntimeError):
+            self._check_at(95)
+        self.assertFalse(session_kv_server._data_volume_warned())
+        self.post.side_effect = None
+        self._check_at(95)
+        self.assertEqual(self.post.call_count, 2)
+        self.assertTrue(session_kv_server._data_volume_warned())
+
     def test_no_chat_platform_logs_the_warning_and_stops(self):
         with patch.object(session_kv_server, "enabled_chat_platforms", return_value=[session_kv_server.DEFAULT_CHAT_PLATFORM]), \
                 patch.object(session_kv_server, "_chat_platforms_disabled", return_value=True), \

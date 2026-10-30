@@ -401,11 +401,12 @@ func (s *podUsageSource) Scrape(ctx context.Context, addr string, counters []str
 
 // foldUsageBody scans body line by line and keeps none of it: a line that could
 // be a wanted family -- each counter's own, the start-time gauge, and for the
-// watcher's body the per-cluster up gauge, one that contains a wanted name as a
-// substring -- is parsed on its own with expfmt, and a metric expfmt names as
-// one of them is folded as it is read, a counter's into its running sum under
-// its label filter and the up gauge into the cluster counts; every other line
-// is skipped unread. The substring is only a prefilter: the parser,
+// watcher's body the per-cluster up gauge and the data volume pair, one that
+// contains a wanted name as a substring -- is parsed on its own with expfmt,
+// and a metric expfmt names as one of them is folded as it is read, a
+// counter's into its running sum under its label filter, the up gauge into the
+// cluster counts and the volume pair into one reading; every other line is
+// skipped unread. The substring is only a prefilter: the parser,
 // not a hand-read of the line, names the metric, so the name in a comment or a
 // label value adds nothing and a UTF-8 name the parser accepts is not dropped by
 // a stricter hand-read. A candidate line that does not parse, or a sample that
