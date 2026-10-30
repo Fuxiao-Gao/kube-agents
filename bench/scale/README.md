@@ -28,6 +28,11 @@ console's Harness limits page reads `harness-limits.json`.
 - `real-install-test-plan.md`, `real-install.yaml` and `real-install-concurrent.yaml`: the test of one
   new install at the L container size on 40 clusters (first-run flow, heavy questions, churn, a red test
   at the S size, cost), and the two plans its measured steps run.
+- `broker.yaml`: the credential broker's load for its exec-tier design: the first-run audits at 2 and
+  8 clusters, the command path with kubectl and with gcloud, and 8 to 15 questions at once at 8
+  clusters.
+- `broker-proxy-raised.yaml`: the 8-cluster audit window with the credential proxy's CPU limit at 2
+  cores; set the limit before the run and remove it after.
 - `harness-limits.json`: every measured run. A run merges its records in and replaces only a record with the same key; a record leaves the file only by hand, as Phase 1's runs spoiled by an outside IAM change did before their re-runs.
 - `harness-limits.sample.json`: a small fake data set the console page and its tests use when
   `harness-limits.json` does not exist.
@@ -182,11 +187,11 @@ one. `commit` is the commit the agent image's tag pins (the tag itself when it i
 from the install. The key holds the commit's first 8 characters, or the whole tag when the tag is not a commit, so a new build is a new set of keys. A base record has `factor` `base` and `level`
 0; `values` holds every factor's planned value at the point, base records included. `totals` holds
 what the test clusters really had, summed over the fleet; fits use the totals for the factors the totals count (clusters, nodes, objects), the achieved rate for churn (`churn_achieved_per_minute`), and `values` for the rest. `limits`, `requests` and
-`replicas` are read from the live pods during the run (records written before the runner read requests have none), and `mode` from the install's `PlatformAgent` (`today` when its spec leaves the mode unset). `answers` holds the start of each prompt's answer, with the project ID replaced by `<project>`, so a response time can be checked against what the agent said. `runner` is the measurement runner's own commit, so a change in how a metric is read shows in the data. A metric without `container` belongs to the
+`replicas` are read from the live pods during the run (records written before the runner read requests have none), and `mode` from the install's `PlatformAgent` (`today` when its spec leaves the mode unset). `answers` holds the start of each prompt's answer, with the project ID replaced by `<project>` (the preview is cut before a word, never inside one; `reclassify` also redacts a cut-off start of the ID in records stored before that), so a response time can be checked against what the agent said. `runner` is the measurement runner's own commit, so a change in how a metric is read shows in the data. A metric without `container` belongs to the
 run. `excluded_from` names the fits the record is left out of: `["response_seconds"]` when a prompt
 run saw a provider 429 or an unfinished prompt, or, for a fleet audit or upgrade readiness record written
-before answers were kept, when its completion cannot be checked. The CPU, memory and proxy metrics
-are left out too when work other than the run's own shared the broker: jobs an earlier `trigger_soak`
+before answers were kept, when its completion cannot be checked. The CPU, memory and proxy metrics,
+with the per-tool and throttle readings that split them, are left out too when work other than the run's own shared the broker: jobs an earlier `trigger_soak`
 started were still running; a prompt or boot-burst run started inside a Stall Watch read (2 minutes
 plus 30 seconds per cluster after :00 or :30) or held a tick; a proxy load run's broker ran a command its
 workers did not send (its throughput and tokens are left out as well). A prompt answered without its
@@ -202,7 +207,12 @@ Metric names:
   `restarts`, `oomkills`;
 - the data volume: `pvc_used_bytes`, `pvc_capacity_bytes`, `profile_bytes_max`, `profiles`;
 - the credential proxy: `proxy_wait_p50_seconds`, `proxy_wait_max_seconds`, `proxy_refusals`,
-  `proxy_commands` (brokered commands run) and `proxy_command_seconds` (the seconds they ran, summed);
+  `proxy_commands` (brokered commands run) and `proxy_command_seconds` (the seconds they ran, summed),
+  the same two per tool as `proxy_commands_<tool>` and `proxy_command_seconds_<tool>` (tool
+  kubectl, gcloud, ...), and `proxy_slot_cap`; per container `envoy-credential-proxy`,
+  `proxy_slots_in_use_peak` (from Managed Prometheus where the cluster collects the gauge, else the record's errors list says it is unknown; scraped every 30 s, so a shorter burst is
+  missed), `cpu_throttled_seconds` and `cpu_throttled_period_share` (the container's cgroup
+  `cpu.stat` over the window);
 - a proxy load run: `proxy_load_completed`, `proxy_load_errors`, `proxy_load_per_second` (commands
   completed per second), and `proxy_load_p50_seconds`, `proxy_load_p95_seconds`,
   `proxy_load_max_seconds` (each command's time as `credential-proxy-exec` saw it);
