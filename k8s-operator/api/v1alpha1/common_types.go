@@ -1141,6 +1141,28 @@ type CredentialProxySpec struct {
 	// declared limits stand.
 	// +optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// Exec configures the exec tier: stateless broker replicas beside the
+	// stateful broker that serve the sandbox's, the session pods' and the
+	// profile workers' commands (/v1/exec) and Cloud API reads (/v1/gcp/).
+	// +optional
+	Exec *CredentialProxyExecSpec `json:"exec,omitempty"`
+}
+
+// CredentialProxyExecSpec sizes the credential broker's exec tier.
+type CredentialProxyExecSpec struct {
+	// Replicas is the number of exec-tier pods. Unset or 0 renders no exec
+	// tier, and callers send every request to the stateful broker. Each
+	// replica requests and is limited to 2 CPU and 2Gi of memory, with no
+	// override. A change between 0 and a positive value restarts the shell
+	// sandbox, which reads the exec tier's URL when it starts; a change
+	// between two positive values does not. The operator does not derive the
+	// count from the fleet size: raise it while the broker's per-replica
+	// background wait, its slot or budget refusals, or CPU throttling persist.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=32
+	Replicas *int32 `json:"replicas,omitempty"`
 }
 
 // AgentAPIAuthSpec configures the agent-api-auth sidecar in the gateway pod.

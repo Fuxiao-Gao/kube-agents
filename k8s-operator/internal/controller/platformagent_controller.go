@@ -3070,7 +3070,7 @@ func (r *PlatformAgentReconciler) reconcileCredentialProxy(ctx context.Context, 
 			return fmt.Errorf("failed to apply credential proxy %T %s/%s: %w", obj, obj.GetNamespace(), obj.GetName(), err)
 		}
 	}
-	return nil
+	return r.reconcileCredentialProxyExecTier(ctx, agent, proxy, profiles)
 }
 
 // applyCredentialProxyDeployment applies the broker's Deployment, recreating it

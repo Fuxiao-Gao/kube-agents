@@ -1128,6 +1128,17 @@ platformAgent:
     # does).
     credentialProxy:
       resources: {}
+      # The exec tier: stateless broker replicas that serve the sandbox's, the
+      # session pods' and the profile workers' commands, forwarded to the CR as
+      # spec.deployment.credentialProxy.exec.replicas when above 0. 0 runs every
+      # command on the one stateful broker. Each replica requests and is limited
+      # to 2 CPU and 2Gi, which the quota preflight counts. A change between 0
+      # and a positive value restarts the shell sandbox. Raise it while the
+      # broker's slot or budget refusals or CPU throttling persist. On an
+      # existing install the chart fails the upgrade when the installed CRD
+      # predates the field; apply crds/ first (upgrade.sh does).
+      exec:
+        replicas: 0
     # The agent-api-auth sidecar's requests and limits, forwarded to the CR as
     # spec.deployment.agentAPIAuth.resources when any key is set. Each key merges
     # over the operator's defaults (150m CPU and 384Mi requests; 1 CPU, 2Gi memory
