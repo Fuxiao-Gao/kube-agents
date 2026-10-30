@@ -367,7 +367,7 @@ To check it, copy the repository from the shell sandbox:
 ```bash
 kubectl exec -n kubeagents-system -c shell platform-agent-shell-0 -- \
   python3 /opt/data/skills/inspect-repository/scripts/inspect_repository.py clone \
-  --repo https://gitlab.example.com/platform/infra/terraform --into /tmp/read-token-check
+  --repo https://gitlab.example.com/platform/infra/terraform --into /tmp/read-token-check --force
 ```
 
 The answer has a `sha` and `"role": "context"`. If the copy fails, the broker's log shows
