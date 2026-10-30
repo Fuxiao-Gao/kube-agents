@@ -381,10 +381,10 @@ member with its `via`, its probe `outcome`, and `confirmedAt`, the last run in w
 listed it and its probe answered `ok`. Explicit projects and the management project have no rows.
 A failed source carries its members' rows forward with their outcome and `confirmedAt`, and two
 fields the gateway does not read carry the rest of what the reconcile's own snapshot carries: the
-number-to-ID memo and the members counted against the cap that have no row. The parts that run it do
-not ship yet: the operator Job that starts it every 15 minutes, when the membership fields
-change, and at creation; the broker's `scope` caller role, whose only commands are the lookups'
-five argv shapes; and the gateway's check of the document, which admits explicit projects and the
+number-to-ID memo and the members counted against the cap that have no row. The operator starts
+it as a Job every 15 minutes, when the membership fields change, and at creation. Two parts do not
+ship yet: the broker's `scope` caller role, whose only commands are the lookups' five argv
+shapes; and the gateway's check of the document, which admits explicit projects and the
 management project from the declaration and its own environment. The reconcile, its snapshot and
 today-mode installs do not change.
 
