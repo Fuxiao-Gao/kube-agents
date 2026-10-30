@@ -403,7 +403,7 @@ func TestTheBrokerConfersTheScopeRoleOnlyBehindTheGatewayPodPolicy(t *testing.T)
 			if strings.HasSuffix(tc.name, "nothing to resolve") {
 				agent.Spec.Scope = &agentv1alpha1.ScopeSpec{Projects: []string{"team-a"}}
 			}
-			deployment := buildCredentialProxyDeploymentForPlugins(agent, "hash", nil, tc.owned)
+			deployment := buildCredentialProxyDeploymentForPlugins(agent, "hash", nil, tc.owned, credentialProxyProfileConfig{})
 			c := deployment.Spec.Template.Spec.Containers[0]
 
 			file, found := brokerEnvValue(c.Env, "CREDENTIAL_PROXY_SCOPE_FILE")
@@ -464,7 +464,7 @@ func TestTheBrokerDeclarationMountSitsBesideTheForgeCAMounts(t *testing.T) {
 	agent.Spec.Integration.Forges[1].CABundleRef = &agentv1alpha1.ForgeCABundleRef{Name: "gitlab-forge-ca", Key: "root.pem"}
 	agent.Spec.Mode = ptr.To("next")
 	agent.Spec.Scope = &agentv1alpha1.ScopeSpec{Folders: []string{"111111111111"}}
-	mounts := buildCredentialProxyDeploymentForPlugins(agent, "hash", nil, allBrokerCallersOwned).Spec.Template.Spec.Containers[0].VolumeMounts
+	mounts := buildCredentialProxyDeploymentForPlugins(agent, "hash", nil, allBrokerCallersOwned, credentialProxyProfileConfig{}).Spec.Template.Spec.Containers[0].VolumeMounts
 
 	var declaration, forgeCA bool
 	for _, m := range mounts {

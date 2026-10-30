@@ -4379,13 +4379,15 @@ func harnessOnKind(harness *agentv1alpha1.HarnessSpec) bool {
 // buildCredentialProxyEnv is buildCredentialProxyEnvForPlugins with no plugins:
 // every variable but the platform Pub/Sub relay's subscription set.
 func buildCredentialProxyEnv(agent *agentv1alpha1.PlatformAgent) []corev1.EnvVar {
-	return buildCredentialProxyEnvForPlugins(agent, nil, allBrokerCallersOwned)
+	return buildCredentialProxyEnvForPlugins(agent, nil, allBrokerCallersOwned, credentialProxyProfileConfig{})
 }
 
 // buildCredentialProxyEnvForPlugins renders the broker's environment for an
 // agent and the AgentPlugins resolved for it. The plugins contribute one
-// variable: the subscriptions the Pub/Sub platform relay may reach.
-func buildCredentialProxyEnvForPlugins(agent *agentv1alpha1.PlatformAgent, agentPlugins []*agentv1alpha1.AgentPlugin, owned brokerCallerOwnership) []corev1.EnvVar {
+// variable: the subscriptions the Pub/Sub platform relay may reach. profiles
+// is the profile role's configuration (credentialProxyProfileEnv); its zero
+// value renders no profile role.
+func buildCredentialProxyEnvForPlugins(agent *agentv1alpha1.PlatformAgent, agentPlugins []*agentv1alpha1.AgentPlugin, owned brokerCallerOwnership, profiles credentialProxyProfileConfig) []corev1.EnvVar {
 	envVars := []corev1.EnvVar{
 		{Name: "PLATFORM_AGENT_HOME", Value: "/tmp/credential-proxy"},
 		{Name: "HOME", Value: "/tmp/credential-proxy/home"},
@@ -4512,7 +4514,10 @@ func buildCredentialProxyEnvForPlugins(agent *agentv1alpha1.PlatformAgent, agent
 		// than as "the gateway has the shell's role" — so the two can roll in
 		// either order without chat answering 403 in between.
 		corev1.EnvVar{Name: "CREDENTIAL_PROXY_CHAT_AUDIENCE", Value: credentialProxyChatAudience},
-		corev1.EnvVar{Name: "CREDENTIAL_PROXY_ALLOWED_CALLERS", Value: allowedBrokerCallers(agent, owned)},
+		// The profile workers' ServiceAccounts join the list only with a
+		// profile caller to confer the role on; the broker holds each to the
+		// profile audience by the identity map rendered below.
+		corev1.EnvVar{Name: "CREDENTIAL_PROXY_ALLOWED_CALLERS", Value: strings.Join(append([]string{allowedBrokerCallers(agent, owned)}, profiles.callers()...), ",")},
 		// The watchers' audience, in both modes: agent-api-auth always runs
 		// them.
 		corev1.EnvVar{Name: "CREDENTIAL_PROXY_WATCHER_AUDIENCE", Value: credentialProxyWatcherAudience},
@@ -4536,6 +4541,9 @@ func buildCredentialProxyEnvForPlugins(agent *agentv1alpha1.PlatformAgent, agent
 	// (a2aMCPBrokerEnabled), so an install without it confers no mcp role.
 	envVars = append(envVars, a2aMCPBrokerEnv(agent, owned.mcp)...)
 	envVars = append(envVars, scopeBrokerEnv(agent, owned.scope)...)
+	// The profile workers' audience, identity map and the task-signing public
+	// key, with a profile caller only (credential_proxy_profiles.go).
+	envVars = append(envVars, credentialProxyProfileEnv(profiles)...)
 	envVars = append(envVars,
 		corev1.EnvVar{Name: "CREDENTIAL_PROXY_KUBE_CA_FILE", Value: kubeAPIAccessMountPath + "/ca.crt"},
 		corev1.EnvVar{Name: "CREDENTIAL_PROXY_KUBE_TOKEN_FILE", Value: kubeAPIAccessMountPath + "/token"},
@@ -4731,6 +4739,17 @@ func mergeCredentialProxyEnv(managed, custom []corev1.EnvVar) []corev1.EnvVar {
 		credentialProxyScopeFileEnvVar,
 		a2aMCPBrokerURLEnvVar,
 		a2aMCPBrokerTokenFileEnvVar,
+		// The profile role's four, by name because each is rendered only
+		// with a profile caller. One that could set the audience or the
+		// identity map would decide who holds the profile role and as which
+		// (profile, tier); one that could set the signing keys would choose
+		// whose task credentials the broker trusts, and so which cluster a
+		// profile task's calls are confined to; one that could set the
+		// lifetime would choose how long a credential lives.
+		credentialProxyProfileAudienceEnvVar,
+		credentialProxyProfileIdentitiesEnvVar,
+		credentialProxyTaskSigningKeysEnvVar,
+		credentialProxyTaskCredentialMaxLifetimeEnvVar,
 		// One that could set the watcher audience would decide who holds the
 		// watcher role; one that could set the subscription would point the
 		// watcher relay at any subscription the broker's credential can pull;
