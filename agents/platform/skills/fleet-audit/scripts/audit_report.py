@@ -1956,6 +1956,8 @@ GREP_MAX_MATCHES = 200
 GREP_MAX_MATCH_CHARS = 400
 # `git grep`'s exit codes: 0 found, 1 found nothing; anything else is an error.
 GREP_NO_MATCH_EXIT_CODE = 1
+# What every `git grep -n -z` record holds after its path: `\0<line>\0`.
+GREP_RECORD_HEAD = re.compile(r"\x00[0-9]+\x00")
 # The broker's refusal of a snapshot whose `paths` name nothing at that revision.
 SNAPSHOT_PATH_NOT_FOUND = "PATH_NOT_FOUND"
 # How many characters of a revision a message names.
@@ -15929,13 +15931,23 @@ class RepositorySnapshot:
             raise ValidationError(
                 f"a file that matches is not UTF-8 text ({exc.reason}); narrow the search with --prefix"
             ) from exc
+        # A record is `path\0line\0text\n`. A file name can hold a newline
+        # too, so a chunk without the `\0<digits>\0` head is the start of the
+        # next record's path, not a record of its own.
+        records: list[str] = []
+        pending: str | None = None
+        chunks = output.split("\n")
+        for index, chunk in enumerate(chunks):
+            if pending is not None:
+                chunk, pending = f"{pending}\n{chunk}", None
+            if GREP_RECORD_HEAD.search(chunk):
+                records.append(chunk)
+            elif index < len(chunks) - 1:
+                pending = chunk
         matches: list[dict] = []
         total = 0
-        for record in output.split("\n"):
-            if not record:
-                continue
-            path, _, remainder = record.partition("\0")
-            line, _, text = remainder.partition("\0")
+        for record in records:
+            path, line, text = record.split("\0", 2)
             total += 1
             if len(matches) >= GREP_MAX_MATCHES:
                 continue
@@ -16992,8 +17004,8 @@ class _RepositoryProbe:
         # The first broker error that was an outage rather than a refusal:
         # no answer, or a status that says to try again (`_broker_outage`).
         self.outage: BaseException | None = None
-        # Why the last answer was a yes nobody saw: a call that failed or a
-        # listing that stopped short. Read and cleared by `take_unanswered`.
+        # Why the last answer was a yes nobody saw: no snapshot, or a read or a
+        # search that failed. Read and cleared by `take_unanswered`.
         self.unanswered = ""
         self._attempts = 0
         # The clone's YAML, read once for every `mentions` in directory mode,
@@ -17063,11 +17075,16 @@ class _RepositoryProbe:
     def has_path(self, path: str) -> bool:
         if not content_mode():
             return (self.root / path).exists()
-        # Every finding in one cluster tree asks about the same ancestors.
-        if path not in self._paths:
-            self.unanswered = ""
-            self._paths[path] = (self._broker_has_path(path), self.unanswered)
-        answer, self.unanswered = self._paths[path]
+        # Every finding in one cluster tree asks about the same ancestors. Only
+        # an answer the snapshot gave is kept: a default yes taken while there
+        # was none would outlive a retry that took one.
+        if path in self._paths:
+            answer, self.unanswered = self._paths[path]
+            return answer
+        self.unanswered = ""
+        answer = self._broker_has_path(path)
+        if self._snapshot is not None:
+            self._paths[path] = (answer, self.unanswered)
         return answer
 
     def _broker_has_path(self, path: str) -> bool:
@@ -19566,6 +19583,14 @@ def handle_fetch(args: argparse.Namespace) -> None:
         if exc.code == vcs_client.SNAPSHOT_TOO_LARGE:
             raise ValidationError(
                 f"the files named by --path are too large for one snapshot ({exc}); fetch fewer at a time"
+            ) from exc
+        if exc.code == SNAPSHOT_PATH_NOT_FOUND:
+            # The broker names no path, so every one asked for is listed.
+            at = f" at {exc.revision[:REVISION_SHOWN_CHARS]}" if exc.revision else ""
+            raise ValidationError(
+                f"one of the --path values names no file in {repo}{at}: {', '.join(targets)}. "
+                "Fetch them one at a time to find it; a file only the remediation branch has "
+                "needs --branch."
             ) from exc
         raise
     with snap:

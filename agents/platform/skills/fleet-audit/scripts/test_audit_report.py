@@ -494,6 +494,8 @@ THREE_SEVERITIES = [
 ]
 
 
+# The revision `use_snapshot`'s snapshots report.
+SNAPSHOT_TEST_REVISION = "a" * 40
 # The forge verbs `ContentModeTestCase` sends to its real broker, not the Recorder.
 BROKER_BRANCH_VERBS = ("branch-view", "branch-delete")
 # The client's own `forge`, before any test patches it.
@@ -562,9 +564,7 @@ def broker_refusal(status: int, message: str = "refused") -> "vcs_client.VcsErro
         return error
 
 
-def use_snapshot(
-    case, files=None, *, error=None, calls=None, revision="a" * 40, unreadable=(), read_error=None
-):
+def use_snapshot(case, files=None, *, error=None, calls=None, unreadable=(), read_error=None):
     """Make `audit_report.RepositorySnapshot` unpack `files` rather than ask the broker.
 
     `error`, when set, is what taking the snapshot raises; a list gives one
@@ -591,7 +591,7 @@ def use_snapshot(
                 target = self.tree / path
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(text, encoding="utf-8")
-            self.revision = revision
+            self.revision = SNAPSHOT_TEST_REVISION
 
         def read_bytes(self, path):
             if path in unreadable:
@@ -607,6 +607,25 @@ def use_snapshot(
         patcher.start()
         case.addCleanup(patcher.stop)
     return Snapshot
+
+
+class _HistoryDirectoryForge(_DirectoryForge):
+    """`_DirectoryForge` with a proposal history per branch, as
+    `test_vcs_broker.HistoryLocalForge`: what the broker's `branch-delete`
+    reads to decide a branch is spent."""
+
+    verbs = ("proposal-list",)
+
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.history: dict[str, list[dict]] = {}
+
+    def proposal_list(self, api, repo, payload):
+        found = [] if payload.get("target") is not None else list(self.history.get(payload.get("source"), []))
+        if payload.get("state") == "open":
+            found = [item for item in found if item.get("state") == "open"]
+        limit = int(payload.get("limit") or 100)
+        return providers.listing(found[:limit], limit, "proposals")
 
 
 class Recorder:
@@ -19276,6 +19295,22 @@ class ContentModeTestCase(BaseTestCase):
         self.assertEqual(len(self.harness.forge_calls("proposal-create")), creates)
         self.assertTrue(self.harness.forge_calls("proposal-update"))
 
+    def test_a_file_name_holding_a_newline_is_one_match(self):
+        self.push_to_origin("clus\nters/x.yaml", b"kind: Namespace\n")
+        self.start()
+        self.assertEqual(self.run_main(["grep", "--audit", AUDIT, "--pattern", "Namespace"]), 0)
+        found = json.loads(self.out.strip())
+        self.assertEqual((found["total"], [m["path"] for m in found["matches"]]), (1, ["clus\nters/x.yaml"]))
+
+    def test_a_fetch_naming_a_missing_file_lists_the_paths(self):
+        self.start()
+        self.assertEqual(
+            self.run_main(["fetch", "--audit", AUDIT, "--path", "README.md", "--path", "gone.yaml"]), 2
+        )
+        self.assertIn("one of the --path values names no file in acme/fleet", self.err)
+        self.assertIn("README.md, gone.yaml", self.err)
+        self.assertFalse((self.workspace / "README.md").exists())
+
     def test_grep_over_a_file_that_is_not_utf8_names_the_cause(self):
         self.push_to_origin("legacy/app.yaml", "namespace: caf\u00e9\n".encode("latin-1"))
         self.start()
@@ -19300,22 +19335,25 @@ class ContentModeTestCase(BaseTestCase):
         self.assertEqual(self.origin_git(["rev-parse", branch]).strip(), first)
         self.assertEqual(len(self.harness.forge_calls("proposal-create")), 1)
 
+    def history_forge(self) -> "_HistoryDirectoryForge":
+        """Swap the broker's forge for one with a proposal history, so `branch-delete` runs its gates."""
+        forge = _HistoryDirectoryForge(self.tmp_path / "forges")
+        self.broker.registry.forges = [forge]
+        self.broker.registry.hosts = {host: forge for host in forge.hosts}
+        self.broker.registry.default = forge
+        return forge
+
+    def spent(self, branch: str, revision: str) -> dict:
+        return {"number": 8, "state": "closed", "source": branch, "sourceRevision": revision,
+                "sourceRepo": "acme/fleet", "author": "", "url": "https://github.com/acme/fleet/pull/8"}
+
     def test_a_spent_branch_the_broker_deletes_is_cut_again_from_the_base(self):
-        # The tip of a closed pull request of this install: the broker deletes
-        # the branch, and the fix is cut again from the base and proposed anew.
+        # The tip of a closed pull request of this install: the broker's own
+        # gates read the landing's `branch-delete` payload, delete the branch,
+        # and the fix is cut again from the base and proposed anew.
         branch = self.publish_once()
         first = self.origin_git(["rev-parse", branch]).strip()
-        real = vcs_client.forge
-
-        def delete_spent(verb, payload, repository=None):
-            if verb == "branch-delete":
-                self.origin_git(["branch", "-D", branch])
-                return {"deleted": True}
-            return real(verb, payload, repository=repository)
-
-        patcher = patch.object(vcs_client, "forge", delete_spent)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        self.history_forge().history[branch] = [self.spent(branch, first)]
         self.start()
         self.write_manifest(
             "clusters/prod-us-east/payments-netpol.yaml", "kind: NetworkPolicy\nspec: {}\n"
@@ -19328,6 +19366,20 @@ class ContentModeTestCase(BaseTestCase):
             "kind: NetworkPolicy\nspec: {}\n",
         )
         self.assertEqual(len(self.harness.forge_calls("proposal-create")), 2)
+
+    def test_a_branch_that_moved_past_its_closed_pull_request_is_not_deleted(self):
+        # The closed pull request carried an older revision than the tip, so
+        # the broker refuses with NOT_SPENT and the branch is left as it is.
+        branch = self.publish_once()
+        first = self.origin_git(["rev-parse", branch]).strip()
+        self.history_forge().history[branch] = [self.spent(branch, "0" * 40)]
+        self.start()
+        self.write_manifest(
+            "clusters/prod-us-east/payments-netpol.yaml", "kind: NetworkPolicy\nspec: {}\n"
+        )
+        self.assertEqual(self.run_finish(make_doc()), 0, self.err)
+        self.assertIn("NOT_SPENT", self.err)
+        self.assertEqual(self.origin_git(["rev-parse", branch]).strip(), first)
 
     def test_an_unchanged_second_run_still_reports_the_pull_request(self):
         # EMPTY_COMMIT on a branch that already exists is "nothing to push",
@@ -21790,6 +21842,17 @@ class TestUnwrittenSweepFixes(HarnessTestCase):
                 [finding], manifest, self.unwritten([finding], manifest), {}, [], self.workspace, probe, AUDIT, notes
             )
         self.assertIn("Kustomize root", notes["a"])
+
+    def test_a_default_yes_taken_without_a_snapshot_is_not_kept_after_a_retry(self):
+        use_snapshot(self, {"clusters/c1/kustomization.yaml": "resources: []\n"}, error=[RuntimeError("down"), None])
+        self.patch_attr("content_mode", lambda: True)
+        probe = audit_report._RepositoryProbe("acme/fleet", self.workspace)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertTrue(probe.has_path("clusters/new.yaml"))  # no snapshot: a default yes
+            self.assertFalse(probe.has_path("clusters/new.yaml"))  # the retry's snapshot answers
+        self.assertFalse(probe.known_absent("clusters/other.yaml"))
+        self.assertTrue(probe.known_absent("clusters/new.yaml"))
+        probe.close()
 
     def test_a_snapshot_that_failed_is_named_not_called_a_collision(self):
         use_snapshot(self, error=RuntimeError("down"))
