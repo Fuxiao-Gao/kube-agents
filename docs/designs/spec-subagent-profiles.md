@@ -364,8 +364,11 @@ What the operator renders per profile, as built (amended 10/6):
     credential leaves the caller local-only commands: `gcloud version`,
     `kubectl version --client`, `--help` on a command, and the `kubectl config` reads
     `get-contexts` and `current-context`, the ones the read-only policy admits (`config view` is refused, since
-    `--flatten` prints credentials). A local-only command runs isolated, against no
-    kubeconfig and with no `get-credentials` handling, with or without a credential.
+    `--flatten` prints credentials). The confinement asks the policy rather than
+    mirroring it: `--help` on a command the policy refuses (`kubectl apply --help`,
+    `gcloud init --help`) gets the policy's own refusal. A local-only command runs
+    isolated, against no kubeconfig and with no `get-credentials` handling, with or
+    without a credential, so `get-credentials <cluster> --help` is a help read.
     `gcloud config` and `gcloud auth` are refused whole, since even their reads print the
     broker's own account and default project.
   - With a credential, every call is held to its target (`task_confinement.py`). Every
