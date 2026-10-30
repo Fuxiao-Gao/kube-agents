@@ -352,15 +352,21 @@ class ContentModeTest(unittest.TestCase):
         self.assertEqual(list(snapshot.files), ["apps/a.yaml"])
         self.assertEqual(snapshot.skipped, [left_out, {"path": "apps/link.yaml", "reason": scan.REASON_SYMLINK}])
 
-    def test_links_the_snapshot_left_out_are_listed_only_when_they_can_hold_manifests(self):
+    def test_every_entry_the_snapshot_left_out_is_listed(self):
+        """A dotted name does not prove a file: `overlays/prod.eu` can be a
+        directory of manifests the section would otherwise call clean."""
         left_out = [
             {"path": "apps/escape.yaml", "reason": "out of the tree"},
             {"path": "docs/logo.png", "reason": "out of the tree"},
+            {"path": "overlays/prod.eu", "reason": "out of the tree"},
             {"path": "vendored", "reason": "out of the tree"},
         ]
         fake = FakeSnapshot({"apps/a.yaml": CRONJOB_V1}, skipped=left_out)
         snapshot = scan.read_repo_content("acme/infra", snapshot=fake)
-        self.assertEqual([entry["path"] for entry in snapshot.skipped], ["apps/escape.yaml", "vendored"])
+        self.assertEqual(
+            [entry["path"] for entry in snapshot.skipped],
+            ["apps/escape.yaml", "docs/logo.png", "overlays/prod.eu", "vendored"],
+        )
 
     def test_a_snapshot_whose_tree_is_gone_is_an_error_not_a_clean_section(self):
         class Vanishing(FakeSnapshot):
@@ -404,7 +410,10 @@ class ContentModeTest(unittest.TestCase):
         (outside / "keep.yaml").write_bytes(CRONJOB_V1)
         link = root / (scan.CLONE_DIR_PREFIX + "link")
         link.symlink_to(outside)
-        old = time.time() - (scan.vcs_client.COPY_TTL_HOURS + 1) * 3600
+        ttl = patch.object(scan.vcs_client, "COPY_TTL_HOURS", 24.0)
+        ttl.start()
+        self.addCleanup(ttl.stop)
+        old = time.time() - 25 * 3600
         for path in (stale, other):
             os.utime(path, (old, old))
         os.utime(link, (old, old), follow_symlinks=False)

@@ -349,9 +349,10 @@ def read_repo_content(
 ) -> Snapshot:
     """Broker mode: one revision from the broker's snapshot, read as a local tree.
 
-    The manifest-named links the snapshot left out, because they point out of
-    the tree, are listed as skipped with its reason, and so are the links with
-    no suffix, which can be directories of manifests.
+    Every entry the snapshot left out (a link out of the tree, a bare
+    repository layout) is listed as skipped with its reason. The snapshot does
+    not say whether a link was to a file or to a directory of manifests, and
+    a dotted name proves neither, so none is hidden.
     """
     snapshot = snapshot or vcs_client.snapshot
     vcs_client.ROOT.mkdir(parents=True, exist_ok=True)
@@ -364,11 +365,7 @@ def read_repo_content(
         if not tree.is_dir():
             raise FileNotFoundError(f"the snapshot of {repo} is not at {tree}")
         read = read_tree(tree, SOURCE_REPO.format(sha=sha or SHA_UNKNOWN), sha, max_files, max_bytes, skip_links=True)
-    left_out = [
-        entry for entry in answer.get("skipped") or []
-        if is_manifest_path(entry.get("path", "")) or not Path(entry.get("path", "")).suffix
-    ]
-    read.skipped = left_out + read.skipped
+    read.skipped = list(answer.get("skipped") or []) + read.skipped
     return read
 
 
