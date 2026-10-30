@@ -15791,6 +15791,49 @@ class ScopeRouteAdmissionTest(unittest.TestCase):
         self.assertFalse(credential_proxy.executable_permitted(credential_proxy.CALLER_ROLE_SCOPE, "kubectl"))
 
 
+class ScopeSlotShareTest(unittest.TestCase):
+    """The scope share takes only what session and profile work leave, and the shell keeps a slot."""
+
+    def limit(self, raw, pool, session, profile):
+        with mock.patch.dict(os.environ, {credential_proxy.ENV_SCOPE_MAX_CONCURRENT_COMMANDS: raw}):
+            return credential_proxy.scope_slot_limit_from_env(pool, session, profile)
+
+    def test_the_defaults_leave_the_shell_a_slot_with_every_bounded_role_busy(self):
+        pool = credential_proxy.DEFAULT_MAX_CONCURRENT_COMMANDS
+        with mock.patch.dict(os.environ, {}, clear=True):
+            session = credential_proxy.session_slot_limit_from_env()
+            profile = credential_proxy.profile_slot_limit_from_env(pool, session)
+            scope = credential_proxy.scope_slot_limit_from_env(pool, session, profile)
+        self.assertEqual(1, credential_proxy.DEFAULT_SCOPE_MAX_CONCURRENT_COMMANDS)
+        self.assertEqual(1, scope)
+        self.assertLessEqual(session + profile + scope, pool - 1)
+
+    def test_an_oversubscribed_config_clamps_scope_first(self):
+        for raw, pool, session, profile, want, warns in (
+            ("1", 8, 2, 4, 1, False),
+            ("4", 8, 2, 4, 1, True),   # 8 - 2 - 4 - 1: the profile share is kept, scope gives way
+            ("4", 16, 2, 4, 4, False),
+            ("2", 8, 2, 5, 0, True),   # profile left nothing: scope is answered busy, the shell keeps its slot
+            ("x", 8, 2, 4, 1, True),   # an unreadable value is the default
+        ):
+            with self.subTest(raw=raw, pool=pool, profile=profile):
+                with self.assertLogs(credential_proxy.LOGGER, level="WARNING") if warns else contextlib.nullcontext():
+                    got = self.limit(raw, pool, session, profile)
+                self.assertEqual(want, got)
+                self.assertLessEqual(session + profile + got, pool - 1)
+
+    def test_a_scope_share_of_zero_is_busy_and_the_shell_is_not(self):
+        slots = credential_proxy.SessionSlots(
+            0, role=credential_proxy.CALLER_ROLE_SCOPE,
+            env_name=credential_proxy.ENV_SCOPE_MAX_CONCURRENT_COMMANDS, bound=credential_proxy.ADMISSION_BOUND_SCOPE,
+        )
+        with self.assertRaises(credential_proxy.CommandSlotUnavailable):
+            with slots.acquire(credential_proxy.CALLER_ROLE_SCOPE):
+                pass
+        with slots.acquire(credential_proxy.CALLER_ROLE_SHELL):
+            pass
+
+
 SCOPE_ASSET_SEARCH = [
     "gcloud", "asset", "search-all-resources", "--scope=folders/111",
     "--asset-types=container.googleapis.com/Cluster", "--format=json(name,location)",

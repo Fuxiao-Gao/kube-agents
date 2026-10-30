@@ -324,8 +324,11 @@ CGROUP_NO_LIMIT = "max"
 DEFAULT_SESSION_MAX_CONCURRENT_COMMANDS = 2
 ENV_SESSION_MAX_CONCURRENT_COMMANDS = "CREDENTIAL_PROXY_SESSION_MAX_CONCURRENT_COMMANDS"
 # The scope role's share, for the same reason: the publisher probes one project
-# per call, up to maxProjects calls a run, from the pool the shell uses.
-DEFAULT_SCOPE_MAX_CONCURRENT_COMMANDS = 4
+# per call, up to maxProjects calls a run, from the pool the shell uses. One
+# worker is enough for a run every 15 minutes. At serve() it is clamped after
+# the profile share, so session, profile and scope together leave the shell at
+# least one slot (scope_slot_limit_from_env); scope gives way first.
+DEFAULT_SCOPE_MAX_CONCURRENT_COMMANDS = 1
 ENV_SCOPE_MAX_CONCURRENT_COMMANDS = "CREDENTIAL_PROXY_SCOPE_MAX_CONCURRENT_COMMANDS"
 # The profile role's share (#3889), the same mechanism as the session's: every
 # AgentProfile worker's calls together hold at most this many of the pool's
@@ -2187,6 +2190,27 @@ def profile_slot_limit_from_env(pool: int, session_limit: int) -> int:
             "the profile share of %d is more than the pool of %d less the session share of %d and one slot "
             "for the shell; using %d",
             value, pool, session_limit, ceiling,
+        )
+        value = ceiling
+    return value
+
+
+def scope_slot_limit_from_env(pool: int, session_limit: int, profile_limit: int) -> int:
+    """The scope role's concurrent-command share, clamped to what the others leave.
+
+    Read like the session's, then held to ``pool - session_limit -
+    profile_limit - 1``, so that with every session, profile and scope slot
+    taken the shell still has one. Profile work keeps its priority: this is
+    decided after its share. Zero when nothing is left, with a warning: the
+    scope publisher is then answered busy, and the shell keeps its slot.
+    """
+    value = session_slot_limit_from_env(ENV_SCOPE_MAX_CONCURRENT_COMMANDS, DEFAULT_SCOPE_MAX_CONCURRENT_COMMANDS)
+    ceiling = max(0, pool - session_limit - profile_limit - 1)
+    if value > ceiling:
+        LOGGER.warning(
+            "the scope share of %d is more than the pool of %d less the session share of %d, the profile "
+            "share of %d and one slot for the shell; using %d",
+            value, pool, session_limit, profile_limit, ceiling,
         )
         value = ceiling
     return value
@@ -12734,17 +12758,23 @@ def serve(args: argparse.Namespace) -> None:
     executor.bootstrap(os.getenv("CREDENTIAL_PROXY_BOOTSTRAP_COMMAND", ""))
     CredentialProxyHandler.executor = executor
     CredentialProxyHandler.session_slots = SessionSlots(session_slot_limit_from_env())
-    CredentialProxyHandler.scope_slots = SessionSlots(
-        session_slot_limit_from_env(ENV_SCOPE_MAX_CONCURRENT_COMMANDS, DEFAULT_SCOPE_MAX_CONCURRENT_COMMANDS),
-        role=CALLER_ROLE_SCOPE,
-        env_name=ENV_SCOPE_MAX_CONCURRENT_COMMANDS,
-        bound=ADMISSION_BOUND_SCOPE,
-    )
     CredentialProxyHandler.profile_slots = SessionSlots(
         profile_slot_limit_from_env(executor.max_concurrent_commands, CredentialProxyHandler.session_slots.limit),
         role=CALLER_ROLE_PROFILE,
         env_name=ENV_PROFILE_SLOTS,
         bound=ADMISSION_BOUND_PROFILE,
+    )
+    # After the profile share, so the scope share takes only what profile and
+    # session work leave the shell's last slot.
+    CredentialProxyHandler.scope_slots = SessionSlots(
+        scope_slot_limit_from_env(
+            executor.max_concurrent_commands,
+            CredentialProxyHandler.session_slots.limit,
+            CredentialProxyHandler.profile_slots.limit,
+        ),
+        role=CALLER_ROLE_SCOPE,
+        env_name=ENV_SCOPE_MAX_CONCURRENT_COMMANDS,
+        bound=ADMISSION_BOUND_SCOPE,
     )
     CredentialProxyHandler.base_branch = (
         getattr(args, "base_branch", "")
