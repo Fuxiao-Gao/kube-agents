@@ -5,6 +5,13 @@
 # Its slots-in-use peak is recorded only where the cluster runs Managed Prometheus collection for the
 # broker's gauge; elsewhere the record says so in `errors` (the 2026-10-28 records have no peak).
 #
+# `run`, `apply` and `teardown` hold the experiment install's live-test lease, and `run --dry-run`
+# prints the cluster creates and deletes and the runs first (the runner's, from Phase 4). The plan
+# measures the broker at its default 1-CPU limit, so it refuses to run while the broker carries
+# another (`expect_proxy_limits`). The 2026-10-28 run took about 10 hours, so the lease lasts 14.
+# That run created its test clusters in us-central1-f (SCALE_ZONE=us-central1-f): us-central1-c had
+# no e2-standard-2 capacity that day.
+#
 # The target names no project: set SCALE_PROJECT_ID as for phase1.yaml. 16 and 32 clusters are a
 # later run of this file with those levels added to `clusters`: above about 30 clusters the
 # project's default network has no room left for Pod ranges (see phase2.yaml).
@@ -51,6 +58,9 @@ combined:
     concurrent: 15
 
 settings:
+  expect_proxy_limits:
+    cpu: "1"
+  lease_ttl_minutes: 840
   settle_seconds: 300
   pods_per_node: 90
   fixture_pool: scale-pool

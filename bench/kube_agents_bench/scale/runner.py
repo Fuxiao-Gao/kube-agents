@@ -54,6 +54,11 @@ WATCHER_POLL_SECONDS = 30
 TRIGGER_DRAIN_SECONDS = 1800
 # The commands that change the test clusters or the install, and so hold the live-test lease.
 MUTATING_COMMANDS = ("run", "apply", "teardown")
+# A plan that measures the broker at limits set by hand names them under this settings key
+# (resource -> quantity, as in a pod spec); `run` and `apply` refuse to start while the live broker
+# pods carry other limits, and `run --dry-run` says whether they match.
+EXPECTED_PROXY_LIMITS_KEY = "expect_proxy_limits"
+LIMIT_FIELDS = {"cpu": "cpu_cores", "memory": "memory_bytes"}
 LEASE_SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "live_test_lease.py"
 LEASE_ENVS_VAR = "KUBE_AGENTS_LIVE_TEST_ENVS"
 LEASE_SESSION_VAR = "KUBE_AGENTS_LEASE_SESSION"
@@ -719,6 +724,31 @@ class Runner:
             self.flush_peaks(awaiting, wait=True)
         return not stopped
 
+    def limit_mismatches(self) -> list[str]:
+        """How the live broker's limits differ from the plan's ``expect_proxy_limits``; empty when they match or none is named."""
+        expected = self.plan.settings.get(EXPECTED_PROXY_LIMITS_KEY) or {}
+        if not expected:
+            return []
+        live = self.install.limits().get(collect.PROXY_CONTAINER, {})
+        problems = []
+        for resource, quantity in expected.items():
+            if resource not in LIMIT_FIELDS:
+                problems.append(f"{resource}: not a limit this check reads ({', '.join(LIMIT_FIELDS)})")
+                continue
+            have = live.get(LIMIT_FIELDS[resource])
+            if have is None or abs(have - collect.parse_quantity(str(quantity))) > 1e-9:
+                problems.append(f"{resource}: the plan expects {quantity}, the broker has {'none' if have is None else f'{have:g}'}")
+        return problems
+
+    def check_limits(self) -> None:
+        """Refuse to go on while the broker's limits are not the plan's ``expect_proxy_limits``."""
+        problems = self.limit_mismatches()
+        if problems:
+            raise SystemExit(
+                f"the broker's limits are not this plan's {EXPECTED_PROXY_LIMITS_KEY}: {'; '.join(problems)}. "
+                "Set them on the PlatformAgent, wait for the broker to roll, then run again."
+            )
+
     def dry_run(self, specs: list[RunSpec], force: bool) -> list[str]:
         """What ``run`` would do, as lines: each level's cluster creates and deletes, and each run.
 
@@ -728,6 +758,9 @@ class Runner:
         pending = specs if force else self.pending(specs)
         current = set(kube.clusters_with_prefix(self.project, self.zone, self.prefix, self.label))
         lines = [f"{len(pending)} runs to do (of {len(specs)}); test clusters now: {len(current)}"]
+        if self.plan.settings.get(EXPECTED_PROXY_LIMITS_KEY):
+            problems = self.limit_mismatches()
+            lines.append(f"{EXPECTED_PROXY_LIMITS_KEY}: {'; '.join(problems) if problems else 'the broker matches'}")
         for (factor, level), group in itertools.groupby(pending, key=lambda s: (s.factor, s.level)):
             values = self.plan.level_values(factor, level)
             wanted = set(self.cluster_names(int(values[CLUSTERS_TOTAL])))
@@ -1009,6 +1042,8 @@ def main(argv: list[str] | None = None) -> int:
 
 def _mutate(runner: Runner, args: argparse.Namespace, specs: list[RunSpec]) -> int:
     """The commands that change the test clusters or the install, run under the lease."""
+    if args.command in ("run", "apply"):
+        runner.check_limits()
     if args.command == "run":
         # Non-zero when the run stopped at a level, so a script does not go on to its next step.
         return 0 if runner.run(specs, args.force, args.limit) else STOPPED_EXIT_CODE

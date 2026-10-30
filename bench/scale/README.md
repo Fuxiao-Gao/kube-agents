@@ -76,7 +76,9 @@ deletes, and each run, marked where it makes model calls of its own. `run`, `app
 hold the experiment install's live-test lease while they work
 ([`docs/designs/live-test-lease.md`](../../docs/designs/live-test-lease.md)), so a second runner or
 an agent's live validation cannot change the install at the same time; a lease another holder has
-refuses the command. The lease lasts `lease_ttl_minutes` (default 720).
+refuses the command. The lease lasts `lease_ttl_minutes` (default 720). A plan that measures the
+broker at limits set by hand names them in `expect_proxy_limits`; `run` and `apply` refuse to start
+while the live broker carries other limits, and `run --dry-run` says whether they match.
 
 An operation's `kind` says what a run does:
 
@@ -113,6 +115,8 @@ Settings with no default: `churn_pod_lifetime_seconds`, `fixture_machine_type`, 
   default one;
 - `cluster_registration_timeout_seconds`: how long to wait for a Cluster Agent profile.
 - `lease_ttl_minutes`: how long a run's live-test lease lasts before another holder can take it.
+- `expect_proxy_limits`: the credential broker's container limits the plan measures at, as in a pod
+  spec (`cpu: "2"`, `memory: 2Gi`); `run` and `apply` refuse to start while the live pods differ.
 - `trigger_drain_seconds`: how long the run after a `trigger_soak` waits for its jobs to finish.
 
 The agent API is reached through the repository's `kubectl exec` relay

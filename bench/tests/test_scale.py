@@ -1405,3 +1405,50 @@ def test_a_pod_whose_cpu_stat_was_unread_at_the_start_adds_no_throttle():
     before = Snapshot(cpu_unread={"p"})
     after = Snapshot(cpu_stat={"p": {"nr_periods": 1e6, "nr_throttled": 4e5, "throttled_seconds": 9000.0}})
     assert collect.throttle_metrics(before, after) == []
+
+
+BROKER_RAISED = REPO_BENCH / "scale" / "broker-proxy-raised.yaml"
+
+
+def _raised_runner(tmp_path, proxy_limits):
+    plan = load_plan(BROKER_RAISED, environ=ENV)
+    run = runner.Runner(plan, tmp_path / "data.json")
+    read = []
+
+    def limits():
+        read.append(True)
+        return {collect.PROXY_CONTAINER: proxy_limits}
+    run.install = types.SimpleNamespace(limits=limits)
+    return plan, run, read
+
+
+def test_a_run_starts_when_the_broker_carries_the_plan_s_limits(monkeypatch, tmp_path):
+    plan, run, read = _raised_runner(tmp_path, {"cpu_cores": 2.0, "memory_bytes": 2 * 1024**3})
+    started = []
+    monkeypatch.setattr(run, "run", lambda *a: started.append(True) or True)
+    args = types.SimpleNamespace(command="run", force=False, limit=None)
+    assert runner._mutate(run, args, []) == 0
+    assert started and read
+    monkeypatch.setattr(runner.kube, "clusters_with_prefix", lambda *a: [])
+    assert "expect_proxy_limits: the broker matches" in run.dry_run([], force=True)
+
+
+def test_a_run_refuses_to_start_while_the_broker_carries_other_limits(monkeypatch, tmp_path):
+    plan, run, read = _raised_runner(tmp_path, {"cpu_cores": 1.0})
+    started = []
+    monkeypatch.setattr(run, "run", lambda *a: started.append(True) or True)
+    for command in ("run", "apply"):
+        args = types.SimpleNamespace(command=command, force=False, limit=None, factor="clusters", level=8)
+        with pytest.raises(SystemExit, match="cpu: the plan expects 2, the broker has 1"):
+            runner._mutate(run, args, [])
+    assert started == []
+    monkeypatch.setattr(runner.kube, "clusters_with_prefix", lambda *a: [])
+    assert any("expect_proxy_limits: cpu: the plan expects 2" in line for line in run.dry_run([], force=True))
+
+
+def test_a_plan_that_names_no_limits_reads_none(tmp_path):
+    plan = load_plan(PHASE4, environ=ENV)
+    run = runner.Runner(plan, tmp_path / "data.json")
+    run.install = types.SimpleNamespace(limits=lambda: pytest.fail("a plan with no expect_proxy_limits read the limits"))
+    run.check_limits()
+    assert run.limit_mismatches() == []

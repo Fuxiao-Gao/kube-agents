@@ -1,7 +1,9 @@
 # The vertical control for broker.yaml: the 8-cluster audit window with the credential proxy's CPU
 # limit at 2 cores (spec.deployment.credentialProxy.resources.limits.cpu: "2" on the experiment
 # install's PlatformAgent). The runner reads the limits from the live pods into every record; it
-# does not change them: set the field before these runs and remove it after. Run it while the fleet
+# does not change them: set the field before these runs and remove it after. It refuses to run while
+# the broker's CPU limit is not 2 (`expect_proxy_limits`), and it holds the install's live-test
+# lease; `run --dry-run` shows both first. Run it while the fleet
 # has 8 clusters. One run per point fitted the 2026-10-28 run inside its time limit.
 phase: broker-proxy-raised
 
@@ -27,6 +29,8 @@ base:
 factors: {}
 
 settings:
+  expect_proxy_limits:
+    cpu: "2"
   settle_seconds: 300
   pods_per_node: 90
   fixture_pool: scale-pool
