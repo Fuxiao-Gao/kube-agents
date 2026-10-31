@@ -41,7 +41,7 @@ from dataclasses import dataclass, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping, NamedTuple, TextIO
+from typing import Any, Callable, Iterator, Mapping, NamedTuple, Sequence, TextIO
 
 import api_policy
 import command_policy
@@ -442,6 +442,34 @@ KILL_POLL_SECONDS = 0.05
 # uninterruptible sleep or an orphan whose reaper is slow, since a zombie
 # keeps the group's id until it is reaped.
 KILL_SETTLE_SECONDS = 1
+# SIGTERM is the kubelet's warning that an eviction, a node drain or a
+# rollout is about to end the pod (terminationGracePeriodSeconds later, 30 s
+# unset). The one thing this process then holds that no other pod can pick
+# up is the ack id of each Chat message the gateway pulled and has not yet
+# settled. The gateway settles a pull as soon as it returns
+# (a2a/gateway/gchat.go, Run), so once new pulls are refused the settle routes
+# stay open this long for those acks to land; a receipt still unsettled after
+# it belongs to a pull whose answer never reached the gateway, and is handed
+# back to Pub/Sub so the replacement pod gets it at once rather than when its
+# ack deadline (60 s) runs out. Short on purpose: the window is the whole of
+# what a graceful stop adds to a Recreate rollout.
+SHUTDOWN_SETTLE_SECONDS = 3
+# How long the hand-back's one Pub/Sub call may take, with no retry. It runs
+# on the drain thread ahead of server.shutdown(), inside the entrypoint's
+# RUNTIME_DRAIN_SECONDS (10 s) after the settle window above; the client
+# library's defaults (60 s per call, retried for 60 s) would let a slow
+# Pub/Sub hold the stop past that budget and hand the process to SIGKILL with
+# the server still up, the ending this path exists to avoid. A call that does
+# not finish in this long is logged and the messages wait out their ack
+# deadline, as before.
+SHUTDOWN_NACK_TIMEOUT_SECONDS = 2
+# The body of the 503 a Chat pull gets during the window. The gateway logs the
+# 503 as "event pull failed ... answered 503: subscription <name>" (it renders
+# only the chat, pubsub and subscription keys of a relay error, never free
+# text), so the words reach the proxy's caller, not the gateway's line.
+SHUTDOWN_ERROR = "credential proxy shutting down"
+# The drain thread's name, for a reader of a thread dump mid-stop.
+SHUTDOWN_THREAD_NAME = "shutdown"
 
 # Bounds on the pre-authentication body drain in AgentAPIProxyHandler. The body has
 # to be read in full for the 401 to survive the close, so these bound what reading it
@@ -3938,6 +3966,10 @@ class GoogleChatRelay:
         self._http_pool_size = int(os.getenv("GOOGLE_CHAT_HTTP_POOL_SIZE", "8"))
         self.num_retries = int(os.getenv("GOOGLE_CHAT_API_NUM_RETRIES", "3"))
         self._receipts: dict[str, Any] = {}
+        # Set by release_unsettled: from then on a pull that was already in
+        # flight at the hand-back nacks what it receives instead of holding a
+        # receipt nothing will settle.
+        self._closed = False
         self._lock = threading.Lock()
 
     def _build_http(self) -> Any:
@@ -3980,7 +4012,14 @@ class GoogleChatRelay:
         received = response.received_messages[0]
         receipt = str(uuid.uuid4())
         with self._lock:
-            self._receipts[receipt] = received.ack_id
+            closed = self._closed
+            if not closed:
+                self._receipts[receipt] = received.ack_id
+        if closed:
+            # Delivered to a long poll that outlived the hand-back; nobody
+            # will settle a receipt now, so hand this one back at once too.
+            self._nack([received.ack_id])
+            return None
         return {
             "receipt": receipt,
             "data": base64.b64encode(received.message.data).decode("ascii"),
@@ -4006,6 +4045,48 @@ class GoogleChatRelay:
                 }
             )
         return True
+
+    def _nack(self, ack_ids: list[Any]) -> bool:
+        """Hand ack_ids back to Pub/Sub now; False, and a log line, when that failed.
+
+        Best effort and bounded (SHUTDOWN_NACK_TIMEOUT_SECONDS, no retry): a
+        failure or a timeout leaves the messages to redeliver at their ack
+        deadline, which is what happened to them before the shutdown path.
+        """
+        try:
+            self.subscriber.modify_ack_deadline(
+                request={
+                    "subscription": self.subscription_path,
+                    "ack_ids": ack_ids,
+                    "ack_deadline_seconds": 0,
+                },
+                timeout=SHUTDOWN_NACK_TIMEOUT_SECONDS,
+                retry=None,
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "shutdown: handing back %d unsettled receipt(s) failed type=%s; "
+                "they redeliver at their ack deadline",
+                len(ack_ids), type(exc).__name__,
+            )
+            return False
+        return True
+
+    def release_unsettled(self) -> int:
+        """Hand every unsettled receipt back to Pub/Sub; the count handed back.
+
+        The shutdown path's last act (install_shutdown_handler). Also closes
+        the relay: a pull in flight at this moment, which nothing interrupts,
+        nacks whatever it then receives rather than registering a receipt
+        after the clear (pull).
+        """
+        with self._lock:
+            self._closed = True
+            ack_ids = list(self._receipts.values())
+            self._receipts.clear()
+        if not ack_ids or not self._nack(ack_ids):
+            return 0
+        return len(ack_ids)
 
     def api_call(
         self, resource: list[str], method: str, arguments: dict[str, Any]
@@ -10433,6 +10514,12 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
     a2a_chat_relay: GoogleChatRelay | None = None
     slack_relay: SlackRelay | None = None
     teams_relay: TeamsRelay | None = None
+    # Set by the SIGTERM handler (install_shutdown_handler). While set, the
+    # two Chat event-pull routes answer 503 SHUTDOWN_ERROR and nothing else
+    # changes: the settle routes, the Slack pull and every other route serve
+    # until the server stops, so the gateway's acks for pulls already
+    # answered still land.
+    shutting_down = threading.Event()
     # The read-only Cloud API relay's credential and transport. Armed by
     # serve() unconditionally, like the exec route: the shell role always
     # exists. None only in a test that has not set it, where the route
@@ -10658,6 +10745,13 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
             "session_cap": getattr(self.session_slots, "limit", DEFAULT_SESSION_MAX_CONCURRENT_COMMANDS),
         }
 
+    def _refused_while_shutting_down(self, **fields: Any) -> bool:
+        """Answer a Chat event pull 503 SHUTDOWN_ERROR while the stop is under way."""
+        if not self.shutting_down.is_set():
+            return False
+        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": SHUTDOWN_ERROR, **fields})
+        return True
+
     def do_GET(self) -> None:  # noqa: N802
         if self.path != HEALTHZ_PATH and self._authenticated() is None:
             return
@@ -10690,6 +10784,11 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
                     HTTPStatus.SERVICE_UNAVAILABLE, {"error": "Slack relay disabled"}
                 )
                 return
+            # Served through the shutdown window on purpose: this queue is
+            # in-process and already acknowledged to Slack, so every event
+            # the gateway pulls now is one fewer lost with the pod. Only the
+            # Chat routes refuse (_refused_while_shutting_down), because only
+            # a Chat pull creates a Pub/Sub receipt the stop has to hand back.
             try:
                 self._json(HTTPStatus.OK, {"event": self.slack_relay.pull()})
             except Exception as exc:
@@ -10706,6 +10805,8 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
             # The subscription rides every answer, so the gateway can name
             # what it pulls: it is configured with the relay URL only.
             subscription = getattr(self.a2a_chat_relay, "subscription_path", "")
+            if self._refused_while_shutting_down(subscription=subscription):
+                return
             try:
                 event = self.a2a_chat_relay.pull()
                 self._json(HTTPStatus.OK, {"event": event, "subscription": subscription})
@@ -10739,6 +10840,8 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
         if self.path.startswith("/v1/chat/events"):
             if self.chat_relay is None:
                 self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "chat relay disabled"})
+                return
+            if self._refused_while_shutting_down():
                 return
             try:
                 event = self.chat_relay.pull()
@@ -13226,6 +13329,54 @@ def platform_pubsub_subscriptions() -> frozenset[str]:
     return frozenset(kept)
 
 
+def install_shutdown_handler(
+    server: socketserver.BaseServer,
+    relays: Sequence[GoogleChatRelay],
+    settle_seconds: float = SHUTDOWN_SETTLE_SECONDS,
+) -> None:
+    """Make SIGTERM a graceful stop of the credentialed server.
+
+    On the signal: refuse new Chat event pulls at once, keep every other route up
+    for settle_seconds so the gateway's acks for pulls already answered land,
+    hand what is still unsettled back to Pub/Sub, then stop the server so
+    serve() returns and the process exits 0 inside the pod's grace period.
+    Without this the default handler ends the process mid-request, and a
+    message pulled but not yet acked sits in Pub/Sub until its ack deadline
+    (SHUTDOWN_SETTLE_SECONDS has the argument). The Slack relay's queue is not
+    handed back: its envelopes were acknowledged to Slack on arrival, and the
+    gateway on a next install reads Slack itself. A second SIGTERM changes
+    nothing; the stop already under way finishes.
+
+    The drain runs on its own thread because server.shutdown() waits for
+    serve_forever() to return, and the handler runs on the thread that is
+    inside serve_forever(). Only the main thread may install a signal
+    handler; a caller on any other logs and keeps the default.
+    """
+    def drain() -> None:
+        time.sleep(settle_seconds)
+        released = sum(relay.release_unsettled() for relay in relays)
+        LOGGER.info(
+            "shutdown: settle window over, handed back %d unsettled receipt(s); stopping",
+            released,
+        )
+        server.shutdown()
+
+    def on_sigterm(signum: int, _frame: Any) -> None:
+        if CredentialProxyHandler.shutting_down.is_set():
+            return
+        CredentialProxyHandler.shutting_down.set()
+        LOGGER.info(
+            "SIGTERM: refusing new Chat event pulls; settling receipts for %ss before stopping",
+            settle_seconds,
+        )
+        threading.Thread(target=drain, name=SHUTDOWN_THREAD_NAME, daemon=True).start()
+
+    try:
+        signal.signal(signal.SIGTERM, on_sigterm)
+    except ValueError:
+        LOGGER.warning("not on the main thread; SIGTERM keeps its default handler")
+
+
 def serve(args: argparse.Namespace) -> None:
     role = resolve_role()
     if role == "api-proxy":
@@ -13420,7 +13571,16 @@ def serve(args: argparse.Namespace) -> None:
             )
         else:
             start_metrics_listener(args.host, metrics_port)
+    install_shutdown_handler(
+        server,
+        [
+            relay
+            for relay in (CredentialProxyHandler.chat_relay, CredentialProxyHandler.a2a_chat_relay)
+            if relay is not None
+        ],
+    )
     server.serve_forever()
+    LOGGER.info("credential proxy stopped")
 
 
 def _metrics_port_refusal(metrics_port: int, args: argparse.Namespace) -> str | None:
