@@ -224,7 +224,11 @@ example a Service with no endpoints). No request reached a broker then, so nothi
 same reason as §4.3's retry. A failed connect can take the shim's whole connect bound, 10 s
 (`BROKER_CONNECT_TIMEOUT_SECONDS`): a missing egress peer hangs the dial rather than refusing it.
 So the shim writes one stderr line on each fallback, and §5's `broker_tier` audit field is the
-check: exec-role commands on `stateful` while replicas > 0 mean the exec path is broken. The sandbox forwards only the variable names in `SANDBOX_FORWARDED_ENV_NAMES`
+check: exec-role commands on `stateful` while replicas > 0 mean the exec path is broken. The Cloud
+API relay client (`ApiSession`) also falls back on a connection error that comes after the request
+was sent, because every relay call is a GET and sending it again is safe; it then stays on the
+stateful broker for the rest of the session, and it retries no busy reply. The command path never
+resends after a send, because a command may have run. The sandbox forwards only the variable names in `SANDBOX_FORWARDED_ENV_NAMES`
 (`deploy/sandbox/entrypoint.sh`), so `CREDENTIAL_PROXY_EXEC_URL` is added there. Without that, the
 shim always takes the fallback and nothing reports it.
 
@@ -428,15 +432,16 @@ What this means for this design:
 This design keeps a stateful pod because two route groups need it (§3.1). A later step could
 drop the split and scale one broker, once both are gone:
 
-- **The content workspace is removed.** Its callers today: the fleet audit's remediation push and
-  its reads (`audit_report.py`, `_land_group_via_broker` and `detect_content_mode`), the
-  collectors' repository mirror (`collect.py`), the deprecation scan (`api_deprecation_scan.py`)
-  and `inspect-repository`. The `/v1/vcs` verbs cover managed repositories, but not two of its
-  uses: reads of repositories the install does not manage, or context repositories, and a
-  shallow clone, which the verbs refuse on purpose.
+- **The content workspace is removed (#4243).** Its callers on `main` today: the fleet audit's
+  remediation push and its reads (`audit_report.py`, `_land_group_via_broker` and
+  `detect_content_mode`), the collectors' repository mirror (`collect.py`), the deprecation scan
+  (`api_deprecation_scan.py`) and `inspect-repository`. The snapshot verb (#4255) covers the reads
+  that the other `/v1/vcs` verbs did not: repositories the install does not manage, context
+  repositories, and a shallow read. #4243 moves the callers to it, for example `inspect-repository`
+  in #4260 and the deprecation scan in #4281.
 - **The chat relays are made safe on N pods, or move out of the broker.**
 
-No issue tracks either step today. `CREDENTIAL_PROXY_CONTENT_WORKSPACE` switches the workspace
+#4243 tracks the first step; no issue tracks the second. `CREDENTIAL_PROXY_CONTENT_WORKSPACE` switches the workspace
 off in the broker (`credential_proxy.py:5405`). But on an operator install the operator pins the
 flag to `1` and has no field to change it (`platformagent_manifests.go:4499-4540`). So a test of a
 broker without the workspace needs an operator change. While the flag is off, the fleet audit's
