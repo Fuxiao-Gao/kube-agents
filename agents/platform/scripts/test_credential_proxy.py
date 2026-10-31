@@ -9,6 +9,7 @@ import os
 from dataclasses import replace
 import queue
 import re
+import shlex
 import shutil
 import socket
 import ssl
@@ -5956,6 +5957,168 @@ class CommandExecutorTest(unittest.TestCase):
         )
         self.assertNotIn("GH_CONFIG_DIR", environment)
         self.assertIn("KUBECONFIG", environment)
+
+    # ---- Every gcloud call gets a kubeconfig of its own ----------------------
+    #
+    # gcloud has no need of the broker's kubeconfig outside get-credentials,
+    # which already uses a scratch file; giving every gcloud call its own keeps
+    # them independent of each other.
+
+    def logging_gcloud(self, executor, body="exit 0"):
+        """Swap in a gcloud that records the KUBECONFIG it ran with.
+
+        Each run appends `<KUBECONFIG> <mode or absent> <argv>` to a log, read
+        back by `gcloud_runs`. A help probe and a describe answer the way
+        `fake_gcloud`'s do, so the endpoint decision can run through it.
+        Named `gcloud` in a directory of its own: the executor decides by the
+        executable's name.
+        """
+        stub_dir = Path(self.temp_dir.name) / "logging-gcloud-bin"
+        stub_dir.mkdir(parents=True, exist_ok=True)
+        self.gcloud_log = stub_dir / "runs.log"
+        stub = stub_dir / "gcloud"
+        stub.write_text(
+            textwrap.dedent(
+                f"""\
+                #!/bin/bash
+                mode=$({shlex.quote(sys.executable)} -c 'import os, sys; p = sys.argv[1]; print(oct(os.stat(p).st_mode & 0o777) if os.path.exists(p) else "absent")' "$KUBECONFIG")
+                printf '%s %s %s\\n' "$KUBECONFIG" "$mode" "$*" >> {shlex.quote(str(self.gcloud_log))}
+                case " $* " in
+                    *" --help "*) echo "  --dns-endpoint  Use the DNS endpoint."; exit 0 ;;
+                    *" describe "*) echo "{{}}"; exit 0 ;;
+                esac
+                """
+            )
+            + body
+            + "\n",
+            encoding="utf-8",
+        )
+        stub.chmod(0o755)
+        executor.executables["gcloud"] = str(stub)
+        return executor
+
+    def gcloud_runs(self):
+        """`(kubeconfig, mode, argv)` for each run of `logging_gcloud`."""
+        if not self.gcloud_log.exists():
+            return []
+        return [
+            tuple(line.split(" ", 2))
+            for line in self.gcloud_log.read_text(encoding="utf-8").splitlines()
+        ]
+
+    def assert_own_kubeconfig(self, executor, kubeconfig, mode):
+        self.assertNotEqual(executor.environment["KUBECONFIG"], kubeconfig)
+        self.assertEqual(executor.kubeconfig_dir, Path(kubeconfig).parent)
+        self.assertEqual("0o600", mode)
+        self.assertFalse(Path(kubeconfig).exists(), "the per-call kubeconfig outlived its call")
+
+    def test_plain_gcloud_runs_with_a_kubeconfig_of_its_own(self):
+        executor = self.logging_gcloud(self.executor())
+        result = executor.execute(["gcloud", "auth", "list"])
+        self.assertEqual(0, result.exit_code, result.stderr)
+        runs = self.gcloud_runs()
+        self.assertEqual(1, len(runs))
+        self.assert_own_kubeconfig(executor, runs[0][0], runs[0][1])
+
+    def test_each_gcloud_call_gets_a_different_kubeconfig(self):
+        executor = self.logging_gcloud(self.executor())
+        executor.execute(["gcloud", "auth", "list"])
+        executor.execute(["gcloud", "config", "list"])
+        runs = self.gcloud_runs()
+        self.assertEqual(2, len(runs))
+        self.assertNotEqual(runs[0][0], runs[1][0])
+        for kubeconfig, mode, _ in runs:
+            self.assert_own_kubeconfig(executor, kubeconfig, mode)
+
+    def test_gcloud_kubeconfig_is_removed_after_a_failing_command(self):
+        executor = self.logging_gcloud(self.executor(), body="exit 3")
+        result = executor.execute(["gcloud", "auth", "list"])
+        self.assertEqual(3, result.exit_code)
+        (kubeconfig, mode, _), = self.gcloud_runs()
+        self.assert_own_kubeconfig(executor, kubeconfig, mode)
+
+    def test_gcloud_kubeconfig_is_removed_after_a_timeout(self):
+        executor = self.logging_gcloud(self.executor(timeout_seconds=1), body="sleep 30")
+        result = executor.execute(["gcloud", "auth", "list"])
+        self.assertTrue(result.timed_out)
+        (kubeconfig, mode, _), = self.gcloud_runs()
+        self.assert_own_kubeconfig(executor, kubeconfig, mode)
+
+    def test_gcloud_kubeconfig_is_removed_when_the_spawn_fails(self):
+        executor = self.logging_gcloud(self.executor())
+        with mock.patch.object(credential_proxy.subprocess, "Popen", side_effect=OSError("no such file")):
+            with self.assertRaises(OSError):
+                executor.execute(["gcloud", "auth", "list"])
+        self.assertEqual([], [p for p in executor.kubeconfig_dir.iterdir() if p.name.startswith(".")])
+
+    def test_gcloud_given_a_kubeconfig_still_gets_its_own(self):
+        executor = self.logging_gcloud(self.executor())
+        given = self.seed_managed(executor)
+        executor._execute([executor.executables["gcloud"], "auth", "list"], kubeconfig_path=given)
+        (kubeconfig, mode, _), = self.gcloud_runs()
+        self.assertNotEqual(str(given), kubeconfig)
+        self.assert_own_kubeconfig(executor, kubeconfig, mode)
+
+    def test_gcloud_with_a_forwarded_context_gets_its_own_kubeconfig(self):
+        executor = self.logging_gcloud(self.executor())
+        managed = self.seed_managed(executor)
+        result = executor.execute(["gcloud", "auth", "list"], kubeconfig_context=self.CONTEXT)
+        self.assertEqual(0, result.exit_code, result.stderr)
+        (kubeconfig, mode, _), = self.gcloud_runs()
+        self.assertNotEqual(str(managed), kubeconfig)
+        self.assert_own_kubeconfig(executor, kubeconfig, mode)
+        self.assertTrue(managed.is_file())
+
+    def test_kubectl_still_runs_against_the_base_kubeconfig(self):
+        executor = self.fake_kubectl(self.executor(), body='printf "%s" "$KUBECONFIG"')
+        result = executor.execute(["kubectl", "get", "pods"])
+        self.assertEqual(executor.environment["KUBECONFIG"], result.stdout)
+
+    def test_the_endpoint_describe_runs_with_a_kubeconfig_of_its_own(self):
+        executor = self.logging_gcloud(self.executor())
+        target = credential_proxy_client.ClusterTarget(
+            project="demo-project", location="us-central1", cluster="cluster-a"
+        )
+        executor._endpoint_decision(executor.executables["gcloud"], target)
+        runs = self.gcloud_runs()
+        self.assertTrue(any(" describe " in f" {argv} " for _, _, argv in runs), runs)
+        for kubeconfig, mode, _ in runs:
+            self.assert_own_kubeconfig(executor, kubeconfig, mode)
+        self.assertEqual(len(runs), len({kubeconfig for kubeconfig, _, _ in runs}))
+
+    def test_get_credentials_still_fetches_into_its_pending_file(self):
+        executor = self.logging_gcloud(
+            self.executor(),
+            body=(
+                "printf 'apiVersion: v1\\nkind: Config\\ncurrent-context: %s\\n' "
+                f"{shlex.quote(self.CONTEXT)} > \"$KUBECONFIG\""
+            ),
+        )
+        result = executor.execute(
+            ["gcloud", "container", "clusters", "get-credentials", "cluster-a",
+             "--location=us-central1", "--project=demo-project"],
+            wants_kubeconfig=True,
+        )
+        self.assertEqual(0, result.exit_code, result.stderr)
+        self.assertIn(self.CONTEXT, result.kubeconfig)
+        fetches = [run for run in self.gcloud_runs() if "get-credentials" in run[2] and "--help" not in run[2]]
+        self.assertEqual(1, len(fetches))
+        self.assertTrue(Path(fetches[0][0]).name.startswith(".pending-"), fetches)
+        self.assertEqual("absent", fetches[0][1])
+        self.assertTrue((executor.kubeconfig_dir / f"{self.CONTEXT}.yaml").is_file())
+
+    def test_a_confined_gcloud_read_runs_with_a_kubeconfig_of_its_own(self):
+        import task_confinement
+
+        executor = self.logging_gcloud(self.executor())
+        target = credential_proxy_client.ClusterTarget(
+            project="demo-project", location="us-central1", cluster="cluster-a"
+        )
+        confined = task_confinement.confine(["gcloud", "compute", "instances", "list"], None, target)
+        self.assertFalse(confined.isolated)
+        executor.execute(confined.argv, confined=confined)
+        (kubeconfig, mode, _), = self.gcloud_runs()
+        self.assert_own_kubeconfig(executor, kubeconfig, mode)
 
     def test_bootstrap_prepares_profile_for_later_commands(self):
         import os

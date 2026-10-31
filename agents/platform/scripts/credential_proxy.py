@@ -7851,7 +7851,8 @@ class CommandExecutor:
         # refused or would mint for a variable gcloud never reads. Non-kubectl
         # requests still resolve a named kubeconfig the way they did before
         # the pool existed -- regenerated on the ambient identity, never
-        # selected on.
+        # selected on. gcloud then runs with a kubeconfig of its own rather
+        # than the resolved one (`_gcloud_call_kubeconfig`).
         scoped = executable == "kubectl"
         # Bound the one-shot read; a command meant to block keeps kubectl's own
         # default. Decided here rather than in `_execute` because the argv
@@ -7994,7 +7995,8 @@ class CommandExecutor:
                 caller=caller,
             )
         # gcloud names its project in argv (injected); it reads no kubeconfig
-        # but get-credentials, which is handled above.
+        # but get-credentials, which is handled above, and runs with one of
+        # its own (`_gcloud_call_kubeconfig`).
         return self._execute(command, stdin=stdin, cwd=cwd, kubeconfig_path=None, caller=caller)
 
     def _with_host_hint(self, argv: list[str], result: ExecutionResult) -> ExecutionResult:
@@ -9348,6 +9350,7 @@ class CommandExecutor:
                         *_flags_of(decision),
                     ],
                     kubeconfig_path=scratch,
+                    authors_kubeconfig=True,
                     # The short deadline, as for the describe above. A
                     # credential fetch takes seconds when the API answers, and
                     # when it does not, five minutes of silence here -- ahead of
@@ -9451,7 +9454,8 @@ class CommandExecutor:
         scratch = self.kubeconfig_dir / f".pending-{uuid.uuid4().hex}.yaml"
         try:
             result = self._execute(
-                command, stdin=stdin, cwd=cwd, kubeconfig_path=scratch, caller=caller
+                command, stdin=stdin, cwd=cwd, kubeconfig_path=scratch, caller=caller,
+                authors_kubeconfig=True,
             )
             if result.exit_code == 0 and scratch.is_file():
                 generated = scratch.read_text(encoding="utf-8")
@@ -9479,6 +9483,31 @@ class CommandExecutor:
         finally:
             scratch.unlink(missing_ok=True)
 
+    @contextlib.contextmanager
+    def _gcloud_call_kubeconfig(self, argv: list[str], authors_kubeconfig: bool) -> Iterator[Path | None]:
+        """A kubeconfig of its own for a gcloud call, or None.
+
+        gcloud has no need of the broker's kubeconfig outside get-credentials,
+        which already uses a scratch file; giving every gcloud call its own
+        keeps them independent of each other. So every gcloud call `_execute`
+        runs -- an agent's plain read, one that arrived with a forwarded
+        context, a profile's confined read, the endpoint describe -- runs with
+        `KUBECONFIG` naming an empty 0600 file in the state dir, made for this
+        call and removed when it ends, however it ends, much as git calls drop
+        `KUBECONFIG` in `_execute`. Any `kubeconfig_path` the call was handed
+        is set aside for it. The one exception is get-credentials
+        (`authors_kubeconfig`), which keeps its own `.pending-` scratch file.
+        """
+        if not argv or Path(argv[0]).name != "gcloud" or authors_kubeconfig:
+            yield None
+            return
+        scratch = self.kubeconfig_dir / f".gcloud-{uuid.uuid4().hex}.yaml"
+        try:
+            os.close(os.open(scratch, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+            yield scratch
+        finally:
+            scratch.unlink(missing_ok=True)
+
     def _execute(
         self,
         argv: list[str],
@@ -9491,6 +9520,7 @@ class CommandExecutor:
         caller: socket.socket | None = None,
         *,
         allow_http: bool = False,
+        authors_kubeconfig: bool = False,
         stop: Callable[[], bool] | None = None,
     ) -> ExecutionResult:
         """Run a command. `kubeconfig_path` is already resolved and trusted.
@@ -9510,6 +9540,10 @@ class CommandExecutor:
 
         `caller` is the connection the command answers, if it answers one; see
         `_capture_output`. Internal callers leave it unset.
+
+        `authors_kubeconfig` is set by the get-credentials paths only: their
+        gcloud writes into `kubeconfig_path`. Every other gcloud call runs with
+        a kubeconfig of its own (`_gcloud_call_kubeconfig`).
 
         No concurrency slot is taken here, and no reservation on a thread that
         already holds one: a slot and a child memory reservation are a
@@ -9605,7 +9639,9 @@ class CommandExecutor:
             if covered or self.children_budget_bytes is None
             else self.reserve_child_memory(caller=caller)
         )
-        with admission:
+        with admission, self._gcloud_call_kubeconfig(argv, authors_kubeconfig) as call_kubeconfig:
+            if call_kubeconfig is not None:
+                command_environment["KUBECONFIG"] = str(call_kubeconfig)
             started = time.monotonic()
             process = subprocess.Popen(
                 argv,
