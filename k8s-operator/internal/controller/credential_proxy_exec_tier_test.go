@@ -129,6 +129,9 @@ func TestTheExecTierFollowsItsReplicaCount(t *testing.T) {
 	if *dep.Spec.Replicas != 2 || dep.Spec.Strategy.Type != appsv1.RollingUpdateDeploymentStrategyType {
 		t.Errorf("Deployment replicas %d strategy %s, want 2 RollingUpdate", *dep.Spec.Replicas, dep.Spec.Strategy.Type)
 	}
+	if ru := dep.Spec.Strategy.RollingUpdate; ru == nil || ru.MaxUnavailable == nil || ru.MaxUnavailable.IntValue() != 1 {
+		t.Errorf("rollout %+v, want maxUnavailable 1 so a full namespace quota cannot stall it", dep.Spec.Strategy.RollingUpdate)
+	}
 	templateAt2 := dep.Spec.Template.DeepCopy()
 
 	reconcileAt(1)

@@ -43,18 +43,18 @@ import (
 // §12): stateless broker replicas beside the stateful broker, serving /v1/exec
 // and /v1/gcp/ only. Every name the tier renders is derived here.
 const (
-	credentialProxyExecTierSuffix         = "-credential-proxy-exec-tier"
-	credentialProxyExecTierComponent      = "credential-proxy-exec-tier"
-	credentialProxyExecTierReplicasSuffix = "-credential-proxy-exec-tier-replicas"
+	credentialProxyExecTierSuffix         = "-credential-proxy-exec-tier"          // #nosec G101 -- Resource name suffix, not a credential
+	credentialProxyExecTierComponent      = "credential-proxy-exec-tier"           // #nosec G101 -- Label value, not a credential
+	credentialProxyExecTierReplicasSuffix = "-credential-proxy-exec-tier-replicas" // #nosec G101 -- Resource name suffix, not a credential
 	// The ConfigMap's key and where its directory is mounted. A directory
 	// mount, not a SubPath one: the kubelet refreshes a directory mount when
 	// the ConfigMap changes, so a scale change reaches the running pods
 	// without a new pod template (§3.5).
-	credentialProxyExecTierReplicasKey       = "replicas"
-	credentialProxyExecTierReplicasMountPath = "/etc/credential-proxy-exec-tier"
-	credentialProxyExecTierReplicasVolume    = "credential-proxy-exec-tier-replicas"
-	credentialProxyExecTierReplicasFileEnv   = "CREDENTIAL_PROXY_EXEC_REPLICAS_FILE"
-	credentialProxyRoleEnv                   = "CREDENTIAL_PROXY_ROLE"
+	credentialProxyExecTierReplicasKey       = "replicas"                            // #nosec G101 -- ConfigMap key, not a credential
+	credentialProxyExecTierReplicasMountPath = "/etc/credential-proxy-exec-tier"     // #nosec G101 -- Mount path, not a credential
+	credentialProxyExecTierReplicasVolume    = "credential-proxy-exec-tier-replicas" // #nosec G101 -- Volume name, not a credential
+	credentialProxyExecTierReplicasFileEnv   = "CREDENTIAL_PROXY_EXEC_REPLICAS_FILE" // #nosec G101 -- Environment variable name, not a credential
+	credentialProxyRoleEnv                   = "CREDENTIAL_PROXY_ROLE"               // #nosec G101 -- Environment variable name, not a credential
 	credentialProxyExecRole                  = "exec"
 	// Requests equal limits on every cluster mode (§3.3): the 2Gi request is
 	// the floor of §4.2's admission rule, and the CPU request reserves the two
@@ -63,7 +63,7 @@ const (
 	credentialProxyExecTierMemory = "2Gi"
 	// A PodDisruptionBudget only from two replicas: at one, maxUnavailable 1
 	// guards nothing, and the tier being off means callers use the stateful
-	// broker.
+	// broker. The same maxUnavailable bounds the Deployment's rollout.
 	credentialProxyExecTierPDBMinReplicas = 2
 	credentialProxyExecTierMaxUnavailable = 1
 	// The broker container's request port name, which the Service targets.
@@ -142,8 +142,11 @@ func credentialProxyExecTierResources() corev1.ResourceRequirements {
 // same on both. What differs:
 //   - its own name, selector and labels, without has-credential-proxy, which
 //     opens the github-token-minter to a pod;
-//   - the replica count and RollingUpdate: no exec call keeps state across
-//     calls, and a second replica serves while one rolls;
+//   - the replica count and RollingUpdate with maxUnavailable 1: no exec call
+//     keeps state across calls, a second replica serves while one rolls, and
+//     a rollout needs no surge Pod, so a namespace quota with no headroom
+//     cannot stall it (at one replica the callers fall back to the stateful
+//     broker for the gap);
 //   - CREDENTIAL_PROXY_ROLE=exec, and the replica count mounted from the
 //     ConfigMap;
 //   - fixed resources;
@@ -159,7 +162,10 @@ func buildCredentialProxyExecTierDeployment(agent *agentv1alpha1.PlatformAgent, 
 	withCommonLabels(dep, agent)
 	dep.Labels[labelAppKey] = name
 	dep.Spec.Replicas = ptr.To(credentialProxyExecTierReplicas(agent))
-	dep.Spec.Strategy = appsv1.DeploymentStrategy{Type: appsv1.RollingUpdateDeploymentStrategyType}
+	dep.Spec.Strategy = appsv1.DeploymentStrategy{
+		Type:          appsv1.RollingUpdateDeploymentStrategyType,
+		RollingUpdate: &appsv1.RollingUpdateDeployment{MaxUnavailable: ptr.To(intstr.FromInt32(credentialProxyExecTierMaxUnavailable))},
+	}
 	dep.Spec.Selector = &metav1.LabelSelector{MatchLabels: selector}
 
 	podLabels := commonLabels(agent)
