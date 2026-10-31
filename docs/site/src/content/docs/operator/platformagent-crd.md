@@ -954,8 +954,8 @@ See [`k8s-operator/api/v1alpha1/platformagent_types.go`](https://github.com/gke-
 The operator writes observed state to the `status` subresource; [PlatformAgent fields → Status](/kube-agents/operator/platformagent-fields/#status) lists every field with its type. How the `usage` counters are produced, and what each condition reports, follows.
 
 `usage.toolExecutionsTotal`, `usage.toolExecutionsBlockedTotal`, `usage.eventsIngestedTotal`, `usage.sessionsTotal`, `usage.remediationsProposedTotal`,
-`usage.remediationsMergedTotal`, `usage.chatMessagesInboundTotal`, `usage.brokerFailuresTotal`, `usage.chatTurnsErroredTotal`, `usage.backgroundTasksGaveUpTotal`, `usage.negativeFeedbackTotal`, `usage.remediationsClosedUnmergedTotal`,
-`usage.lastActiveTime`, `usage.lastHumanActiveTime` and the two cluster gauges are produced by the operator, on the leader and off the reconcile path: every five
+`usage.chatMessagesInboundTotal`, `usage.brokerFailuresTotal`, `usage.chatTurnsErroredTotal`, `usage.backgroundTasksGaveUpTotal`, `usage.negativeFeedbackTotal`,
+`usage.lastActiveTime`, `usage.lastHumanActiveTime`, the two cluster gauges and the six proposal readings are produced by the operator, on the leader and off the reconcile path: every five
 minutes it reads the credential broker's, the event watcher's, the chat plugin's and, on a `next`
 install, the A2A gateway's metrics listeners over the pod network, folds the counter series into totals it keeps with their per-pod baseline in the
 `<name>-usage-counters` ConfigMap, so the counters stay monotonic across pod, process and operator
@@ -967,10 +967,27 @@ burst past it, or what a process counted after its last read and before it resta
 A `lastActiveTime` that stops advancing while commands plainly run is the symptom of a listener the
 operator cannot reach; the CR's events name the pod. It advances on any brokered command, including
 those a scheduled job runs -- the Controller Stall Watch cron issues some every 30 minutes by
-default -- so a recent `lastActiveTime` is not evidence that a person used the agent; `lastHumanActiveTime` is. A counter nothing writes yet (`usage.remediationsAppliedTotal`) stays absent until a
-series exists for it
-([what lands them](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/usage-counters-producer.md#what-stays-unwritten-and-what-lands-it)).
-The operator also serves every counter, cluster gauge and time of this block, and `status.phase`, as Prometheus gauges on its own metrics port, so a collector reads them without a query against the status; the series are on [Observability](/kube-agents/concepts/observability/#prometheus-metrics).
+default -- so a recent `lastActiveTime` is not evidence that a person used the agent; `lastHumanActiveTime` is.
+
+The six proposal fields are readings, not totals. Every 240 seconds the credential broker asks the forge (on GitHub with a read-only token of its own) for the proposals the install authored in each managed
+repository and the human events on them. The operator projects the latest poll's values as they
+stand, outside the ConfigMap.
+
+The outcomes reading (`remediationsMergedTotal`, `remediationsOpen`, `proposalsAuthored`) and the
+details reading (the other three) each have their own miss streak. One poll that cannot read the
+broker, or reads it without a reading, leaves that reading's fields as they were; the second in a
+row clears them to absent. The broker stops serving a reading more than an hour old. A 0 is a
+reading.
+
+A broker restart leaves the details fields (`remediationsClosedUnmergedTotal`,
+`proposalHumanTouches`, `proposalsMergedUntouched`) as they were for one operator poll, and clears
+them when a second poll in a row finds no details reading. The broker keeps what it read of each
+proposal in memory, and after a restart it reads every proposal again within an hourly budget of
+forge calls. A small install is done within the first sweep. An install with a thousand proposals
+takes some hours, and the fields are absent in between. The outcomes fields return on the first
+sweep.
+
+The operator also serves every counter, cluster gauge, proposal reading and time of this block, and `status.phase`, as Prometheus gauges on its own metrics port. A collector reads them without a query against the status; the series are on [Observability](/kube-agents/concepts/observability/#prometheus-metrics).
 
 `usage.activeInterfaces` is `dashboard` unless `harness.hermes.dashboardEnabled` is `false`, plus
 `googlechat`, `slack` and `teams` for each `integration` entry with `enabled: true`. It is resolved
@@ -981,13 +998,12 @@ write; the operator notices from the write's echo, stops treating the missing fi
 five minutes at a time, and lands it once this release's CRD is applied: within five minutes on a
 quiet install, at once when the Ready status update next writes for any other reason. The other
 status writers carry the field through as they read it, so a pass that ends `Degraded` lands
-nothing new. `usage.remediationsAppliedTotal` is declared in the
-schema and absent from every status until a series exists for it. The counters the operator does write, and the two times, land
+nothing new. The counters and the two times land
 through the poller above, which consults the same five-minute record: under a served CRD that
 predates `status.usage` they accumulate in the `<name>-usage-counters` ConfigMap and land with the
 first patch after this release's CRD is applied. Under a served CRD at a previous schema, which has
-`status.usage` without the fields added later (the two cluster gauges,
-`remediationsMergedTotal`, `chatMessagesInboundTotal`, `toolExecutionsBlockedTotal`, `brokerFailuresTotal`, `chatTurnsErroredTotal`, `backgroundTasksGaveUpTotal`, `negativeFeedbackTotal`, `remediationsClosedUnmergedTotal` and `lastHumanActiveTime`), the first-schema counters keep landing and the newer fields are probed
+`status.usage` without the fields added later (the two cluster gauges, the proposal readings,
+`chatMessagesInboundTotal`, `toolExecutionsBlockedTotal`, `brokerFailuresTotal`, `chatTurnsErroredTotal`, `backgroundTasksGaveUpTotal`, `negativeFeedbackTotal` and `lastHumanActiveTime`), the first-schema counters keep landing and the newer fields are probed
 again every five minutes until this release's CRD is applied.
 
 These condition types appear in `conditions`; only `Ready` is always present:
