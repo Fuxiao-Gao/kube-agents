@@ -1847,6 +1847,7 @@ class GitHardeningTest(unittest.TestCase):
             ["git", "x"],
             ["git", "gc"],
             ["git", "archive"],
+            ["git", "ls-tree", "-r", "HEAD"],
             ["git", "-C", "/tmp", "not-a-subcommand"],
         ):
             with self.subTest(argv=argv):
@@ -4704,6 +4705,27 @@ class CommandExecutorTest(unittest.TestCase):
             credential_proxy.KILL_POLL_SECONDS, clock.now - killed_at, places=6
         )
 
+    def test_a_stop_check_that_answers_true_ends_the_command(self):
+        # The snapshot clone's watch: asked while the command runs, and a true
+        # answer kills it as a hang-up does, long before the deadline.
+        for body in ("sleep 30", "exec >&- 2>&-; sleep 30"):
+            with self.subTest(body=body):
+                process = subprocess.Popen(
+                    ["sh", "-c", body], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, start_new_session=True,
+                )
+                asked = []
+
+                def stop():
+                    asked.append(time.monotonic())
+                    return len(asked) >= 2
+
+                started = time.monotonic()
+                credential_proxy._capture_output(process, None, 1 << 16, 30, stop=stop)
+                self.assertIsNotNone(process.returncode)
+                self.assertLess(time.monotonic() - started, 10)
+                self.assertGreaterEqual(len(asked), 2)
+
     def test_a_hang_up_after_the_pipes_close_still_ends_the_command(self):
         # With both pipes closed the read loop has nothing to watch, so the
         # wait that follows has to look at the caller itself, or a hang-up in
@@ -4960,6 +4982,37 @@ class CommandExecutorTest(unittest.TestCase):
         self.assertTrue(
             any("child memory budget enabled" in line and "admits 4" in line for line in logs.output),
             logs.output,
+        )
+
+    def _admission_report(self, executor):
+        handler = types.SimpleNamespace(executor=executor, session_slots=credential_proxy.SessionSlots(2))
+        return CredentialProxyHandler._admission_report(handler)
+
+    def test_the_admission_report_at_the_default_limit_is_the_slot_cap(self):
+        mib = credential_proxy.MEBIBYTE
+        with self.assertLogs(credential_proxy.LOGGER, level="INFO"):
+            executor = self.executor(memory_limit_bytes=2048 * mib, max_output_bytes=8 * mib)
+        # 1,728 MiB over 176 MiB a request fits 9; the slot cap of 8 binds.
+        self.assertEqual(
+            {"slot_cap": 8, "budget_admits": 9, "admitted": 8, "session_cap": 2},
+            self._admission_report(executor),
+        )
+
+    def test_the_admission_report_at_a_1gi_limit_is_the_budget(self):
+        mib = credential_proxy.MEBIBYTE
+        with self.assertLogs(credential_proxy.LOGGER, level="INFO"):
+            executor = self.executor(memory_limit_bytes=1024 * mib, max_output_bytes=8 * mib)
+        # GKE Autopilot without bursting: the limit is the 1Gi request, and 704 MiB fits 4.
+        self.assertEqual(
+            {"slot_cap": 8, "budget_admits": 4, "admitted": 4, "session_cap": 2},
+            self._admission_report(executor),
+        )
+
+    def test_the_admission_report_without_a_budget_is_the_slot_cap(self):
+        executor = self.executor()
+        self.assertEqual(
+            {"slot_cap": 8, "budget_admits": None, "admitted": 8, "session_cap": 2},
+            self._admission_report(executor),
         )
 
     def test_a_missing_limit_is_logged_once_at_startup(self):
@@ -9833,6 +9886,26 @@ class VcsGitPathTest(unittest.TestCase):
         )
         self.assertEqual("true", result.stdout.strip())
 
+    def test_the_answer_says_whether_the_output_was_cut(self):
+        # `snapshot` sizes a tree from an `ls-tree` listing, and a cut listing
+        # undercounts it, so the cut has to reach the broker.
+        executor = self.executor()
+        executor.max_output_bytes = 1024
+        scratch = self.tree(executor)
+        blob = subprocess.run(
+            ["git", "hash-object", "-w", "--stdin"], cwd=scratch, input="x\n",
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        entries = "".join(f"100644 blob {blob}\t{index:03d}{'n' * 100}\n" for index in range(20))
+        tree = subprocess.run(
+            ["git", "mktree"], cwd=scratch, input=entries, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        cut = executor.execute_vcs_git(["git", "ls-tree", "-r", tree], scratch)
+        self.assertTrue(cut.truncated)
+        whole = executor.execute_vcs_git(["git", "ls-tree", f"{tree}", "000" + "n" * 100], scratch)
+        self.assertFalse(whole.truncated)
+        self.assertIn(blob, whole.stdout)
+
     def test_only_git_runs_on_this_door(self):
         executor = self.executor()
         scratch = self.tree(executor)
@@ -10167,9 +10240,14 @@ class VcsRouteTest(unittest.TestCase):
         self.assertTrue(vcs_broker.WRITE_VERBS <= routes)
         self.assertEqual({"capabilities"}, set(vcs_broker.UNGATED_VERBS))
         self.assertFalse(vcs_broker.UNGATED_VERBS & vcs_broker.WRITE_VERBS)
+        # The verb that picks its credential by role: off the managed list,
+        # never a write, and not the ungated one.
+        self.assertEqual({"snapshot"}, set(vcs_broker.ROLE_SELECTED_VERBS))
+        self.assertFalse(vcs_broker.ROLE_SELECTED_VERBS & vcs_broker.WRITE_VERBS)
+        self.assertFalse(vcs_broker.ROLE_SELECTED_VERBS & vcs_broker.UNGATED_VERBS)
         unclassified = routes - vcs_broker.WRITE_VERBS
         self.assertEqual(
-            {"capabilities", "clone", "identity", "proposal-list", "proposal-view",
+            {"capabilities", "clone", "snapshot", "identity", "proposal-list", "proposal-view",
              "proposal-commits", "issue-list", "issue-view", "branch-view"},
             unclassified,
             "a new verb must be classified as a read or a write",
@@ -10291,6 +10369,307 @@ class VcsRouteTest(unittest.TestCase):
         overlapping.workspace_dir = self.executor.workspace_dir
         with self.assertRaises(RuntimeError):
             credential_proxy.build_vcs_broker(overlapping)
+
+
+class SnapshotRouteTest(unittest.TestCase):
+    """`POST /v1/vcs/snapshot` through the broker `build_vcs_broker` wires: the
+    route gate, the role, and the exact config each role puts on the clone."""
+
+    HELPER_CLEARED = ("credential.helper", "")
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.base = Path(self.temp_dir.name)
+        self.executor = CommandExecutor(
+            timeout_seconds=10,
+            max_output_bytes=1 << 16,
+            state_dir=str(self.base / "state"),
+        )
+        self.executor.executables["git"] = shutil.which("git") or "/usr/bin/git"
+        self.managed: set[str] = set()
+        self.context: set[str] = set()
+        self.lists_readable = True
+        self.refreshed: list[tuple[str, str]] = []
+        self.minted: list[tuple[str, str]] = []
+        self.mint_answer: object = "minted-read-token"
+        self.git: list[tuple[list[str], tuple]] = []
+
+        def lists(keys):
+            def read():
+                if not self.lists_readable:
+                    raise RuntimeError("kubectl exited 1")
+                return frozenset(keys)
+            return read
+
+        def mint(provider, repository):
+            self.minted.append((provider, repository))
+            if isinstance(self.mint_answer, Exception):
+                raise self.mint_answer
+            return self.mint_answer
+
+        def execute(argv, **kwargs):
+            if Path(argv[0]).name == "git":
+                self.git.append((list(argv), tuple(kwargs.get("extra_config", ()))))
+            # The clone fails: what is under test is what it was handed.
+            return credential_proxy.ExecutionResult(
+                exit_code=128, stdout="", stderr="fatal: stopped by the test",
+                duration_ms=1, truncated=False, timed_out=False,
+            )
+
+        self.executor.refresh_forge_credential = lambda provider, repository: self.refreshed.append(
+            (provider, repository)
+        )
+        self.executor.mint_read_credential = mint
+        for patcher in (
+            mock.patch.object(credential_proxy, "managed_repositories", side_effect=lambda: lists(self.managed)()),
+            mock.patch.object(credential_proxy, "context_repositories", side_effect=lambda: lists(self.context)()),
+            mock.patch.object(self.executor, "_execute", side_effect=execute),
+            mock.patch.object(credential_proxy, "warn_on_credential_reach"),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def broker(self, forges_config: dict | None = None):
+        environment = {}
+        if forges_config is not None:
+            path = self.base / "forges.json"
+            path.write_text(json.dumps(forges_config))
+            environment["VCS_FORGES_CONFIG"] = str(path)
+        with mock.patch.dict(os.environ, environment):
+            if forges_config is None:
+                os.environ.pop("VCS_FORGES_CONFIG", None)
+            return credential_proxy.build_vcs_broker(self.executor)
+
+    def post(self, body, broker=None):
+        handler = CredentialProxyHandler.__new__(CredentialProxyHandler)
+        handler.vcs = broker or self.broker()
+        handler.executor = self.executor
+        handler.max_request_bytes = 1 << 20
+        encoded = json.dumps(body).encode()
+        handler.headers = {"Content-Length": str(len(encoded))}
+        handler.rfile = io.BytesIO(encoded)
+        handler.path = "/v1/vcs/snapshot"
+        replies = []
+        handler._json = lambda status, payload: replies.append((status, payload))
+        handler._handle_vcs_post()
+        return replies[0]
+
+    def clone_config(self) -> tuple:
+        (config,) = [config for argv, config in self.git if argv[1] == "clone"]
+        return config
+
+    def clone_argv(self) -> list[str]:
+        (argv,) = [argv for argv, _config in self.git if argv[1] == "clone"]
+        return argv
+
+    def assert_reached_the_clone(self, status, payload):
+        # Past the route gate and into git: an unmanaged repository is not
+        # refused here, and the stub's failure comes back as a git failure.
+        self.assertEqual((HTTPStatus.BAD_GATEWAY, "GIT_FAILED"), (status, payload.get("code")))
+
+    def test_an_unregistered_repository_clones_with_the_helper_cleared_and_nothing_else(self):
+        self.managed = {"github:github.com/acme/managed"}
+        status, payload = self.post({"repository": "https://github.com/acme/upstream"})
+        self.assert_reached_the_clone(status, payload)
+        self.assertEqual((self.HELPER_CLEARED,), self.clone_config())
+        self.assertEqual(([], []), (self.refreshed, self.minted))
+        self.assertIn("https://github.com/acme/upstream.git", self.clone_argv())
+
+    def test_unreadable_lists_clone_as_an_unregistered_repository(self):
+        self.lists_readable = False
+        status, payload = self.post({"repository": "https://github.com/acme/infra"})
+        self.assert_reached_the_clone(status, payload)
+        self.assertEqual((self.HELPER_CLEARED,), self.clone_config())
+        self.assertEqual(([], []), (self.refreshed, self.minted))
+
+    def test_a_context_repository_clones_on_the_minted_read_token_with_the_helper_cleared(self):
+        self.context = {"github:github.com/acme/tf-live"}
+        status, payload = self.post({"repository": "https://github.com/acme/tf-live"})
+        self.assert_reached_the_clone(status, payload)
+        basic = base64.b64encode(b"x-access-token:minted-read-token").decode("ascii")
+        self.assertEqual(
+            (("http.https://github.com/.extraheader", f"AUTHORIZATION: basic {basic}"), self.HELPER_CLEARED),
+            self.clone_config(),
+        )
+        self.assertEqual([("github", "acme/tf-live")], self.minted)
+        self.assertEqual([], self.refreshed)
+
+    def test_a_context_repository_whose_mint_fails_clones_with_no_credential(self):
+        self.context = {"github:github.com/acme/tf-live"}
+        self.mint_answer = RuntimeError("read-only credential mint failed")
+        status, payload = self.post({"repository": "https://github.com/acme/tf-live"})
+        self.assert_reached_the_clone(status, payload)
+        self.assertEqual((self.HELPER_CLEARED,), self.clone_config())
+        self.assertEqual([], self.refreshed)
+
+    def test_a_managed_repository_rides_the_managed_credential(self):
+        # On github.com that is the ambient helper the CLI installed: no
+        # config of its own, and the credential made current first.
+        self.managed = {"github:github.com/acme/infra"}
+        self.context = {"github:github.com/acme/infra"}
+        status, payload = self.post({"repository": "https://github.com/acme/infra"})
+        self.assert_reached_the_clone(status, payload)
+        self.assertEqual((), self.clone_config())
+        self.assertEqual([("github", "acme/infra")], self.refreshed)
+        self.assertEqual([], self.minted)
+
+    def test_a_host_this_install_does_not_serve_is_refused_before_any_git(self):
+        status, payload = self.post({"repository": "https://git.example.invalid/acme/infra"})
+        self.assertEqual((HTTPStatus.NOT_IMPLEMENTED, "FORGE_UNSUPPORTED"), (status, payload.get("code")))
+        self.assertEqual([], self.git)
+
+    def gitlab_only(self):
+        token = self.base / "token"
+        token.write_text("glpat-SENTINEL-must-never-appear")
+        return self.broker({"forges": [
+            {"provider": "gitlab", "host": "gitlab.com", "tokenPath": str(token), "allowedPaths": ["acme"]},
+        ]})
+
+    def test_a_gitlab_context_repository_without_a_read_token_says_which_half_is_wrong(self):
+        # The workspace's open wrote these two lines; the snapshot is the read
+        # that stays once the workspace is gone, so it writes them too.
+        self.context = {"gitlab:gitlab.com/acme/notes"}
+        with self.assertLogs(credential_proxy.LOGGER, level="WARNING") as logs:
+            status, payload = self.post({"repository": "gitlab.com/acme/notes"}, self.gitlab_only())
+        self.assert_reached_the_clone(status, payload)
+        self.assertIn("snapshot credential repo=acme/notes role=context", "\n".join(logs.output))
+        self.assertIn("names no readTokenPath", "\n".join(logs.output))
+        token = self.base / "token"
+        broker = self.broker({"forges": [
+            {"provider": "gitlab", "host": "gitlab.com", "tokenPath": str(token),
+             "readTokenPath": str(self.base / "read-token"), "allowedPaths": ["acme"]},
+        ]})
+        with self.assertLogs(credential_proxy.LOGGER, level="WARNING") as logs:
+            self.post({"repository": "gitlab.com/acme/notes"}, broker)
+        self.assertIn("no usable read-only token", "\n".join(logs.output))
+        self.assertIn(credential_proxy.FORGE_READ_TOKEN_KEY, "\n".join(logs.output))
+        self.assertNotIn("glpat", json.dumps(self.git))
+
+    def test_a_bare_name_on_an_install_with_no_github_forge_reads_github_com_with_no_credential(self):
+        # An owner outside the GitLab forge's allowedPaths: the registry would
+        # refuse this name with a 403, so the request reaching the clone shows
+        # the dispatcher did not resolve it.
+        broker = self.gitlab_only()
+        self.managed = {"gitlab:gitlab.com/acme/infra"}
+        status, payload = self.post({"repository": "kubernetes/kubernetes"}, broker)
+        self.assert_reached_the_clone(status, payload)
+        self.assertIn("https://github.com/kubernetes/kubernetes.git", self.clone_argv())
+        self.assertEqual((self.HELPER_CLEARED,), self.clone_config())
+        self.assertNotIn("glpat", json.dumps(self.git))
+        # A name with its host still goes to that host's forge, by the registry.
+        self.git.clear()
+        status, payload = self.post({"repository": "gitlab.com/acme/other"}, broker)
+        self.assert_reached_the_clone(status, payload)
+        self.assertIn("https://gitlab.com/acme/other.git", self.clone_argv())
+        self.assertEqual((self.HELPER_CLEARED,), self.clone_config())
+
+    def test_a_bare_name_the_install_s_own_forge_registers_is_read_there_and_not_on_github_com(self):
+        # The same name on github.com can belong to anyone; `clone` reads a
+        # bare name on the install's one forge, and so does `snapshot` when
+        # that forge lists it.
+        for managed, context in (({"gitlab:gitlab.com/acme/infra"}, set()), (set(), {"gitlab:gitlab.com/acme/infra"})):
+            with self.subTest(managed=managed, context=context):
+                broker = self.gitlab_only()
+                self.managed, self.context = managed, context
+                self.git.clear()
+                status, payload = self.post({"repository": "acme/infra"}, broker)
+                self.assert_reached_the_clone(status, payload)
+                self.assertIn("https://gitlab.com/acme/infra.git", self.clone_argv())
+                self.assertNotIn("github.com", json.dumps(self.git))
+
+    def test_a_bare_name_registered_on_one_of_two_non_github_forges_is_read_there(self):
+        # The registry refuses a hostless name once the install has two
+        # forges, so the fallback names the host of the forge that lists it.
+        token = self.base / "token"
+        token.write_text("glpat-SENTINEL-must-never-appear")
+        broker = self.broker({"forges": [
+            {"provider": "gitlab", "host": "gitlab.com", "tokenPath": str(token), "allowedPaths": ["acme"]},
+            {"provider": "gitlab", "host": "git.example.com", "tokenPath": str(token), "allowedPaths": ["acme"]},
+        ]})
+        self.context = {"gitlab:git.example.com/acme/notes"}
+        status, payload = self.post({"repository": "acme/notes"}, broker)
+        self.assert_reached_the_clone(status, payload)
+        self.assertIn("https://git.example.com/acme/notes.git", self.clone_argv())
+        self.assertNotIn("github.com", json.dumps(self.git))
+
+    def test_a_bare_name_is_not_read_on_github_com_while_the_lists_cannot_be_read(self):
+        broker = self.gitlab_only()
+        self.lists_readable = False
+        with self.assertLogs(credential_proxy.LOGGER, level="WARNING"):
+            status, payload = self.post({"repository": "acme/infra"}, broker)
+        self.assert_reached_the_clone(status, payload)
+        self.assertIn("https://gitlab.com/acme/infra.git", self.clone_argv())
+        self.assertEqual((self.HELPER_CLEARED,), self.clone_config())
+
+    def test_a_bare_name_on_an_install_with_github_and_a_second_forge_is_read_on_github(self):
+        # The content workspace reads it there; without the lift the registry
+        # refuses a hostless name when it serves two forges.
+        token = self.base / "token"
+        token.write_text("glpat-SENTINEL-must-never-appear")
+        broker = self.broker({"forges": [
+            {"provider": "github", "host": "github.com"},
+            {"provider": "gitlab", "host": "gitlab.com", "tokenPath": str(token), "allowedPaths": ["acme"]},
+        ]})
+        status, payload = self.post({"repository": "kubernetes/kubernetes"}, broker)
+        self.assert_reached_the_clone(status, payload)
+        self.assertIn("https://github.com/kubernetes/kubernetes.git", self.clone_argv())
+        self.assertEqual((self.HELPER_CLEARED,), self.clone_config())
+        self.assertNotIn("glpat", json.dumps(self.git))
+        # The role is asked of the GitHub forge: a context repository there
+        # gets the read token.
+        self.git.clear()
+        self.context = {"github:github.com/acme/tf-live"}
+        status, payload = self.post({"repository": "acme/tf-live"}, broker)
+        self.assert_reached_the_clone(status, payload)
+        self.assertIn("https://github.com/acme/tf-live.git", self.clone_argv())
+        self.assertEqual([("github", "acme/tf-live")], self.minted)
+
+    def test_the_fallback_applies_only_to_a_bare_name(self):
+        github = self.broker()
+        self.assertEqual(("https://github.com/acme/infra", None), github.snapshot_source("acme/infra"))
+        self.assertEqual(("gitlab.com/acme/infra", None), github.snapshot_source("gitlab.com/acme/infra"))
+        self.assertIsNone(credential_proxy.snapshot_bare_name_fallback("github.com/acme", ()))
+        self.assertIsNone(credential_proxy.snapshot_bare_name_fallback("gitlab.com/acme/infra", ()))
+        self.assertEqual(
+            ("github", "acme/infra", "https://github.com/acme/infra.git"),
+            credential_proxy.snapshot_bare_name_fallback("acme/infra.git", ()),
+        )
+
+
+class CredentialHelperClearTest(unittest.TestCase):
+    """The claim the snapshot's helper clear rests on, proven with real git."""
+
+    def test_an_empty_helper_in_the_config_layer_resets_a_url_scoped_helper_from_the_global_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            global_file = Path(tmp) / ".gitconfig"
+            global_file.write_text(
+                '[credential "https://github.com"]\n'
+                '\thelper = "!f() { echo username=ambient; echo password=from-the-global-file; }; f"\n'
+            )
+            environment = {
+                "PATH": os.environ.get("PATH", ""),
+                "HOME": tmp,
+                "GIT_CONFIG_GLOBAL": str(global_file),
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_TERMINAL_PROMPT": "0",
+            }
+            request = "protocol=https\nhost=github.com\npath=acme/infra.git\n\n"
+
+            def fill(layer):
+                return subprocess.run(
+                    ["git", "credential", "fill"], input=request, capture_output=True, text=True,
+                    env={**environment, **credential_proxy._git_forced_config_environment(layer)},
+                )
+
+            # Without the clear, the global file's helper answers.
+            ambient = fill(())
+            self.assertEqual(0, ambient.returncode, ambient.stderr)
+            self.assertIn("password=from-the-global-file", ambient.stdout)
+            # With it, in the same layer the broker builds, nothing answers.
+            cleared = fill((vcs_broker.HELPER_CLEARED,))
+            self.assertNotEqual(0, cleared.returncode)
+            self.assertNotIn("from-the-global-file", cleared.stdout + cleared.stderr)
 
 
 class ContentWorkspaceOnGitLabTest(unittest.TestCase):
@@ -11901,6 +12280,14 @@ class RequiredRoleTest(unittest.TestCase):
             credential_proxy.required_roles("/v1/exec"),
         )
 
+    def test_the_admission_report_is_the_shells_alone(self):
+        """It sits under /v1/exec but is matched first: the shell's sweeps size
+        their pools by it, and a session pod has none to size."""
+        self.assertEqual(
+            (credential_proxy.CALLER_ROLE_SHELL,),
+            credential_proxy.required_roles(credential_proxy.ADMISSION_PATH),
+        )
+
     def test_the_chat_routes(self):
         for path in ("/v1/chat/slack/events", "/v1/chat/google/api"):
             with self.subTest(path=path):
@@ -12765,6 +13152,9 @@ class MCPVcsVerbGateTest(unittest.TestCase):
         handler.headers = {"Content-Length": str(len(encoded))}
         handler.rfile = io.BytesIO(encoded)
         handler.vcs = mock.Mock()
+        # `snapshot` asks where a bare name is read before it resolves: here,
+        # as given.
+        handler.vcs.snapshot_source.side_effect = lambda repository: (repository, None)
         forge = mock.Mock()
         forge.name = "github"
         handler.vcs.registry.resolve.return_value = (forge, "acme/infra")
@@ -12793,7 +13183,7 @@ class MCPVcsVerbGateTest(unittest.TestCase):
     def test_every_write_verb_and_every_unlisted_verb_is_refused_for_mcp(self):
         verbs = (
             set(vcs_broker.WRITE_VERBS)
-            | {"clone", "identity", "branch-view", "branch-delete"}
+            | {"clone", "snapshot", "identity", "branch-view", "branch-delete"}
             | (set(vcs_broker.VCS_VERBS) - credential_proxy.ROLE_VCS_VERBS[credential_proxy.CALLER_ROLE_MCP])
         )
         self.assertTrue(vcs_broker.WRITE_VERBS <= verbs)
@@ -12896,6 +13286,15 @@ class RoleVcsVerbsTableTest(unittest.TestCase):
                     credential_proxy._validate_role_vcs_verbs(
                         {credential_proxy.CALLER_ROLE_MCP: frozenset({"proposal-view", verb})}
                     )
+
+    def test_a_role_selected_verb_in_the_mcp_entry_is_refused(self):
+        # `snapshot` reads repositories nobody registered and clones into the
+        # broker; the MCP pod answers callers outside the cluster.
+        for verb in sorted(vcs_broker.ROLE_SELECTED_VERBS):
+            with self.subTest(verb=verb), self.assertRaises(ValueError):
+                credential_proxy._validate_role_vcs_verbs(
+                    {credential_proxy.CALLER_ROLE_MCP: frozenset({"proposal-view", verb})}
+                )
 
     def test_a_bare_string_unknown_verb_or_unknown_role_is_refused(self):
         with self.assertRaises(TypeError):
@@ -13052,9 +13451,17 @@ class AuthenticationOverTheSocketTest(unittest.TestCase):
 
     class _RecordingExecutor:
         ALLOWED_EXECUTABLES = CommandExecutor.ALLOWED_EXECUTABLES
+        # What the admission report reads off a real executor.
+        max_concurrent_commands = 8
 
         def __init__(self):
             self.executed = []
+
+        def requests_the_budget_admits(self):
+            return 9
+
+        def admitted_requests(self):
+            return 8
 
         def git_lease_violation(self, argv, cwd):
             return None
@@ -13168,6 +13575,30 @@ class AuthenticationOverTheSocketTest(unittest.TestCase):
     def test_healthz_stays_open_for_the_readiness_probe(self):
         with urllib.request.urlopen(self.endpoint + "/healthz") as response:
             self.assertEqual(200, response.status)
+
+    def test_an_authenticated_get_on_the_admission_report_answers_the_four_numbers(self):
+        """The dispatch itself: past authentication, the exact path reaches the
+        report. A regression here would only show as the sweeps' silent fallback
+        to four, so it is pinned over the socket."""
+        request = urllib.request.Request(
+            self.endpoint + credential_proxy.ADMISSION_PATH,
+            headers={"Authorization": "Bearer good-token"},
+            method="GET",
+        )
+        with urllib.request.urlopen(request) as response:
+            self.assertEqual(200, response.status)
+            report = json.loads(response.read())
+        self.assertEqual(
+            {"slot_cap": 8, "budget_admits": 9, "admitted": 8, "session_cap": credential_proxy.DEFAULT_SESSION_MAX_CONCURRENT_COMMANDS},
+            report,
+        )
+        self.assertEqual([], self.executor.executed, "the admission report must run nothing")
+
+    def test_an_unauthenticated_get_on_the_admission_report_is_401(self):
+        request = urllib.request.Request(self.endpoint + credential_proxy.ADMISSION_PATH, method="GET")
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request)
+        self.assertEqual(401, raised.exception.code)
 
     def test_an_unauthenticated_get_on_a_relay_route_is_401(self):
         request = urllib.request.Request(self.endpoint + "/v1/chat/events", method="GET")
@@ -14282,6 +14713,24 @@ class ReadCredentialMintTest(unittest.TestCase):
         (argv,) = executor.calls
         self.assertTrue(argv[0].endswith("/github_token_refresh.py"), argv)
         self.assertEqual(["--read-only", "acme/tf-live"], argv[1:])
+
+    def test_a_vcs_request_s_reservation_covers_the_mint_and_nothing_else_is_exempt(self):
+        # Under a `snapshot`, the request's reservation covers the helper, as
+        # it covers the write mint; anywhere else -- the content workspace,
+        # under its store lock -- the mint runs on the workspace's fixed term.
+        token = "ghs_" + "C" * 36
+        for reserved, exempt in ((True, False), (False, True)):
+            with self.subTest(reserved=reserved):
+                executor = self._executor(self._result(0, stdout=token))
+                executor._request_budget.reserved = reserved
+                seen = []
+                executor.execute_internal = lambda argv: seen.append(
+                    getattr(executor._request_budget, "exempt", False)
+                ) or self._result(0, stdout=token)
+                with mock.patch.object(credential_proxy, "repository_role", return_value="context"):
+                    self.assertEqual(token, executor.mint_read_credential("github", "acme/tf-live"))
+                self.assertEqual([exempt], seen)
+                self.assertFalse(getattr(executor._request_budget, "exempt", False))
 
     def test_the_flag_is_the_one_the_helper_parses(self):
         # Two copies of one string, kept in step here because the broker
@@ -15908,6 +16357,327 @@ class TeamsRelayTest(unittest.TestCase):
 
             with self.assertRaises(RuntimeError):
                 relay._get_access_token()
+
+
+
+class ResolveRoleTest(unittest.TestCase):
+    """The values CREDENTIAL_PROXY_ROLE may take, the exec tier's among them."""
+
+    def test_each_known_role_is_accepted(self):
+        for raw, role in (
+            ("combined", "combined"), ("broker", "broker"), ("api-proxy", "api-proxy"),
+            (credential_proxy_client.EXEC_ROLE, "exec"), (" EXEC ", "exec"), ("", "combined"),
+        ):
+            with self.subTest(raw=raw), mock.patch.dict(os.environ, {"CREDENTIAL_PROXY_ROLE": raw}):
+                self.assertEqual(role, credential_proxy.resolve_role())
+
+    def test_an_unknown_role_is_refused_with_the_exec_role_named(self):
+        for raw in ("stateful", "execute", "bogus"):
+            with self.subTest(raw=raw), mock.patch.dict(os.environ, {"CREDENTIAL_PROXY_ROLE": raw}):
+                with self.assertRaisesRegex(RuntimeError, r"unsupported CREDENTIAL_PROXY_ROLE .*'exec'"):
+                    credential_proxy.resolve_role()
+
+
+class ExecPodRefusesTest(unittest.TestCase):
+    """The exec pod's gate, asked directly: which routes pass and how the scope role is refused."""
+
+    def _handler(self, path, broker_role=credential_proxy_client.EXEC_ROLE):
+        handler = CredentialProxyHandler.__new__(CredentialProxyHandler)
+        handler.path = path
+        handler.broker_role = broker_role
+        handler.replies = []
+        handler._json = lambda status, payload: handler.replies.append((status, payload))
+        return handler
+
+    @staticmethod
+    def _principal(role):
+        return credential_proxy.Principal(
+            workload="system:serviceaccount:ns:agent", uid="u", groups=(), role=role
+        )
+
+    def test_the_exec_routes_pass(self):
+        for method, path in (
+            ("POST", "/v1/exec"),
+            ("GET", credential_proxy.API_RELAY_PREFIX + "monitoring.googleapis.com/v3/x"),
+            ("GET", credential_proxy.ADMISSION_PATH),
+            ("GET", credential_proxy.HEALTHZ_PATH),
+        ):
+            with self.subTest(method=method, path=path):
+                handler = self._handler(path)
+                self.assertFalse(handler._exec_pod_refuses(method, self._principal(credential_proxy.CALLER_ROLE_SHELL)))
+                self.assertEqual([], handler.replies)
+
+    def test_the_exec_routes_on_another_method_answer_404(self):
+        for method, path in (
+            ("GET", "/v1/exec"),
+            ("POST", credential_proxy.API_RELAY_PREFIX + "monitoring.googleapis.com/v3/x"),
+            ("POST", credential_proxy.ADMISSION_PATH),
+        ):
+            with self.subTest(method=method, path=path):
+                handler = self._handler(path)
+                self.assertTrue(handler._exec_pod_refuses(method, None))
+                self.assertEqual([(HTTPStatus.NOT_FOUND, {"status": "not_found"})], handler.replies)
+
+    def test_the_scope_role_is_refused_on_an_exec_pod(self):
+        handler = self._handler("/v1/exec")
+        with self.assertLogs(credential_proxy.LOGGER, level="WARNING"):
+            self.assertTrue(handler._exec_pod_refuses("POST", self._principal(credential_proxy.CALLER_ROLE_SCOPE)))
+        status, payload = handler.replies[0]
+        self.assertEqual(HTTPStatus.FORBIDDEN, status)
+        self.assertEqual("CALLER_ROLE_FORBIDDEN", payload["code"])
+        self.assertIn("stateful broker", payload["error"])
+
+    def test_the_other_roles_reach_the_command_route_on_an_exec_pod(self):
+        for role in (
+            credential_proxy.CALLER_ROLE_SHELL, credential_proxy.CALLER_ROLE_SESSION,
+            credential_proxy.CALLER_ROLE_PROFILE, "",
+        ):
+            with self.subTest(role=role):
+                handler = self._handler("/v1/exec")
+                self.assertFalse(handler._exec_pod_refuses("POST", self._principal(role)))
+                self.assertEqual([], handler.replies)
+
+    def test_no_other_broker_role_gates(self):
+        for broker_role in ("combined", "broker"):
+            with self.subTest(broker_role=broker_role):
+                handler = self._handler("/v1/workspace/open", broker_role=broker_role)
+                self.assertFalse(handler._exec_pod_refuses("POST", self._principal(credential_proxy.CALLER_ROLE_SCOPE)))
+                self.assertEqual([], handler.replies)
+
+
+class ExecPodRouteGateTest(unittest.TestCase):
+    """Every route over HTTP on an exec pod: the exec routes are served and the rest answer 404.
+
+    Each route handler is replaced by one that answers 200 and names itself,
+    so a 404 here is the gate's and not a handler's. The same requests on a
+    combined broker are the control: there none of them answers 404.
+    """
+
+    _HANDLERS = (
+        "_handle_api_relay", "_handle_watcher_gcp", "_handle_platform_pubsub", "_handle_watcher_k8s",
+        "_handle_mcp_relay", "_handle_slack_post", "_handle_teams_post", "_handle_chat_post",
+        "_handle_forge_refresh", "_handle_workspace_post", "_handle_vcs_post", "_handle_feedback_post",
+    )
+    _GCP_PATH = credential_proxy.API_RELAY_PREFIX + "monitoring.googleapis.com/v3/x"
+    _NOT_SERVED = (
+        ("GET", "/v1/chat/events"),
+        ("GET", "/v1/chat/slack/events"),
+        ("GET", "/v1/chat/a2a/events"),
+        ("GET", "/v1/chat/teams/events"),
+        ("GET", credential_proxy.watcher_policy.WATCHER_GCP_PREFIX + "x"),
+        ("GET", credential_proxy.watcher_policy.WATCHER_K8S_PREFIX + "x"),
+        ("GET", credential_proxy.watcher_policy.PLATFORM_PUBSUB_PREFIX + "x"),
+        ("GET", credential_proxy.mcp_policy.MCP_RELAY_PREFIX + "x"),
+        ("POST", _GCP_PATH),
+        ("POST", credential_proxy.mcp_policy.MCP_RELAY_PREFIX + "x"),
+        ("POST", credential_proxy.watcher_policy.WATCHER_GCP_PREFIX + "x"),
+        ("POST", credential_proxy.watcher_policy.WATCHER_K8S_PREFIX + "x"),
+        ("POST", credential_proxy.watcher_policy.PLATFORM_PUBSUB_PREFIX + "x"),
+        ("POST", "/v1/chat/api"),
+        ("POST", "/v1/chat/slack/api"),
+        ("POST", "/v1/chat/teams/api"),
+        ("POST", "/v1/forge/refresh"),
+        ("POST", "/v1/github/refresh"),
+        ("POST", "/v1/workspace/open"),
+        ("POST", "/v1/vcs/probe"),
+        ("POST", feedback_broker.ROUTE),
+    )
+
+    def setUp(self):
+        for name in self._HANDLERS:
+            def reached(handler, *args, _name=name, **kwargs):
+                handler._json(HTTPStatus.OK, {"reached": _name})
+            patcher = mock.patch.object(CredentialProxyHandler, name, reached)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        for name, value in (
+            ("authenticator", credential_proxy.NullAuthenticator()), ("profile_gate", None),
+            ("max_request_bytes", 65536), ("chat_relay", None), ("a2a_chat_relay", None),
+            ("slack_relay", None), ("teams_relay", None),
+        ):
+            patcher = mock.patch.object(CredentialProxyHandler, name, value, create=True)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), CredentialProxyHandler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+
+    def _request(self, method, path, broker_role):
+        with mock.patch.object(CredentialProxyHandler, "broker_role", broker_role):
+            connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=10)
+            try:
+                body = b"{}" if method == "POST" else None
+                connection.request(method, path, body=body, headers={"Content-Type": "application/json"})
+                response = connection.getresponse()
+                return response.status, response.read()
+            finally:
+                connection.close()
+
+    def test_every_other_route_answers_404_on_an_exec_pod(self):
+        for method, path in self._NOT_SERVED:
+            with self.subTest(method=method, path=path):
+                status, body = self._request(method, path, credential_proxy_client.EXEC_ROLE)
+                self.assertEqual(HTTPStatus.NOT_FOUND, status)
+                self.assertEqual({"status": "not_found"}, json.loads(body))
+
+    def test_the_same_routes_are_served_on_a_combined_broker(self):
+        for method, path in self._NOT_SERVED:
+            with self.subTest(method=method, path=path):
+                status, _ = self._request(method, path, "combined")
+                self.assertNotEqual(HTTPStatus.NOT_FOUND, status)
+
+    def test_the_exec_routes_are_served_on_an_exec_pod(self):
+        exec_role = credential_proxy_client.EXEC_ROLE
+        status, body = self._request("GET", credential_proxy.HEALTHZ_PATH, exec_role)
+        self.assertEqual((HTTPStatus.OK, {"status": "ok"}), (status, json.loads(body)))
+        status, body = self._request("GET", self._GCP_PATH, exec_role)
+        self.assertEqual((HTTPStatus.OK, {"reached": "_handle_api_relay"}), (status, json.loads(body)))
+        # A body with no argv: the route parsed it, so the gate let it through.
+        status, body = self._request("POST", "/v1/exec", exec_role)
+        self.assertEqual(HTTPStatus.BAD_REQUEST, status)
+        self.assertIn("argv", json.loads(body)["error"])
+
+
+class BusyReplyNamesItsBoundTest(unittest.TestCase):
+    """The busy answer carries `bound`, the same value the refusal counter records."""
+
+    def _busy(self, bound):
+        handler = CredentialProxyHandler.__new__(CredentialProxyHandler)
+        handler.metrics = credential_proxy.ProxyMetrics()
+        handler.replies = []
+        handler._json = lambda status, payload: handler.replies.append((status, payload))
+        handler._busy(credential_proxy.CommandSlotUnavailable("held", bound=bound))
+        return handler
+
+    def test_each_bound_is_named_in_the_reply_and_the_counter(self):
+        for bound in (
+            credential_proxy.ADMISSION_BOUND_SLOT, credential_proxy.ADMISSION_BOUND_BUDGET,
+            credential_proxy.ADMISSION_BOUND_REFRESH_LOCK, credential_proxy.ADMISSION_BOUND_SESSION,
+            credential_proxy.ADMISSION_BOUND_PROFILE, credential_proxy_client.ADMISSION_BOUND_DRAINING,
+            credential_proxy.ADMISSION_BOUND_OTHER,
+        ):
+            with self.subTest(bound=bound):
+                handler = self._busy(bound)
+                self.assertEqual(
+                    [(HTTPStatus.SERVICE_UNAVAILABLE,
+                      {"status": "busy", "code": "CREDENTIAL_PROXY_BUSY",
+                       credential_proxy_client.BUSY_BOUND_KEY: bound, "error": "held"})],
+                    handler.replies,
+                )
+                self.assertIn(
+                    f'{credential_proxy.ADMISSION_REFUSALS_METRIC}{{bound="{bound}"}} 1',
+                    handler.metrics.render(),
+                )
+
+    def test_an_unknown_bound_is_named_other(self):
+        handler = self._busy("text a caller wrote")
+        self.assertEqual(credential_proxy.ADMISSION_BOUND_OTHER, handler.replies[0][1]["bound"])
+        self.assertIn(
+            f'{credential_proxy.ADMISSION_REFUSALS_METRIC}{{bound="other"}} 1', handler.metrics.render()
+        )
+
+
+class ServeStartsNoRelayOnAnExecPodTest(unittest.TestCase):
+    """`serve` on the exec role starts no relay, and keeps the Cloud API relay and the metrics listener."""
+
+    class _Stop(Exception):
+        pass
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.policy_path = Path(self.tmp.name) / "policy.json"
+        self.policy_path.write_text(json.dumps({"rules": []}), encoding="utf-8")
+        for name, value in (
+            ("broker_role", "combined"), ("api_relay", None), ("chat_relay", None),
+            ("a2a_chat_relay", None), ("slack_relay", None), ("teams_relay", None),
+            ("watcher_subscription", ""), ("platform_pubsub_subscriptions", frozenset()),
+        ):
+            patcher = mock.patch.object(CredentialProxyHandler, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _serve(self, role):
+        owner = self
+        bound = []
+        thread_targets = []
+
+        def stop(server):
+            bound.append(server)
+            raise owner._Stop
+
+        class FakeThread:
+            def __init__(self, *args, target=None, **kwargs):
+                thread_targets.append(getattr(target, "__name__", ""))
+
+            def start(self):
+                pass
+
+        args = types.SimpleNamespace(
+            policy=str(self.policy_path),
+            host="127.0.0.1",
+            port=0,
+            unix_socket=str(Path(self.tmp.name) / "backend.sock"),
+            timeout_seconds=5,
+            max_request_bytes=1 << 20,
+            max_output_bytes=1 << 20,
+            state_dir=str(Path(self.tmp.name) / "state"),
+            metrics_port=9466,
+        )
+        environment = {
+            "CREDENTIAL_PROXY_ROLE": role,
+            "CREDENTIAL_PROXY_BOOTSTRAP_COMMAND": "",
+            "CREDENTIAL_PROXY_SCOPED_SA_POOL": "0",
+            "WATCHER_PUBSUB_SUBSCRIPTION": "projects/p/subscriptions/drift",
+            "GOOGLE_CHAT_PROJECT_ID": "p",
+            "GOOGLE_CHAT_SUBSCRIPTION_NAME": "chat",
+            "A2A_GOOGLE_CHAT_SUBSCRIPTION_NAME": "a2a-chat",
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "SLACK_APP_TOKEN": "xapp-test",
+            "TEAMS_APP_ID": "app",
+            "TEAMS_APP_PASSWORD": "password",
+        }
+        relays = {name: mock.MagicMock() for name in ("GoogleChatRelay", "SlackRelay", "TeamsRelay")}
+        pubsub = mock.MagicMock(return_value=frozenset({"projects/p/subscriptions/plugin"}))
+        metrics_listener = mock.MagicMock()
+        try:
+            with mock.patch.dict(os.environ, environment, clear=True), \
+                    mock.patch.multiple(credential_proxy, **relays), \
+                    mock.patch.object(credential_proxy, "platform_pubsub_subscriptions", pubsub), \
+                    mock.patch.object(credential_proxy, "start_metrics_listener", metrics_listener), \
+                    mock.patch.object(credential_proxy.threading, "Thread", FakeThread), \
+                    mock.patch.object(credential_proxy.ThreadingUnixHTTPServer, "serve_forever", stop):
+                with self.assertRaises(self._Stop):
+                    credential_proxy.serve(args)
+        finally:
+            for server in bound:
+                server.server_close()
+        return relays, pubsub, metrics_listener, thread_targets
+
+    def test_an_exec_pod_starts_no_relay(self):
+        relays, pubsub, metrics_listener, thread_targets = self._serve(credential_proxy_client.EXEC_ROLE)
+        for name, relay in relays.items():
+            with self.subTest(relay=name):
+                relay.assert_not_called()
+        pubsub.assert_not_called()
+        self.assertNotIn("initialize_slack_relay", thread_targets)
+        self.assertEqual("", CredentialProxyHandler.watcher_subscription)
+        self.assertIsNone(CredentialProxyHandler.chat_relay)
+        self.assertIsNone(CredentialProxyHandler.teams_relay)
+        self.assertIsNotNone(CredentialProxyHandler.api_relay)
+        self.assertEqual(credential_proxy_client.EXEC_ROLE, CredentialProxyHandler.broker_role)
+        metrics_listener.assert_called_once_with("127.0.0.1", 9466)
+
+    def test_the_stateful_broker_starts_them(self):
+        relays, pubsub, metrics_listener, thread_targets = self._serve("broker")
+        self.assertEqual(2, relays["GoogleChatRelay"].call_count)
+        relays["TeamsRelay"].assert_called_once()
+        pubsub.assert_called_once()
+        self.assertIn("initialize_slack_relay", thread_targets)
+        self.assertEqual("projects/p/subscriptions/drift", CredentialProxyHandler.watcher_subscription)
+        self.assertEqual("broker", CredentialProxyHandler.broker_role)
+        metrics_listener.assert_called_once_with("127.0.0.1", 9466)
 
 
 if __name__ == "__main__":

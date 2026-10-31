@@ -80,9 +80,12 @@ _KUBECTL_SUBCOMMANDS: dict[str, frozenset[str]] = {
 # `--kubeconfig` scan stops -- in one place. Nothing else in
 # credential_proxy_client runs on import.
 from credential_proxy_client import (  # noqa: F401  (re-export)
+    ADMISSION_BOUND_DRAINING,
     API_RELAY_PREFIX,
+    BUSY_BOUND_KEY,
     CONTEXT_FLAG,
     END_OF_FLAGS,
+    EXEC_ROLE,
     KUBECONFIG_FLAG,
     ClusterTarget,
     kubectl_context_flag,
@@ -93,7 +96,7 @@ from credential_proxy_client import (  # noqa: F401  (re-export)
 LOGGER = logging.getLogger("credential-proxy")
 # The optional key, in the Secret a forge's credentialsRef names, that holds
 # its read-only token. Named in the log when a context clone presents none.
-FORGE_READ_TOKEN_KEY = "read-token"
+FORGE_READ_TOKEN_KEY = vcs_broker.FORGE_READ_TOKEN_KEY
 SLACK_EVENT_QUEUE_MAXSIZE = 1000
 SLACK_ERROR_DIAGNOSTIC_FIELDS = ("ok", "error", "needed", "provided")
 
@@ -243,6 +246,8 @@ KILLED_COMMAND_DRAIN_SECONDS = 5
 # looked at: nothing can wake that wait, so the deadline and the caller's
 # hang-up are checked in steps this long.
 PIPES_CLOSED_POLL_SECONDS = 0.5
+# How often a command's `stop` check is asked while it runs (`_capture_output`).
+STOP_POLL_SECONDS = 0.5
 # `_reap`'s poll for a child that has not exited yet, the cadence Popen.wait
 # uses: short at first, doubling to the ceiling, so a quick exit is seen at
 # once and a slow one costs no busy loop.
@@ -621,6 +626,13 @@ METRICS_PORT_MIN = 1
 METRICS_PORT_MAX = 65535
 METRICS_PATH = "/metrics"
 HEALTHZ_PATH = "/healthz"
+# What the broker admits at once, for the sandbox's fleet sweeps to size their
+# worker pools by (`broker_admission.sweep_width`). Read-only: the slot cap, the
+# count the child memory budget fits at this container's effective limit, the
+# smaller of the two, and the session role's own cap. Only the broker knows the
+# effective limit: on GKE Autopilot without bursting it is the memory request,
+# rewritten after the operator rendered the pod.
+ADMISSION_PATH = "/v1/exec/admission"
 METRICS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 METRICS_SERVER_HEADER = "credential-proxy-metrics"
 # The metrics listener shares the process with the credentialed handler, so a
@@ -691,7 +703,7 @@ ADMISSION_BOUND_OTHER = "other"
 ADMISSION_BOUND_NONE = "none"
 ADMISSION_BOUNDS = frozenset(
     {ADMISSION_BOUND_SLOT, ADMISSION_BOUND_BUDGET, ADMISSION_BOUND_REFRESH_LOCK, ADMISSION_BOUND_SESSION,
-     ADMISSION_BOUND_PROFILE, ADMISSION_BOUND_NONE}
+     ADMISSION_BOUND_PROFILE, ADMISSION_BOUND_DRAINING, ADMISSION_BOUND_NONE}
 )
 # Edges where a reader wants them: 15 s is the cap the Cluster Agent preflight
 # (cluster_preflight.sh) puts on one brokered call, the shortest caller-side
@@ -1120,6 +1132,10 @@ CALLER_ROLE_MCP = "mcp"
 # credential is mandatory for anything that reaches a cluster or a project: a
 # profile caller without a valid one runs local-only commands and nothing else.
 CALLER_ROLE_PROFILE = "profile"
+# The scope sweep's role (#4275 adds its audience). Named here only for the
+# exec pod's refusal: a scope command reads its member window, which lives on
+# the stateful broker, so an exec pod refuses it (_exec_pod_refuses).
+CALLER_ROLE_SCOPE = "scope"
 
 # The TokenReview user.extra key under which the API server names the Pod a
 # projected token is bound to.
@@ -1186,7 +1202,8 @@ def executable_permitted(role: str, executable: str) -> bool:
 # `capabilities` (ungated by the managed list, so it would resolve any
 # repository the registry knows), `branch-view` and `identity` (the forge
 # credential's own login and reach, which the MCP pod has no use for), and
-# `clone` (fills the broker's disk on a caller's say-so).
+# `clone` and `snapshot` (fill the broker's disk on a caller's say-so, and
+# `snapshot` reads repositories this install does not manage).
 ROLE_VCS_VERBS: dict[str, frozenset[str]] = {
     CALLER_ROLE_MCP: frozenset({"proposal-view"}),
 }
@@ -1230,6 +1247,15 @@ def _validate_role_vcs_verbs(table: dict[str, frozenset[str]]) -> None:
     if writes:
         raise ValueError(
             f"ROLE_VCS_VERBS[{CALLER_ROLE_MCP!r}]: {', '.join(sorted(writes))} writes to the forge"
+        )
+    # A role-selected verb reads repositories nobody registered and clones into
+    # the broker on the caller's say-so, which is wider than a read of a managed
+    # repository.
+    unlisted = table.get(CALLER_ROLE_MCP, frozenset()) & vcs_broker.ROLE_SELECTED_VERBS
+    if unlisted:
+        raise ValueError(
+            f"ROLE_VCS_VERBS[{CALLER_ROLE_MCP!r}]: {', '.join(sorted(unlisted))} reads "
+            "repositories this install does not manage"
         )
 
 
@@ -1374,6 +1400,11 @@ ROUTE_ROLES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # 404s anything else under it, so the prefix admits nothing extra today.
     ("/v1/chat/api", (CALLER_ROLE_CHAT, CALLER_ROLE_A2A_CHAT)),
     ("/v1/chat/", (CALLER_ROLE_CHAT,)),
+    # The admission report sits under /v1/exec and must be matched first: the
+    # shell's fleet sweeps size their pools by it, so it is the shell's alone
+    # rather than /v1/exec's roles. A sweep run under any other role is refused
+    # here and falls back to four (broker_admission.sweep_width).
+    (ADMISSION_PATH, (CALLER_ROLE_SHELL,)),
     # The profile role reaches this route and no other: the Cloud API relay,
     # the MCP relay, the watcher and Pub/Sub routes all stay closed to it.
     ("/v1/exec", (CALLER_ROLE_SHELL, CALLER_ROLE_SESSION, CALLER_ROLE_PROFILE)),
@@ -1519,6 +1550,19 @@ def required_roles(path: str) -> tuple[str, ...]:
     return ()
 
 
+def exec_pod_serves(method: str, path: str) -> bool:
+    """Whether an exec pod serves ``method`` on ``path``.
+
+    The routes docs/designs/credential-broker-exec-tier.md §12 gives the exec
+    tier: the command route, the Cloud API relay's reads, the admission route
+    and the readiness probe. The metrics listener is a server of its own and
+    does not pass through here. Everything else is the stateful broker's.
+    """
+    if method == "POST":
+        return path == "/v1/exec"
+    return path in (HEALTHZ_PATH, ADMISSION_PATH) or path.startswith(API_RELAY_PREFIX)
+
+
 # How long a managed-repository allowlist read is reused.
 #
 # The list arrives as a ConfigMap mounted read-only at GITOPS_STATE_PATH, and
@@ -1556,10 +1600,11 @@ REFRESH_YIELDED_BUDGET_WAIT_TEXT = (
 
 # What `repository_role` answers. `managed` is a repository in `managed_repos`,
 # whatever else it is in; `context` is one in `context_repos` alone; the third
-# is neither. Only the content workspace's clone reads the answer.
-ROLE_MANAGED = "managed"
-ROLE_CONTEXT = "context"
-ROLE_UNREGISTERED = "unregistered"
+# is neither. The content workspace's clone and the vcs `snapshot` verb read
+# the answer, and the values are the broker's, so the two cannot drift.
+ROLE_MANAGED = vcs_broker.ROLE_MANAGED
+ROLE_CONTEXT = vcs_broker.ROLE_CONTEXT
+ROLE_UNREGISTERED = vcs_broker.ROLE_UNREGISTERED
 
 _managed_repository_cache: tuple[float, frozenset[str]] | None = None
 _managed_repository_lock = threading.Lock()
@@ -1691,10 +1736,11 @@ def repository_role(repository: str, forge: providers.Forge | None = None) -> st
 
     Managed wins. A repository in both lists is one the install writes to, and
     the write path must see it exactly as it would without the second entry.
-    Consulted by the content workspace to decide what credential a clone gets,
-    and by nothing that gates a write: `repository_is_managed` stays the only
-    question `commit`, `push`, the API routes and the refresh route ask, and
-    `ROLE_CONTEXT` is not an answer any of them accepts.
+    Consulted by the content workspace and the vcs `snapshot` verb to decide
+    what credential a clone gets, and by nothing that gates a write:
+    `repository_is_managed` stays the only question `commit`, `push`, the API
+    routes and the refresh route ask, and `ROLE_CONTEXT` is not an answer any
+    of them accepts.
     """
     if repository_is_managed(repository, forge):
         return ROLE_MANAGED
@@ -1778,42 +1824,13 @@ def read_credential_for(registry: providers.Registry, repository: str) -> provid
     # credential, which reads a public repository and refuses a private one
     # at the clone.
     credential = forge.read_credential(repo)
-    if isinstance(credential, providers.NoCredential) and _holds_stored_token(forge):
-        if not getattr(forge, "read_token_path", ""):
-            # The forge was given no read-token path: the forges file came
-            # from an operator older than the read token, so no change to the
-            # Secret can help until the operator is upgraded.
-            LOGGER.warning(
-                "content workspace open repo=%s role=context: the broker's "
-                "config names no readTokenPath for the %s forge (an operator "
-                "older than the read-only token rendered it), so the clone "
-                "presents none; a private repository will refuse it",
-                repository, forge.name,
-            )
-            return credential
-        LOGGER.warning(
-            "content workspace open repo=%s role=context: the %s forge has no "
-            "usable read-only token (key %s in its credentials Secret: missing, "
-            "unreadable, empty, or not one line of printable ASCII) and its stored "
-            "token can write, so the clone presents none; a private repository "
-            "will refuse it",
-            repository, forge.name, FORGE_READ_TOKEN_KEY,
-        )
+    vcs_broker.warn_without_read_token(forge, credential, f"content workspace open repo={repository}")
     return credential
 
 
 def _holds_stored_token(forge: providers.Forge) -> bool:
-    """Whether ``forge`` presents a stored token rather than a minted one.
-
-    GitHub's is brokered: minted per repository, and installed for git by the
-    CLI, so the broker's own clones of a managed repository ride it ambiently.
-    A forge whose credential is neither brokered nor absent has nothing ambient
-    behind it, and its clones carry the credential themselves.
-    """
-    credential = getattr(forge, "credential", None)
-    return credential is not None and not isinstance(
-        credential, (providers.BrokeredCredential, providers.NoCredential)
-    )
+    """Whether ``forge`` presents a stored token rather than a minted one."""
+    return vcs_broker.holds_stored_token(forge)
 
 
 #: The forge a bare `owner/name` means to the content workspace. A
@@ -1923,6 +1940,66 @@ def _is_bare_name(repository: object) -> bool:
     import content_workspace
 
     return isinstance(repository, str) and content_workspace.is_bare_github_name(repository)
+
+
+def snapshot_bare_name_fallback(
+    repository: object, forges: tuple[providers.Forge, ...]
+) -> tuple[str, str, str] | str | None:
+    """Where the vcs `snapshot` reads a bare `owner/name`, as the content workspace reads it.
+
+    A bare name is GitHub's to the workspace (`is_bare_github_name`), and
+    `inspect-repository` relies on that. Against ``forges``, the broker's own:
+
+    - the name has a host, or is not GitHub-shaped: None, for the registry;
+    - the install has a GitHub forge: the name on that forge's host, for the
+      registry to resolve, as `_workspace_credential` lifts it (`_hosted`).
+      With a second forge the registry refuses a hostless name;
+    - no GitHub forge, and a forge of the install lists the name as managed
+      or context: the name on that forge's host, read on the install's forge,
+      as `clone` would, and not on github.com, where the same name can belong
+      to anyone. With a host the registry resolves it even when the install
+      has more than one forge;
+    - no GitHub forge, and the lists cannot be read: None, for the registry,
+      which reads the name on the install's one forge and refuses it when the
+      install has more than one;
+    - no GitHub forge, and nobody registered the name:
+      `(forge label, repository, clone URL)` for github.com, read with no
+      credential and the helper cleared.
+
+    The last case keeps a read the workspace has, where a refusal would take
+    it away: github.com is not in such an install's host table, so the bare
+    name is the only way to name a public GitHub repository there. The host
+    allowlist exists to stop a credential from reaching a host nobody
+    configured, and this clone carries none; the answer names `github` as the
+    forge, so a caller can see where it read.
+    """
+    if not _is_bare_name(repository):
+        return None
+    ref = repo_ref.try_parse(repository)
+    if ref is None or ref.host or len(ref.segments) != repo_ref.GITHUB_PATH_DEPTH:
+        return None
+    path = "/".join(ref.segments)
+    github = [forge for forge in forges if forge.name == CONTENT_WORKSPACE_PROVIDER]
+    if github:
+        return f"https://{github[0].hosts[0]}/{path}" if github[0].hosts else None
+    for forge in forges:
+        try:
+            role = repository_role(path, forge)
+        except Exception as exc:  # noqa: BLE001 - not known to be unregistered
+            LOGGER.warning(
+                "snapshot repo=%s: the repository lists could not be read type=%s; "
+                "leaving the name to the registry (read on the install's one forge, "
+                "refused when it has more than one) and not reading it on %s",
+                path, type(exc).__name__, repo_ref.GITHUB_CANONICAL_HOST,
+            )
+            return None
+        if role != ROLE_UNREGISTERED:
+            return f"https://{forge.hosts[0]}/{path}" if forge.hosts else None
+    return (
+        CONTENT_WORKSPACE_PROVIDER,
+        path,
+        f"https://{repo_ref.GITHUB_CANONICAL_HOST}/{path}.git",
+    )
 
 
 def _workspace_locate(repository: str) -> tuple[str, str]:
@@ -5162,14 +5239,20 @@ VCS_SCRATCH_DIR = "vcs"
 # other way to read a bundle is `fetch <path>`, which is the `file` transport
 # `GIT_ALLOW_PROTOCOL` refuses everywhere for reasons the executor environment
 # spells out.
+#
+# `archive` and `ls-tree` are on it for one caller: `snapshot` lists one
+# revision's tree to size the tar, then writes the tree as a tar, to a file in
+# its scratch directory (`--output`), from a bare clone.
 VCS_GIT_SUBCOMMANDS = frozenset(
     {
+        "archive",
         "bundle",
         "checkout",
         "clone",
         "fetch",
         "init",
         "ls-remote",
+        "ls-tree",
         "merge-base",
         "push",
         "remote",
@@ -5180,13 +5263,21 @@ VCS_GIT_SUBCOMMANDS = frozenset(
 )
 
 
+# The broker's own git subcommands that no caller's argv may name. `archive`
+# takes `--output=<path>` and `--remote=<url>`, and only `snapshot` issues it,
+# with a path and a revision the broker chose, so it stays off the `/v1/exec`
+# argument gate below. `ls-tree` is there for the same caller, and stays off
+# the gate because no caller of `/v1/exec` needed it before.
+VCS_ONLY_GIT_SUBCOMMANDS = frozenset({"archive", "ls-tree"})
+
+
 def _allowed_git_subcommands() -> frozenset[str]:
     from content_workspace import WORKSPACE_GIT_SUBCOMMANDS
 
     return (
         GIT_MUTATING_SUBCOMMANDS
         | GIT_READ_SUBCOMMANDS
-        | VCS_GIT_SUBCOMMANDS
+        | (VCS_GIT_SUBCOMMANDS - VCS_ONLY_GIT_SUBCOMMANDS)
         | WORKSPACE_GIT_SUBCOMMANDS
         | frozenset({"config"})
     )
@@ -5194,9 +5285,9 @@ def _allowed_git_subcommands() -> frozenset[str]:
 
 # The closed set of subcommands the product and its skills issue: the union of
 # the four git verb sets this module already tracks (`GIT_MUTATING_SUBCOMMANDS`,
-# `GIT_READ_SUBCOMMANDS`, `VCS_GIT_SUBCOMMANDS`, and `WORKSPACE_GIT_SUBCOMMANDS`)
-# plus `config` (whose own `_git_config_violation` gate restricts writes to
-# `ALLOWED_GIT_CONFIG_KEYS`). A verb outside this union is refused. On the
+# `GIT_READ_SUBCOMMANDS`, `VCS_GIT_SUBCOMMANDS` less `VCS_ONLY_GIT_SUBCOMMANDS`,
+# and `WORKSPACE_GIT_SUBCOMMANDS`) plus `config` (whose own
+# `_git_config_violation` gate restricts writes to `ALLOWED_GIT_CONFIG_KEYS`). A verb outside this union is refused. On the
 # `/v1/exec` path the check runs after `resolve_git_command` has expanded a
 # repository-local alias, so an alias is judged by what it expands to rather
 # than refused for being one.
@@ -6636,6 +6727,7 @@ def _capture_output(
     limit: int,
     timeout: float,
     caller: Any = None,
+    stop: Callable[[], bool] | None = None,
 ) -> _CapturedOutput:
     """Run a started command to completion holding at most `limit` bytes per stream.
 
@@ -6647,6 +6739,10 @@ def _capture_output(
     run to its deadline for nobody; and a command that is killed -- for either
     reason -- still has what it managed to write collected, briefly, so a
     timed-out kubectl's partial output and stderr reach the caller.
+
+    `stop`, when given, is asked about every `STOP_POLL_SECONDS` while the
+    command runs; a true answer kills it as a caller's hang-up does. The
+    snapshot clone uses it to stop at the clone ceiling while it writes.
 
     Returns once the command has exited. `process.returncode` is set.
     """
@@ -6689,7 +6785,10 @@ def _capture_output(
             remaining = until - time.monotonic()
             if remaining <= 0:
                 return True, False
-            for key, _ in selector.select(remaining):
+            if watch_caller and stop is not None and stop():
+                return False, True
+            wait = min(remaining, STOP_POLL_SECONDS) if stop is not None else remaining
+            for key, _ in selector.select(wait):
                 stream = key.fileobj
                 if stream is caller:
                     if _caller_has_gone(caller):
@@ -6748,6 +6847,8 @@ def _capture_output(
                 if remaining <= 0:
                     timed_out = True
                 elif caller is not None and _caller_has_gone(caller):
+                    abandoned = True
+                elif stop is not None and stop():
                     abandoned = True
                 else:
                     time.sleep(min(PIPES_CLOSED_POLL_SECONDS, remaining))
@@ -7162,6 +7263,15 @@ class CommandExecutor:
             f"{output_allowance // MEBIBYTE} MiB of output allowance for "
             f"{self._slots_in_use} requests"
         )
+
+    def admitted_requests(self) -> int:
+        """How many slot-taking requests the broker admits at once: the slot cap,
+        or the child memory budget's count when that is smaller. The figure the
+        admission report gives and the startup line implies."""
+        budget = self.requests_the_budget_admits()
+        if budget is None:
+            return self.max_concurrent_commands
+        return min(self.max_concurrent_commands, budget)
 
     def requests_the_budget_admits(self) -> int | None:
         """How many slot-taking requests fit the budget at once; None when it is off.
@@ -7899,6 +8009,7 @@ class CommandExecutor:
         config: tuple[tuple[str, str], ...] = (),
         *,
         allow_http: bool = False,
+        stop: Callable[[], bool] | None = None,
     ) -> subprocess.CompletedProcess:
         """git the version-control broker issues, in its own scratch tree.
 
@@ -7937,15 +8048,20 @@ class CommandExecutor:
             containment_root=self.vcs_root,
             extra_config=tuple(config),
             allow_http=allow_http,
+            stop=stop,
         )
         self._drop_write_tokens_refused_by(result.exit_code, result.stderr, config)
         if check and result.exit_code != 0:
             raise subprocess.CalledProcessError(
                 result.exit_code, argv, result.stdout, result.stderr
             )
-        return subprocess.CompletedProcess(
+        completed = subprocess.CompletedProcess(
             argv, result.exit_code, result.stdout, result.stderr
         )
+        # Whether the output was cut at the ceiling: `snapshot` sizes a tree
+        # from a listing, and a cut listing undercounts it.
+        completed.truncated = result.truncated
+        return completed
 
     def execute_forge_cli(
         self, argv: list[str], stdin: str | None = None
@@ -8463,9 +8579,14 @@ class CommandExecutor:
             raise PermissionError(
                 f"{repository} is not a context repository of this install"
             )
-        # Reached only from the store's `open` and `commit`, under its lock:
-        # the fixed workspace term covers it, as it does the store's git.
-        with self._outside_budget():
+        budget = getattr(self, "_request_budget", None)
+        covered_by_request = getattr(budget, "reserved", False) or getattr(budget, "exempt", False)
+        with contextlib.ExitStack() as admission:
+            # A vcs `snapshot`'s reservation covers the helper, as it covers
+            # the write mint; the content workspace's `open` and `commit`, under
+            # the store's lock, run on the workspace's fixed term.
+            if not covered_by_request and budget is not None:
+                admission.enter_context(self._outside_budget())
             result = self._run_forge_helper(
                 provider, helper, [FORGE_READ_ONLY_FLAG, repository], "read-only credential mint"
             )
@@ -9167,6 +9288,7 @@ class CommandExecutor:
         caller: socket.socket | None = None,
         *,
         allow_http: bool = False,
+        stop: Callable[[], bool] | None = None,
     ) -> ExecutionResult:
         """Run a command. `kubeconfig_path` is already resolved and trusted.
 
@@ -9297,6 +9419,7 @@ class CommandExecutor:
                 limit=self.max_output_bytes,
                 timeout=effective_timeout,
                 caller=caller,
+                stop=stop,
             )
             # What the child's tree peaked at came back with its reap, the one
             # measurement the flat reserve above cannot make. argv[0] is the
@@ -9421,6 +9544,11 @@ def build_vcs_broker(
         refresh=executor.refresh_forge_credential,
         mint_write=executor.mint_write_credential,
         drop_write=executor.drop_write_credential,
+        # The read-only token a context repository's `snapshot` presents, and
+        # the role that decides whether it is asked for at all.
+        mint=executor.mint_read_credential,
+        repository_role=lambda forge, repo: repository_role(repo, forge),
+        bare_name_fallback=snapshot_bare_name_fallback,
         base_branch=base_branch,
         http_timeout=executor.timeout_seconds,
         http_max_bytes=executor.max_output_bytes,
@@ -10289,6 +10417,9 @@ def start_metrics_listener(host: str, port: int) -> MetricsServer | None:
 class CredentialProxyHandler(BaseHTTPRequestHandler):
     policy: Policy
     executor: CommandExecutor
+    # resolve_role()'s answer, set by serve(). On EXEC_ROLE the handler serves
+    # only the routes exec_pod_serves names.
+    broker_role: str = "combined"
     # The session role's bounded share of the command pool, installed by main
     # beside the executor; None (the route tests' stand-ins) means unbounded.
     session_slots: "SessionSlots | None" = None
@@ -10522,8 +10653,54 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
         )
         return False
 
+    def _admission_report(self) -> dict[str, int | None]:
+        """The four numbers ADMISSION_PATH answers with, and nothing else of the
+        budget's internals."""
+        return {
+            "slot_cap": self.executor.max_concurrent_commands,
+            "budget_admits": self.executor.requests_the_budget_admits(),
+            "admitted": self.executor.admitted_requests(),
+            "session_cap": getattr(self.session_slots, "limit", DEFAULT_SESSION_MAX_CONCURRENT_COMMANDS),
+        }
+
+    def _exec_pod_refuses(self, method: str, principal: Principal | None) -> bool:
+        """On an exec pod, answer a request it does not serve and return True.
+
+        After authentication, so an exec pod answers an unknown route as the
+        stateful broker does: 401 to a caller it cannot identify, then the same
+        404 body. The scope role's commands are refused with the role refusal's
+        shape, because the member window they read is on the stateful pod.
+        """
+        if self.broker_role != EXEC_ROLE:
+            return False
+        if not exec_pod_serves(method, self.path):
+            self._json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
+            return True
+        if principal is not None and principal.role == CALLER_ROLE_SCOPE:
+            LOGGER.warning(
+                "refused a scope command on an exec pod path=%s",
+                _sanitize_for_logging(self.path),
+            )
+            self._json(
+                HTTPStatus.FORBIDDEN,
+                {
+                    "error": (
+                        "scope commands are not available on the exec broker; "
+                        "send them to the stateful broker"
+                    ),
+                    "code": "CALLER_ROLE_FORBIDDEN",
+                },
+            )
+            return True
+        return False
+
     def do_GET(self) -> None:  # noqa: N802
         if self.path != HEALTHZ_PATH and self._authenticated() is None:
+            return
+        if self._exec_pod_refuses("GET", None):
+            return
+        if self.path == ADMISSION_PATH:
+            self._json(HTTPStatus.OK, self._admission_report())
             return
         if self.path.startswith(API_RELAY_PREFIX):
             self._handle_api_relay()
@@ -10617,6 +10794,8 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         principal = self._authenticated()
         if principal is None:
+            return
+        if self._exec_pod_refuses("POST", principal):
             return
         if self.path.startswith(API_RELAY_PREFIX):
             # Reaches the relay so that the refusal is the policy's
@@ -12427,9 +12606,21 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
                 # repository by URL. Resolving here also rejects a host this
                 # install serves no credential for before the verb is entered,
                 # which is the same order `/v1/forge/refresh` uses.
-                if verb not in vcs_broker.UNGATED_VERBS:
+                #
+                # A role-selected verb (`vcs_broker.ROLE_SELECTED_VERBS`) is
+                # resolved and not compared: it chooses its credential by the
+                # repository's role itself. A bare name is resolved as the
+                # verb will read it (`snapshot_bare_name_fallback`): lifted
+                # onto the install's GitHub forge, or, when it is read from a
+                # host outside the table with no credential, not at all.
+                role_selected = verb in vcs_broker.ROLE_SELECTED_VERBS
+                named, outside = payload.get("repository"), None
+                if role_selected:
+                    named, outside = self.vcs.snapshot_source(named)
+                resolves = verb not in vcs_broker.UNGATED_VERBS and outside is None
+                if resolves:
                     try:
-                        forge, repository = self.vcs.registry.resolve(payload.get("repository"))
+                        forge, repository = self.vcs.registry.resolve(named)
                     except providers.WorkspaceError as exc:
                         # A repository this install serves no credential for
                         # (`ForgeUnsupported`, a 501) or one an allowlist declines
@@ -12440,7 +12631,7 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
                         return TOOL_STATUS_BLOCKED if refused else TOOL_STATUS_ERROR
                     if not isinstance(forge, providers.StubForge):
                         self.vcs_provider = forge.name
-                    if not self._repository_is_permitted(repository, forge):
+                    if not role_selected and not self._repository_is_permitted(repository, forge):
                         # Refused on the managed list, or the list itself could
                         # not be read: the first is a refusal, the second a fault.
                         if self.repository_refusal_status == HTTPStatus.SERVICE_UNAVAILABLE:
@@ -12844,12 +13035,16 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
         `error` is the key the shim prints, so the agent reads why rather than
         a bare exit 1, and `code` lets a caller tell "busy, retry" from a
         failure. Counted here, once per route that answers it, under the bound
-        the exception carries.
+        the exception carries; `bound` names it to the caller too, so the shim
+        can tell a bound another exec replica may not hold from one it will.
         """
-        self.metrics.record_refusal(getattr(exc, "bound", ADMISSION_BOUND_OTHER))
+        bound = getattr(exc, "bound", ADMISSION_BOUND_OTHER)
+        if bound not in ADMISSION_BOUNDS:
+            bound = ADMISSION_BOUND_OTHER
+        self.metrics.record_refusal(bound)
         self._json(
             HTTPStatus.SERVICE_UNAVAILABLE,
-            {"status": "busy", "code": "CREDENTIAL_PROXY_BUSY", "error": str(exc)},
+            {"status": "busy", "code": "CREDENTIAL_PROXY_BUSY", BUSY_BOUND_KEY: bound, "error": str(exc)},
         )
 
 
@@ -13001,13 +13196,15 @@ def resolve_role() -> str:
     ``combined`` is the sidecar deployment and the default: one container is
     both the credential broker and the agent-API front door, because both ends
     are on the same loopback. Splitting the broker into its own Pod splits
-    those two roles across two containers in two Pods.
+    those two roles across two containers in two Pods. ``exec`` is the exec
+    tier's pod (docs/designs/credential-broker-exec-tier.md §12): the broker
+    with no relays, serving the command routes only (exec_pod_serves).
     """
     role = os.getenv("CREDENTIAL_PROXY_ROLE", "combined").strip().lower() or "combined"
-    if role not in {"combined", "broker", "api-proxy"}:
+    if role not in {"combined", "broker", "api-proxy", EXEC_ROLE}:
         raise RuntimeError(
             f"unsupported CREDENTIAL_PROXY_ROLE {role!r}; "
-            "expected 'combined', 'broker' or 'api-proxy'"
+            f"expected 'combined', 'broker', 'api-proxy' or {EXEC_ROLE!r}"
         )
     return role
 
@@ -13081,6 +13278,7 @@ def serve(args: argparse.Namespace) -> None:
         start_agent_api_proxy().serve_forever()
         return
 
+    CredentialProxyHandler.broker_role = role
     # Decided before anything credentialed starts, so a misconfigured
     # deployment fails at boot rather than on the first request.
     CredentialProxyHandler.authenticator = build_authenticator()
@@ -13155,75 +13353,80 @@ def serve(args: argparse.Namespace) -> None:
     LOGGER.info("read-only enforcement enabled=%s", CredentialProxyHandler.enforce_read_only)
     CredentialProxyHandler.api_relay = GoogleApiRelay()
     LOGGER.info("Cloud API relay enabled routes=%d", len(api_policy.API_READ_ROUTES))
-    CredentialProxyHandler.watcher_subscription = os.getenv("WATCHER_PUBSUB_SUBSCRIPTION", "").strip()
-    CredentialProxyHandler.platform_pubsub_subscriptions = platform_pubsub_subscriptions()
-    if CredentialProxyHandler.platform_pubsub_subscriptions:
-        LOGGER.info(
-            "platform Pub/Sub relay enabled subscriptions=%d",
-            len(CredentialProxyHandler.platform_pubsub_subscriptions),
+    # An exec pod serves commands and Cloud API reads and nothing else (§12 of
+    # credential-broker-exec-tier.md), so it starts none of the relays: no
+    # Pub/Sub, Google Chat, Slack or Teams consumer competes with the stateful
+    # broker for their subscriptions and sockets.
+    if role != EXEC_ROLE:
+        CredentialProxyHandler.watcher_subscription = os.getenv("WATCHER_PUBSUB_SUBSCRIPTION", "").strip()
+        CredentialProxyHandler.platform_pubsub_subscriptions = platform_pubsub_subscriptions()
+        if CredentialProxyHandler.platform_pubsub_subscriptions:
+            LOGGER.info(
+                "platform Pub/Sub relay enabled subscriptions=%d",
+                len(CredentialProxyHandler.platform_pubsub_subscriptions),
+            )
+        CredentialProxyHandler.slack_max_request_bytes = int(
+            os.getenv("SLACK_RELAY_MAX_REQUEST_BYTES", str(28 * 1024 * 1024))
         )
-    CredentialProxyHandler.slack_max_request_bytes = int(
-        os.getenv("SLACK_RELAY_MAX_REQUEST_BYTES", str(28 * 1024 * 1024))
-    )
-    chat_project = os.getenv("GOOGLE_CHAT_PROJECT_ID", "").strip()
-    chat_subscription, a2a_subscription = chat_relay_subscriptions(chat_project)
-    if chat_project and chat_subscription:
-        CredentialProxyHandler.chat_relay = GoogleChatRelay(
-            chat_project, chat_subscription
-        )
-        LOGGER.info("Google Chat relay enabled project=%s subscription=<redacted>", chat_project)
-    # The A2A gateway's relay instance on the same topic and credential;
-    # armed independently so an install can run either consumer alone.
-    if chat_project and a2a_subscription:
-        CredentialProxyHandler.a2a_chat_relay = GoogleChatRelay(
-            chat_project, a2a_subscription
-        )
-        LOGGER.info(
-            "A2A Google Chat relay enabled project=%s subscription=<redacted>", chat_project
-        )
-    slack_bot_tokens = os.getenv("SLACK_BOT_TOKEN", "").strip()
-    slack_app_token = os.getenv("SLACK_APP_TOKEN", "").strip()
-    if slack_bot_tokens and slack_app_token:
-        def initialize_slack_relay() -> None:
-            while CredentialProxyHandler.slack_relay is None:
-                try:
-                    relay = SlackRelay(
-                        slack_bot_tokens,
-                        slack_app_token,
-                        max_file_bytes=int(
-                            os.getenv(
-                                "SLACK_RELAY_MAX_FILE_BYTES", str(20 * 1024 * 1024)
-                            )
-                        ),
-                    )
-                except Exception as exc:
-                    LOGGER.error(
-                        "Slack relay initialization failed; retrying type=%s",
-                        type(exc).__name__,
-                    )
-                    time.sleep(30)
-                else:
-                    CredentialProxyHandler.slack_relay = relay
-                    LOGGER.info(
-                        "Slack relay enabled workspaces=%d",
-                        len(relay.bootstrap()),
-                    )
+        chat_project = os.getenv("GOOGLE_CHAT_PROJECT_ID", "").strip()
+        chat_subscription, a2a_subscription = chat_relay_subscriptions(chat_project)
+        if chat_project and chat_subscription:
+            CredentialProxyHandler.chat_relay = GoogleChatRelay(
+                chat_project, chat_subscription
+            )
+            LOGGER.info("Google Chat relay enabled project=%s subscription=<redacted>", chat_project)
+        # The A2A gateway's relay instance on the same topic and credential;
+        # armed independently so an install can run either consumer alone.
+        if chat_project and a2a_subscription:
+            CredentialProxyHandler.a2a_chat_relay = GoogleChatRelay(
+                chat_project, a2a_subscription
+            )
+            LOGGER.info(
+                "A2A Google Chat relay enabled project=%s subscription=<redacted>", chat_project
+            )
+        slack_bot_tokens = os.getenv("SLACK_BOT_TOKEN", "").strip()
+        slack_app_token = os.getenv("SLACK_APP_TOKEN", "").strip()
+        if slack_bot_tokens and slack_app_token:
+            def initialize_slack_relay() -> None:
+                while CredentialProxyHandler.slack_relay is None:
+                    try:
+                        relay = SlackRelay(
+                            slack_bot_tokens,
+                            slack_app_token,
+                            max_file_bytes=int(
+                                os.getenv(
+                                    "SLACK_RELAY_MAX_FILE_BYTES", str(20 * 1024 * 1024)
+                                )
+                            ),
+                        )
+                    except Exception as exc:
+                        LOGGER.error(
+                            "Slack relay initialization failed; retrying type=%s",
+                            type(exc).__name__,
+                        )
+                        time.sleep(30)
+                    else:
+                        CredentialProxyHandler.slack_relay = relay
+                        LOGGER.info(
+                            "Slack relay enabled workspaces=%d",
+                            len(relay.bootstrap()),
+                        )
 
-        threading.Thread(target=initialize_slack_relay, daemon=True).start()
-    teams_app_id = os.getenv("TEAMS_APP_ID", "").strip()
-    teams_app_password = os.getenv("TEAMS_APP_PASSWORD", "").strip()
-    teams_tenant_id = os.getenv("TEAMS_TENANT_ID", "").strip() or None
-    if teams_app_id and teams_app_password:
-        CredentialProxyHandler.teams_relay = TeamsRelay(
-            app_id=teams_app_id,
-            app_password=teams_app_password,
-            tenant_id=teams_tenant_id,
-        )
-        LOGGER.info(
-            "Teams relay enabled app_id=%s tenant=%s",
-            teams_app_id,
-            teams_tenant_id or "common",
-        )
+            threading.Thread(target=initialize_slack_relay, daemon=True).start()
+        teams_app_id = os.getenv("TEAMS_APP_ID", "").strip()
+        teams_app_password = os.getenv("TEAMS_APP_PASSWORD", "").strip()
+        teams_tenant_id = os.getenv("TEAMS_TENANT_ID", "").strip() or None
+        if teams_app_id and teams_app_password:
+            CredentialProxyHandler.teams_relay = TeamsRelay(
+                app_id=teams_app_id,
+                app_password=teams_app_password,
+                tenant_id=teams_tenant_id,
+            )
+            LOGGER.info(
+                "Teams relay enabled app_id=%s tenant=%s",
+                teams_app_id,
+                teams_tenant_id or "common",
+            )
     if role == "combined":
         api_server = start_agent_api_proxy()
         threading.Thread(target=api_server.serve_forever, daemon=True).start()
