@@ -280,14 +280,16 @@ const (
 	// whole excess to the state volume (credentialProxyEmptyDirSizeLimit),
 	// which is what a larger limit is raised for; /tmp keeps its cap, so the
 	// two caps and the headroom still add up to the limit at any override.
-	// The state volume holds the vcs scratch, which 5Gi is sized for, and the
-	// command HOME: gcloud's config, kubeconfigs, the commands' TMPDIR and
-	// kubectl's discovery cache (about 0.3MiB a cluster, 1.9MiB with the
-	// OpenAPI schemas). gcloud writes no per-command log files there
-	// (GCLOUD_FILE_LOGGING_OFF_ENV in credential_proxy.py), which at a busy
-	// slot cap would grow it by gigabytes a day (#5417). kubectl's cache gets
-	// no reclaimer here, as it does on an exec pod: the gate reclaims the vcs
-	// scratch, and 5Gi holds a large fleet's cache.
+	// The state volume holds the vcs scratch, which 5Gi is sized for, the
+	// shared workspace a `git clone` through the proxy lands in (see
+	// CREDENTIAL_PROXY_WORKSPACE_ROOT below), the command HOME (gcloud's config
+	// and kubectl's discovery cache, about 0.3MiB a cluster, 1.9MiB with the
+	// OpenAPI schemas), the kubeconfigs and the commands' TMPDIR. gcloud
+	// writes no per-command log files there (GCLOUD_FILE_LOGGING_OFF_ENV in
+	// credential_proxy.py), which at a busy slot cap would grow it by
+	// gigabytes a day (#5417). Unlike on an exec pod, kubectl's cache gets no
+	// reclaimer here: the gate reclaims the vcs scratch, and 5Gi holds a large
+	// fleet's cache.
 	credentialProxyTmpSizeLimit    = "2Gi"
 	credentialProxyStateSizeLimit  = "5Gi"
 	credentialProxyTmpVolumeName   = "credential-proxy-tmp"   // #nosec G101 -- Volume name, not a credential

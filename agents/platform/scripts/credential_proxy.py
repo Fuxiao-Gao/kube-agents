@@ -9230,8 +9230,9 @@ class CommandExecutor:
             if name in os.environ:
                 self.environment[name] = os.environ[name]
         # After the forwarded names, so nothing forwarded can turn it back
-        # on; a caller sends only argv, and gcloud reads this variable over
-        # any configuration a `--configuration` names (GCLOUD_FILE_LOGGING_OFF_ENV).
+        # on. Nothing a caller sends reaches a child's environment, and
+        # gcloud reads this variable over any configuration a
+        # `--configuration` names (GCLOUD_FILE_LOGGING_OFF_ENV).
         self.environment[GCLOUD_FILE_LOGGING_OFF_ENV] = "1"
         # Read here rather than forwarded into `self.environment`: this decides
         # which kubeconfig a request resolves to, and a subprocess has no

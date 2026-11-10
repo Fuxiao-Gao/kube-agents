@@ -7165,10 +7165,12 @@ class CommandExecutorTest(unittest.TestCase):
         self.assertNotIn("CLOUDSDK_CONFIG", environment)
 
     def test_a_callers_request_cannot_turn_gcloud_file_logging_back_on(self):
-        # A caller sends only argv: a `--configuration` that names one with file
-        # logging on loses to the variable, which gcloud reads over any
-        # configuration, and a value in the pod's own environment is not
-        # forwarded. So no request can fill the state volume with log files.
+        # Nothing a caller sends reaches a child's environment, and the pod's
+        # own value is not forwarded, so the variable reaches gcloud whatever
+        # the request names. gcloud reads it over any configuration a
+        # `--configuration` names (checked by hand against gcloud's source;
+        # the stub here only shows the variable arrives). So no request can
+        # fill the state volume with log files.
         with mock.patch.dict(os.environ, {credential_proxy.GCLOUD_FILE_LOGGING_OFF_ENV: "0"}):
             executor = self.logging_gcloud(self.executor(max_output_bytes=1 << 16), body="env")
         environment = self.dumped_environment(
