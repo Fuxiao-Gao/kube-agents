@@ -303,8 +303,7 @@ shim always takes the fallback and nothing reports it.
   gets gcloud's stderr and the audit line records the exit code, but gcloud's own debug log is no
   longer kept on the pod. A sweep reaches every cluster on every replica, and nothing else frees
   kubectl's cache, so the resource watermark gate's soft mark reclaims it on an exec pod: the
-  cache is renamed and removed, and the next command rebuilds it. Decided (#4536). The stateful
-  broker keeps gcloud's default file logging and its own figures.
+  cache is renamed and removed, and the next command rebuilds it. Decided (#4536). The stateful broker runs its commands with file logging off too (#5417); its figures stay, sized for its vcs scratch.
 - A NetworkPolicy target for the exec tier: ingress on 8765 from the sandbox, from session pods
   only under the cluster-view flag (the condition the stateful broker has today), and the metrics
   port from GMP. The egress rules that select the broker's pod labels also need the exec tier as a

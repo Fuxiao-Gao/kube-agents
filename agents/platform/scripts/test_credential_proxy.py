@@ -7164,6 +7164,18 @@ class CommandExecutorTest(unittest.TestCase):
         self.assertNotIn("KUBECONFIG", environment)
         self.assertNotIn("CLOUDSDK_CONFIG", environment)
 
+    def test_a_callers_request_cannot_turn_gcloud_file_logging_back_on(self):
+        # A caller sends only argv: a `--configuration` that names one with file
+        # logging on loses to the variable, which gcloud reads over any
+        # configuration, and a value in the pod's own environment is not
+        # forwarded. So no request can fill the state volume with log files.
+        with mock.patch.dict(os.environ, {credential_proxy.GCLOUD_FILE_LOGGING_OFF_ENV: "0"}):
+            executor = self.logging_gcloud(self.executor(max_output_bytes=1 << 16), body="env")
+        environment = self.dumped_environment(
+            executor.execute(["gcloud", "--configuration", "logs-on", "projects", "list"])
+        )
+        self.assertEqual("1", environment.get(credential_proxy.GCLOUD_FILE_LOGGING_OFF_ENV))
+
     def test_kubectl_environment_excludes_gh_config_dir(self):
         executor = self.fake_kubectl(
             self.executor(max_output_bytes=1 << 16), body="env"
@@ -11061,20 +11073,14 @@ class ServeArmsTheReadOnlyGateTest(unittest.TestCase):
         CredentialProxyHandler.enforce_read_only = False
         self.assertTrue(self._serve_with(None))
 
-    def test_serve_turns_gcloud_file_logging_off_in_the_exec_role_only(self):
-        # An exec pod's state volume is sized for no gcloud log files; the
-        # broker and the sidecar roles keep gcloud's default.
-        for role, off in (
-            (credential_proxy_client.EXEC_ROLE, True),
-            ("broker", False),
-            ("combined", False),
-        ):
+    def test_serve_turns_gcloud_file_logging_off_in_every_role(self):
+        # No broker pod's state volume is sized for gcloud's per-command log
+        # files (#4536, #5417).
+        for role in (credential_proxy_client.EXEC_ROLE, "broker", "combined"):
             with self.subTest(role=role):
                 self._serve_with(None, extra_env={"CREDENTIAL_PROXY_ROLE": role})
                 env = CredentialProxyHandler.executor.environment
-                self.assertEqual(
-                    "1" if off else None, env.get(credential_proxy.GCLOUD_FILE_LOGGING_OFF_ENV)
-                )
+                self.assertEqual("1", env.get(credential_proxy.GCLOUD_FILE_LOGGING_OFF_ENV))
 
     def test_serve_gives_only_the_exec_role_the_kubectl_cache_reclaimer(self):
         for role, wired in ((credential_proxy_client.EXEC_ROLE, True), ("broker", False)):
