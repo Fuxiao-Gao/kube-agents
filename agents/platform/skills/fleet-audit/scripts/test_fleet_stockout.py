@@ -2226,8 +2226,9 @@ class CollectClusterTest(unittest.TestCase):
         declared = {e["check"]: e["reason"] for e in entry.get("checks_not_applicable") or []}
         # `spot-scarcity-risk` rides along because this fixture's cluster asks
         # for no Spot capacity at all, which is its own declared non-applicability.
-        self.assertEqual(set(declared), {"single-zone-nodepool", "spot-scarcity-risk", fs.UNBACKED_MANUAL_FALLBACK})
+        self.assertEqual(set(declared), {"single-zone-nodepool", "spot-scarcity-risk", fs.UNBACKED_MANUAL_FALLBACK, fs.GPU_ZONAL_SKEW})
         self.assertIn("Autopilot", declared["single-zone-nodepool"])
+        self.assertIn("Autopilot", declared[fs.GPU_ZONAL_SKEW])
 
     def test_autopilot_never_issues_the_node_pools_read(self):
         """The API answers 400 for it, and its only consumers cannot apply to a
@@ -2648,9 +2649,10 @@ class CollectClusterTest(unittest.TestCase):
         self.assertNotIn("spot-scarcity-risk", self.declared_not_applicable(entry))
         self.assertEqual(
             {e["check"] for e in entry["checks_unevaluated"]},
-            {"reservation-mismatch-risk", "single-zone-nodepool", "spot-scarcity-risk"},
+            {"reservation-mismatch-risk", "single-zone-nodepool", "spot-scarcity-risk", fs.GPU_ZONAL_SKEW},
         )
         self.assertIn("spot-scarcity-risk read no Spot node pool", entry["limitations"])
+        self.assertIn("gpu-zonal-capacity-skew read no GPU node pool", entry["limitations"])
 
     def test_a_truncated_node_pool_read_is_unevaluated_not_gate_failed(self):
         """A cut or non-list answer at exit 0 used to raise inside the pool
@@ -4998,6 +5000,135 @@ class UnbackedManualFallbackCollectTest(unittest.TestCase):
         ):
             text = f"{class_read}; {pools_read}"
             self.assertEqual(text, audit_report.validate_check_command(text, "clusters[0]", self.SLUG))
+
+
+ZONE_B = "us-central1-b"
+ZONE_C = "us-central1-c"
+
+
+def gpu_pool(name="gpu-shared", zones=(ZONE_B, ZONE_C), **config):
+    # The accelerator entry is the documented `NodeConfig.accelerators` shape,
+    # not a captured response: replace it with the captured pool when one is read.
+    return {"name": name, "locations": list(zones), "config": {"machineType": "n1-standard-4", "accelerators": [{"acceleratorCount": "1", "acceleratorType": "nvidia-tesla-t4"}], **config}}
+
+
+def zone_nodes(pool, counts):
+    return [node(f"{pool}-{zone}-{i}", pool, {"topology.kubernetes.io/zone": zone}) for zone, count in counts.items() for i in range(count)]
+
+
+class GpuZonalCapacitySkewTest(unittest.TestCase):
+    def skew(self, counts, pool=None):
+        return fs.check_gpu_zonal_capacity_skew(pool or gpu_pool(), counts)
+
+    def test_the_issue_s_example_is_minor_at_30_percent(self):
+        hit = self.skew({ZONE_B: 14, ZONE_C: 20})
+        self.assertEqual((hit["object"], hit["severity"]), ("NodePool/gpu-shared", "minor"))
+        self.assertEqual(
+            hit["excerpt"],
+            "GPU nodes by zone: us-central1-b 14, us-central1-c 20; skew 30.0% ((20 - 14) / 20); each node has 1 x nvidia-tesla-t4",
+        )
+
+    def test_the_limits_are_exclusive(self):
+        for counts, severity in (
+            ({ZONE_B: 75, ZONE_C: 100}, None),  # 25%
+            ({ZONE_B: 74, ZONE_C: 100}, "minor"),  # 26%
+            ({ZONE_B: 50, ZONE_C: 100}, "minor"),  # 50%
+            ({ZONE_B: 49, ZONE_C: 100}, "major"),  # 51%
+        ):
+            with self.subTest(counts=counts):
+                hit = self.skew(counts)
+                self.assertEqual(hit and hit["severity"], severity)
+
+    def test_a_difference_of_one_node_is_not_filed(self):
+        self.assertIsNone(self.skew({ZONE_B: 1, ZONE_C: 2}))
+        self.assertIsNone(self.skew({ZONE_B: 0, ZONE_C: 1}))
+
+    def test_a_zone_of_the_pool_with_no_node_counts_as_zero(self):
+        hit = self.skew({ZONE_C: 2})
+        self.assertEqual(hit["severity"], "major")
+        self.assertIn("us-central1-b 0, us-central1-c 2; skew 100.0%", hit["excerpt"])
+
+    def test_a_zone_that_is_not_in_the_pool_s_locations_is_not_counted(self):
+        self.assertIsNone(self.skew({ZONE_B: 4, ZONE_C: 4, "us-central1-f": 20}))
+
+    def test_the_zones_are_named_in_order(self):
+        hit = self.skew({ZONE_B: 14, ZONE_C: 20}, gpu_pool(zones=(ZONE_C, ZONE_B)))
+        self.assertIn("us-central1-b 14, us-central1-c 20;", hit["excerpt"])
+
+    def test_the_excerpt_does_not_round_a_filed_skew_to_the_limit(self):
+        self.assertIn("skew 25.5% ((51 - 38) / 51)", self.skew({ZONE_B: 38, ZONE_C: 51})["excerpt"])
+
+    def test_the_largest_and_the_smallest_of_three_zones_decide(self):
+        hit = self.skew({"us-central1-a": 8, ZONE_B: 5, ZONE_C: 8}, gpu_pool(zones=("us-central1-a", ZONE_B, ZONE_C)))
+        self.assertIn("skew 37.5% ((8 - 5) / 8)", hit["excerpt"])
+
+    def test_a_pool_with_no_node_is_not_filed(self):
+        self.assertIsNone(self.skew({}))
+
+    def test_a_pool_with_no_accelerator_is_not_filed(self):
+        pool = {"name": "web", "locations": [ZONE_B, ZONE_C], "config": {"machineType": "e2-standard-4"}}
+        self.assertIsNone(self.skew({ZONE_B: 1, ZONE_C: 20}, pool))
+
+    def test_a_pool_in_one_zone_is_not_filed(self):
+        self.assertIsNone(self.skew({ZONE_C: 20}, gpu_pool(zones=(ZONE_C,))))
+
+    def test_a_pool_that_names_no_zone_is_not_filed(self):
+        pool = gpu_pool()
+        del pool["locations"]
+        self.assertIsNone(self.skew({ZONE_C: 20}, pool))
+
+    def test_a_non_production_pool_is_not_filed(self):
+        self.assertIsNone(self.skew({ZONE_B: 1, ZONE_C: 20}, gpu_pool(name="gpu-dev")))
+        self.assertIsNone(self.skew({ZONE_B: 1, ZONE_C: 20}, gpu_pool(labels={fs.OPT_OUT_LABEL: fs.OPT_OUT_VALUE})))
+        self.assertIsNone(self.skew({ZONE_B: 1, ZONE_C: 20}, gpu_pool(resourceLabels={"environment": "dev"})))
+
+    def test_nodes_are_counted_by_pool_and_zone(self):
+        nodes = zone_nodes("gpu-shared", {ZONE_B: 1, ZONE_C: 2}) + zone_nodes("web", {ZONE_B: 3})
+        self.assertEqual(fs.node_count_by_pool_and_zone(nodes), {"gpu-shared": {ZONE_B: 1, ZONE_C: 2}, "web": {ZONE_B: 3}})
+
+
+class GpuZonalCapacitySkewCollectTest(unittest.TestCase):
+    CLUSTER = CollectClusterTest.CLUSTER
+    AUTOPILOT_NODE_POOLS_ERROR = CollectClusterTest.AUTOPILOT_NODE_POOLS_ERROR
+    run_with = CollectClusterTest.run_with
+    SLUG = fs.GPU_ZONAL_SKEW
+
+    def filed(self, entry):
+        return [c for c in entry["candidates"] if c["check"] == self.SLUG]
+
+    def test_the_collector_files_a_skewed_gpu_pool_with_both_reads(self):
+        entry = self.run_with(dump_items=zone_nodes("gpu-shared", {ZONE_B: 14, ZONE_C: 20}), pools=[gpu_pool()])
+        [filed] = self.filed(entry)
+        self.assertEqual((filed["object"], filed["severity"], filed["namespace"]), ("NodePool/gpu-shared", "minor", ""))
+        self.assertEqual(filed["impact"], fs.IMPACT[self.SLUG])
+        self.assertIn("gcloud container node-pools list", filed["command"])
+        self.assertRegex(filed["command"], r"; KUBECONFIG=\S+ kubectl get --raw \S*/nodes")
+        self.assertEqual(filed["command"], audit_report.validate_check_command(filed["command"], "clusters[0]", self.SLUG))
+
+    def test_a_cluster_with_no_gpu_pool_records_the_check_as_run(self):
+        entry = self.run_with(dump_items=zone_nodes("web", {ZONE_B: 1, ZONE_C: 20}), pools=[{"name": "web", "locations": [ZONE_B, ZONE_C]}])
+        self.assertEqual(self.filed(entry), [])
+        self.assertIn(self.SLUG, {c["check"] for c in entry["commands"]})
+
+    def test_each_pool_is_judged_on_its_own_nodes(self):
+        nodes = zone_nodes("gpu-shared", {ZONE_B: 4, ZONE_C: 4}) + zone_nodes("gpu-plain", {ZONE_C: 6}) + zone_nodes("gpu-l4", {ZONE_B: 7, ZONE_C: 10})
+        entry = self.run_with(dump_items=nodes, pools=[gpu_pool(), gpu_pool(name="gpu-plain"), gpu_pool(name="gpu-l4")])
+        self.assertEqual([(c["object"], c["severity"]) for c in self.filed(entry)], [("NodePool/gpu-plain", "major"), ("NodePool/gpu-l4", "minor")])
+
+    def test_autopilot_does_not_record_the_check_as_run(self):
+        entry = self.run_with(cluster={**self.CLUSTER, "autopilot": True})
+        self.assertNotIn(self.SLUG, {c["check"] for c in entry["commands"]})
+        self.assertIn(self.SLUG, {e["check"] for e in entry["checks_not_applicable"]})
+
+    def test_unread_pools_leave_the_check_unevaluated(self):
+        entry = self.run_with(dump_items=zone_nodes("gpu-shared", {ZONE_B: 1, ZONE_C: 20}), pools_rc=1)
+        self.assertEqual(self.filed(entry), [])
+        self.assertNotIn(self.SLUG, {c["check"] for c in entry["commands"]})
+        self.assertIn(self.SLUG, {e["check"] for e in entry["checks_unevaluated"]})
+
+    def test_the_stream_s_roster_has_the_check(self):
+        self.assertIn(self.SLUG, audit_report.AUDITS["stockout-prevention"].checks)
+        self.assertIn(self.SLUG, fs.SEVERITY)
 
 
 if __name__ == "__main__":

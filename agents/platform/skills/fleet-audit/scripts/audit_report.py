@@ -416,6 +416,7 @@ AUDITS: dict[str, AuditSpec] = {
             "autoscaler-out-of-resources",
             "dangling-compute-class",
             "ccc-unbacked-manual-fallback",
+            "gpu-zonal-capacity-skew",
         ),
         # §4's manifest note: the `project/<id>` entry carries the two
         # project-scoped checks. `reservation-mismatch-risk` sits under both
@@ -437,6 +438,7 @@ AUDITS: dict[str, AuditSpec] = {
                     "autoscaler-out-of-resources",
                     "dangling-compute-class",
                     "ccc-unbacked-manual-fallback",
+                    "gpu-zonal-capacity-skew",
                 ),
             ),
             ("project", ("quota-exhaustion-risk", "reservation-mismatch-risk")),
@@ -449,7 +451,7 @@ AUDITS: dict[str, AuditSpec] = {
         # finding; the join tells the arms apart by the collector's excerpt
         # (`ZONE_LOCKED_ARM_MARK` opening it, `CEILING_ARM_MARK` absent), the
         # validator cannot, and the SOP's step carries that distinction. The
-        # other twelve are capacity faults no
+        # other thirteen are capacity faults no
         # declaration excuses: a quota near its limit, a ComputeClass with no
         # fallback, a Spot shape that gets preempted, an autoscaler that
         # already failed to add a node.
@@ -1366,6 +1368,7 @@ CHECK_PHRASES = {
     "autoscaler-out-of-resources": "the autoscaler couldn't get machines",
     "dangling-compute-class": "{object} has a compute class problem that can leave pods unscheduled",
     "ccc-unbacked-manual-fallback": "ComputeClass `{object}` lists machine options that it cannot use",
+    "gpu-zonal-capacity-skew": "{object} GPU node pool has many more nodes in one zone than in another",
     # GCP Networking Fabric & VPC IPAM Audit
     "subnet-ip-exhaustion": "subnet is running out of IP addresses",
     "cloud-nat-exhaustion": "Cloud NAT is running out of ports",

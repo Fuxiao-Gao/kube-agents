@@ -7,7 +7,7 @@ which `audit_report.py finish --manifest-file` cross-checks the published
 document against; the checks it runs are defined in
 governance/stockout_prevention_sop.md.
 
-**All thirteen checks are converted.** Eleven read structures this repository's
+**All fourteen checks are converted.** Twelve read structures this repository's
 other collectors already read with confidence — a `ComputeClass`/`Deployment`/
 `StatefulSet`/`StorageClass`/`Node` dump, the node pools (the discovery
 `clusters list` item's `nodePools`, else `gcloud container node-pools list`),
@@ -17,7 +17,7 @@ other collectors already read with confidence — a `ComputeClass`/`Deployment`/
 `ccc-mixed-disk-generations`, `ccc-hyperdisk-incompatible`,
 `ccc-unbacked-manual-fallback`,
 `quota-exhaustion-risk`, `single-zone-nodepool`, `reservation-mismatch-risk`,
-`dangling-compute-class`.
+`dangling-compute-class`, `gpu-zonal-capacity-skew`.
 
 The other two — `spot-scarcity-risk`, off the beta Spot capacity-advice API
 (`gcloud beta compute advice capacity-history`), and
@@ -198,6 +198,10 @@ SPOT_MAX_SHAPES = 8
 
 # The label GKE stamps on every node with the name of its node pool.
 NODEPOOL_LABEL = "cloud.google.com/gke-nodepool"
+# The label Kubernetes stamps on every node with the name of its zone. With
+# `NODEPOOL_LABEL` it gives the node count of each pool in each zone, from the
+# Node dump the collector already holds.
+ZONE_LABEL = "topology.kubernetes.io/zone"
 # §3.9's live backlog: the pods the scheduler itself has given up on. The read
 # is server-filtered to Pending pods, never the whole pod list, and the
 # scheduler's own verdict narrows it further: a pod Pending on an image pull
@@ -470,6 +474,26 @@ NODEPOOL_CEILING_FRACTION = 0.9
 ZONE_LOCKED_ARM_PREFIX = "single-zone ("
 CEILING_ARM_PREFIX = "at its autoscaling ceiling:"
 
+# `gpu-zonal-capacity-skew`: a multi-zone GPU node pool with many more nodes in
+# one zone than in another. Skew is (largest zone - smallest zone) / largest
+# zone, in nodes: 20 and 14 nodes give 30%.
+GPU_ZONAL_SKEW = "gpu-zonal-capacity-skew"
+GPU_SKEW_MINOR_RATIO = 0.25
+GPU_SKEW_MAJOR_RATIO = 0.50
+# 2 nodes and 1 node is a skew of 50% and a difference of one node, which the
+# next scale-up can remove. Below this difference nothing is filed.
+GPU_SKEW_MIN_NODE_DIFFERENCE = 2
+GPU_SKEW_MINOR = "minor"
+GPU_SKEW_MAJOR = "major"
+GPU_SKEW_EXCERPT = "GPU nodes by zone: {zones}; skew {skew:.1%} (({largest} - {smallest}) / {largest}); each node has {accelerators}"
+GPU_SKEW_ZONE = "{zone} {count}"
+GPU_SKEW_ACCELERATOR = "{count} x {type}"
+GPU_SKEW_JOINER = ", "
+GPU_SKEW_NOT_ON_AUTOPILOT = (
+    "GKE Autopilot: Google places the nodes and exposes no user node pool "
+    "whose GPU nodes could be counted by zone."
+)
+
 # §3.9's Impact, one per arm. The arms share a slug and nothing else, so no
 # single sentence is true of both: the zone-locked arm is about a stockout in
 # one zone, and the ceiling arm fires on regional pools spanning three of
@@ -568,6 +592,7 @@ IMPACT = {
     # zone-locked pool at 1 of 2 nodes, which scales fine until the zone
     # runs out.
     "single-zone-nodepool": "Node pool's scale-up has a single point of failure: it is locked to one zone, at its own configured ceiling, or both.",
+    GPU_ZONAL_SKEW: "A multi-zone GPU node pool has many more nodes in one zone than in another. If the largest zone fails, the other zones do not hold enough GPU nodes for its pods, and GPU capacity is often not available on demand.",
     "reservation-mismatch-risk": "ComputeClass fallback priorities are rendered inert by Automatic reservation affinity, or expensive guaranteed reservation capacity sits idle during stockouts.",
     "dangling-compute-class": "Workload cannot be scheduled due to dangling class references, invalid CRD configuration, or missing node tolerations, causing permanent Pending state.",
     "spot-scarcity-risk": "Spot machine shapes have high historical preemption rates and severe obtainability constraints, putting workload uptime at extreme risk.",
@@ -583,6 +608,7 @@ SEVERITY = {
     UNBACKED_MANUAL_FALLBACK: "major",
     "quota-exhaustion-risk": "critical",
     "single-zone-nodepool": "major",
+    GPU_ZONAL_SKEW: GPU_SKEW_MINOR,  # raised to major above `GPU_SKEW_MAJOR_RATIO`
     "reservation-mismatch-risk": "major",  # overridden to critical for a broken/bypassed binding
     "dangling-compute-class": "critical",
     "spot-scarcity-risk": "major",
@@ -630,7 +656,7 @@ def _has_non_production_token(name: str) -> bool:
 
 
 def is_non_production(name: str, labels: dict | None = None, namespace: str = "") -> bool:
-    """§2's "non-production", for the checks that name it (3.2, 3.8, 3.10)."""
+    """§2's "non-production", for the checks that name it (3.2, 3.8, 3.10, 3.14)."""
     labels = labels or {}
     if labels.get(OPT_OUT_LABEL) == OPT_OUT_VALUE:
         return True
@@ -657,6 +683,8 @@ default_run = functools.partial(collector_run.default_run, timeout=DEFAULT_TIMEO
 # cap in one `-A -o json` dump.
 COMPUTECLASS_KIND = "computeclasses"
 PAGED_DUMP_KINDS = ("deployments", "statefulsets", "storageclasses", "nodes")
+# The one kind of `PAGED_DUMP_KINDS` that `gpu-zonal-capacity-skew` counts.
+NODES_KIND = "nodes"
 
 
 RunFn = Callable[..., Run]
@@ -1830,6 +1858,62 @@ def check_single_zone_nodepool(pool: dict, has_nap: bool, current_node_count: in
 
 
 # --------------------------------------------------------------------------- #
+# gpu-zonal-capacity-skew
+# --------------------------------------------------------------------------- #
+
+
+def node_count_by_pool_and_zone(nodes: Sequence[dict]) -> dict[str, dict[str, int]]:
+    """The live node count of each pool in each zone, from the `Node` objects'
+    own labels."""
+    counts: dict[str, dict[str, int]] = {}
+    for node in nodes:
+        labels = (node.get("metadata") or {}).get("labels") or {}
+        by_zone = counts.setdefault(labels.get(NODEPOOL_LABEL, ""), {})
+        zone = labels.get(ZONE_LABEL, "")
+        by_zone[zone] = by_zone.get(zone, 0) + 1
+    return counts
+
+
+def check_gpu_zonal_capacity_skew(pool: dict, nodes_by_zone: dict[str, int]) -> dict | None:
+    """`nodes_by_zone` is the pool's live node count in each zone. A zone in the
+    pool's `locations` with no node counts as zero, so a pool with all its
+    nodes in one of its zones is the largest skew there is.
+
+    Not flagged: a pool with no accelerator, a non-production pool, and a
+    difference below `GPU_SKEW_MIN_NODE_DIFFERENCE` nodes. That floor also
+    passes each pool in one zone (§3.9 has those): its largest zone is its
+    smallest.
+    """
+    config = pool.get("config") or {}
+    accelerators = config.get("accelerators") or []
+    zones = pool.get("locations") or []
+    if not accelerators or not zones:
+        return None
+    if is_non_production(pool.get("name", ""), {**(config.get("resourceLabels") or {}), **(config.get("labels") or {})}):
+        return None
+    counts = {zone: nodes_by_zone.get(zone, 0) for zone in sorted(zones)}
+    largest, smallest = max(counts.values()), min(counts.values())
+    if largest - smallest < GPU_SKEW_MIN_NODE_DIFFERENCE:
+        return None
+    skew = (largest - smallest) / largest
+    if skew <= GPU_SKEW_MINOR_RATIO:
+        return None
+    return {
+        "object": f"NodePool/{pool.get('name', '')}",
+        "severity": GPU_SKEW_MAJOR if skew > GPU_SKEW_MAJOR_RATIO else GPU_SKEW_MINOR,
+        "excerpt": GPU_SKEW_EXCERPT.format(
+            zones=GPU_SKEW_JOINER.join(GPU_SKEW_ZONE.format(zone=zone, count=count) for zone, count in counts.items()),
+            skew=skew,
+            largest=largest,
+            smallest=smallest,
+            accelerators=GPU_SKEW_JOINER.join(
+                GPU_SKEW_ACCELERATOR.format(count=a.get("acceleratorCount", ""), type=a.get("acceleratorType", "")) for a in accelerators
+            ),
+        ),
+    }
+
+
+# --------------------------------------------------------------------------- #
 # 3.10 reservation-mismatch-risk
 # --------------------------------------------------------------------------- #
 
@@ -2646,6 +2730,7 @@ def collect_cluster(cluster: dict, *, run: RunFn) -> dict:
                 ),
             }
         )
+        not_applicable.append({"check": GPU_ZONAL_SKEW, "reason": GPU_SKEW_NOT_ON_AUTOPILOT})
     elif pools_readable:
         # Recorded even when the cluster holds no pools. Zero pools is a real
         # answer to "is any pool single-zone" -- no -- and dropping the check
@@ -2690,8 +2775,19 @@ def collect_cluster(cluster: dict, *, run: RunFn) -> dict:
                         # reads.
                         hit["command"] = f"{pools_record['command']}; {pods_command_text}"
                     candidates.append(_emit("single-zone-nodepool", hit))
+        # Zero GPU pools is an answer too, so the check is recorded on every
+        # cluster whose pools were read. A hit names both reads: the pools
+        # list gives the zones, and the Node read gives the count in each.
+        commands[GPU_ZONAL_SKEW] = pools_record
+        nodes_command_text = paged_command_text((NODES_KIND,), kubeconfig=kubeconfig)
+        nodes_by_pool_and_zone = node_count_by_pool_and_zone([i for i in items if i.get("kind") == "Node"])
+        for pool in node_pools:
+            skew_hit = check_gpu_zonal_capacity_skew(pool, nodes_by_pool_and_zone.get(pool.get("name", ""), {}))
+            if skew_hit:
+                candidates.append(_emit(GPU_ZONAL_SKEW, {**skew_hit, "command": f"{pools_record['command']}; {nodes_command_text}"}))
     else:
         unevaluated["single-zone-nodepool"] = pools_failure
+        unevaluated[GPU_ZONAL_SKEW] = pools_failure
         if any(_reads_pool_labels(w, compute_classes_by_name) for w in workloads):
             # The nodePoolAutoCreation arm needs the pool labels this read
             # would have given, and a workload here selects a class it applies
@@ -2714,7 +2810,8 @@ def collect_cluster(cluster: dict, *, run: RunFn) -> dict:
             f"single-zone-nodepool could not be measured on this cluster: "
             f"{pools_failure}. The same failure left dangling-compute-class "
             f"without node pool labels, so its nodePoolAutoCreation arm did not "
-            f"run either, spot-scarcity-risk read no Spot node pool, and "
+            f"run either, spot-scarcity-risk read no Spot node pool, "
+            f"{GPU_ZONAL_SKEW} read no GPU node pool, and "
             f"reservation-mismatch-risk compared no node pool with the reservation it names"
         )
         if manual_fallback_unread:
